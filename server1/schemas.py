@@ -21,3 +21,7 @@ class BlockOut(BaseModel):
 class BlockStreamOut(BaseModel):
     blocks: list[BlockOut]
     latest_seq: int
+
+class BlockUpdate(BaseModel):
+    status: Optional[str] = None
+    payload: Optional[Any] = None

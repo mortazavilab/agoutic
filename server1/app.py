@@ -1,60 +1,126 @@
-import json
+import datetime
 import uuid
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Query
-from sqlalchemy import select
-from .db import SessionLocal, init_db, next_seq, row_to_dict
-from .models import ProjectBlock
-from .schemas import BlockCreate, BlockOut, BlockStreamOut
+import json
+from typing import Optional
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await init_db()
-    yield
+from fastapi import FastAPI, HTTPException, Path
+from sqlalchemy import create_engine, Column, String, Integer, JSON, DateTime, select, desc
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-app = FastAPI(title="AGOUTIC Server 1 (State Engine)", version="2.3", lifespan=lifespan)
+# ✅ UPDATED IMPORT: Uses 'schemas' (plural)
+from schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 
-@app.get("/health")
-async def health():
-    return {"status": "online", "system": "AGOUTIC v2.3"}
+# --- CONFIG ---
+DATABASE_URL = "sqlite:///./agoutic_v23.sqlite"
+
+# --- DATABASE SETUP ---
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+class ProjectBlock(Base):
+    __tablename__ = "project_blocks"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String, index=True, nullable=False)
+    seq = Column(Integer, index=True)  # Auto-incrementing sequence per project
+    type = Column(String, nullable=False)
+    status = Column(String, default="NEW")
+    payload = Column(JSON, default={})
+    parent_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+Base.metadata.create_all(bind=engine)
+
+# --- APP ---
+app = FastAPI()
+
+# Helper: Convert DB Row to Pydantic Schema
+def row_to_dict(row):
+    return {
+        "id": row.id,
+        "project_id": row.project_id,
+        "seq": row.seq,
+        "type": row.type,
+        "status": row.status,
+        "payload": row.payload,
+        "parent_id": row.parent_id,
+        "created_at": row.created_at.isoformat()
+    }
 
 @app.post("/block", response_model=BlockOut)
-async def add_block(body: BlockCreate):
-    async with SessionLocal() as session:
-        seq = await next_seq(session, body.project_id)
-        new_id = str(uuid.uuid4())
+async def create_block(block_in: BlockCreate):
+    session = SessionLocal()
+    try:
+        # Calculate next sequence number for this project
+        last_seq = session.query(ProjectBlock.seq)\
+            .filter(ProjectBlock.project_id == block_in.project_id)\
+            .order_by(desc(ProjectBlock.seq))\
+            .first()
+        
+        next_seq = (last_seq[0] + 1) if last_seq else 1
 
-        row = ProjectBlock(
-            id=new_id,
-            project_id=body.project_id,
-            seq=seq,
-            type=body.type,
-            status=body.status,
-            payload_json=json.dumps(body.payload),
-            parent_id=body.parent_id,
+        new_block = ProjectBlock(
+            project_id=block_in.project_id,
+            seq=next_seq,
+            type=block_in.type,
+            status=block_in.status,
+            payload=block_in.payload,
+            parent_id=block_in.parent_id
         )
-        session.add(row)
-        await session.commit()
-        await session.refresh(row)
-        return row_to_dict(row)
+        session.add(new_block)
+        session.commit()
+        session.refresh(new_block)
+        return row_to_dict(new_block)
+    finally:
+        session.close()
 
 @app.get("/blocks", response_model=BlockStreamOut)
-async def get_blocks(
-    project_id: str = Query(..., min_length=1),
-    since_seq: int = Query(0, ge=0),
-    limit: int = Query(200, ge=1, le=2000),
-):
-    async with SessionLocal() as session:
-        q = (
-            select(ProjectBlock)
-            .where(ProjectBlock.project_id == project_id, ProjectBlock.seq > since_seq)
-            .order_by(ProjectBlock.seq.asc())
+async def get_blocks(project_id: str, since_seq: int = 0, limit: int = 100):
+    session = SessionLocal()
+    try:
+        # Fetch only blocks newer than 'since_seq'
+        query = select(ProjectBlock)\
+            .where(ProjectBlock.project_id == project_id)\
+            .where(ProjectBlock.seq > since_seq)\
+            .order_by(ProjectBlock.seq.asc())\
             .limit(limit)
-        )
-        res = await session.execute(q)
-        rows = res.scalars().all()
+        
+        result = session.execute(query)
+        blocks = result.scalars().all()
+        
+        # Calculate new high-water mark
+        new_latest = since_seq
+        if blocks:
+            new_latest = blocks[-1].seq
+            
+        return {
+            "blocks": [row_to_dict(b) for b in blocks],
+            "latest_seq": new_latest
+        }
+    finally:
+        session.close()
 
-        blocks = [row_to_dict(r) for r in rows]
-        latest = (blocks[-1]["seq"] if blocks else since_seq)
-
-        return {"blocks": blocks, "latest_seq": latest}
+@app.patch("/block/{block_id}", response_model=BlockOut)
+async def update_block(
+    block_id: str = Path(..., min_length=1),
+    body: BlockUpdate = ...
+):
+    session = SessionLocal()
+    try:
+        # Find block
+        block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
+        if not block:
+            raise HTTPException(status_code=404, detail="Block not found")
+            
+        # Update fields if provided
+        if body.status is not None:
+            block.status = body.status
+        if body.payload is not None:
+            block.payload = body.payload
+            
+        session.commit()
+        session.refresh(block)
+        return row_to_dict(block)
+    finally:
+        session.close()

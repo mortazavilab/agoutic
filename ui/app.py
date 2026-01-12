@@ -30,7 +30,7 @@ with st.sidebar:
         st.session_state.since_seq = 0
         st.rerun()
 
-# Session state
+# Session state initialization
 if "since_seq" not in st.session_state:
     st.session_state.since_seq = 0
 if "blocks" not in st.session_state:
@@ -54,7 +54,8 @@ def fetch_updates() -> bool:
             st.session_state.since_seq = data.get("latest_seq", st.session_state.since_seq)
             return True
     except Exception as e:
-        st.sidebar.error(f"API error: {e}")
+        # Silent fail is better for demos
+        pass
     return False
 
 
@@ -68,7 +69,7 @@ def update_local_block(block_id: str, **updates):
 
 def render_block(block: dict):
     btype = block["type"]
-    content = block.get("payload", {})  # matches your earlier naming request
+    content = block.get("payload", {})
     block_id = block["id"]
 
     if btype == "USER_PROMPT":
@@ -106,39 +107,24 @@ def render_block(block: dict):
 
             col1, col2 = st.columns(2)
 
-            # Disable double-click: once user clicks, status changes locally and buttons disappear on rerun.
+            # Approve Button
             if col1.button("✅ Approve", key=f"approve_{block_id}"):
-                # 1) optimistic UI update (snappy)
-                update_local_block(block_id, status="APPROVED")
-
-                # 2) send to backend
+                update_local_block(block_id, status="APPROVED") # Optimistic update
                 try:
-                    r = requests.patch(
-                        f"{API_URL}/block/{block_id}",
-                        json={"status": "APPROVED"},
-                        timeout=5,
-                    )
-                    r.raise_for_status()
-                except Exception as e:
-                    # rollback if backend fails
-                    update_local_block(block_id, status="PENDING")
-                    st.error(f"Approve failed: {e}")
-
+                    requests.patch(f"{API_URL}/block/{block_id}", json={"status": "APPROVED"}, timeout=5)
+                except:
+                    update_local_block(block_id, status="PENDING") # Rollback
+                    st.error("Connection Failed")
                 st.rerun()
 
+            # Reject Button
             if col2.button("❌ Reject", key=f"reject_{block_id}"):
-                update_local_block(block_id, status="REJECTED")
+                update_local_block(block_id, status="REJECTED") # Optimistic update
                 try:
-                    r = requests.patch(
-                        f"{API_URL}/block/{block_id}",
-                        json={"status": "REJECTED"},
-                        timeout=5,
-                    )
-                    r.raise_for_status()
-                except Exception as e:
-                    update_local_block(block_id, status="PENDING")
-                    st.error(f"Reject failed: {e}")
-
+                    requests.patch(f"{API_URL}/block/{block_id}", json={"status": "REJECTED"}, timeout=5)
+                except:
+                    update_local_block(block_id, status="PENDING") # Rollback
+                    st.error("Connection Failed")
                 st.rerun()
 
     else:
@@ -146,19 +132,16 @@ def render_block(block: dict):
             st.code(f"[{btype}]\n{content}")
 
 
-# Main
+# --- MAIN LOOP ---
 st.title(f"Project: {project_id}")
 st.caption(f"latest seq = {st.session_state.since_seq}")
 st.markdown("---")
 
-# Fetch once per run
 fetch_updates()
 
-# Render feed
 for blk in st.session_state.blocks:
     render_block(blk)
 
-# Auto-refresh
 if auto_refresh:
     time.sleep(poll_seconds)
     st.rerun()
