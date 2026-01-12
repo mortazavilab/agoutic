@@ -1,0 +1,31 @@
+name: agoutic_core
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12                # High performance, better async support
+  - pip
+  - pip:
+    # --- The Interface ---
+    - streamlit==1.52.0        # Pinned per requirement
+    - watchdog                 # For Streamlit auto-reload during dev
+    
+    # --- The Backend/API ---
+    - fastmcp
+    - fastapi
+    - uvicorn[standard]        # 'standard' includes 'uvloop' for speed
+    - python-multipart
+    
+    # --- The Logic & MCP ---
+    - mcp                      # Model Context Protocol SDK
+    - pydantic>=2.0            # Data validation
+    - requests
+    - httpx                    # Async HTTP client
+    
+    # --- The Database ---
+    - sqlalchemy>=2.0
+    - aiosqlite                # Async SQLite driver
+    
+    # --- AI Integration ---
+    - openai                   # Compatible with OpenAI and local vLLM
+    - tiktoken
