@@ -4,13 +4,18 @@ import json
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Path
+from fastapi.concurrency import run_in_threadpool  # To run LLM without blocking
+from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, String, Integer, JSON, DateTime, select, desc
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# ✅ YOUR FIX: Import directly from the server1 package
+# ✅ Import from your package
 from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
+from server1.agent_engine import AgentEngine
 
 # --- CONFIG ---
+# We read the DB URL from the same place config.py does (or hardcode for now)
+# Ideally import DATABASE_URL from server1.config, but keeping your existing style:
 DATABASE_URL = "sqlite:///./agoutic_v23.sqlite"
 
 # --- DATABASE SETUP ---
@@ -35,7 +40,15 @@ Base.metadata.create_all(bind=engine)
 # --- APP ---
 app = FastAPI()
 
-# Helper: Convert DB Row to Pydantic Schema
+# --- NEW SCHEMAS ---
+# Simple request model for the chat endpoint
+class ChatRequest(BaseModel):
+    project_id: str
+    message: str
+    skill: str = "ENCODE_LongRead" # Default skill
+    model: str = "default"         # Default model (devstral-2)
+
+# Helper: Convert DB Row to Dict
 def row_to_dict(row):
     return {
         "id": row.id,
@@ -48,29 +61,39 @@ def row_to_dict(row):
         "created_at": row.created_at.isoformat()
     }
 
+# Helper: Create a Block internally
+def _create_block_internal(session, project_id, block_type, payload, status="NEW"):
+    # Calculate next sequence
+    last_seq = session.query(ProjectBlock.seq)\
+        .filter(ProjectBlock.project_id == project_id)\
+        .order_by(desc(ProjectBlock.seq))\
+        .first()
+    
+    next_seq = (last_seq[0] + 1) if last_seq else 1
+
+    new_block = ProjectBlock(
+        project_id=project_id,
+        seq=next_seq,
+        type=block_type,
+        status=status,
+        payload=payload
+    )
+    session.add(new_block)
+    session.commit()
+    session.refresh(new_block)
+    return new_block
+
 @app.post("/block", response_model=BlockOut)
 async def create_block(block_in: BlockCreate):
     session = SessionLocal()
     try:
-        # Calculate next sequence number for this project
-        last_seq = session.query(ProjectBlock.seq)\
-            .filter(ProjectBlock.project_id == block_in.project_id)\
-            .order_by(desc(ProjectBlock.seq))\
-            .first()
-        
-        next_seq = (last_seq[0] + 1) if last_seq else 1
-
-        new_block = ProjectBlock(
-            project_id=block_in.project_id,
-            seq=next_seq,
-            type=block_in.type,
-            status=block_in.status,
-            payload=block_in.payload,
-            parent_id=block_in.parent_id
+        new_block = _create_block_internal(
+            session, 
+            block_in.project_id, 
+            block_in.type, 
+            block_in.payload, 
+            block_in.status
         )
-        session.add(new_block)
-        session.commit()
-        session.refresh(new_block)
         return row_to_dict(new_block)
     finally:
         session.close()
@@ -79,7 +102,6 @@ async def create_block(block_in: BlockCreate):
 async def get_blocks(project_id: str, since_seq: int = 0, limit: int = 100):
     session = SessionLocal()
     try:
-        # Fetch only blocks newer than 'since_seq'
         query = select(ProjectBlock)\
             .where(ProjectBlock.project_id == project_id)\
             .where(ProjectBlock.seq > since_seq)\
@@ -89,7 +111,6 @@ async def get_blocks(project_id: str, since_seq: int = 0, limit: int = 100):
         result = session.execute(query)
         blocks = result.scalars().all()
         
-        # Calculate new high-water mark
         new_latest = since_seq
         if blocks:
             new_latest = blocks[-1].seq
@@ -108,12 +129,10 @@ async def update_block(
 ):
     session = SessionLocal()
     try:
-        # Find block
         block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
         if not block:
             raise HTTPException(status_code=404, detail="Block not found")
             
-        # Update fields if provided
         if body.status is not None:
             block.status = body.status
         if body.payload is not None:
@@ -122,5 +141,51 @@ async def update_block(
         session.commit()
         session.refresh(block)
         return row_to_dict(block)
+    finally:
+        session.close()
+
+# --- NEW: CHAT ENDPOINT ---
+@app.post("/chat")
+async def chat_with_agent(req: ChatRequest):
+    """
+    1. Saves User Message -> DB
+    2. Runs Agent Engine (LLM)
+    3. Saves Agent Plan -> DB
+    """
+    session = SessionLocal()
+    try:
+        # 1. Save USER_MESSAGE
+        user_block = _create_block_internal(
+            session,
+            req.project_id,
+            "USER_MESSAGE",
+            {"text": req.message}
+        )
+        
+        # 2. Run the Brain (in a thread so it doesn't block the server)
+        # We Initialize the engine with the requested model (e.g. 'fast' or 'default')
+        engine = AgentEngine(model_key=req.model)
+        
+        # 'think' talks to Ollama. This might take 5-10 seconds.
+        plan_text = await run_in_threadpool(engine.think, req.message, req.skill)
+        
+        # 3. Save AGENT_PLAN
+        # We wrap the text in a Markdown payload so the UI can render it nicely
+        agent_block = _create_block_internal(
+            session,
+            req.project_id,
+            "AGENT_PLAN",
+            {"markdown": plan_text, "skill": req.skill, "model": engine.model_name},
+            status="WAITING_APPROVAL" # Agent creates plans that need approval
+        )
+        
+        return {
+            "status": "ok", 
+            "user_block": row_to_dict(user_block),
+            "agent_block": row_to_dict(agent_block)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
