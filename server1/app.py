@@ -7,8 +7,8 @@ from fastapi import FastAPI, HTTPException, Path
 from sqlalchemy import create_engine, Column, String, Integer, JSON, DateTime, select, desc
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# ✅ UPDATED IMPORT: Uses 'schemas' (plural)
-from schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
+# ✅ YOUR FIX: Import directly from the server1 package
+from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 
 # --- CONFIG ---
 DATABASE_URL = "sqlite:///./agoutic_v23.sqlite"
