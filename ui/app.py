@@ -12,6 +12,12 @@ st.set_page_config(page_title="AGOUTIC v3.0", layout="wide")
 # We use a single source of truth for the Active Project ID
 if "active_project_id" not in st.session_state:
     st.session_state.active_project_id = "test_project_001"
+    st.session_state.cached_blocks = []
+
+# Track when project ID changes and clear blocks
+if st.session_state.get("last_project_id") != st.session_state.active_project_id:
+    st.session_state.cached_blocks = []
+    st.session_state.last_project_id = st.session_state.active_project_id
 
 # --- 2. SIDEBAR ---
 with st.sidebar:
