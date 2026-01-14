@@ -9,15 +9,13 @@ API_URL = "http://127.0.0.1:8000"
 st.set_page_config(page_title="AGOUTIC v3.0", layout="wide")
 
 # --- 1. STATE MANAGEMENT ---
-# We use a single source of truth for the Active Project ID
+# Initialize with a random project ID if none exists
 if "active_project_id" not in st.session_state:
-    st.session_state.active_project_id = "test_project_001"
-    st.session_state.cached_blocks = []
-
-# Track when project ID changes and clear blocks
-if st.session_state.get("last_project_id") != st.session_state.active_project_id:
-    st.session_state.cached_blocks = []
-    st.session_state.last_project_id = st.session_state.active_project_id
+    st.session_state.active_project_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+# Initialize other state variables
+if "blocks" not in st.session_state:
+    st.session_state.blocks = []
 
 # --- 2. SIDEBAR ---
 with st.sidebar:
@@ -27,7 +25,12 @@ with st.sidebar:
     if st.button("✨ New Project", use_container_width=True):
         # Create a unique ID
         new_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Clear ALL state variables for fresh start
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        # Set the new project ID
         st.session_state.active_project_id = new_id
+        st.session_state.blocks = []
         st.rerun()
 
     # [B] PROJECT ID INPUT
@@ -143,15 +146,15 @@ active_id = st.session_state.active_project_id
 
 st.title(f"Project: {active_id}")
 
-# 1. Fetch & Sanitize
-# We only get blocks that survive the filter
+# 1. Fetch & Sanitize (only if we need to refresh)
 blocks = get_sanitized_blocks(active_id)
+st.session_state.blocks = blocks  # Update session state with fresh blocks
 
 # 2. Render
-if not blocks:
+if not st.session_state.blocks:
     st.info(f"👋 **Project `{active_id}` is empty.**\n\nAsk Agoutic to start a task!")
 else:
-    for blk in blocks:
+    for blk in st.session_state.blocks:
         render_block(blk)
 
 st.write("---")
