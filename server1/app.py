@@ -14,8 +14,6 @@ from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from server1.agent_engine import AgentEngine
 
 # --- CONFIG ---
-# We read the DB URL from the same place config.py does (or hardcode for now)
-# Ideally import DATABASE_URL from server1.config, but keeping your existing style:
 DATABASE_URL = "sqlite:///./agoutic_v23.sqlite"
 
 # --- DATABASE SETUP ---
@@ -40,15 +38,14 @@ Base.metadata.create_all(bind=engine)
 # --- APP ---
 app = FastAPI()
 
-# --- NEW SCHEMAS ---
-# Simple request model for the chat endpoint
+# --- SCHEMAS ---
 class ChatRequest(BaseModel):
     project_id: str
     message: str
     skill: str = "ENCODE_LongRead" # Default skill
     model: str = "default"         # Default model (devstral-2)
 
-# Helper: Convert DB Row to Dict
+# --- HELPERS ---
 def row_to_dict(row):
     return {
         "id": row.id,
@@ -61,8 +58,10 @@ def row_to_dict(row):
         "created_at": row.created_at.isoformat()
     }
 
-# Helper: Create a Block internally
 def _create_block_internal(session, project_id, block_type, payload, status="NEW"):
+    """
+    Internal helper to insert a block and handle the sequence number safely.
+    """
     # Calculate next sequence
     last_seq = session.query(ProjectBlock.seq)\
         .filter(ProjectBlock.project_id == project_id)\
@@ -82,6 +81,8 @@ def _create_block_internal(session, project_id, block_type, payload, status="NEW
     session.commit()
     session.refresh(new_block)
     return new_block
+
+# --- ENDPOINTS ---
 
 @app.post("/block", response_model=BlockOut)
 async def create_block(block_in: BlockCreate):
@@ -144,13 +145,15 @@ async def update_block(
     finally:
         session.close()
 
-# --- NEW: CHAT ENDPOINT ---
+# --- CHAT & AGENT LOGIC ---
 @app.post("/chat")
 async def chat_with_agent(req: ChatRequest):
     """
     1. Saves User Message -> DB
     2. Runs Agent Engine (LLM)
-    3. Saves Agent Plan -> DB
+    3. Parses output for [[APPROVAL_NEEDED]] tag
+    4. Saves Agent Plan -> DB (Clean text)
+    5. If tag found -> Saves APPROVAL_GATE -> DB (Interactive buttons)
     """
     session = SessionLocal()
     try:
@@ -163,26 +166,50 @@ async def chat_with_agent(req: ChatRequest):
         )
         
         # 2. Run the Brain (in a thread so it doesn't block the server)
-        # We Initialize the engine with the requested model (e.g. 'fast' or 'default')
+        # Initialize engine with the selected model (from UI request)
         engine = AgentEngine(model_key=req.model)
         
-        # 'think' talks to Ollama. This might take 5-10 seconds.
-        plan_text = await run_in_threadpool(engine.think, req.message, req.skill)
+        # 'think' talks to Ollama. 
+        raw_response = await run_in_threadpool(engine.think, req.message, req.skill)
         
-        # 3. Save AGENT_PLAN
-        # We wrap the text in a Markdown payload so the UI can render it nicely
+        # 3. Parse the "Trigger Tag"
+        trigger_tag = "[[APPROVAL_NEEDED]]"
+        needs_approval = trigger_tag in raw_response
+        
+        # Clean the tag out of the text so the user doesn't see it
+        clean_markdown = raw_response.replace(trigger_tag, "").strip()
+        
+        # 4. Save AGENT_PLAN (The Text)
+        # Status is DONE because the text itself is just informational. 
+        # The flow control happens in the gate block below.
         agent_block = _create_block_internal(
             session,
             req.project_id,
             "AGENT_PLAN",
-            {"markdown": plan_text, "skill": req.skill, "model": engine.model_name},
-            status="WAITING_APPROVAL" # Agent creates plans that need approval
+            {
+                "markdown": clean_markdown, 
+                "skill": req.skill, 
+                "model": engine.model_name
+            },
+            status="DONE" 
         )
+        
+        # 5. Insert APPROVAL_GATE (The Buttons) if requested
+        gate_block = None
+        if needs_approval:
+            gate_block = _create_block_internal(
+                session,
+                req.project_id,
+                "APPROVAL_GATE",
+                {"label": "Do you authorize the Agent to proceed with this plan?"},
+                status="PENDING"
+            )
         
         return {
             "status": "ok", 
             "user_block": row_to_dict(user_block),
-            "agent_block": row_to_dict(agent_block)
+            "agent_block": row_to_dict(agent_block),
+            "gate_block": row_to_dict(gate_block) if gate_block else None
         }
         
     except Exception as e:

@@ -1,99 +1,117 @@
 import time
 import requests
+import datetime
 import streamlit as st
 
 # --- CONFIG ---
 API_URL = "http://127.0.0.1:8000"
 
-st.set_page_config(page_title="AGOUTIC v2.3", layout="wide")
+st.set_page_config(page_title="AGOUTIC v3.0", layout="wide")
 
-# --- SIDEBAR ---
+# --- 1. STATE MANAGEMENT ---
+# We use a single source of truth for the Active Project ID
+if "active_project_id" not in st.session_state:
+    st.session_state.active_project_id = "test_project_001"
+
+# --- 2. SIDEBAR ---
 with st.sidebar:
     st.title("🧬 AGOUTIC")
-    project_id = st.text_input("Project ID", value="test_project_001")
     
-    # Model Selection (New!)
+    # [A] NEW PROJECT (Generates Random ID)
+    if st.button("✨ New Project", use_container_width=True):
+        # Create a unique ID
+        new_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        st.session_state.active_project_id = new_id
+        st.rerun()
+
+    # [B] PROJECT ID INPUT
+    # We display the current state. If user types here, we update state & rerun.
+    user_input = st.text_input(
+        "Project ID", 
+        value=st.session_state.active_project_id
+    )
+    
+    # Handle manual renaming
+    if user_input != st.session_state.active_project_id:
+        st.session_state.active_project_id = user_input
+        st.rerun()
+
+    st.divider()
+    
+    # [C] DEBUG TOOLS
+    # If things get weird, this button forces a hard reload
+    if st.button("🧹 Force Clear / Refresh"):
+        st.rerun()
+
+    st.divider()
+    
     model_choice = st.selectbox("Brain Model", ["default", "fast", "smart"], index=0)
-
-    # --- Project Watcher (Auto-Reset) ---
-    if "current_pid" not in st.session_state:
-        st.session_state.current_pid = project_id
-
-    if st.session_state.current_pid != project_id:
-        st.session_state.blocks = []
-        st.session_state.since_seq = 0
-        st.session_state.current_pid = project_id
-        st.rerun()
-
     auto_refresh = st.toggle("Live Stream", value=True)
-    poll_seconds = st.slider("Poll interval (sec)", 1, 5, 1)
+    poll_seconds = st.slider("Poll interval (sec)", 1, 5, 2)
+    
+    # DEBUG DISPLAY: Show exactly what ID the UI thinks it is using
+    st.caption(f"**System ID:** `{st.session_state.active_project_id}`")
 
-    if st.button("Clear View"):
-        st.session_state.blocks = []
-        st.session_state.since_seq = 0
-        st.rerun()
 
-# --- SESSION STATE ---
-if "since_seq" not in st.session_state:
-    st.session_state.since_seq = 0
-if "blocks" not in st.session_state:
-    st.session_state.blocks = []
+# --- 3. LOGIC ---
 
-# --- FUNCTIONS ---
-def fetch_updates() -> bool:
-    """Poll new blocks since since_seq."""
+def get_sanitized_blocks(target_project_id):
+    """
+    Fetch blocks from server, but SCRUB any block that doesn't match the target ID.
+    This guarantees no 'ghost' messages from other projects can appear.
+    """
     try:
+        # 1. Ask Server
         resp = requests.get(
             f"{API_URL}/blocks",
-            params={"project_id": project_id, "since_seq": st.session_state.since_seq},
+            params={"project_id": target_project_id, "since_seq": 0, "limit": 100},
             timeout=5,
         )
-        resp.raise_for_status()
-        data = resp.json()
-
-        new_blocks = data.get("blocks", [])
-        if new_blocks:
-            st.session_state.blocks.extend(new_blocks)
-            st.session_state.since_seq = data.get("latest_seq", st.session_state.since_seq)
-            return True
+        if resp.status_code == 200:
+            raw_blocks = resp.json().get("blocks", [])
+            
+            # 2. CLIENT-SIDE SANITATION (The Fix)
+            # We explicitly filter the list. If the block's 'project_id' is not exactly
+            # equal to our target, we throw it away.
+            clean_blocks = [
+                b for b in raw_blocks 
+                if b.get("project_id") == target_project_id
+            ]
+            return clean_blocks
     except Exception:
         pass
-    return False
+    return []
 
-def render_block(block: dict):
-    """Render a single block based on its type."""
+def render_block(block):
+    """Render a single block."""
     btype = block["type"]
     content = block.get("payload", {})
     status = block.get("status", "NEW")
     block_id = block["id"]
+    
+    # Metadata
+    b_project = block.get("project_id", "???")
+    b_skill = content.get("skill", "N/A")
+    b_model = content.get("model", "N/A")
 
-    # 1. User Message (Fixed Type Name)
-    if btype == "USER_MESSAGE" or btype == "USER_PROMPT":
+    def show_metadata():
+        st.caption(f"📌 **Proj:** `{b_project}` | 🧠 **Model:** `{b_model}` | 🛠️ **Skill:** `{b_skill}`")
+
+    if btype == "USER_MESSAGE":
         with st.chat_message("user"):
             st.write(content.get("text", ""))
 
-    # 2. Agent Plan (Now supports Markdown from LLM)
     elif btype == "AGENT_PLAN":
         with st.chat_message("assistant", avatar="🤖"):
-            # Show the skill used if available
-            if "skill" in content:
-                st.caption(f"Skill: `{content['skill']}` | Model: `{content.get('model', 'unknown')}`")
-            
-            # The LLM returns a markdown string, so we render it directly
+            show_metadata()
             if "markdown" in content:
                 st.markdown(content["markdown"])
-            else:
-                # Fallback for old list-style plans
-                st.write("### 📋 Proposed Plan")
-                steps = content.get("content", [])
-                for i, step in enumerate(steps, 1):
-                    st.write(f"{i}. {step}")
 
-    # 3. Approval Gate (Interactive)
     elif btype == "APPROVAL_GATE":
         with st.chat_message("assistant", avatar="🚦"):
             st.write("### ✅ Approval Required")
             st.write(content.get("label", "Approve this plan?"))
+            st.caption(f"Block ID: `{block_id}`")
 
             if status == "APPROVED":
                 st.success("✅ Approved")
@@ -107,45 +125,53 @@ def render_block(block: dict):
                 if col2.button("❌ Reject", key=f"rej_{block_id}"):
                     requests.patch(f"{API_URL}/block/{block_id}", json={"status": "REJECTED"})
                     st.rerun()
-
-    # 4. Fallback for other system messages
     else:
         with st.chat_message("system", avatar="⚙️"):
             st.code(f"[{btype}] {content}")
 
-# --- MAIN LAYOUT ---
-st.title(f"Project: {project_id}")
 
-# 1. Render History
-fetch_updates()
-for blk in st.session_state.blocks:
-    render_block(blk)
+# --- 4. MAIN RENDER LOOP ---
 
-# 2. Chat Input (The Critical New Feature)
+# Capture the ID once for this entire run
+active_id = st.session_state.active_project_id
+
+st.title(f"Project: {active_id}")
+
+# 1. Fetch & Sanitize
+# We only get blocks that survive the filter
+blocks = get_sanitized_blocks(active_id)
+
+# 2. Render
+if not blocks:
+    st.info(f"👋 **Project `{active_id}` is empty.**\n\nAsk Agoutic to start a task!")
+else:
+    for blk in blocks:
+        render_block(blk)
+
+st.write("---")
+
+# 3. Chat Input
 if prompt := st.chat_input("Ask Agoutic to do something..."):
-    # Render user message immediately (optimistic UI)
     with st.chat_message("user"):
         st.write(prompt)
     
-    # Send to Server
     try:
+        # Send using the ACTIVE ID
         requests.post(
             f"{API_URL}/chat",
             json={
-                "project_id": project_id, 
+                "project_id": active_id, 
                 "message": prompt,
-                "skill": "ENCODE_LongRead", # Default for now
+                "skill": "ENCODE_LongRead",
                 "model": model_choice
             }
         )
-        # Force a refresh to see the "Thinking..." status or result
         time.sleep(0.5) 
         st.rerun()
-        
     except Exception as e:
         st.error(f"Failed to send message: {e}")
 
-# 3. Auto-Refresh Loop
+# 4. Auto-Refresh
 if auto_refresh:
     time.sleep(poll_seconds)
     st.rerun()

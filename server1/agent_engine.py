@@ -1,11 +1,7 @@
 import os
 from openai import OpenAI
-# Update import to use LLM_URL
-try:
-    from server1.config import SKILLS_DIR, SKILLS_REGISTRY, LLM_URL, LLM_MODELS
-except ImportError:
-    from config import SKILLS_DIR, SKILLS_REGISTRY, LLM_URL, LLM_MODELS
-    
+from server1.config import SKILLS_DIR, SKILLS_REGISTRY, LLM_URL, LLM_MODELS
+
 # --- LLM CONNECTION ---
 # We use the standard OpenAI client but point it to the configured URL
 client = OpenAI(
@@ -66,10 +62,16 @@ class AgentEngine:
         {skill_content}
         --- SKILL DEFINITION END ---
         
-        OUTPUT FORMAT:
-        You must reply with a structured plan. 
-        Simply list the steps you intend to take in clear natural language, 
-        prefixed with "STEP [N]:".
+        OUTPUT FORMATTING RULES:
+        1. Write your plan in clear natural language (Markdown).
+        2. Use "STEP [N]:" for each action.
+        3. CRITICAL: If the skill definition mentions an "APPROVAL GATE" or requires user confirmation 
+           before proceeding (e.g. for downloading or computing), you MUST end your response 
+           with this exact tag on a new line:
+           
+           [[APPROVAL_NEEDED]]
+           
+           Do not output this tag if you are just answering a question.
         """
         return system_prompt
 
@@ -98,10 +100,18 @@ class AgentEngine:
             return f"❌ Brain Freeze (Connection Error): {str(e)}"
 
 # --- Quick Test Block ---
-# In server1/agent_engine.py (bottom test block)
 if __name__ == "__main__":
-    # Test the fast model specifically
-    engine = AgentEngine(model_key="fast") 
+    # 1. Initialize with the default model
+    engine = AgentEngine(model_key="default")
     
-    print(f"Using model: {engine.model_name}")
-    print(engine.think("Hello, are you ready?"))
+    # 2. Define a test query
+    test_query = "Please align the liver tissue sample using the latest reference."
+    
+    print("\n--- 🧑‍🔬 User Query ---")
+    print(test_query)
+    
+    print(f"\n--- 🤖 Agent Thinking ---")
+    reply = engine.think(test_query)
+    
+    print("\n--- 📄 Result ---")
+    print(reply)
