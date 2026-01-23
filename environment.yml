@@ -29,3 +29,8 @@ dependencies:
     # --- AI Integration ---
     - openai                   # Compatible with OpenAI and local vLLM
     - tiktoken
+    
+    # --- Testing ---
+    - pytest>=7.0
+    - pytest-asyncio>=0.21.0   # Async test support
+    - aiohttp>=3.8.0      # Async HTTP client for tests

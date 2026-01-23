@@ -56,12 +56,12 @@ class JobStatus(str, Enum):
 # --- REFERENCE GENOMES ---
 REFERENCE_GENOMES = {
     "GRCh38": {
-        "fasta": "/data/references/GRCh38/GRCh38.fa",
-        "gtf": "/data/references/GRCh38/gencode.v42.annotation.gtf",
+        "fasta": AGOUTIC_DATA / "references" / "GRCh38" / "GRCh38.fa",
+        "gtf": AGOUTIC_DATA / "references" / "GRCh38" / "gencode.v42.annotation.gtf",
     },
     "mm39": {
-        "fasta": "/data/references/mm39/mm39.fa",
-        "gtf": "/data/references/mm39/gencode.vM33.annotation.gtf",
+        "fasta": AGOUTIC_DATA / "references" / "mm39" / "mm39.fa",
+        "gtf": AGOUTIC_DATA / "references" / "mm39" / "gencode.vM33.annotation.gtf",
     },
     "default": "GRCh38",
 }

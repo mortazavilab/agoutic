@@ -9,12 +9,13 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
+import pytest_asyncio
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Async fixtures
-@pytest.fixture
+@pytest_asyncio.fixture
 async def db_session():
     """Create a test database session."""
     from server3.db import SessionLocal, init_db
