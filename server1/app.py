@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 # ✅ Import from your package
 from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from server1.agent_engine import AgentEngine
+from server1.config import SKILLS_REGISTRY
 
 # --- CONFIG ---
 DATABASE_URL = "sqlite:///./agoutic_v23.sqlite"
@@ -83,6 +84,14 @@ def _create_block_internal(session, project_id, block_type, payload, status="NEW
     return new_block
 
 # --- ENDPOINTS ---
+
+@app.get("/skills")
+async def get_available_skills():
+    """Return the list of all available skills."""
+    return {
+        "skills": list(SKILLS_REGISTRY.keys()),
+        "count": len(SKILLS_REGISTRY)
+    }
 
 @app.post("/block", response_model=BlockOut)
 async def create_block(block_in: BlockCreate):
@@ -172,12 +181,25 @@ async def chat_with_agent(req: ChatRequest):
         # 'think' talks to Ollama. 
         raw_response = await run_in_threadpool(engine.think, req.message, req.skill)
         
-        # 3. Parse the "Trigger Tag"
+        # 3. Parse for Skill Switch Tag
+        import re
+        skill_switch_match = re.search(r'\[\[SKILL_SWITCH_TO:\s*(\w+)\]\]', raw_response)
+        if skill_switch_match:
+            new_skill = skill_switch_match.group(1)
+            if new_skill in SKILLS_REGISTRY:
+                print(f"🔄 Agent switching from '{req.skill}' to '{new_skill}'")
+                # Re-run with the new skill
+                engine = AgentEngine(model_key=req.model)
+                raw_response = await run_in_threadpool(engine.think, req.message, new_skill)
+                req.skill = new_skill  # Update the skill for the response
+        
+        # 4. Parse the "Approval Gate Tag"
         trigger_tag = "[[APPROVAL_NEEDED]]"
         needs_approval = trigger_tag in raw_response
         
-        # Clean the tag out of the text so the user doesn't see it
+        # Clean all tags out of the text so the user doesn't see them
         clean_markdown = raw_response.replace(trigger_tag, "").strip()
+        clean_markdown = re.sub(r'\[\[SKILL_SWITCH_TO:\s*\w+\]\]', '', clean_markdown).strip()
         
         # 4. Save AGENT_PLAN (The Text)
         # Status is DONE because the text itself is just informational. 

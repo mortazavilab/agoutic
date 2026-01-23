@@ -1,46 +1,58 @@
 # Skill: ENCODE Long-Read Alignment (Dogme Pipeline)
 
 ## Description
-This skill handles the end-to-end alignment of ENCODE long-read data (PacBio/Nanopore). It starts from a loose search query (Sample ID or Tissue), manages data retrieval, configures the "Dogme" Nextflow pipeline on Server 3, and returns quality metrics.
+
+This skill handles the retrieval and initial processing of ENCODE long-read data. It searches the ENCODE portal, manages the download of raw `.pod5`/`.fastq` files, and automatically dispatches the analysis to the correct Dogme sub-skill (`DNA`, `RNA`, or `cDNA`) based on the experiment metadata.
 
 ## Inputs
-- `query`: (String) The search term (e.g., "ENCSR...", "liver tissue").
-- `platform`: (String, Optional) "Nanopore" or "PacBio".
-- `ref_version`: (String, Optional) "default" (ENCODE standard) or "latest".
+
+* `query`: (String) The search term (e.g., "ENCSR...", "liver tissue").
+* `platform`: (String, Optional) "Nanopore" or "PacBio".
+* `ref_version`: (String, Optional) "default" (ENCODE standard) or "latest".
 
 ## Plan Logic
 
 ### 1. Discovery & Selection
-- **Tool:** `find_encode_samples(query, platform)`
-- **Context:** The agent searches the ENCODE database.
-- **Output:** A list of candidate samples with file sizes and file types (fastq/pod5/bam).
+
+* **Tool:** `find_encode_samples(query, platform)`
+* **Context:** The agent searches the ENCODE database.
+* **Output:** A list of candidate samples including experiment type (e.g., "polyA plus RNA-seq", "DNA methylation").
 
 ### 2. APPROVAL GATE: Data Retrieval
-- **Condition:** The user must confirm the correct sample and authorize the storage usage.
-- **Prompt:** "I found [N] samples matching '{query}'. The total download size is [Size]. Do you want to proceed with downloading sample '{sample_name}'?"
 
-### 3. Setup (Download & Config)
-- **Tool:** `scaffold_dogme_dir(sample_name, file_urls)`
-  - *Logic:* Creates directory `{sample_name}/`. Checks if files are local; if not, downloads them.
-- **Tool:** `generate_dogme_config(sample_name, ref_version)`
-  - *Logic:* Generates the `nextflow.config` file using the specified reference genomes (Default vs Latest).
+* **Condition:** The user must confirm the correct sample and authorize the storage usage.
+* **Prompt:** "I found experiment '{sample_id}' ([Experiment_Type]).
+* Description: {description}
+* Total download size: [Size]
 
-### 4. APPROVAL GATE: Pipeline Launch
-- **Condition:** The user must review the configuration before compute starts.
-- **Prompt:** "Configuration generated for '{sample_name}'.
-  - Reference: {ref_version}
-  - Output Dir: ./{sample_name}/
-  - Pipeline: Dogme v2.0 (Server 3)
-  
-  Ready to launch?"
 
-### 5. Execution & Monitoring
-- **Tool:** `submit_dogme_nextflow(sample_name)`
-  - *Logic:* Submits job to Server 3. Returns a Run UUID.
-- **Tool:** `check_nextflow_status(run_uuid)`
-  - *Logic:* Loops until status is 'COMPLETED' or 'FAILED'.
+Do you want to proceed with downloading this dataset?"
 
-### 6. Final Reporting
-- **Tool:** `get_run_metrics(sample_name)`
-- **Output:** Returns a JSON summary of the run (N50, Mapping Rate, Read Count).
-- **Note:** This skill ends here. Analysis is a separate downstream skill.
+### 3. Setup (Download & Staging)
+
+* **Tool:** `download_encode_files(sample_id, output_dir)`
+* *Logic:* Downloads the raw pod5/fastq files to the local storage. Verifies checksums.
+
+
+* **Tool:** `get_experiment_metadata(sample_id)`
+* *Logic:* Retrieves specific details to determine the pipeline mode (e.g., is it Direct RNA or cDNA?).
+
+
+
+### 4. Classification & Routing
+
+* **Tool:** `delegate_to_skill(target_skill, parameters)`
+* **Logic:** Based on the ENCODE experiment type, the agent routes to the specialized skill:
+* **Case 'Direct RNA-seq':**
+-> Calls `run_dogme_rna(query=local_path, sample_name=sample_id, reference_genome=ref_version)`
+* **Case 'Whole Genome Sequencing' or 'Methylation':**
+-> Calls `run_dogme_dna(query=local_path, sample_name=sample_id, reference_genome=ref_version)`
+* **Case 'polyA RNA-seq' or 'cDNA':**
+-> Calls `run_dogme_cdna(query=local_path, sample_name=sample_id, reference_genome=ref_version)`
+
+
+
+### 5. Final Status
+
+* **Output:** "Data retrieved for {sample_id}. Analysis delegated to **{Target_Skill_Name}**."
+* **Note:** The downstream skill will handle the configuration, execution, and reporting.

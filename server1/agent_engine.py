@@ -49,8 +49,14 @@ class AgentEngine:
         """
         skill_content = self._load_skill_text(skill_key)
         
+        # Build list of all available skills
+        all_skills = "\n".join([f"  - {key}" for key in SKILLS_REGISTRY.keys()])
+        
         system_prompt = f"""
         You are Agoutic, an autonomous bioinformatics agent.
+        
+        AVAILABLE SKILLS:
+{all_skills}
         
         YOUR CURRENT SKILL: {skill_key}
         
@@ -65,7 +71,13 @@ class AgentEngine:
         OUTPUT FORMATTING RULES:
         1. Write your plan in clear natural language (Markdown).
         2. Use "STEP [N]:" for each action.
-        3. CRITICAL: If the skill definition mentions an "APPROVAL GATE" or requires user confirmation 
+        3. If you determine that a different skill would be more appropriate for this task,
+           output this tag on a new line:
+           
+           [[SKILL_SWITCH_TO: skill_name]]
+           
+           Replace 'skill_name' with one of the available skills listed above.
+        4. CRITICAL: If the skill definition mentions an "APPROVAL GATE" or requires user confirmation 
            before proceeding (e.g. for downloading or computing), you MUST end your response 
            with this exact tag on a new line:
            
