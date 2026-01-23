@@ -88,6 +88,6 @@ See [app.py](app.py) for current implementation status.
 
 ## Next Steps
 
-- Week 4: Core dashboard
-- Week 5: Real-time updates
-- Week 6: Polish and optimization
+- Core dashboard
+- Real-time updates
+- Polish and optimization

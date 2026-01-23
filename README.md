@@ -397,8 +397,8 @@ pylint server1 server3
 
 ## 🗓️ Development Timeline
 
-- **Week 1-2**: Core infrastructure and basic API
-- **Week 3**: Complete (Current) - Dual interface, MCP integration
-- **Week 4**: Integration with Server 1 approval gates
-- **Week 5**: Web UI job monitoring dashboard
-- **Week 6**: Performance optimization & deployment
+- complete: Core infrastructure and basic API
+- current: Complete (Current) - Dual interface, MCP integration
+- next: Integration with Server 1 approval gates
+- future: Web UI job monitoring dashboard
+- future: Performance optimization & deployment
