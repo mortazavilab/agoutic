@@ -25,38 +25,38 @@ async def db_session():
 
 @pytest.fixture
 def sample_job_request():
-    """Sample job submission request."""
+    """Sample DNA job submission request (based on GDNAmicro example config)."""
     return {
-        "project_id": "test_project_001",
-        "sample_name": "test_sample_liver",
+        "project_id": "test_project_dna_001",
+        "sample_name": "GDNAmicro",
         "mode": "DNA",
-        "input_directory": "/data/samples/test_dna",
-        "reference_genome": "GRCh38",
+        "input_directory": "/media/backup_disk/agoutic_root/testdata/GDNA/pod5",
+        "reference_genome": "mm39",
         "modifications": "5mCG_5hmCG,6mA",
-        "parent_block_id": "block_123",
+        "parent_block_id": "block_dna_001",
     }
 
 @pytest.fixture
 def sample_job_request_rna():
-    """Sample RNA job submission request."""
+    """Sample RNA job submission request (based on DRNAmicro example config)."""
     return {
-        "project_id": "test_project_002",
-        "sample_name": "test_sample_brain_rna",
+        "project_id": "test_project_rna_002",
+        "sample_name": "DRNAmicro",
         "mode": "RNA",
-        "input_directory": "/data/samples/test_rna",
-        "reference_genome": "GRCh38",
-        "modifications": "inosine_m6A,pseU,m5C",
+        "input_directory": "/media/backup_disk/agoutic_root/testdata/DRNA/pod5",
+        "reference_genome": "mm39",
+        "modifications": "inosine_m6A_2OmeA,pseU_2OmeU,m5C_2OmeC,2OmeG",
     }
 
 @pytest.fixture
 def sample_job_request_cdna():
-    """Sample cDNA job submission request."""
+    """Sample cDNA job submission request (based on CDNAmicro example config)."""
     return {
-        "project_id": "test_project_003",
-        "sample_name": "test_sample_cdna",
+        "project_id": "test_project_cdna_003",
+        "sample_name": "CDNAmicro",
         "mode": "CDNA",
-        "input_directory": "/data/samples/test_cdna",
-        "reference_genome": "GRCh38",
+        "input_directory": "/media/backup_disk/agoutic_root/testdata/CDNA/pod5",
+        "reference_genome": "mm39",
     }
 
 # --- CONFIG TESTS ---
@@ -75,10 +75,12 @@ class TestNextflowConfig:
             modifications="5mCG_5hmCG,6mA",
         )
         
-        assert config["params"]["readType"] == "DNA"
-        assert config["params"]["modifications"] == "5mCG_5hmCG,6mA"
-        assert config["params"]["modkit_enabled"] is True
-        assert config["params"]["sample_name"] == "test_dna"
+        assert isinstance(config, str)
+        assert "readType = 'DNA'" in config
+        assert "modifications = '5mCG_5hmCG,6mA'" in config
+        assert "sample = 'test_dna'" in config
+        assert "params {" in config
+        assert "process {" in config
     
     def test_generate_rna_config(self):
         """Test RNA mode configuration."""
@@ -92,9 +94,11 @@ class TestNextflowConfig:
             modifications="inosine_m6A",
         )
         
-        assert config["params"]["readType"] == "RNA"
-        assert config["params"]["modifications"] == "inosine_m6A"
-        assert config["params"]["gtf"] is not None
+        assert isinstance(config, str)
+        assert "readType = 'RNA'" in config
+        assert "modifications = 'inosine_m6A'" in config
+        assert "params {" in config
+        assert "process {" in config
     
     def test_generate_cdna_config(self):
         """Test cDNA mode configuration (no modifications)."""
@@ -107,27 +111,59 @@ class TestNextflowConfig:
             reference_genome="GRCh38",
         )
         
-        assert config["params"]["readType"] == "CDNA"
-        assert config["params"]["modkit_enabled"] is False
-        assert "modifications" not in config["params"] or config["params"]["modifications"] is None
+        assert isinstance(config, str)
+        assert "readType = 'CDNA'" in config
+        assert "modifications" not in config
+        assert "params {" in config
+        assert "process {" in config
     
-    def test_groovy_formatting(self):
-        """Test Groovy config formatting."""
+    def test_generate_dna_default_mincov(self):
+        """Test that DNA mode has minCov=1 by default."""
         from server3.nextflow_executor import NextflowConfig
         
-        test_dict = {
-            "params": {
-                "sample": "test",
-                "enabled": True,
-                "count": 42,
-            }
-        }
+        config = NextflowConfig.generate_config(
+            sample_name="test_dna",
+            mode="DNA",
+            input_dir="/data/test",
+            reference_genome="GRCh38",
+        )
         
-        groovy = NextflowConfig._dict_to_groovy(test_dict)
-        assert "params {" in groovy
-        assert 'sample = "test"' in groovy
-        assert "enabled = true" in groovy
-        assert "count = 42" in groovy
+        assert "minCov = 1" in config
+    
+    def test_generate_rna_default_mincov(self):
+        """Test that RNA mode has minCov=3 by default."""
+        from server3.nextflow_executor import NextflowConfig
+        
+        config = NextflowConfig.generate_config(
+            sample_name="test_rna",
+            mode="RNA",
+            input_dir="/data/test",
+            reference_genome="GRCh38",
+        )
+        
+        assert "minCov = 3" in config
+    
+    def test_generate_default_modifications(self):
+        """Test that default modifications are applied when not provided."""
+        from server3.nextflow_executor import NextflowConfig
+        
+        # DNA without explicit modifications
+        config_dna = NextflowConfig.generate_config(
+            sample_name="test_dna",
+            mode="DNA",
+            input_dir="/data/test",
+            reference_genome="GRCh38",
+        )
+        assert "modifications = '5mCG_5hmCG,6mA'" in config_dna
+        
+        # RNA without explicit modifications
+        config_rna = NextflowConfig.generate_config(
+            sample_name="test_rna",
+            mode="RNA",
+            input_dir="/data/test",
+            reference_genome="GRCh38",
+        )
+        assert "modifications = 'inosine_m6A_2OmeA,pseU_2OmeU,m5C_2OmeC,2OmeG'" in config_rna
 
 # --- DATABASE TESTS ---
 class TestDatabase:
@@ -151,7 +187,7 @@ class TestDatabase:
         )
         
         assert job.run_uuid == run_uuid
-        assert job.sample_name == "test_sample_liver"
+        assert job.sample_name == "GDNAmicro"
         assert job.mode == "DNA"
         assert job.status == "PENDING"
     
@@ -238,7 +274,8 @@ class TestSchemas:
         from server3.schemas import SubmitJobRequest
         
         req = SubmitJobRequest(**sample_job_request)
-        assert req.project_id == "test_project_001"
+        assert req.project_id == "test_project_dna_001"
+        assert req.sample_name == "GDNAmicro"
         assert req.mode == "DNA"
     
     def test_job_status_response_schema(self):
@@ -369,7 +406,10 @@ class TestIntegration:
                 mode=mode_enum.value,
                 input_dir="/data/test",
             )
-            assert config["params"]["readType"] == mode_enum.value
+            # Config is now a string, so check for the mode in the string
+            assert f"readType = '{mode_enum.value}'" in config
+            assert "params {" in config
+            assert "process {" in config
             modes_tested.append(mode_enum.value)
         
         assert "DNA" in modes_tested

@@ -29,103 +29,169 @@ class NextflowConfig:
         sample_name: str,
         mode: str,  # "DNA", "RNA", "CDNA"
         input_dir: str,
-        reference_genome: str = "GRCh38",
+        reference_genome: str = "mm39",
         modifications: Optional[str] = None,
-    ) -> dict:
+    ) -> str:
         """
-        Generate a Nextflow configuration dict for Dogme pipeline.
+        Generate a Nextflow configuration string for Dogme pipeline.
         
         Args:
             sample_name: Name of the sample
             mode: Dogme mode (DNA, RNA, or CDNA)
-            input_dir: Path to pod5 input directory
+            input_dir: Path to pod5 input directory (not used in config generation)
             reference_genome: Genome version (GRCh38, mm39, etc.)
-            modifications: Modification motifs to call (or empty string for cDNA)
+            modifications: Modification motifs to call (uses defaults if None)
         
         Returns:
-            Dictionary representing nextflow.config parameters
+            Groovy configuration string formatted for nextflow.config
         """
-        genome_config = REFERENCE_GENOMES.get(reference_genome, {})
-        fasta = genome_config.get("fasta", "")
-        gtf = genome_config.get("gtf", "")
+        # Get genome references
+        genome_config = REFERENCE_GENOMES.get(reference_genome, REFERENCE_GENOMES["mm39"])
+        fasta = genome_config.get("fasta", "/home/seyedam/genRefs/IGVFFI9282QLXO.fasta")
+        gtf = genome_config.get("gtf", "/home/seyedam/genRefs/IGVFFI4777RDZK.gtf")
         
-        config = {
-            "params": {
-                "sample_name": sample_name,
-                "input": input_dir,
-                "readType": mode,
-                "genome": reference_genome,
-                "fasta": fasta,
-                "gtf": gtf if mode in ("RNA", "CDNA") else None,
-                "outdir": str(SERVER3_WORK_DIR / f"{sample_name}_output"),
-            },
-            "process": {
-                "maxRetries": 1,
-                "errorStrategy": "finish",
-                "withName": {
-                    "basecall": {
-                        "container": "nanopore/guppy:6.0.1",
-                    },
-                    "align": {
-                        "container": "biocontainers/minimap2:2.24",
-                    },
-                }
-            },
-            "executor": {
-                "name": "local",
-                "cpus": 16,
-                "memory": "64 GB",
-            }
-        }
+        # Determine modifications based on mode
+        if modifications:
+            mods = modifications
+        elif mode == "DNA":
+            mods = "5mCG_5hmCG,6mA"
+        elif mode == "RNA":
+            mods = "inosine_m6A_2OmeA,pseU_2OmeU,m5C_2OmeC,2OmeG"
+        else:  # CDNA
+            mods = None
         
-        # Add modification calling only for DNA and RNA
-        if mode == "DNA" and modifications:
-            config["params"]["modifications"] = modifications
-            config["params"]["modkit_enabled"] = True
-        elif mode == "RNA" and modifications:
-            config["params"]["modifications"] = modifications
-        elif mode == "CDNA":
-            config["params"]["modkit_enabled"] = False
+        # Determine minCov based on mode
+        min_cov = 1 if mode == "DNA" else 3
         
-        return config
+        # Build config string matching example format
+        config_lines = []
+        config_lines.append("params {")
+        config_lines.append(f"    sample = '{sample_name}'")
+        config_lines.append(f"    //readType can either be 'RNA', 'DNA' or 'CDNA'")
+        config_lines.append(f"    readType = '{mode}'")
+        config_lines.append(f"    // change this value if 0.9 is too strict")
+        config_lines.append(f"    // if set to null or '' then modkit will determine its threshold by sampling reads.")
+        config_lines.append(f"    modkitFilterThreshold = 0.9")
+        
+        # Add modifications if applicable
+        if mods:
+            config_lines.append(f"    // modification type should be set as necessary if different from 'inosine_m6A,pseU,m5C' for RNA and '5mCG_5hmCG,6mA' for DNA.")
+            config_lines.append(f"    modifications = '{mods}'")
+        
+        config_lines.append(f"    //change setting if necessary")
+        config_lines.append(f"    //minCov = 3 by default, but changed to 1 for microtest" if mode == "DNA" else f"    //change setting if necessary")
+        config_lines.append(f"    minCov = {min_cov}")
+        config_lines.append(f"    perMod = 5")
+        config_lines.append(f"    // change if the launch directory is not where the pod5 and output directories should go")
+        config_lines.append(f'    topDir = "${{launchDir}}"')
+        config_lines.append(f"")
+        config_lines.append(f'    scriptEnv = "${{launchDir}}/dogme.profile"')
+        config_lines.append(f"")
+        config_lines.append(f"    // needs to be modified to match the right genomic reference")
+        config_lines.append(f"    genome_annot_refs = [")
+        config_lines.append(f"        [name: 'mm39', genome: '{fasta}', annot: '{gtf}']")
+        config_lines.append(f"    ]")
+        config_lines.append(f"    ")
+        config_lines.append(f"    kallistoIndex = '/home/seyedam/genRefs/mm39GencM36_k63.idx'")
+        config_lines.append(f"    t2g = '/home/seyedam/genRefs/mm39GencM36_k63.t2g'")
+        config_lines.append(f"")
+        config_lines.append(f"    //default accuracy is sup")
+        config_lines.append(f"    accuracy = \"sup\"")
+        config_lines.append(f"    // change this value if 0.9 is too strict")
+        config_lines.append(f"    // if set to null or '' then modkit will determine its threshold by sampling reads.")
+        config_lines.append(f"    modkitFilterThreshold = 0.9 ")
+        config_lines.append(f"")
+        config_lines.append(f"")
+        config_lines.append(f"    // these paths are all based on the topDir and sample name")
+        config_lines.append(f"    // dogme will populate all of these folders with its output")
+        config_lines.append(f'    modDir = "${{topDir}}/dorModels"')
+        config_lines.append(f'    dorDir = "${{topDir}}/dor12-${{sample}}"')
+        config_lines.append(f'    podDir = "${{topDir}}/pod5"')
+        config_lines.append(f'    bamDir = "${{topDir}}/bams"')
+        config_lines.append(f'    annotDir = "${{topDir}}/annot"')
+        config_lines.append(f'    bedDir = "${{topDir}}/bedMethyl"')
+        config_lines.append(f'    fastqDir = "${{topDir}}/fastqs"')
+        config_lines.append(f'    kallistoDir = "${{topDir}}/kallisto"')
+        config_lines.append(f"    tmpDir = '/tmp'  // Temporary directory for disk-based sorting")
+        config_lines.append("}")
+        config_lines.append("")
+        config_lines.append("process {")
+        config_lines.append("    // <-- Container Settings --->")
+        config_lines.append("    container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'")
+        config_lines.append("    containerOptions = \"-v /home/seyedam:/home/seyedam \"")
+        config_lines.append("    beforeScript = 'export PATH=/opt/conda/bin:$PATH'")
+        config_lines.append("")
+        config_lines.append("")
+        config_lines.append("    executor='local'")
+        config_lines.append("")
+        config_lines.append("    // General default settings - adjust as necessary")
+        config_lines.append("    cpus = 1")
+        config_lines.append("    memory = '32 GB'")
+        config_lines.append("    time = '8:00:00'")
+        config_lines.append("")
+        config_lines.append("    withName: 'extractfastqTask' {")
+        config_lines.append("        // Matches the script's thread count and gives safe memory buffer")
+        config_lines.append("        cpus = 6")
+        config_lines.append("        memory = '24 GB'")
+        config_lines.append("        time = '4 h'")
+        config_lines.append("    }")
+        config_lines.append("")
+        config_lines.append("    withName: 'doradoTask' {")
+        config_lines.append("        memory = '9 GB'  // Increase if necessary")
+        config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
+        config_lines.append("        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam \"")
+        config_lines.append("    }")
+        config_lines.append("    ")
+        config_lines.append("    withName: 'openChromatinTaskBg' {")
+        config_lines.append("        memory = '9 GB'  // Increase if necessary")
+        config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
+        config_lines.append("        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam \"")
+        config_lines.append("    }")
+        config_lines.append("")
+        config_lines.append("    withName: 'openChromatinTaskBed' {")
+        config_lines.append("        memory = '9 GB'  // Increase if necessary")
+        config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
+        config_lines.append("        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam \"")
+        config_lines.append("    }")
+        config_lines.append("")
+        config_lines.append("    withName: 'minimapTask' {")
+        config_lines.append("        memory = '64 GB'  // Increase memory for minimap2")
+        config_lines.append("    }")
+        config_lines.append("}")
+        config_lines.append("")
+        config_lines.append("docker {")
+        config_lines.append("    enabled = true")
+        config_lines.append("    runOptions = '-u $(id -u):$(id -g)'")
+        config_lines.append("}")
+        config_lines.append("")
+        config_lines.append("timeline {")
+        config_lines.append("    enabled = true")
+        config_lines.append("    file = \"${params.sample}_timeline.html\"")
+        config_lines.append("}")
+        config_lines.append("")
+        config_lines.append("report {")
+        config_lines.append("    enabled = true")
+        config_lines.append("    file = \"${params.sample}_report.html\"")
+        config_lines.append("}")
+        config_lines.append("")
+        config_lines.append("trace {")
+        config_lines.append("    enabled = true")
+        config_lines.append("    file = \"${params.sample}_trace.txt\"")
+        config_lines.append("}")
+        
+        return "\n".join(config_lines)
     
     @staticmethod
     def write_config_file(
-        config: dict,
+        config: str,
         output_path: Path,
     ) -> Path:
-        """Write configuration to a nextflow.config file."""
-        # Convert dict to Groovy-like format
-        groovy_config = NextflowConfig._dict_to_groovy(config)
-        
+        """Write configuration string to a nextflow.config file."""
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
-            f.write(groovy_config)
+            f.write(config)
         
         return output_path
-    
-    @staticmethod
-    def _dict_to_groovy(d: dict, indent: int = 0) -> str:
-        """Convert Python dict to Nextflow Groovy config format."""
-        lines = []
-        ind = "    " * indent
-        
-        for key, value in d.items():
-            if isinstance(value, dict):
-                lines.append(f"{ind}{key} {{")
-                lines.append(NextflowConfig._dict_to_groovy(value, indent + 1))
-                lines.append(f"{ind}}}")
-            elif isinstance(value, bool):
-                lines.append(f"{ind}{key} = {str(value).lower()}")
-            elif isinstance(value, (int, float)):
-                lines.append(f"{ind}{key} = {value}")
-            elif value is None:
-                continue  # Skip None values
-            else:
-                # String
-                lines.append(f'{ind}{key} = "{value}"')
-        
-        return "\n".join(lines)
 
 
 class NextflowExecutor:
@@ -141,7 +207,7 @@ class NextflowExecutor:
         sample_name: str,
         mode: str,
         input_dir: str,
-        reference_genome: str = "GRCh38",
+        reference_genome: str = "mm39",
         modifications: Optional[str] = None,
     ) -> tuple[str, Path]:
         """
@@ -151,7 +217,7 @@ class NextflowExecutor:
             sample_name: Name of the sample
             mode: Dogme mode (DNA, RNA, CDNA)
             input_dir: Path to pod5 files
-            reference_genome: Reference genome version
+            reference_genome: Reference genome version (mm39, GRCh38, etc.)
             modifications: Modification motifs
         
         Returns:
@@ -162,7 +228,7 @@ class NextflowExecutor:
         work_dir.mkdir(parents=True, exist_ok=True)
         
         # Generate configuration
-        config_dict = NextflowConfig.generate_config(
+        config_string = NextflowConfig.generate_config(
             sample_name=sample_name,
             mode=mode,
             input_dir=input_dir,
@@ -171,7 +237,7 @@ class NextflowExecutor:
         )
         
         config_path = work_dir / "nextflow.config"
-        NextflowConfig.write_config_file(config_dict, config_path)
+        NextflowConfig.write_config_file(config_string, config_path)
         
         # Log the submission
         log_file = self.logs_dir / f"{run_uuid}.log"
