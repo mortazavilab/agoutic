@@ -87,22 +87,34 @@ class AgentEngine:
         """
         return system_prompt
 
-    def think(self, user_message: str, skill_key: str = "ENCODE_LongRead"):
+    def think(self, user_message: str, skill_key: str = "ENCODE_LongRead", conversation_history: list = None):
         """
         Sends the skill + user request to the local LLM and gets the plan.
+        
+        Args:
+            user_message: The current user message
+            skill_key: The skill to use
+            conversation_history: List of previous messages in format [{"role": "user/assistant", "content": "..."}]
         """
         print(f"🧠 Loading Skill: {skill_key}")
         print(f"🔌 Connecting to LLM at {LLM_URL} using model: {self.display_name}...")
         
         system_prompt = self.construct_system_prompt(skill_key)
         
+        # Build messages array with conversation history
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # Add conversation history if provided
+        if conversation_history:
+            messages.extend(conversation_history)
+        
+        # Add current message
+        messages.append({"role": "user", "content": user_message})
+        
         try:
             response = client.chat.completions.create(
                 model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
+                messages=messages,
                 temperature=0.1  # Low temp = more obedient to instructions
             )
             

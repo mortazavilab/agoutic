@@ -60,7 +60,7 @@ class NextflowConfig:
         elif mode == "RNA":
             mods = "inosine_m6A_2OmeA,pseU_2OmeU,m5C_2OmeC,2OmeG"
         else:  # CDNA
-            mods = None
+            mods = ""  # Empty string for CDNA (no modifications)
         
         # Determine minCov based on mode
         min_cov = 1 if mode == "DNA" else 3
@@ -75,10 +75,13 @@ class NextflowConfig:
         config_lines.append(f"    // if set to null or '' then modkit will determine its threshold by sampling reads.")
         config_lines.append(f"    modkitFilterThreshold = 0.9")
         
-        # Add modifications if applicable
+        # Always include modifications parameter (empty for CDNA)
         if mods:
             config_lines.append(f"    // modification type should be set as necessary if different from 'inosine_m6A,pseU,m5C' for RNA and '5mCG_5hmCG,6mA' for DNA.")
             config_lines.append(f"    modifications = '{mods}'")
+        else:
+            config_lines.append(f"    // No modifications for CDNA mode")
+            config_lines.append(f"    modifications = ''")
         
         config_lines.append(f"    //change setting if necessary")
         config_lines.append(f"    //minCov = 3 by default, but changed to 1 for microtest" if mode == "DNA" else f"    //change setting if necessary")
@@ -442,7 +445,7 @@ class NextflowExecutor:
                 "status": JobStatus.FAILED,
                 "progress_percent": 0,
                 "message": f"Job failed: {error_msg}" if error_msg else "Job failed",
-                "tasks": []
+                "tasks": {}
             }
         
         # Check if process is still running
@@ -480,7 +483,7 @@ class NextflowExecutor:
                         "status": JobStatus.FAILED,
                         "progress_percent": 0,
                         "message": f"Process died: {error_msg[:100]}",
-                        "tasks": []
+                        "tasks": {}
                     }
             except Exception as e:
                 pass

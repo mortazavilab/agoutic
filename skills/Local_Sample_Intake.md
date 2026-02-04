@@ -2,52 +2,118 @@
 
 ## Description
 
-This is a unified entry point for analyzing local data. It acts as an intake wizard that interviews the user to gather essential metadata—Sample Name, Data Type (DNA/RNA/cDNA), and File Location—and then routes the request to the appropriate Dogme pipeline skill.
+This is a unified entry point for analyzing local data. It acts as an intake wizard that interviews the user to gather essential metadata through a multi-turn conversation. **DO NOT show approval until ALL information is collected.**
 
 ## Inputs
 
-* `path`: (String, Optional) The local directory path containing the `.pod5` files.
-* `sample_name`: (String, Optional) The desired identifier for the sample.
-* `sample_type`: (String, Optional) One of "DNA", "RNA", "CDNA", or "Fiber-seq".
-* `reference_genome`: (String, Optional) The target genome (e.g., "GRCh38").
+* `path`: (String, Required) The local directory path containing the `.pod5` files.
+* `sample_name`: (String, Required) The desired identifier for the sample.
+* `sample_type`: (String, Required) One of "DNA", "RNA", "CDNA", or "Fiber-seq".
+* `reference_genome`: (String, Required) The target genome (e.g., "GRCh38" for human, "mm39" for mouse).
 
 ## Plan Logic
 
-### 1. Information Gathering (Interview)
+### CRITICAL: Multi-Turn Interview Process
 
-* **Tool:** `validate_local_path(path)`
-* **Context:** The agent checks if the provided inputs are complete.
-* **Logic:**
-* If `path` is missing: Ask "Please provide the full path to your local data folder."
-* If `sample_name` is missing: Ask "What would you like to name this sample?"
-* If `sample_type` is missing: Ask "Is this Direct RNA, cDNA, or Genomic DNA/Fiber-seq data?"
-* If `reference_genome` is missing: Ask "Which reference genome should be used (e.g., GRCh38, mm39)?"
+**DO NOT include [[APPROVAL_NEEDED]] tag until ALL required information is collected from the user.**
 
+### Step 1: Check What Information is Missing
 
+Review the conversation history to see what information the user has already provided.
 
-### 2. Validation & Inspection
+### Step 2: Ask ONE Question at a Time
 
-* **Tool:** `scan_directory_contents(path)`
-* **Context:** Verifies that the folder actually contains compatible files (e.g., `.pod5` files) and is accessible.
-* **Output:** Returns a summary (e.g., "Found 40 pod5 files, 200GB").
+Ask for ONE missing piece of information per response:
 
-### 3. APPROVAL GATE: Confirmation & Routing
+**If `sample_name` is missing:**
+"What would you like to name this sample? (e.g., liver_sample_01, brain_tissue_replicate1)"
 
-* **Condition:** The user must confirm the metadata before the agent selects the specialized pipeline.
-* **Prompt:** "I have inspected the data at `{path}`.
-* **Sample Name:** {sample_name}
-* **Type:** {sample_type}
-* **Files:** [Count] pod5 files detected
+**If `path` is missing:**  
+"What is the full path to the directory containing your .pod5 files? (e.g., /data/mouse/liver/pod5/)"
 
+**If `sample_type` is missing:**
+"What type of sequencing data is this?
+- DNA (Genomic DNA or Fiber-seq)
+- RNA (Direct RNA)
+- CDNA (cDNA sequencing)"
 
-Based on this, I will route this to the **{Target_Skill_Name}** pipeline. Proceed?"
+**If `reference_genome` is missing:**
+"Which reference genome should be used?
+- mm39 (mouse)
+- GRCh38 (human)
+- Other (please specify)"
 
-### 4. Skill Handover (Routing)
+### Step 3: Collect User's Answer
 
-* **Tool:** `delegate_to_skill(target_skill, parameters)`
-* **Logic:** Based on `{sample_type}`, the agent calls one of the specialized skills:
-* **If Type is 'Genomic DNA' or 'Fiber-seq':**
--> Calls `run_dogme_dna(query=path, sample_name=sample_name, reference_genome=reference_genome)`
+Wait for the user to provide the answer. The user's next message will contain the information.
+
+### Step 4: Repeat Until All Information is Collected
+
+After each answer, check if there are still missing fields. If yes, ask the next question. If no, proceed to Step 5.
+
+### Step 5: Show Summary and Request Approval
+
+**ONLY after ALL four fields are collected:**
+
+Display a summary and include the [[APPROVAL_NEEDED]] tag:
+
+"I have all the information needed:
+
+📋 **Sample Name:** {sample_name}  
+📁 **Data Path:** {path}  
+🧬 **Data Type:** {sample_type}  
+🔬 **Reference Genome:** {reference_genome}
+
+I will submit this to the Dogme {sample_type} pipeline for analysis.
+
+[[APPROVAL_NEEDED]]"
+
+## Example Conversation Flow
+
+```
+User: "I want to analyze a local mouse sample"
+
+Agent: "What would you like to name this sample? (e.g., liver_sample_01)"
+
+User: "liver_rep1"
+
+Agent: "What is the full path to the directory containing your .pod5 files?"
+
+User: "/data/mouse/liver/run1/"
+
+Agent: "What type of sequencing data is this?
+- DNA (Genomic DNA or Fiber-seq)  
+- RNA (Direct RNA)
+- CDNA (cDNA sequencing)"
+
+User: "DNA"
+
+Agent: "Which reference genome should be used?
+- mm39 (mouse)
+- GRCh38 (human)
+- Other (please specify)"
+
+User: "mm39"
+
+Agent: "I have all the information needed:
+
+📋 **Sample Name:** liver_rep1
+📁 **Data Path:** /data/mouse/liver/run1/
+🧬 **Data Type:** DNA
+🔬 **Reference Genome:** mm39
+
+I will submit this to the Dogme DNA pipeline for analysis.
+
+[[APPROVAL_NEEDED]]"
+```
+
+## Important Rules
+
+1. **Never show [[APPROVAL_NEEDED]] until all 4 fields are collected**
+2. **Ask only ONE question per response**
+3. **Extract information from user's natural language** (they might say "it's in /data/samples" instead of just "/data/samples")
+4. **Keep questions clear and concise**
+5. **Use the conversation history to track what's already been provided**
 * **If Type is 'Direct RNA':**
 -> Calls `run_dogme_rna(query=path, sample_name=sample_name, reference_genome=reference_genome)`
 * **If Type is 'cDNA':**
