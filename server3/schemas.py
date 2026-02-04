@@ -21,6 +21,7 @@ class JobStatusResponse(BaseModel):
     status: str
     progress_percent: int
     message: str
+    tasks: Optional[dict] = None
 
 class JobDetailsResponse(BaseModel):
     """Full job details."""

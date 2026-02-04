@@ -226,6 +226,7 @@ async def submit_job(req: SubmitJobRequest):
         # Submit to Nextflow
         try:
             run_uuid_returned, work_dir = await executor.submit_job(
+                run_uuid=run_uuid,
                 sample_name=req.sample_name,
                 mode=req.mode,
                 input_dir=req.input_directory,
@@ -310,11 +311,17 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         
+        # Get detailed status including tasks from check_status
+        executor = NextflowExecutor()
+        work_dir = executor.work_dir / run_uuid
+        status_data = await executor.check_status(run_uuid, work_dir)
+        
         return {
             "run_uuid": run_uuid,
-            "status": job.status,
-            "progress_percent": job.progress_percent,
-            "message": job.error_message or f"Status: {job.status}",
+            "status": status_data.get("status", job.status),
+            "progress_percent": status_data.get("progress_percent", job.progress_percent),
+            "message": status_data.get("message", job.error_message or f"Status: {job.status}"),
+            "tasks": status_data.get("tasks", {}),
         }
     
     finally:
@@ -415,6 +422,125 @@ async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         )
         
         return {"status": "cancelled", "run_uuid": run_uuid}
+    
+    finally:
+        await session.close()
+
+# --- DEBUG JOB ---
+@app.get("/jobs/{run_uuid}/debug")
+async def debug_job(run_uuid: str = FastAPIPath(..., min_length=1)):
+    """Get detailed debugging information about a job."""
+    session = SessionLocal()
+    
+    try:
+        job = await get_job(session, run_uuid)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        from pathlib import Path
+        import os
+        
+        work_dir = Path(job.nextflow_work_dir) if job.nextflow_work_dir else None
+        debug_info = {
+            "run_uuid": run_uuid,
+            "status": job.status,
+            "work_directory": str(work_dir) if work_dir else None,
+            "markers": {},
+            "files": {},
+            "process_info": {},
+            "logs_preview": {},
+        }
+        
+        if work_dir and work_dir.exists():
+            # Check marker files
+            markers = [".nextflow_running", ".nextflow_success", ".nextflow_failed", ".nextflow_pid", 
+                      ".launch_command", ".launch_error", ".nextflow_error"]
+            for marker in markers:
+                marker_path = work_dir / marker
+                debug_info["markers"][marker] = {
+                    "exists": marker_path.exists(),
+                    "content": marker_path.read_text()[:200] if marker_path.exists() else None
+                }
+            
+            # Check if PID is alive
+            pid_file = work_dir / ".nextflow_pid"
+            if pid_file.exists():
+                try:
+                    pid = int(pid_file.read_text().strip())
+                    debug_info["process_info"]["pid"] = pid
+                    try:
+                        os.kill(pid, 0)
+                        debug_info["process_info"]["alive"] = True
+                    except OSError:
+                        debug_info["process_info"]["alive"] = False
+                except:
+                    debug_info["process_info"]["error"] = "Could not parse PID"
+            
+            # Check key files
+            files_to_check = ["nextflow.config", ".nextflow.log", "report.html", "pod5"]
+            for filename in files_to_check:
+                filepath = work_dir / filename
+                if filepath.exists():
+                    if filepath.is_symlink():
+                        debug_info["files"][filename] = {
+                            "type": "symlink",
+                            "target": str(filepath.resolve()),
+                            "target_exists": filepath.resolve().exists()
+                        }
+                    elif filepath.is_dir():
+                        try:
+                            num_files = len(list(filepath.rglob("*")))
+                            debug_info["files"][filename] = {
+                                "type": "directory",
+                                "num_files": num_files
+                            }
+                        except:
+                            debug_info["files"][filename] = {"type": "directory", "error": "Could not count"}
+                    else:
+                        debug_info["files"][filename] = {
+                            "type": "file",
+                            "size": filepath.stat().st_size
+                        }
+                else:
+                    debug_info["files"][filename] = {"exists": False}
+            
+            # Get log previews
+            from server3.config import SERVER3_LOGS_DIR
+            log_files = [f"{run_uuid}_stdout.log", f"{run_uuid}_stderr.log", f"{run_uuid}.log"]
+            for log_name in log_files:
+                log_path = SERVER3_LOGS_DIR / log_name
+                if log_path.exists():
+                    try:
+                        content = log_path.read_text()
+                        lines = content.split('\n')
+                        debug_info["logs_preview"][log_name] = {
+                            "size": log_path.stat().st_size,
+                            "lines": len(lines),
+                            "last_10_lines": lines[-10:] if len(lines) > 10 else lines
+                        }
+                    except Exception as e:
+                        debug_info["logs_preview"][log_name] = {"error": str(e)}
+                else:
+                    debug_info["logs_preview"][log_name] = {"exists": False}
+            
+            # Also get .nextflow.log from work directory (this has the real errors)
+            nextflow_log = work_dir / ".nextflow.log"
+            if nextflow_log.exists():
+                try:
+                    content = nextflow_log.read_text()
+                    lines = content.split('\n')
+                    # Extract ERROR and WARN lines
+                    error_lines = [l for l in lines if 'ERROR' in l or 'WARN' in l]
+                    debug_info["logs_preview"][".nextflow.log"] = {
+                        "size": nextflow_log.stat().st_size,
+                        "lines": len(lines),
+                        "last_20_lines": lines[-20:] if len(lines) > 20 else lines,
+                        "errors_and_warnings": error_lines[-10:] if len(error_lines) > 10 else error_lines
+                    }
+                except Exception as e:
+                    debug_info["logs_preview"][".nextflow.log"] = {"error": str(e)}
+        
+        return debug_info
     
     finally:
         await session.close()

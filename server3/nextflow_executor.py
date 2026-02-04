@@ -15,6 +15,8 @@ from server3.config import (
     NEXTFLOW_BIN,
     SERVER3_WORK_DIR,
     SERVER3_LOGS_DIR,
+    AGOUTIC_DATA,
+    AGOUTIC_CODE,
     DogmeMode,
     JobStatus,
     REFERENCE_GENOMES,
@@ -118,7 +120,7 @@ class NextflowConfig:
         config_lines.append("process {")
         config_lines.append("    // <-- Container Settings --->")
         config_lines.append("    container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'")
-        config_lines.append("    containerOptions = \"-v /home/seyedam:/home/seyedam \"")
+        config_lines.append(f"    containerOptions = \"-v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    beforeScript = 'export PATH=/opt/conda/bin:$PATH'")
         config_lines.append("")
         config_lines.append("")
@@ -139,19 +141,19 @@ class NextflowConfig:
         config_lines.append("    withName: 'doradoTask' {")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
-        config_lines.append("        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam \"")
+        config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("    ")
         config_lines.append("    withName: 'openChromatinTaskBg' {")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
-        config_lines.append("        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam \"")
+        config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("")
         config_lines.append("    withName: 'openChromatinTaskBed' {")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
-        config_lines.append("        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam \"")
+        config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("")
         config_lines.append("    withName: 'minimapTask' {")
@@ -166,16 +168,19 @@ class NextflowConfig:
         config_lines.append("")
         config_lines.append("timeline {")
         config_lines.append("    enabled = true")
+        config_lines.append("    overwrite = true")
         config_lines.append("    file = \"${params.sample}_timeline.html\"")
         config_lines.append("}")
         config_lines.append("")
         config_lines.append("report {")
         config_lines.append("    enabled = true")
+        config_lines.append("    overwrite = true")
         config_lines.append("    file = \"${params.sample}_report.html\"")
         config_lines.append("}")
         config_lines.append("")
         config_lines.append("trace {")
         config_lines.append("    enabled = true")
+        config_lines.append("    overwrite = true")
         config_lines.append("    file = \"${params.sample}_trace.txt\"")
         config_lines.append("}")
         
@@ -204,6 +209,7 @@ class NextflowExecutor:
     
     async def submit_job(
         self,
+        run_uuid: str,
         sample_name: str,
         mode: str,
         input_dir: str,
@@ -214,6 +220,7 @@ class NextflowExecutor:
         Submit a Dogme/Nextflow job.
         
         Args:
+            run_uuid: Unique identifier for this job run
             sample_name: Name of the sample
             mode: Dogme mode (DNA, RNA, CDNA)
             input_dir: Path to pod5 files
@@ -223,9 +230,32 @@ class NextflowExecutor:
         Returns:
             Tuple of (run_uuid, work_directory)
         """
-        run_uuid = str(uuid.uuid4())
         work_dir = self.work_dir / run_uuid
         work_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create pod5 symlink in work directory
+        pod5_link = work_dir / "pod5"
+        try:
+            if pod5_link.exists():
+                pod5_link.unlink()
+            pod5_link.symlink_to(Path(input_dir).resolve())
+            print(f"📁 Created pod5 symlink: {pod5_link} -> {input_dir}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to create pod5 symlink: {e}")
+        
+        # Copy or create dogme.profile
+        dogme_profile_src = DOGME_REPO / "dogme.profile"
+        dogme_profile_dst = work_dir / "dogme.profile"
+        
+        if dogme_profile_src.exists():
+            # Copy from repo
+            import shutil
+            shutil.copy2(dogme_profile_src, dogme_profile_dst)
+            print(f"📋 Copied dogme.profile from {dogme_profile_src}")
+        else:
+            # Create a minimal one
+            dogme_profile_dst.write_text("# Dogme environment profile\n# Add environment variables here if needed\n")
+            print(f"📋 Created minimal dogme.profile")
         
         # Generate configuration
         config_string = NextflowConfig.generate_config(
@@ -239,109 +269,383 @@ class NextflowExecutor:
         config_path = work_dir / "nextflow.config"
         NextflowConfig.write_config_file(config_string, config_path)
         
-        # Log the submission
-        log_file = self.logs_dir / f"{run_uuid}.log"
+        # Log files for stdout/stderr
+        stdout_file = self.logs_dir / f"{run_uuid}_stdout.log"
+        stderr_file = self.logs_dir / f"{run_uuid}_stderr.log"
+        
+        # Create running marker
+        running_marker = work_dir / ".nextflow_running"
+        running_marker.write_text(f"Started at {datetime.utcnow().isoformat()}\n")
         
         # Build Nextflow command
+        # Note: Nextflow automatically creates .nextflow.log in the working directory
         cmd = [
             str(self.nextflow_bin),
             "run",
-            str(DOGME_REPO / "main.nf"),
+            str(DOGME_REPO / "dogme.nf"),
             "-c", str(config_path),
             "-work-dir", str(work_dir / "work"),
-            "-log", str(log_file),
             "-with-report", str(work_dir / "report.html"),
+            "-with-timeline", str(work_dir / f"{sample_name}_timeline.html"),
+            "-with-trace", str(work_dir / f"{sample_name}_trace.txt"),
         ]
         
-        # Submit job (fire and forget, track separately)
+        # Validate prerequisites before attempting launch
+        if not self.nextflow_bin.exists():
+            raise RuntimeError(f"Nextflow binary not found at: {self.nextflow_bin}")
+        
+        if not (DOGME_REPO / "dogme.nf").exists():
+            raise RuntimeError(f"Dogme dogme.nf not found at: {DOGME_REPO / 'dogme.nf'}")
+        
+        # Submit job as background process
         try:
+            # Create log files and open for writing
+            stdout_file.parent.mkdir(parents=True, exist_ok=True)
+            stderr_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Open file descriptors
+            stdout_fd = open(stdout_file, "w", buffering=1)  # Line buffered
+            stderr_fd = open(stderr_file, "w", buffering=1)
+            
+            # Also write a launch marker with the command
+            launch_marker = work_dir / ".launch_command"
+            launch_marker.write_text(" ".join(cmd) + "\n")
+            
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=stdout_fd,
+                stderr=stderr_fd,
+                cwd=work_dir,  # Run in work directory so launchDir is correct
             )
             
-            # Detach and let it run
-            # In production, you'd use a job scheduler like SLURM
+            # Store PID for tracking
+            pid_file = work_dir / ".nextflow_pid"
+            pid_file.write_text(str(process.pid))
+            
             print(f"✅ Job submitted: {run_uuid}")
+            print(f"   PID: {process.pid}")
             print(f"   Command: {' '.join(cmd)}")
+            print(f"   Working directory: {work_dir}")
+            print(f"   Logs: {stdout_file}, {stderr_file}")
+            
+            # Start background task to monitor process completion
+            asyncio.create_task(self._monitor_process(process, run_uuid, work_dir, stdout_fd, stderr_fd))
             
             return run_uuid, work_dir
             
         except Exception as e:
+            # Clean up running marker on failure
+            if running_marker.exists():
+                running_marker.unlink()
+            
+            # Write error to marker file
+            error_marker = work_dir / ".launch_error"
+            error_marker.write_text(f"Launch failed: {str(e)}\n{type(e).__name__}")
+            
             raise RuntimeError(f"Failed to submit Nextflow job: {e}")
+    
+    async def _monitor_process(self, process, run_uuid: str, work_dir: Path, stdout_f, stderr_f):
+        """Background task to monitor process completion and create marker files."""
+        try:
+            returncode = await process.wait()
+            
+            # Close log files
+            stdout_f.close()
+            stderr_f.close()
+            
+            # Remove running marker
+            running_marker = work_dir / ".nextflow_running"
+            if running_marker.exists():
+                running_marker.unlink()
+            
+            # Create completion marker
+            if returncode == 0:
+                success_marker = work_dir / ".nextflow_success"
+                success_marker.write_text(f"Completed at {datetime.utcnow().isoformat()}\n")
+                print(f"✅ Job {run_uuid} completed successfully")
+            else:
+                failed_marker = work_dir / ".nextflow_failed"
+                error_file = work_dir / ".nextflow_error"
+                
+                # Try to extract error from stderr log
+                stderr_file = self.logs_dir / f"{run_uuid}_stderr.log"
+                error_msg = f"Process exited with code {returncode}"
+                if stderr_file.exists():
+                    with open(stderr_file) as f:
+                        stderr_content = f.read()
+                        if stderr_content:
+                            error_msg = stderr_content[-500:]  # Last 500 chars
+                
+                failed_marker.write_text(f"Failed at {datetime.utcnow().isoformat()}\n")
+                error_file.write_text(error_msg)
+                print(f"❌ Job {run_uuid} failed with code {returncode}")
+                
+        except Exception as e:
+            print(f"⚠️ Error monitoring process {run_uuid}: {e}")
     
     async def check_status(self, run_uuid: str, work_dir: Path) -> dict:
         """
         Check the status of a running job.
         
-        Returns dict with keys: status, progress_percent, message
+        Returns dict with keys: status, progress_percent, message, tasks (optional)
         """
         # Check for completion markers
         success_marker = work_dir / ".nextflow_success"
         failed_marker = work_dir / ".nextflow_failed"
         running_marker = work_dir / ".nextflow_running"
+        pid_file = work_dir / ".nextflow_pid"
         
-        # Check timeline report for progress
-        timeline_file = work_dir / "timeline.html"
-        report_file = work_dir / "report.html"
-        
+        # Check completion markers first
         if success_marker.exists():
+            # Parse final task summary from trace file
+            completed_tasks = []
+            total = 0
+            trace_files = list(work_dir.glob("*_trace.txt"))
+            if trace_files:
+                try:
+                    with open(trace_files[0]) as f:
+                        lines = f.readlines()
+                        if len(lines) > 1:
+                            headers = lines[0].strip().split('\t')
+                            try:
+                                name_idx = headers.index('name')
+                            except ValueError:
+                                name_idx = 0
+                            
+                            for line in lines[1:]:
+                                parts = line.strip().split('\t')
+                                if len(parts) > name_idx:
+                                    completed_tasks.append(parts[name_idx])
+                            total = len(lines) - 1
+                except:
+                    pass
+            
             return {
                 "status": JobStatus.COMPLETED,
                 "progress_percent": 100,
-                "message": "Job completed successfully",
+                "message": f"Job completed successfully - {total} tasks completed",
+                "tasks": {
+                    "completed": completed_tasks,  # All completed tasks
+                    "running": [],
+                    "total": total,
+                    "completed_count": total,
+                    "failed_count": 0
+                } if total > 0 else {}
             }
         elif failed_marker.exists():
             error_msg = ""
             error_file = work_dir / ".nextflow_error"
             if error_file.exists():
                 with open(error_file) as f:
-                    error_msg = f.read()
+                    error_msg = f.read()[:200]  # First 200 chars
             return {
                 "status": JobStatus.FAILED,
                 "progress_percent": 0,
-                "message": f"Job failed: {error_msg}",
+                "message": f"Job failed: {error_msg}" if error_msg else "Job failed",
+                "tasks": []
             }
-        elif report_file.exists():
-            # Parse progress from report
-            try:
-                with open(report_file) as f:
-                    report_content = f.read()
-                    # Simple heuristic: count completed processes
-                    completed = report_content.count('<td class="completed')
-                    total = max(1, report_content.count('<td class="'))
-                    progress = int((completed / total) * 100) if total > 0 else 50
-                return {
-                    "status": JobStatus.RUNNING,
-                    "progress_percent": progress,
-                    "message": "Pipeline executing...",
-                }
-            except Exception:
-                pass
         
-        # Check if process still running
-        log_file = self.logs_dir / f"{run_uuid}.log"
-        if log_file.exists():
-            with open(log_file) as f:
-                logs = f.read()
-                if "Completed" in logs or "completed" in logs:
-                    return {
-                        "status": JobStatus.COMPLETED,
-                        "progress_percent": 100,
-                        "message": "Job completed",
-                    }
-                elif "ERROR" in logs or "error" in logs:
+        # Check if process is still running
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                # Check if PID is alive
+                import os
+                import signal
+                try:
+                    os.kill(pid, 0)  # Signal 0 checks if process exists
+                    is_running = True
+                except OSError:
+                    is_running = False
+                
+                if not is_running and running_marker.exists():
+                    # Process died unexpectedly
+                    running_marker.unlink()
+                    failed_marker = work_dir / ".nextflow_failed"
+                    failed_marker.write_text(f"Process died unexpectedly at {datetime.utcnow().isoformat()}\n")
+                    
+                    # Try to get error from stderr
+                    stderr_file = self.logs_dir / f"{run_uuid}_stderr.log"
+                    error_msg = "Process died unexpectedly"
+                    if stderr_file.exists():
+                        with open(stderr_file) as f:
+                            content = f.read()
+                            if content:
+                                error_msg = content[-200:]  # Last 200 chars
+                    
+                    error_file = work_dir / ".nextflow_error"
+                    error_file.write_text(error_msg)
+                    
                     return {
                         "status": JobStatus.FAILED,
                         "progress_percent": 0,
-                        "message": "Job failed - see logs",
+                        "message": f"Process died: {error_msg[:100]}",
+                        "tasks": []
                     }
+            except Exception as e:
+                pass
+        
+        # Job is running - parse detailed task information from trace.txt
+        progress = 10  # Default
+        message = "Job starting..."
+        tasks = {
+            "completed": [],
+            "running": [],
+            "total": 0,
+            "completed_count": 0,
+            "failed_count": 0
+        }
+        
+        # Parse trace.txt file for completed tasks - tab-separated with columns:
+        # task_id hash native_id name status exit submit duration realtime %cpu peak_rss peak_vmem rchar wchar
+        # Find trace file - it might be named trace.txt or {sample_name}_trace.txt
+        trace_file = work_dir / "trace.txt"
+        if not trace_file.exists():
+            # Try to find any *_trace.txt file
+            trace_files = list(work_dir.glob("*_trace.txt"))
+            if trace_files:
+                trace_file = trace_files[0]
+        
+        completed_tasks = []
+        failed_tasks = []
+        
+        if trace_file.exists():
+            try:
+                with open(trace_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = f.readlines()
+                    
+                    # Skip header line
+                    for line in lines[1:]:
+                        if not line.strip():
+                            continue
+                        
+                        # Split by tabs
+                        parts = line.split('\t')
+                        if len(parts) < 5:
+                            continue
+                        
+                        # Extract task name (column 3, index 3) and status (column 4, index 4)
+                        task_name = parts[3].strip()
+                        status = parts[4].strip()
+                        
+                        # Only track mainWorkflow tasks
+                        if not task_name.startswith('mainWorkflow:'):
+                            continue
+                        
+                        # Categorize by status
+                        if status == 'COMPLETED':
+                            if task_name not in completed_tasks:
+                                completed_tasks.append(task_name)
+                        elif status == 'FAILED':
+                            if task_name not in failed_tasks:
+                                failed_tasks.append(task_name)
+                        
+            except Exception as e:
+                pass
+        
+        # Now parse stdout for currently running tasks (not yet in trace.txt)
+        stdout_file = self.logs_dir / f"{run_uuid}_stdout.log"
+        running_tasks = []
+        submitted_count = 0
+        
+        if stdout_file.exists():
+            try:
+                with open(stdout_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    lines = content.split('\n')
+                    
+                    # Track task hashes we've seen
+                    seen_hashes = set()
+                    
+                    for line in lines:
+                        # Look for executor count to get total submitted
+                        if 'executor >' in line and '(' in line:
+                            try:
+                                count_str = line.split('(')[1].split(')')[0]
+                                submitted_count = max(submitted_count, int(count_str))
+                            except:
+                                pass
+                        
+                        # Look for task lines: [hash] taskName
+                        if line.startswith('[') and ']' in line and 'mainWorkflow:' in line:
+                            # Extract hash
+                            hash_part = line.split(']')[0] + ']'
+                            
+                            # Skip placeholder lines [-        ]
+                            if '/' not in hash_part:
+                                continue
+                            
+                            # Extract task name
+                            rest = line.split(']', 1)[1] if ']' in line else ''
+                            task_name = rest.strip().split()[0] if rest.strip() else ''
+                            
+                            # Add number if present: mainWorkflow:doradoTask (1)
+                            if '(' in rest and ')' in rest:
+                                task_num = rest[rest.find('('):rest.find(')')+1]
+                                if task_num not in task_name:
+                                    task_name = task_name + ' ' + task_num
+                            
+                            if not task_name:
+                                continue
+                            
+                            # Check if completed (has ✔)
+                            is_completed = '✔' in line
+                            
+                            # Only add to running if not completed AND not already in completed_tasks
+                            if not is_completed and task_name not in completed_tasks:
+                                # Use hash to deduplicate
+                                if hash_part not in seen_hashes:
+                                    seen_hashes.add(hash_part)
+                                    if task_name not in running_tasks:
+                                        running_tasks.append(task_name)
+                            
+            except Exception as e:
+                pass
+        
+        # Calculate totals
+        total = max(submitted_count, len(completed_tasks) + len(running_tasks) + len(failed_tasks))
+        
+        if total > 0 or completed_tasks or running_tasks:
+            tasks['completed'] = completed_tasks  # All completed tasks
+            tasks['running'] = running_tasks[-5:] if len(running_tasks) > 5 else running_tasks  # Last 5 running
+            tasks['total'] = total
+            tasks['completed_count'] = len(completed_tasks)
+            tasks['failed_count'] = len(failed_tasks)
+            
+            # Calculate progress
+            progress = int((len(completed_tasks) / total) * 90) if total > 0 else 10
+            
+            # Build message
+            msg_parts = []
+            if total > 0:
+                msg_parts.append(f"{len(completed_tasks)}/{total} completed")
+            if running_tasks:
+                msg_parts.append(f"{len(running_tasks)} running")
+            if failed_tasks:
+                msg_parts.append(f"{len(failed_tasks)} failed")
+            
+            message = "Pipeline: " + ", ".join(msg_parts) if msg_parts else "Pipeline starting..."
+        
+        # Fallback: Check .nextflow.log for recent activity if we still have no data
+        if progress == 10 and not completed_tasks:
+            nextflow_log = work_dir / ".nextflow.log"
+            if nextflow_log.exists():
+                try:
+                    with open(nextflow_log) as f:
+                        log_content = f.read()
+                        # Look for executor messages about submitted tasks
+                        submitted = log_content.count('Submitted process')
+                        if submitted > 0:
+                            progress = min(30 + (submitted * 3), 80)
+                            message = f"Pipeline executing ({submitted} tasks submitted)..."
+                except Exception:
+                    pass
         
         return {
             "status": JobStatus.RUNNING,
-            "progress_percent": 50,
-            "message": "Checking job status...",
+            "progress_percent": progress,
+            "message": message,
+            "tasks": tasks
         }
     
     async def get_results(self, run_uuid: str, work_dir: Path) -> dict:
