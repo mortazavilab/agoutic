@@ -34,6 +34,20 @@ LLM_MODELS = {
     "backup": "gpt-oss:120b",             # Alternative heavy model
 }
 
+# --- GENOME ALIASES ---
+# Map common genome names to canonical IDs
+GENOME_ALIASES = {
+    "human": "GRCh38",
+    "hg38": "GRCh38",
+    "grch38": "GRCh38",
+    "mouse": "mm39",
+    "mm10": "mm39",
+    "mm39": "mm39",
+}
+
+# Available reference genomes (for UI display)
+AVAILABLE_GENOMES = ["GRCh38", "mm39"]
+
 # --- SKILL REGISTRY ---
 # The menu of available workflows.
 SKILLS_REGISTRY = {

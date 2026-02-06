@@ -31,8 +31,12 @@ class NextflowConfig:
         sample_name: str,
         mode: str,  # "DNA", "RNA", "CDNA"
         input_dir: str,
-        reference_genome: str = "mm39",
+        reference_genome: list,  # Now a list of genome names
         modifications: Optional[str] = None,
+        modkit_filter_threshold: float = 0.9,
+        min_cov: Optional[int] = None,
+        per_mod: int = 5,
+        accuracy: str = "sup",
     ) -> str:
         """
         Generate a Nextflow configuration string for Dogme pipeline.
@@ -41,16 +45,27 @@ class NextflowConfig:
             sample_name: Name of the sample
             mode: Dogme mode (DNA, RNA, or CDNA)
             input_dir: Path to pod5 input directory (not used in config generation)
-            reference_genome: Genome version (GRCh38, mm39, etc.)
+            reference_genome: List of genome versions (["GRCh38"], ["mm39"], or ["GRCh38", "mm39"])
             modifications: Modification motifs to call (uses defaults if None)
         
         Returns:
             Groovy configuration string formatted for nextflow.config
         """
-        # Get genome references
-        genome_config = REFERENCE_GENOMES.get(reference_genome, REFERENCE_GENOMES["mm39"])
-        fasta = genome_config.get("fasta", "/home/seyedam/genRefs/IGVFFI9282QLXO.fasta")
-        gtf = genome_config.get("gtf", "/home/seyedam/genRefs/IGVFFI4777RDZK.gtf")
+        # Ensure reference_genome is a list
+        if isinstance(reference_genome, str):
+            reference_genome = [reference_genome]
+        
+        # Build genome_annot_refs list for all specified genomes
+        genome_refs_lines = []
+        for genome_name in reference_genome:
+            genome_config = REFERENCE_GENOMES.get(genome_name, REFERENCE_GENOMES["mm39"])
+            fasta = genome_config.get("fasta", "/home/seyedam/genRefs/IGVFFI9282QLXO.fasta")
+            gtf = genome_config.get("gtf", "/home/seyedam/genRefs/IGVFFI4777RDZK.gtf")
+            genome_refs_lines.append(f"        [name: '{genome_name}', genome: '{fasta}', annot: '{gtf}']")
+        
+        # Use first genome for kallisto index (TODO: support per-genome kallisto)
+        primary_genome = reference_genome[0]
+        primary_config = REFERENCE_GENOMES.get(primary_genome, REFERENCE_GENOMES["mm39"])
         
         # Determine modifications based on mode
         if modifications:
@@ -62,8 +77,9 @@ class NextflowConfig:
         else:  # CDNA
             mods = ""  # Empty string for CDNA (no modifications)
         
-        # Determine minCov based on mode
-        min_cov = 1 if mode == "DNA" else 3
+        # Determine minCov based on mode if not explicitly provided
+        if min_cov is None:
+            min_cov = 1 if mode == "DNA" else 3
         
         # Build config string matching example format
         config_lines = []
@@ -73,7 +89,7 @@ class NextflowConfig:
         config_lines.append(f"    readType = '{mode}'")
         config_lines.append(f"    // change this value if 0.9 is too strict")
         config_lines.append(f"    // if set to null or '' then modkit will determine its threshold by sampling reads.")
-        config_lines.append(f"    modkitFilterThreshold = 0.9")
+        config_lines.append(f"    modkitFilterThreshold = {modkit_filter_threshold}")
         
         # Always include modifications parameter (empty for CDNA)
         if mods:
@@ -86,7 +102,7 @@ class NextflowConfig:
         config_lines.append(f"    //change setting if necessary")
         config_lines.append(f"    //minCov = 3 by default, but changed to 1 for microtest" if mode == "DNA" else f"    //change setting if necessary")
         config_lines.append(f"    minCov = {min_cov}")
-        config_lines.append(f"    perMod = 5")
+        config_lines.append(f"    perMod = {per_mod}")
         config_lines.append(f"    // change if the launch directory is not where the pod5 and output directories should go")
         config_lines.append(f'    topDir = "${{launchDir}}"')
         config_lines.append(f"")
@@ -94,17 +110,21 @@ class NextflowConfig:
         config_lines.append(f"")
         config_lines.append(f"    // needs to be modified to match the right genomic reference")
         config_lines.append(f"    genome_annot_refs = [")
-        config_lines.append(f"        [name: 'mm39', genome: '{fasta}', annot: '{gtf}']")
+        # Add all genome references
+        config_lines.extend(genome_refs_lines)
         config_lines.append(f"    ]")
         config_lines.append(f"    ")
-        config_lines.append(f"    kallistoIndex = '/home/seyedam/genRefs/mm39GencM36_k63.idx'")
-        config_lines.append(f"    t2g = '/home/seyedam/genRefs/mm39GencM36_k63.t2g'")
+        # Use primary genome for kallisto
+        kallisto_index = primary_config.get("kallisto_index", "/home/seyedam/genRefs/mm39GencM36_k63.idx")
+        kallisto_t2g = primary_config.get("kallisto_t2g", "/home/seyedam/genRefs/mm39GencM36_k63.t2g")
+        config_lines.append(f"    kallistoIndex = '{kallisto_index}'")
+        config_lines.append(f"    t2g = '{kallisto_t2g}'")
         config_lines.append(f"")
         config_lines.append(f"    //default accuracy is sup")
-        config_lines.append(f"    accuracy = \"sup\"")
+        config_lines.append(f"    accuracy = \"{accuracy}\"")
         config_lines.append(f"    // change this value if 0.9 is too strict")
         config_lines.append(f"    // if set to null or '' then modkit will determine its threshold by sampling reads.")
-        config_lines.append(f"    modkitFilterThreshold = 0.9 ")
+        config_lines.append(f"    modkitFilterThreshold = {modkit_filter_threshold} ")
         config_lines.append(f"")
         config_lines.append(f"")
         config_lines.append(f"    // these paths are all based on the topDir and sample name")
@@ -215,9 +235,15 @@ class NextflowExecutor:
         run_uuid: str,
         sample_name: str,
         mode: str,
+        input_type: str,
         input_dir: str,
-        reference_genome: str = "mm39",
+        reference_genome: list,
         modifications: Optional[str] = None,
+        entry_point: Optional[str] = None,
+        modkit_filter_threshold: float = 0.9,
+        min_cov: Optional[int] = None,
+        per_mod: int = 5,
+        accuracy: str = "sup",
     ) -> tuple[str, Path]:
         """
         Submit a Dogme/Nextflow job.
@@ -226,9 +252,11 @@ class NextflowExecutor:
             run_uuid: Unique identifier for this job run
             sample_name: Name of the sample
             mode: Dogme mode (DNA, RNA, CDNA)
-            input_dir: Path to pod5 files
-            reference_genome: Reference genome version (mm39, GRCh38, etc.)
+            input_type: Type of input ("pod5" or "bam")
+            input_dir: Path to input files
+            reference_genome: List of reference genome versions
             modifications: Modification motifs
+            entry_point: Dogme entry point workflow (None for main, or "remap", "basecall", etc.)
         
         Returns:
             Tuple of (run_uuid, work_directory)
@@ -236,15 +264,109 @@ class NextflowExecutor:
         work_dir = self.work_dir / run_uuid
         work_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create pod5 symlink in work directory
-        pod5_link = work_dir / "pod5"
-        try:
-            if pod5_link.exists():
-                pod5_link.unlink()
-            pod5_link.symlink_to(Path(input_dir).resolve())
-            print(f"📁 Created pod5 symlink: {pod5_link} -> {input_dir}")
-        except Exception as e:
-            raise RuntimeError(f"Failed to create pod5 symlink: {e}")
+        # Setup input files based on entry point and input type
+        if entry_point == "basecall":
+            # basecall: pod5 → unmapped BAM
+            pod5_link = work_dir / "pod5"
+            try:
+                if pod5_link.exists():
+                    pod5_link.unlink()
+                pod5_link.symlink_to(Path(input_dir).resolve())
+                print(f"📁 Created pod5 symlink for basecalling: {pod5_link} -> {input_dir}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to create pod5 symlink: {e}")
+        
+        elif entry_point == "remap":
+            # remap: unmapped BAM → mapped BAM
+            bams_dir = work_dir / "bams"
+            bams_dir.mkdir(parents=True, exist_ok=True)
+            
+            bam_file = Path(input_dir)
+            if not bam_file.exists():
+                raise RuntimeError(f"Unmapped BAM file not found: {input_dir}")
+            
+            bam_link = bams_dir / f"{sample_name}.bam"
+            try:
+                if bam_link.exists():
+                    bam_link.unlink()
+                bam_link.symlink_to(bam_file.resolve())
+                print(f"📁 Created unmapped BAM symlink for remapping: {bam_link} -> {input_dir}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to create BAM symlink: {e}")
+        
+        elif entry_point == "modkit":
+            # modkit: mapped BAM → modification calls
+            bams_dir = work_dir / "bams"
+            bams_dir.mkdir(parents=True, exist_ok=True)
+            
+            bam_file = Path(input_dir)
+            if not bam_file.exists():
+                raise RuntimeError(f"Mapped BAM file not found: {input_dir}")
+            
+            bam_link = bams_dir / f"{sample_name}.bam"
+            try:
+                if bam_link.exists():
+                    bam_link.unlink()
+                bam_link.symlink_to(bam_file.resolve())
+                print(f"📁 Created mapped BAM symlink for modkit: {bam_link} -> {input_dir}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to create BAM symlink: {e}")
+        
+        elif entry_point == "annotateRNA":
+            # annotateRNA: mapped RNA/cDNA BAM → transcript annotation
+            bams_dir = work_dir / "bams"
+            bams_dir.mkdir(parents=True, exist_ok=True)
+            
+            bam_file = Path(input_dir)
+            if not bam_file.exists():
+                raise RuntimeError(f"Mapped BAM file not found: {input_dir}")
+            
+            bam_link = bams_dir / f"{sample_name}.bam"
+            try:
+                if bam_link.exists():
+                    bam_link.unlink()
+                bam_link.symlink_to(bam_file.resolve())
+                print(f"📁 Created mapped BAM symlink for annotation: {bam_link} -> {input_dir}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to create BAM symlink: {e}")
+        
+        elif entry_point == "reports":
+            # reports: existing work directory → generate reports
+            # Input_dir should point to existing work directory with outputs
+            print(f"📊 Report generation will use existing outputs in: {input_dir}")
+            # No symlink needed, just use the directory as-is
+        
+        elif input_type == "bam":
+            # Default BAM handling (assume unmapped, use remap)
+            bams_dir = work_dir / "bams"
+            bams_dir.mkdir(parents=True, exist_ok=True)
+            
+            bam_file = Path(input_dir)
+            if not bam_file.exists():
+                raise RuntimeError(f"BAM file not found: {input_dir}")
+            
+            bam_link = bams_dir / f"{sample_name}.bam"
+            try:
+                if bam_link.exists():
+                    bam_link.unlink()
+                bam_link.symlink_to(bam_file.resolve())
+                print(f"📁 Created BAM symlink: {bam_link} -> {input_dir}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to create BAM symlink: {e}")
+            
+            # Default to remap if no entry point specified
+            if entry_point is None:
+                entry_point = "remap"
+        else:
+            # Default: pod5 input for full pipeline (main workflow)
+            pod5_link = work_dir / "pod5"
+            try:
+                if pod5_link.exists():
+                    pod5_link.unlink()
+                pod5_link.symlink_to(Path(input_dir).resolve())
+                print(f"📁 Created pod5 symlink: {pod5_link} -> {input_dir}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to create pod5 symlink: {e}")
         
         # Copy or create dogme.profile
         dogme_profile_src = DOGME_REPO / "dogme.profile"
@@ -267,6 +389,10 @@ class NextflowExecutor:
             input_dir=input_dir,
             reference_genome=reference_genome,
             modifications=modifications,
+            modkit_filter_threshold=modkit_filter_threshold,
+            min_cov=min_cov,
+            per_mod=per_mod,
+            accuracy=accuracy,
         )
         
         config_path = work_dir / "nextflow.config"
@@ -286,12 +412,25 @@ class NextflowExecutor:
             str(self.nextflow_bin),
             "run",
             str(DOGME_REPO / "dogme.nf"),
+        ]
+        
+        # Add entry point if specified
+        if entry_point:
+            cmd.extend(["-entry", entry_point])
+            print(f"🎯 Using Dogme entry point: {entry_point}")
+            
+            # Add -CDNA flag for annotateRNA with cDNA samples
+            if entry_point == "annotateRNA" and mode == "CDNA":
+                cmd.append("-CDNA")
+                print(f"📝 Adding -CDNA flag for cDNA annotation")
+        
+        cmd.extend([
             "-c", str(config_path),
             "-work-dir", str(work_dir / "work"),
             "-with-report", str(work_dir / "report.html"),
             "-with-timeline", str(work_dir / f"{sample_name}_timeline.html"),
             "-with-trace", str(work_dir / f"{sample_name}_trace.txt"),
-        ]
+        ])
         
         # Validate prerequisites before attempting launch
         if not self.nextflow_bin.exists():

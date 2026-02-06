@@ -15,6 +15,7 @@ from server3.config import (
     JobStatus,
     MAX_CONCURRENT_JOBS,
     JOB_POLL_INTERVAL,
+    REFERENCE_GENOMES,
 )
 from server3.db import (
     init_db,
@@ -178,13 +179,22 @@ async def health_check():
         }
     except Exception as e:
         return {
-            "status": "degraded",
+            "status": "error",
             "version": "0.3.0",
             "running_jobs": 0,
             "database_ok": False,
+            "error": str(e)
         }
-    finally:
-        await session.close()
+
+
+# --- GENOME LIST ENDPOINT ---
+@app.get("/genomes")
+async def list_genomes():
+    """List available reference genomes."""
+    return {
+        "genomes": list(REFERENCE_GENOMES.keys()),
+        "count": len(REFERENCE_GENOMES)
+    }
 
 # --- JOB SUBMISSION ---
 @app.post("/jobs/submit", response_model=JobSubmitResponse)
@@ -229,9 +239,15 @@ async def submit_job(req: SubmitJobRequest):
                 run_uuid=run_uuid,
                 sample_name=req.sample_name,
                 mode=req.mode,
+                input_type=req.input_type,
                 input_dir=req.input_directory,
-                reference_genome=req.reference_genome,
+                reference_genome=req.reference_genome,  # Now normalized to list by validator
                 modifications=req.modifications,
+                entry_point=req.entry_point,
+                modkit_filter_threshold=req.modkit_filter_threshold,
+                min_cov=req.min_cov,
+                per_mod=req.per_mod,
+                accuracy=req.accuracy,
             )
             
             # Update job with work directory info
@@ -261,6 +277,11 @@ async def submit_job(req: SubmitJobRequest):
         
         except Exception as e:
             # Job submission failed
+            import traceback
+            error_trace = traceback.format_exc()
+            print(f"❌ Nextflow submission error: {e}")
+            print(f"   Full traceback:\n{error_trace}")
+            
             job.status = JobStatus.FAILED
             job.error_message = str(e)
             await session.commit()
@@ -281,6 +302,10 @@ async def submit_job(req: SubmitJobRequest):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"❌ Submit endpoint error: {e}")
+        print(f"   Full traceback:\n{error_trace}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         await session.close()

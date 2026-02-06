@@ -1,8 +1,8 @@
 """
 Pydantic schemas for Server 3 API.
 """
-from pydantic import BaseModel, Field
-from typing import Optional, Any
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, Any, List, Literal, Union
 from datetime import datetime
 
 class SubmitJobRequest(BaseModel):
@@ -10,10 +10,26 @@ class SubmitJobRequest(BaseModel):
     project_id: str = Field(..., min_length=1)
     sample_name: str = Field(..., min_length=1)
     mode: str = Field(..., min_length=1)  # DNA, RNA, CDNA
+    input_type: Literal["pod5", "bam"] = "pod5"  # Type of input files
     input_directory: str = Field(..., min_length=1)
-    reference_genome: str = "GRCh38"
+    reference_genome: Union[str, List[str]] = "mm39"  # Single or multiple genomes
     modifications: Optional[str] = None
+    entry_point: Optional[str] = None  # Dogme entry point (e.g., "remap", "basecall")
     parent_block_id: Optional[str] = None
+    
+    # Advanced parameters (optional)
+    modkit_filter_threshold: Optional[float] = 0.9  # Modification calling threshold
+    min_cov: Optional[int] = None  # Minimum coverage (defaults: 1 for DNA, 3 for RNA/CDNA)
+    per_mod: Optional[int] = 5  # Percentage threshold for modifications
+    accuracy: Optional[str] = "sup"  # Basecalling accuracy (sup/hac/fast)
+    
+    @field_validator("reference_genome")
+    @classmethod
+    def normalize_genome_to_list(cls, v):
+        """Normalize reference_genome to list for consistent handling."""
+        if isinstance(v, str):
+            return [v]
+        return v
 
 class JobStatusResponse(BaseModel):
     """Response with job status."""

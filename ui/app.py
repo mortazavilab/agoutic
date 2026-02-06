@@ -130,22 +130,222 @@ def render_block(block):
 
     elif btype == "APPROVAL_GATE":
         with st.chat_message("assistant", avatar="🚦"):
-            st.write("### ✅ Approval Required")
+            # Get extracted parameters and metadata
+            extracted_params = content.get("extracted_params", {})
+            manual_mode = content.get("manual_mode", False)
+            attempt_number = content.get("attempt_number", 1)
+            rejection_history = content.get("rejection_history", [])
+            
+            # Title based on mode
+            if manual_mode:
+                st.write("### ⚠️ Manual Configuration Required")
+                st.warning(f"The AI couldn't understand your requirements after 3 attempts. Please verify these parameters manually.")
+            else:
+                st.write(f"### ✅ Approval Required (Attempt {attempt_number}/3)")
+            
             st.write(content.get("label", "Approve this plan?"))
             st.caption(f"Block ID: `{block_id}`")
+            
+            # Show rejection history if exists
+            if rejection_history:
+                with st.expander(f"📜 Rejection History ({len(rejection_history)} previous attempts)", expanded=False):
+                    for i, hist in enumerate(rejection_history, 1):
+                        st.text(f"Attempt {hist.get('attempt', i)}: {hist.get('reason', 'No reason')}")
+                        st.caption(f"at {hist.get('timestamp', 'unknown time')}")
 
             if status == "APPROVED":
                 st.success("✅ Approved")
+                # Show what parameters were used
+                if extracted_params:
+                    with st.expander("📋 Parameters Used", expanded=False):
+                        st.json(extracted_params)
+                        
             elif status == "REJECTED":
                 st.error("❌ Rejected")
+                # Show rejection reason if available
+                reason = content.get("rejection_reason", "No reason provided")
+                st.caption(f"Reason: {reason}")
+                
             else:
-                col1, col2 = st.columns(2)
-                if col1.button("✅ Approve", key=f"app_{block_id}"):
-                    requests.patch(f"{API_URL}/block/{block_id}", json={"status": "APPROVED"})
-                    st.rerun()
-                if col2.button("❌ Reject", key=f"rej_{block_id}"):
-                    requests.patch(f"{API_URL}/block/{block_id}", json={"status": "REJECTED"})
-                    st.rerun()
+                # Pending approval - show editable parameter form
+                if extracted_params:
+                    st.write("**📋 Extracted Parameters** (edit if needed):")
+                    
+                    with st.form(key=f"params_form_{block_id}"):
+                        # Sample name
+                        sample_name = st.text_input(
+                            "Sample Name",
+                            value=extracted_params.get("sample_name", ""),
+                            help="Name for this sample"
+                        )
+                        
+                        # Mode selection
+                        mode_options = ["DNA", "RNA", "CDNA"]
+                        current_mode = extracted_params.get("mode", "DNA")
+                        mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
+                        mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
+                        
+                        # Input type
+                        input_type_options = ["pod5", "bam"]
+                        current_input_type = extracted_params.get("input_type", "pod5")
+                        input_type_index = input_type_options.index(current_input_type) if current_input_type in input_type_options else 0
+                        input_type = st.selectbox("Input Type", input_type_options, index=input_type_index)
+                        
+                        # Entry point (Dogme workflow)
+                        entry_point_options = ["(auto)", "basecall", "remap", "modkit", "annotateRNA", "reports"]
+                        current_entry = extracted_params.get("entry_point") or "(auto)"
+                        entry_index = entry_point_options.index(current_entry) if current_entry in entry_point_options else 0
+                        entry_point = st.selectbox(
+                            "Pipeline Entry Point",
+                            entry_point_options,
+                            index=entry_index,
+                            help="main=(auto) full pipeline, basecall=only basecalling, remap=from unmapped BAM, modkit=modifications only, annotateRNA=transcript annotation, reports=generate reports"
+                        )
+                        
+                        # Input directory
+                        input_directory = st.text_input(
+                            "Input Directory",
+                            value=extracted_params.get("input_directory", ""),
+                            help="Full path to input files"
+                        )
+                        
+                        # Reference genomes (multi-select)
+                        genome_options = ["GRCh38", "mm39"]  # TODO: fetch from /genomes endpoint
+                        current_genomes = extracted_params.get("reference_genome", ["mm39"])
+                        if isinstance(current_genomes, str):
+                            current_genomes = [current_genomes]
+                        reference_genomes = st.multiselect(
+                            "Reference Genome(s)",
+                            genome_options,
+                            default=current_genomes,
+                            help="Select one or more reference genomes"
+                        )
+                        
+                        # Modifications (optional)
+                        modifications = st.text_input(
+                            "Modifications (optional)",
+                            value=extracted_params.get("modifications", "") or "",
+                            help="Comma-separated modification motifs (leave empty for auto)"
+                        )
+                        
+                        # Advanced parameters in expander
+                        with st.expander("⚙️ Advanced Parameters (optional)"):
+                            st.caption("Leave empty to use defaults")
+                            
+                            # modkit_filter_threshold
+                            modkit_threshold = st.number_input(
+                                "Modkit Filter Threshold",
+                                min_value=0.0,
+                                max_value=1.0,
+                                value=extracted_params.get("modkit_filter_threshold", 0.9),
+                                step=0.05,
+                                help="Modification calling threshold (default: 0.9)"
+                            )
+                            
+                            # min_cov
+                            min_cov_default = extracted_params.get("min_cov")
+                            if min_cov_default is None:
+                                # Show placeholder based on mode
+                                min_cov_placeholder = 1 if mode == "DNA" else 3
+                                st.caption(f"Min Coverage: (auto - will use {min_cov_placeholder} for {mode} mode)")
+                                min_cov = None
+                            else:
+                                min_cov = st.number_input(
+                                    "Minimum Coverage",
+                                    min_value=1,
+                                    max_value=100,
+                                    value=min_cov_default,
+                                    help="Minimum coverage for modification calls"
+                                )
+                            
+                            # per_mod
+                            per_mod = st.number_input(
+                                "Per Mod Threshold",
+                                min_value=1,
+                                max_value=100,
+                                value=extracted_params.get("per_mod", 5),
+                                help="Percentage threshold for modifications (default: 5)"
+                            )
+                            
+                            # accuracy
+                            accuracy_options = ["sup", "hac", "fast"]
+                            current_accuracy = extracted_params.get("accuracy", "sup")
+                            accuracy_index = accuracy_options.index(current_accuracy) if current_accuracy in accuracy_options else 0
+                            accuracy = st.selectbox(
+                                "Basecalling Accuracy",
+                                accuracy_options,
+                                index=accuracy_index,
+                                help="Model accuracy: sup=super accurate, hac=high accuracy, fast=fast mode"
+                            )
+                        
+                        st.divider()
+                        
+                        # Action buttons
+                        col1, col2 = st.columns(2)
+                        
+                        submit_approve = col1.form_submit_button("✅ Approve", use_container_width=True)
+                        submit_reject = col2.form_submit_button("❌ Reject", use_container_width=True)
+                        
+                        if submit_approve:
+                            # Build edited params
+                            edited_params = {
+                                "sample_name": sample_name,
+                                "mode": mode,
+                                "input_type": input_type,
+                                "entry_point": entry_point if entry_point != "(auto)" else None,
+                                "input_directory": input_directory,
+                                "reference_genome": reference_genomes,
+                                "modifications": modifications if modifications else None,
+                                # Advanced parameters
+                                "modkit_filter_threshold": modkit_threshold,
+                                "min_cov": min_cov,
+                                "per_mod": per_mod,
+                                "accuracy": accuracy,
+                            }
+                            
+                            # Update block with edited params and approved status
+                            payload_update = dict(content)
+                            payload_update["edited_params"] = edited_params
+                            
+                            requests.patch(
+                                f"{API_URL}/block/{block_id}",
+                                json={"status": "APPROVED", "payload": payload_update}
+                            )
+                            st.rerun()
+                        
+                        if submit_reject:
+                            st.session_state[f"rejecting_{block_id}"] = True
+                            st.rerun()
+                
+                # Show rejection feedback form if user clicked reject
+                if st.session_state.get(f"rejecting_{block_id}", False):
+                    st.write("**💬 Why are you rejecting this plan?**")
+                    rejection_reason = st.text_area(
+                        "Feedback",
+                        placeholder="E.g., 'Use GRCh38 instead of mm39' or 'Wrong input path'",
+                        key=f"rejection_reason_{block_id}"
+                    )
+                    
+                    col1, col2 = st.columns(2)
+                    if col1.button("Submit Rejection", key=f"submit_reject_{block_id}"):
+                        # Update block with rejection
+                        payload_update = dict(content)
+                        payload_update["rejection_reason"] = rejection_reason
+                        payload_update["attempt_number"] = attempt_number
+                        
+                        requests.patch(
+                            f"{API_URL}/block/{block_id}",
+                            json={"status": "REJECTED", "payload": payload_update}
+                        )
+                        
+                        # Clear rejection state
+                        del st.session_state[f"rejecting_{block_id}"]
+                        st.rerun()
+                    
+                    if col2.button("Cancel", key=f"cancel_reject_{block_id}"):
+                        del st.session_state[f"rejecting_{block_id}"]
+                        st.rerun()
+
     
     elif btype == "EXECUTION_JOB":
         # Job execution monitoring with Nextflow progress visualization

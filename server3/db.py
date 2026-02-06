@@ -42,18 +42,26 @@ async def create_job(
     sample_name: str,
     mode: str,
     input_directory: str,
-    reference_genome: str | None = None,
+    reference_genome: str | list | None = None,
     modifications: str | None = None,
     parent_block_id: str | None = None,
 ) -> DogmeJob:
     """Create a new job record."""
+    import json
+    
+    # Serialize reference_genome list to JSON string for storage
+    if isinstance(reference_genome, list):
+        reference_genome_str = json.dumps(reference_genome)
+    else:
+        reference_genome_str = reference_genome
+    
     job = DogmeJob(
         run_uuid=run_uuid,
         project_id=project_id,
         sample_name=sample_name,
         mode=mode,
         input_directory=input_directory,
-        reference_genome=reference_genome,
+        reference_genome=reference_genome_str,
         modifications=modifications,
         parent_block_id=parent_block_id,
     )
