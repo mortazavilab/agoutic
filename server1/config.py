@@ -11,11 +11,31 @@ AGOUTIC_DATA = Path(os.getenv("AGOUTIC_DATA", AGOUTIC_CODE / "data"))
 
 # --- DATA & STORAGE CONFIG (derived from AGOUTIC_DATA) ---
 DB_FOLDER = AGOUTIC_DATA / "database"
-DB_FILE = DB_FOLDER / "agoutic_v23.sqlite"
+DB_FILE = DB_FOLDER / "agoutic_v24.sqlite"  # Updated to v24 for multi-user support
 
 DB_FOLDER.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = f"sqlite+aiosqlite:///{DB_FILE}"
+
+# --- AUTH CONFIGURATION ---
+# Google OAuth
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+# Allow override via environment variable for remote access
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/callback")
+
+# Super admin email (auto-approved on first login)
+SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "")
+
+# Session configuration
+SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", os.urandom(32).hex())
+SESSION_EXPIRES_HOURS = int(os.getenv("SESSION_EXPIRES_HOURS", "24"))
+
+# Internal API secret for Server 1 <-> Server 3 communication
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+
+# Frontend URL for OAuth redirects - use environment variable for remote access
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8501")
 
 # --- SKILLS & CODE CONFIG (derived from AGOUTIC_CODE) ---
 SKILLS_DIR = AGOUTIC_CODE / "skills"

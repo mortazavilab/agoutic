@@ -14,7 +14,7 @@ AGOUTIC_DATA = Path(os.getenv("AGOUTIC_DATA", AGOUTIC_CODE / "data"))
 SERVER3_WORK_DIR = AGOUTIC_DATA / "server3_work"
 SERVER3_LOGS_DIR = AGOUTIC_DATA / "server3_logs"
 DB_FOLDER = AGOUTIC_DATA / "database"
-DB_FILE = DB_FOLDER / "agoutic_v23.sqlite"
+DB_FILE = DB_FOLDER / "agoutic_v24.sqlite"  # Updated to v24 for multi-user support
 
 # Create directories
 SERVER3_WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -22,6 +22,9 @@ SERVER3_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 DB_FOLDER.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = f"sqlite+aiosqlite:///{DB_FILE}"
+
+# Internal API secret for Server 1 <-> Server 3 communication
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 
 # --- NEXTFLOW / DOGME CONFIG (derived from AGOUTIC_CODE) ---
 # Path to Dogme pipeline repository

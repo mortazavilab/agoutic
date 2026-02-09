@@ -2,43 +2,54 @@ import asyncio
 import datetime
 import uuid
 import json
+import os
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Path
+from fastapi import FastAPI, HTTPException, Path, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool  # To run LLM without blocking
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, String, Integer, JSON, DateTime, select, desc
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import select, desc
 
 # ✅ Import from your package
 from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from server1.agent_engine import AgentEngine
 from server1.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES
-
-# --- CONFIG ---
-DATABASE_URL = "sqlite:///./agoutic_v23.sqlite"
-
-# --- DATABASE SETUP ---
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-class ProjectBlock(Base):
-    __tablename__ = "project_blocks"
-    
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    project_id = Column(String, index=True, nullable=False)
-    seq = Column(Integer, index=True)  # Auto-incrementing sequence per project
-    type = Column(String, nullable=False)
-    status = Column(String, default="NEW")
-    payload = Column(JSON, default={})
-    parent_id = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-Base.metadata.create_all(bind=engine)
+from server1.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
+from server1.models import ProjectBlock
+from server1.middleware import AuthMiddleware
+from server1.auth import router as auth_router
+from server1.admin import router as admin_router
 
 # --- APP ---
 app = FastAPI()
+
+# Add auth middleware FIRST (before CORS)
+app.add_middleware(AuthMiddleware)
+
+# Add CORS middleware for Streamlit UI cross-origin requests
+# Allow both localhost and environment-specified origins
+allowed_origins = ["http://localhost:8501"]
+if frontend_origin := os.getenv("FRONTEND_URL"):
+    if frontend_origin not in allowed_origins:
+        allowed_origins.append(frontend_origin)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(auth_router)
+app.include_router(admin_router)
+
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    init_db_sync()
 
 # --- SCHEMAS ---
 class ChatRequest(BaseModel):
@@ -48,36 +59,27 @@ class ChatRequest(BaseModel):
     model: str = "default"         # Default model (devstral-2)
 
 # --- HELPERS ---
-def row_to_dict(row):
-    return {
-        "id": row.id,
-        "project_id": row.project_id,
-        "seq": row.seq,
-        "type": row.type,
-        "status": row.status,
-        "payload": row.payload,
-        "parent_id": row.parent_id,
-        "created_at": row.created_at.isoformat()
-    }
+def get_block_payload(block: ProjectBlock) -> dict:
+    """Helper to get payload as dict from payload_json"""
+    return json.loads(block.payload_json) if block.payload_json else {}
 
-def _create_block_internal(session, project_id, block_type, payload, status="NEW"):
+def _create_block_internal(session, project_id, block_type, payload, status="NEW", owner_id=None):
     """
     Internal helper to insert a block and handle the sequence number safely.
     """
     # Calculate next sequence
-    last_seq = session.query(ProjectBlock.seq)\
-        .filter(ProjectBlock.project_id == project_id)\
-        .order_by(desc(ProjectBlock.seq))\
-        .first()
-    
-    next_seq = (last_seq[0] + 1) if last_seq else 1
+    seq_num = next_seq_sync(session, project_id)
 
     new_block = ProjectBlock(
+        id=str(uuid.uuid4()),
         project_id=project_id,
-        seq=next_seq,
+        owner_id=owner_id,
+        seq=seq_num,
         type=block_type,
         status=status,
-        payload=payload
+        payload_json=json.dumps(payload),
+        parent_id=None,
+        created_at=datetime.datetime.utcnow()
     )
     session.add(new_block)
     session.commit()
@@ -85,6 +87,11 @@ def _create_block_internal(session, project_id, block_type, payload, status="NEW
     return new_block
 
 # --- ENDPOINTS ---
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint (no auth required)"""
+    return {"status": "ok", "service": "server1"}
 
 @app.get("/skills")
 async def get_available_skills():
@@ -94,8 +101,35 @@ async def get_available_skills():
         "count": len(SKILLS_REGISTRY)
     }
 
+@app.get("/jobs/{run_uuid}/debug")
+async def get_job_debug_info(run_uuid: str):
+    """
+    Proxy endpoint for Server 3 job debug info.
+    This allows the UI to get debug info without calling Server 3 directly.
+    """
+    import requests
+    from server1.config import INTERNAL_API_SECRET
+    
+    try:
+        headers = {}
+        if INTERNAL_API_SECRET:
+            headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+        
+        resp = requests.get(
+            f"http://127.0.0.1:8003/jobs/{run_uuid}/debug",
+            headers=headers,
+            timeout=10
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch debug info: {str(e)}")
+
 @app.post("/block", response_model=BlockOut)
-async def create_block(block_in: BlockCreate):
+async def create_block(block_in: BlockCreate, request: Request):
+    # Get current user from middleware
+    user = request.state.user
+    
     session = SessionLocal()
     try:
         new_block = _create_block_internal(
@@ -103,7 +137,8 @@ async def create_block(block_in: BlockCreate):
             block_in.project_id, 
             block_in.type, 
             block_in.payload, 
-            block_in.status
+            block_in.status,
+            owner_id=user.id
         )
         return row_to_dict(new_block)
     finally:
@@ -140,7 +175,8 @@ async def update_block(
 ):
     session = SessionLocal()
     try:
-        block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
+        result = session.execute(select(ProjectBlock).where(ProjectBlock.id == block_id))
+        block = result.scalar_one_or_none()
         if not block:
             raise HTTPException(status_code=404, detail="Block not found")
             
@@ -149,20 +185,17 @@ async def update_block(
         if body.status is not None:
             block.status = body.status
         if body.payload is not None:
-            block.payload = body.payload
+            block.payload_json = json.dumps(body.payload)
             
         session.commit()
         session.refresh(block)
         
         # If an APPROVAL_GATE was just approved, trigger job submission
         if block.type == "APPROVAL_GATE" and old_status == "PENDING" and block.status == "APPROVED":
-            # Launch background task to submit job to Server3
-            import asyncio
             asyncio.create_task(submit_job_after_approval(block.project_id, block_id))
         
         # If an APPROVAL_GATE was rejected, trigger rejection handling
         if block.type == "APPROVAL_GATE" and old_status == "PENDING" and block.status == "REJECTED":
-            import asyncio
             asyncio.create_task(handle_rejection(block.project_id, block_id))
         
         return row_to_dict(block)
@@ -193,11 +226,11 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     user_messages = []
     for block in blocks:
         if block.type == "USER_MESSAGE":
-            text = block.payload.get('text', '')
+            text = get_block_payload(block).get('text', '')
             conversation.append(f"User: {text}")
             user_messages.append(text)
         elif block.type == "AGENT_PLAN":
-            conversation.append(f"Agent: {block.payload.get('markdown', '')}")
+            conversation.append(f"Agent: {get_block_payload(block).get('markdown', '')}")
     
     if not conversation:
         return None
@@ -376,10 +409,14 @@ async def handle_rejection(project_id: str, gate_block_id: str):
             print(f"❌ Gate block {gate_block_id} not found")
             return
         
+        # Get owner_id from the gate block
+        owner_id = gate_block.owner_id
+        
         # Get rejection details from payload
-        rejection_reason = gate_block.payload.get("rejection_reason", "No reason provided")
-        attempt_number = gate_block.payload.get("attempt_number", 1)
-        rejection_history = gate_block.payload.get("rejection_history", [])
+        gate_payload = get_block_payload(gate_block)
+        rejection_reason = gate_payload.get("rejection_reason", "No reason provided")
+        attempt_number = gate_payload.get("attempt_number", 1)
+        rejection_history = gate_payload.get("rejection_history", [])
         
         # Add to rejection history
         rejection_history.append({
@@ -389,9 +426,8 @@ async def handle_rejection(project_id: str, gate_block_id: str):
         })
         
         # Update gate block with history
-        gate_payload = dict(gate_block.payload)
         gate_payload["rejection_history"] = rejection_history
-        gate_block.payload = gate_payload
+        gate_block.payload_json = json.dumps(gate_payload)
         session.commit()
         
         print(f"🔄 Handling rejection for {project_id}, attempt {attempt_number}/3")
@@ -423,10 +459,11 @@ I've tried 3 times but couldn't meet your requirements. Please verify and edit t
 - Modifications: `{params.get('modifications', 'auto')}`
 
 Please use the parameter editing form below to make corrections.""",
-                    "skill": gate_block.payload.get("skill", "analyze_local_sample"),
-                    "model": gate_block.payload.get("model", "default")
+                    "skill": get_block_payload(gate_block).get("skill", "analyze_local_sample"),
+                    "model": get_block_payload(gate_block).get("model", "default")
                 },
-                status="NEW"
+                status="NEW",
+                owner_id=owner_id
             )
             
             # Create a new approval gate with manual mode flag
@@ -441,7 +478,8 @@ Please use the parameter editing form below to make corrections.""",
                     "attempt_number": 3,
                     "rejection_history": rejection_history
                 },
-                status="PENDING"
+                status="PENDING",
+                owner_id=owner_id
             )
             
             return
@@ -458,17 +496,18 @@ Please use the parameter editing form below to make corrections.""",
         active_skill = None
         
         for block in blocks:
+            block_payload = get_block_payload(block)
             if block.type == "USER_MESSAGE":
                 conversation_history.append({
                     "role": "user",
-                    "content": block.payload.get("text", "")
+                    "content": block_payload.get("text", "")
                 })
             elif block.type == "AGENT_PLAN":
                 conversation_history.append({
                     "role": "assistant",
-                    "content": block.payload.get("markdown", "")
+                    "content": block_payload.get("markdown", "")
                 })
-                active_skill = block.payload.get("skill")
+                active_skill = block_payload.get("skill")
         
         # Add rejection feedback as user message
         conversation_history.append({
@@ -477,8 +516,9 @@ Please use the parameter editing form below to make corrections.""",
         })
         
         # Get the active skill and model
-        skill_name = active_skill or gate_block.payload.get("skill", "analyze_local_sample")
-        model_name = gate_block.payload.get("model", "default")
+        gate_payload = get_block_payload(gate_block)
+        skill_name = active_skill or gate_payload.get("skill", "analyze_local_sample")
+        model_name = gate_payload.get("model", "default")
         
         # Call LLM to regenerate plan
         agent_engine = AgentEngine(model_name=model_name)
@@ -491,40 +531,49 @@ Please use the parameter editing form below to make corrections.""",
                 conversation_history=conversation_history
             )
             
+            # Check if response needs approval or is asking for more info
+            needs_approval = "[[APPROVAL_NEEDED]]" in llm_response
+            clean_response = llm_response.replace("[[APPROVAL_NEEDED]]", "").strip()
+            
             # Create new AGENT_PLAN block
             _create_block_internal(
                 session,
                 project_id,
                 "AGENT_PLAN",
                 {
-                    "markdown": llm_response,
+                    "markdown": clean_response,
                     "skill": skill_name,
                     "model": model_name,
                     "revision_attempt": attempt_number + 1
                 },
-                status="NEW"
+                status="DONE" if needs_approval else "NEW",
+                owner_id=owner_id
             )
             
-            # Extract parameters for new approval gate
-            params = await extract_job_parameters_from_conversation(session, project_id)
-            
-            # Create new APPROVAL_GATE
-            _create_block_internal(
-                session,
-                project_id,
-                "APPROVAL_GATE",
-                {
-                    "label": f"Revised Plan (Attempt {attempt_number + 1}/3)",
-                    "extracted_params": params,
-                    "attempt_number": attempt_number + 1,
-                    "rejection_history": rejection_history,
-                    "skill": skill_name,
-                    "model": model_name
-                },
-                status="PENDING"
-            )
-            
-            print(f"✅ Generated revised plan for {project_id} (attempt {attempt_number + 1}/3)")
+            # Only create approval gate if the agent explicitly requested it
+            if needs_approval:
+                # Extract parameters for new approval gate
+                params = await extract_job_parameters_from_conversation(session, project_id)
+                
+                # Create new APPROVAL_GATE
+                _create_block_internal(
+                    session,
+                    project_id,
+                    "APPROVAL_GATE",
+                    {
+                        "label": f"Revised Plan (Attempt {attempt_number + 1}/3)",
+                        "extracted_params": params,
+                        "attempt_number": attempt_number + 1,
+                        "rejection_history": rejection_history,
+                        "skill": skill_name,
+                        "model": model_name
+                    },
+                    status="PENDING",
+                    owner_id=owner_id
+                )
+                print(f"✅ Generated revised plan for {project_id} (attempt {attempt_number + 1}/3)")
+            else:
+                print(f"✅ Agent is asking for more information (attempt {attempt_number + 1}/3)")
             
         except Exception as e:
             print(f"❌ LLM failed during revision: {e}")
@@ -537,7 +586,8 @@ Please use the parameter editing form below to make corrections.""",
                     "markdown": f"### ⚠️ Error\n\nFailed to generate revised plan: {str(e)}\n\nPlease try again or use manual configuration.",
                     "error": str(e)
                 },
-                status="ERROR"
+                status="ERROR",
+                owner_id=owner_id
             )
     
     finally:
@@ -559,8 +609,12 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             print(f"❌ Gate block {gate_block_id} not found")
             return
         
+        # Get owner_id from the gate block
+        owner_id = gate_block.owner_id
+        
         # Prefer edited_params over extracted_params
-        job_params = gate_block.payload.get("edited_params") or gate_block.payload.get("extracted_params")
+        gate_payload = get_block_payload(gate_block)
+        job_params = gate_payload.get("edited_params") or gate_payload.get("extracted_params")
         
         if not job_params:
             # Fallback: extract from conversation
@@ -608,12 +662,19 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "accuracy": job_params.get("accuracy") or "sup",
         }
         
-        print(f"📋 Job parameters (using {'edited' if gate_block.payload.get('edited_params') else 'extracted'}): {job_data}")
+        print(f"📋 Job parameters (using {'edited' if gate_payload.get('edited_params') else 'extracted'}): {job_data}")
+        
+        # Prepare headers with internal secret
+        from server1.config import INTERNAL_API_SECRET
+        headers = {}
+        if INTERNAL_API_SECRET:
+            headers["X-Internal-Secret"] = INTERNAL_API_SECRET
         
         # Submit job to Server3
         resp = requests.post(
             "http://127.0.0.1:8003/jobs/submit",
             json=job_data,
+            headers=headers,
             timeout=10,
         )
         
@@ -640,7 +701,8 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     },
                     "logs": []
                 },
-                status="RUNNING"
+                status="RUNNING",
+                owner_id=owner_id
             )
             
             print(f"✅ Job submitted: {run_uuid}")
@@ -670,7 +732,8 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                         "tasks": {}
                     }
                 },
-                status="FAILED"
+                status="FAILED",
+                owner_id=owner_id
             )
             print(f"❌ Job submission failed: {resp.status_code}")
             print(f"   Error details: {error_detail}")
@@ -713,9 +776,16 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
         
         session = SessionLocal()
         try:
+            # Prepare headers with internal secret
+            from server1.config import INTERNAL_API_SECRET
+            headers = {}
+            if INTERNAL_API_SECRET:
+                headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+            
             # Get current status from Server3
             status_resp = requests.get(
                 f"http://127.0.0.1:8003/jobs/{run_uuid}/status",
+                headers=headers,
                 timeout=5,
             )
             
@@ -729,6 +799,7 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
             logs_resp = requests.get(
                 f"http://127.0.0.1:8003/jobs/{run_uuid}/logs",
                 params={"limit": 50},
+                headers=headers,
                 timeout=5,
             )
             logs = logs_resp.json().get("logs", []) if logs_resp.status_code == 200 else []
@@ -737,7 +808,7 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
             block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
             if block:
                 # Create new payload dict to ensure SQLAlchemy detects the change
-                payload = dict(block.payload)
+                payload = get_block_payload(block)
                 payload["job_status"] = status_data
                 payload["logs"] = logs
                 
@@ -750,8 +821,8 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                 else:
                     block.status = "RUNNING"
                 
-                # Reassign payload to trigger SQLAlchemy update
-                block.payload = payload
+                # Reassign payload_json to trigger SQLAlchemy update
+                block.payload_json = json.dumps(payload)
                 session.commit()
                 session.refresh(block)
                 
@@ -772,7 +843,7 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
 
 # --- CHAT & AGENT LOGIC ---
 @app.post("/chat")
-async def chat_with_agent(req: ChatRequest):
+async def chat_with_agent(req: ChatRequest, request: Request):
     """
     1. Saves User Message -> DB
     2. Runs Agent Engine (LLM)
@@ -780,6 +851,9 @@ async def chat_with_agent(req: ChatRequest):
     4. Saves Agent Plan -> DB (Clean text)
     5. If tag found -> Saves APPROVAL_GATE -> DB (Interactive buttons)
     """
+    # Get current user from middleware
+    user = request.state.user
+    
     session = SessionLocal()
     try:
         # Check if there's an active skill in progress (no approval gate yet)
@@ -808,7 +882,7 @@ async def chat_with_agent(req: ChatRequest):
         active_skill = req.skill
         if last_agent_block and not approval_block:
             # Continue with the skill from the last agent response
-            last_skill = last_agent_block.payload.get("skill")
+            last_skill = get_block_payload(last_agent_block).get("skill")
             if last_skill:
                 active_skill = last_skill
                 print(f"📌 Continuing with active skill: {active_skill}")
@@ -822,7 +896,8 @@ async def chat_with_agent(req: ChatRequest):
             session,
             req.project_id,
             "USER_MESSAGE",
-            {"text": req.message}
+            {"text": req.message},
+            owner_id=user.id
         )
         
         # Check if user is asking for capabilities
@@ -884,7 +959,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     "skill": "system",
                     "model": engine.model_name
                 },
-                status="DONE"
+                status="DONE",
+                owner_id=user.id
             )
             
             return {
@@ -907,15 +983,16 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # Build conversation history in OpenAI format
         conversation_history = []
         for block in history_blocks[:-1]:  # Exclude the message we just added
+            block_payload = get_block_payload(block)
             if block.type == "USER_MESSAGE":
                 conversation_history.append({
                     "role": "user",
-                    "content": block.payload.get("text", "")
+                    "content": block_payload.get("text", "")
                 })
             elif block.type == "AGENT_PLAN":
                 conversation_history.append({
                     "role": "assistant",
-                    "content": block.payload.get("markdown", "")
+                    "content": block_payload.get("markdown", "")
                 })
         
         # 2. Run the Brain (in a thread so it doesn't block the server)
@@ -967,7 +1044,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 "skill": active_skill,  # Store the active skill
                 "model": engine.model_name
             },
-            status="DONE" 
+            status="DONE",
+            owner_id=user.id
         )
         
         # 5. Insert APPROVAL_GATE (The Buttons) if requested
@@ -988,7 +1066,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     "skill": active_skill,
                     "model": engine.model_name
                 },
-                status="PENDING"
+                status="PENDING",
+                owner_id=user.id
             )
         
         return {

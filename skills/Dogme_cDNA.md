@@ -12,13 +12,28 @@ This skill processes cDNA long-read data. It focuses on high-accuracy isoform qu
 
 ## Plan Logic
 
-### 1. Discovery & Selection
+### 1. Information Gathering
 
-* **Tool:** `find_pod5_directory(query)`
-* **Context:** The agent locates the raw `.pod5` directory.
-* **Output:** Directory path verification.
+**CRITICAL: If the user has not provided:**
+- Sample name/identifier
+- Local path to the data directory
 
-### 2. APPROVAL GATE: Data Validation
+**You MUST ask for this information BEFORE proceeding.** Do NOT guess or hallucinate paths.
+
+Example questions:
+- "What is the sample name you'd like to use?"
+- "What is the full local path to the pod5 directory? (e.g., `/data/runs/sample1/pod5/`)"
+
+**DO NOT include [[APPROVAL_NEEDED]] when asking for information - just ask the questions.**
+
+### 2. Discovery & Validation
+
+Once you have the path from the user:
+* Verify the provided path exists and contains pod5 files
+* Confirm the sample name with the user
+* Note that modification calling will be skipped for cDNA
+
+### 3. APPROVAL GATE: Data Validation
 
 * **Condition:** Confirm sample and strictly note that modification calling will be skipped.
 * **Prompt:** "I found cDNA data for '{query}'.

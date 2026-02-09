@@ -4,6 +4,19 @@
 
 This skill handles the retrieval and initial processing of ENCODE long-read data. It searches the ENCODE portal, manages the download of raw `.pod5`/`.fastq` files, and automatically dispatches the analysis to the correct Dogme sub-skill (`DNA`, `RNA`, or `cDNA`) based on the experiment metadata.
 
+**IMPORTANT: If the user asks about LOCAL data (not ENCODE downloads), use [[SKILL_SWITCH_TO: analyze_local_sample]] to switch to the local sample intake skill.**
+
+## When to Use This Skill
+
+- User mentions "ENCODE", "download from ENCODE", "ENCODE experiment ID", "public data"
+- User provides an ENCSR... identifier
+
+## When NOT to Use This Skill
+
+- User mentions "local", "my data", "local sample", "pod5 directory", "local path"
+- User asks to analyze existing data on disk
+→ In these cases, use: [[SKILL_SWITCH_TO: analyze_local_sample]]
+
 ## Inputs
 
 * `query`: (String) The search term (e.g., "ENCSR...", "liver tissue").

@@ -1,13 +1,19 @@
 import time
 import requests
 import datetime
+import os
 import streamlit as st
+from auth import require_auth, logout_button, make_authenticated_request
 
 # --- CONFIG ---
-API_URL = "http://127.0.0.1:8000"
-SERVER3_URL = "http://127.0.0.1:8003"
+# Use environment variable or default to localhost
+API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title="AGOUTIC v3.0", layout="wide")
+
+# --- AUTHENTICATION ---
+# Require authentication before showing any UI
+user = require_auth(API_URL)
 
 # --- 1. STATE MANAGEMENT ---
 # Initialize with a random project ID if none exists
@@ -22,6 +28,14 @@ if "blocks" not in st.session_state:
 with st.sidebar:
     st.title("🧬 AGOUTIC")
     
+    # User info
+    st.caption(f"👤 {user.get('display_name', user.get('email'))}")
+    if user.get('role') == 'admin':
+        st.caption("🔑 Admin")
+    
+    logout_button(API_URL)
+    
+    st.divider()
     # [A] NEW PROJECT (Generates Random ID)
     if st.button("✨ New Project", use_container_width=True):
         # Create a unique ID
@@ -71,8 +85,9 @@ def get_sanitized_blocks(target_project_id):
     This guarantees no 'ghost' messages from other projects can appear.
     """
     try:
-        # 1. Ask Server
-        resp = requests.get(
+        # 1. Ask Server with authentication
+        resp = make_authenticated_request(
+            "GET",
             f"{API_URL}/blocks",
             params={"project_id": target_project_id, "since_seq": 0, "limit": 100},
             timeout=5,
@@ -93,9 +108,14 @@ def get_sanitized_blocks(target_project_id):
     return []
 
 def get_job_debug_info(run_uuid):
-    """Fetch detailed debug information for a failed job."""
+    """Fetch detailed debug information for a failed job via Server 1 proxy."""
     try:
-        resp = requests.get(f"{SERVER3_URL}/jobs/{run_uuid}/debug", timeout=10)
+        # Use Server 1 proxy instead of calling Server 3 directly
+        resp = make_authenticated_request(
+            "GET",
+            f"{API_URL}/jobs/{run_uuid}/debug",
+            timeout=10
+        )
         if resp.status_code == 200:
             return resp.json()
     except Exception as e:
@@ -307,7 +327,8 @@ def render_block(block):
                             payload_update = dict(content)
                             payload_update["edited_params"] = edited_params
                             
-                            requests.patch(
+                            make_authenticated_request(
+                                "PATCH",
                                 f"{API_URL}/block/{block_id}",
                                 json={"status": "APPROVED", "payload": payload_update}
                             )
@@ -333,7 +354,8 @@ def render_block(block):
                         payload_update["rejection_reason"] = rejection_reason
                         payload_update["attempt_number"] = attempt_number
                         
-                        requests.patch(
+                        make_authenticated_request(
+                            "PATCH",
                             f"{API_URL}/block/{block_id}",
                             json={"status": "REJECTED", "payload": payload_update}
                         )
@@ -606,7 +628,8 @@ if prompt := st.chat_input("Ask Agoutic to do something..."):
     
     try:
         # Send using the ACTIVE ID
-        requests.post(
+        resp = make_authenticated_request(
+            "POST",
             f"{API_URL}/chat",
             json={
                 "project_id": active_id, 
@@ -615,8 +638,11 @@ if prompt := st.chat_input("Ask Agoutic to do something..."):
                 "model": model_choice
             }
         )
-        time.sleep(0.5) 
-        st.rerun()
+        if resp.status_code != 200:
+            st.error(f"Chat request failed: {resp.status_code} - {resp.text}")
+        else:
+            time.sleep(0.5) 
+            st.rerun()
     except Exception as e:
         st.error(f"Failed to send message: {e}")
 

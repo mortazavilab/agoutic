@@ -7,8 +7,10 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Path as FastAPIPath, Query
+from fastapi import FastAPI, HTTPException, Path as FastAPIPath, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import select
 
 from server3.config import (
@@ -16,6 +18,7 @@ from server3.config import (
     MAX_CONCURRENT_JOBS,
     JOB_POLL_INTERVAL,
     REFERENCE_GENOMES,
+    INTERNAL_API_SECRET,
 )
 from server3.db import (
     init_db,
@@ -46,6 +49,46 @@ app = FastAPI(
     description="Dogme/Nextflow Job Execution Engine",
     version="0.3.0",
 )
+
+# Internal API secret validation middleware
+class InternalSecretMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to validate the X-Internal-Secret header on all requests.
+    Only /health is exempted.
+    """
+    
+    EXEMPT_PATHS = ["/health", "/docs", "/openapi.json"]
+    
+    async def dispatch(self, request: Request, call_next):
+        # Check if path is exempted
+        if any(request.url.path.startswith(path) for path in self.EXEMPT_PATHS):
+            return await call_next(request)
+        
+        # If INTERNAL_API_SECRET is not configured, allow all (dev mode)
+        if not INTERNAL_API_SECRET:
+            print("⚠️  Warning: INTERNAL_API_SECRET not set - Server 3 is unprotected!")
+            return await call_next(request)
+        
+        # Check for secret header
+        provided_secret = request.headers.get("X-Internal-Secret")
+        
+        if not provided_secret:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Missing X-Internal-Secret header"}
+            )
+        
+        if provided_secret != INTERNAL_API_SECRET:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Invalid X-Internal-Secret"}
+            )
+        
+        # Secret is valid, continue
+        return await call_next(request)
+
+# Add internal secret middleware FIRST
+app.add_middleware(InternalSecretMiddleware)
 
 # Enable CORS for communication with Server 1
 app.add_middleware(

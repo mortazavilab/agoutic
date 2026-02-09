@@ -1,0 +1,237 @@
+"""
+Authentication module for AGOUTIC using Google OAuth 2.0.
+
+Provides endpoints for:
+- /auth/login: Redirect to Google OAuth
+- /auth/callback: Handle Google OAuth callback
+- /auth/logout: Invalidate session
+"""
+
+import uuid
+import json
+from datetime import datetime, timedelta
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Response, Request
+from fastapi.responses import RedirectResponse
+from authlib.integrations.httpx_client import AsyncOAuth2Client
+from sqlalchemy import select
+
+from server1.config import (
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI,
+    SUPER_ADMIN_EMAIL,
+    FRONTEND_URL,
+    SESSION_EXPIRES_HOURS,
+)
+from server1.db import SessionLocal
+from server1.models import User, Session as SessionModel
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Google OAuth configuration
+GOOGLE_DISCOVERY_URL = "https://accounts.google.com/.well-known/openid-configuration"
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+
+
+@router.get("/login")
+async def login():
+    """
+    Redirect user to Google OAuth login page.
+    """
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."
+        )
+    
+    # Build authorization URL
+    client = AsyncOAuth2Client(
+        client_id=GOOGLE_CLIENT_ID,
+        redirect_uri=GOOGLE_REDIRECT_URI,
+    )
+    
+    authorization_url, state = client.create_authorization_url(
+        GOOGLE_AUTH_URL,
+        scope="openid email profile",
+    )
+    
+    # Redirect to Google
+    return RedirectResponse(authorization_url)
+
+
+@router.get("/callback")
+async def callback(request: Request, code: str, response: Response):
+    """
+    Handle Google OAuth callback.
+    
+    1. Exchange authorization code for access token
+    2. Fetch user info from Google
+    3. Create or update user in database
+    4. Create session
+    5. Set session cookie
+    6. Redirect to frontend
+    """
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="Google OAuth not configured"
+        )
+    
+    # Exchange code for token
+    client = AsyncOAuth2Client(
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        redirect_uri=GOOGLE_REDIRECT_URI,
+    )
+    
+    try:
+        token = await client.fetch_token(
+            GOOGLE_TOKEN_URL,
+            code=code,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch token: {str(e)}")
+    
+    # Get user info from Google
+    try:
+        import httpx
+        async with httpx.AsyncClient() as http_client:
+            resp = await http_client.get(
+                GOOGLE_USERINFO_URL,
+                headers={"Authorization": f"Bearer {token['access_token']}"}
+            )
+            resp.raise_for_status()
+            user_info = resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch user info: {str(e)}")
+    
+    email = user_info.get("email")
+    google_sub_id = user_info.get("sub")
+    display_name = user_info.get("name")
+    
+    if not email or not google_sub_id:
+        raise HTTPException(status_code=400, detail="Invalid user info from Google")
+    
+    # Create or update user in database
+    session = SessionLocal()
+    try:
+        # Check if user exists
+        result = session.execute(
+            select(User).where(User.email == email)
+        )
+        user = result.scalar_one_or_none()
+        
+        if user:
+            # Update existing user
+            user.google_sub_id = google_sub_id
+            user.display_name = display_name
+            user.last_login = datetime.utcnow()
+            session.commit()
+        else:
+            # Create new user
+            user_id = str(uuid.uuid4())
+            
+            # Check if this is the super admin
+            is_super_admin = (email == SUPER_ADMIN_EMAIL)
+            
+            user = User(
+                id=user_id,
+                email=email,
+                google_sub_id=google_sub_id,
+                display_name=display_name,
+                role="admin" if is_super_admin else "user",
+                is_active=is_super_admin,  # Super admin is auto-approved
+                created_at=datetime.utcnow(),
+                last_login=datetime.utcnow(),
+            )
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+        
+        # Create session token
+        session_id = str(uuid.uuid4())
+        expires_at = datetime.utcnow() + timedelta(hours=SESSION_EXPIRES_HOURS)
+        
+        session_obj = SessionModel(
+            id=session_id,
+            user_id=user.id,
+            created_at=datetime.utcnow(),
+            expires_at=expires_at,
+            is_valid=True,
+        )
+        session.add(session_obj)
+        session.commit()
+        
+        # Set cookie
+        response = RedirectResponse(url=FRONTEND_URL)
+        response.set_cookie(
+            key="session",
+            value=session_id,
+            httponly=True,
+            secure=False,  # Set True in production with HTTPS
+            samesite="lax",  # Critical for cross-port cookie sharing
+            max_age=SESSION_EXPIRES_HOURS * 3600,
+            path="/",
+        )
+        
+        return response
+        
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        session.close()
+
+
+@router.post("/logout")
+async def logout(request: Request, response: Response):
+    """
+    Invalidate the current session and clear the cookie.
+    """
+    session_id = request.cookies.get("session")
+    
+    if session_id:
+        session = SessionLocal()
+        try:
+            # Invalidate session in database
+            result = session.execute(
+                select(SessionModel).where(SessionModel.id == session_id)
+            )
+            session_obj = result.scalar_one_or_none()
+            
+            if session_obj:
+                session_obj.is_valid = False
+                session.commit()
+        finally:
+            session.close()
+    
+    # Clear cookie
+    response = Response(content=json.dumps({"status": "logged_out"}), media_type="application/json")
+    response.delete_cookie(key="session", path="/")
+    
+    return response
+
+
+@router.get("/me")
+async def get_current_user_info(request: Request):
+    """
+    Get information about the currently logged-in user.
+    Requires valid session (will be enforced by middleware).
+    """
+    # This will be set by the auth middleware
+    user = getattr(request.state, "user", None)
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    return {
+        "id": user.id,
+        "email": user.email,
+        "display_name": user.display_name,
+        "role": user.role,
+        "is_active": user.is_active,
+    }

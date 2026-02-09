@@ -16,6 +16,9 @@ dependencies:
     - uvicorn[standard]        # 'standard' includes 'uvloop' for speed
     - python-multipart
     
+    # --- Authentication ---
+    - authlib                  # OAuth 2.0 client for Google OAuth
+    
     # --- The Logic & MCP ---
     - mcp                      # Model Context Protocol SDK
     - pydantic>=2.0            # Data validation
