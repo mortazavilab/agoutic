@@ -80,5 +80,8 @@ SKILLS_REGISTRY = {
     "run_dogme_cdna": "Dogme_cDNA.md",
     
     # Local Intake / Dispatcher Skill
-    "analyze_local_sample": "Local_Sample_Intake.md"
+    "analyze_local_sample": "Local_Sample_Intake.md",
+    
+    # Job Results Analysis Skill
+    "analyze_job_results": "Analyze_Job_Results.md"
 }

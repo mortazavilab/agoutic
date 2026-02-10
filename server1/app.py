@@ -3,6 +3,7 @@ import datetime
 import uuid
 import json
 import os
+import httpx
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Path, Request
@@ -16,7 +17,7 @@ from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from server1.agent_engine import AgentEngine
 from server1.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES
 from server1.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
-from server1.models import ProjectBlock
+from server1.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess
 from server1.middleware import AuthMiddleware
 from server1.auth import router as auth_router
 from server1.admin import router as admin_router
@@ -891,6 +892,9 @@ async def chat_with_agent(req: ChatRequest, request: Request):
             active_skill = req.skill
             print(f"🆕 Starting fresh with skill: {active_skill}")
         
+        # Track project access
+        await track_project_access(session, user.id, req.project_id, req.project_id)
+        
         # 1. Save USER_MESSAGE
         user_block = _create_block_internal(
             session,
@@ -1028,11 +1032,76 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         trigger_tag = "[[APPROVAL_NEEDED]]"
         needs_approval = trigger_tag in raw_response
         
+        # 5. Parse Analysis Call Tags
+        analysis_call_pattern = r'\[\[ANALYSIS_CALL:\s*(\w+),\s*run_uuid=([a-f0-9-]+)\]\]'
+        analysis_matches = list(re.finditer(analysis_call_pattern, raw_response))
+        
         # Clean all tags out of the text so the user doesn't see them
         clean_markdown = raw_response.replace(trigger_tag, "").strip()
         clean_markdown = re.sub(r'\[\[SKILL_SWITCH_TO:\s*\w+\]\]', '', clean_markdown).strip()
+        clean_markdown = re.sub(analysis_call_pattern, '', clean_markdown).strip()
         
-        # 4. Save AGENT_PLAN (The Text)
+        # 6. Execute Analysis Calls if present
+        analysis_results = []
+        for match in analysis_matches:
+            analysis_type = match.group(1)  # summary, categorize_files, list_files
+            run_uuid = match.group(2)
+            
+            print(f"📊 Executing analysis call: {analysis_type} for UUID {run_uuid}")
+            
+            try:
+                # Call the appropriate Server4 endpoint
+                if analysis_type == "summary":
+                    endpoint_url = f"http://localhost:8004/analysis/summary/{run_uuid}"
+                elif analysis_type == "categorize_files":
+                    endpoint_url = f"http://localhost:8004/analysis/jobs/{run_uuid}/files/categorize"
+                elif analysis_type == "list_files":
+                    endpoint_url = f"http://localhost:8004/analysis/jobs/{run_uuid}/files"
+                else:
+                    print(f"❌ Unknown analysis type: {analysis_type}")
+                    continue
+                
+                # Make async HTTP call to Server4
+                import httpx
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(endpoint_url)
+                    if response.status_code == 200:
+                        result_data = response.json()
+                        analysis_results.append({
+                            "type": analysis_type,
+                            "uuid": run_uuid,
+                            "data": result_data
+                        })
+                        print(f"✅ Analysis call successful: {analysis_type}")
+                    else:
+                        print(f"❌ Analysis call failed: {response.status_code} - {response.text}")
+                        analysis_results.append({
+                            "type": analysis_type,
+                            "uuid": run_uuid,
+                            "error": f"HTTP {response.status_code}: {response.text[:200]}"
+                        })
+            except Exception as e:
+                print(f"❌ Analysis call exception: {e}")
+                analysis_results.append({
+                    "type": analysis_type,
+                    "uuid": run_uuid,
+                    "error": str(e)
+                })
+        
+        # If we have analysis results, format them and append to the response
+        if analysis_results:
+            analysis_markdown = "\n\n---\n\n### 📊 Analysis Results\n\n"
+            for result in analysis_results:
+                analysis_markdown += f"**{result['type'].replace('_', ' ').title()} for job {result['uuid'][:8]}...**\n\n"
+                if "error" in result:
+                    analysis_markdown += f"❌ Error: {result['error']}\n\n"
+                elif "data" in result:
+                    # Format the data nicely
+                    import json
+                    analysis_markdown += f"```json\n{json.dumps(result['data'], indent=2)[:2000]}\n```\n\n"
+            clean_markdown += analysis_markdown
+        
+        # 7. Save AGENT_PLAN (The Text)
         # Status is DONE because the text itself is just informational. 
         # The flow control happens in the gate block below.
         agent_block = _create_block_internal(
@@ -1047,6 +1116,9 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             status="DONE",
             owner_id=user.id
         )
+        
+        # Save assistant's response to conversation history
+        await save_conversation_message(session, req.project_id, user.id, "assistant", clean_markdown)
         
         # 5. Insert APPROVAL_GATE (The Buttons) if requested
         gate_block = None
@@ -1070,6 +1142,9 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 owner_id=user.id
             )
         
+        # Save conversation message
+        await save_conversation_message(session, req.project_id, user.id, "user", req.message)
+        
         return {
             "status": "ok", 
             "user_block": row_to_dict(user_block),
@@ -1081,3 +1156,464 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
+
+
+# --- CONVERSATION HISTORY ENDPOINTS ---
+
+async def save_conversation_message(session, project_id: str, user_id: str, role: str, content: str):
+    """Helper to save conversation messages."""
+    # Get or create conversation for this project
+    conv_query = select(Conversation)\
+        .where(Conversation.project_id == project_id)\
+        .where(Conversation.user_id == user_id)\
+        .order_by(desc(Conversation.created_at))\
+        .limit(1)
+    
+    result = session.execute(conv_query)
+    conversation = result.scalar_one_or_none()
+    
+    if not conversation:
+        # Create new conversation
+        conversation = Conversation(
+            id=str(uuid.uuid4()),
+            project_id=project_id,
+            user_id=user_id,
+            title=content[:100] if role == "user" else "New Conversation",
+            created_at=datetime.datetime.utcnow(),
+            updated_at=datetime.datetime.utcnow()
+        )
+        session.add(conversation)
+        session.flush()
+    
+    # Get next sequence number
+    msg_query = select(ConversationMessage)\
+        .where(ConversationMessage.conversation_id == conversation.id)\
+        .order_by(desc(ConversationMessage.seq))
+    
+    result = session.execute(msg_query)
+    last_msg = result.first()
+    next_seq = (last_msg[0].seq + 1) if last_msg else 0
+    
+    # Create message
+    message = ConversationMessage(
+        id=str(uuid.uuid4()),
+        conversation_id=conversation.id,
+        role=role,
+        content=content,
+        seq=next_seq,
+        created_at=datetime.datetime.utcnow()
+    )
+    session.add(message)
+    
+    # Update conversation timestamp
+    conversation.updated_at = datetime.datetime.utcnow()
+    
+    session.commit()
+
+
+@app.get("/projects/{project_id}/conversations")
+async def get_project_conversations(project_id: str, request: Request):
+    """Get all conversations for a project."""
+    user = request.state.user
+    
+    session = SessionLocal()
+    try:
+        query = select(Conversation)\
+            .where(Conversation.project_id == project_id)\
+            .where(Conversation.user_id == user.id)\
+            .order_by(desc(Conversation.updated_at))
+        
+        result = session.execute(query)
+        conversations = result.scalars().all()
+        
+        return {
+            "conversations": [
+                {
+                    "id": conv.id,
+                    "project_id": conv.project_id,
+                    "title": conv.title,
+                    "created_at": conv.created_at,
+                    "updated_at": conv.updated_at
+                }
+                for conv in conversations
+            ]
+        }
+    finally:
+        session.close()
+
+
+@app.get("/conversations/{conversation_id}/messages")
+async def get_conversation_messages(conversation_id: str, request: Request):
+    """Get all messages in a conversation."""
+    user = request.state.user
+    
+    session = SessionLocal()
+    try:
+        # Verify user owns this conversation
+        conv_query = select(Conversation).where(Conversation.id == conversation_id)
+        result = session.execute(conv_query)
+        conversation = result.scalar_one_or_none()
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        if conversation.user_id != user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Get messages
+        msg_query = select(ConversationMessage)\
+            .where(ConversationMessage.conversation_id == conversation_id)\
+            .order_by(ConversationMessage.seq)
+        
+        result = session.execute(msg_query)
+        messages = result.scalars().all()
+        
+        return {
+            "conversation_id": conversation_id,
+            "messages": [
+                {
+                    "id": msg.id,
+                    "role": msg.role,
+                    "content": msg.content,
+                    "seq": msg.seq,
+                    "created_at": msg.created_at
+                }
+                for msg in messages
+            ]
+        }
+    finally:
+        session.close()
+
+
+@app.get("/projects/{project_id}/jobs")
+async def get_project_jobs(project_id: str, request: Request):
+    """Get all jobs linked to a project."""
+    user = request.state.user
+    
+    session = SessionLocal()
+    try:
+        # Get all conversations for this project
+        conv_query = select(Conversation)\
+            .where(Conversation.project_id == project_id)\
+            .where(Conversation.user_id == user.id)
+        
+        result = session.execute(conv_query)
+        conversations = result.scalars().all()
+        
+        if not conversations:
+            return {"jobs": []}
+        
+        # Get all job results
+        conversation_ids = [c.id for c in conversations]
+        job_query = select(JobResult)\
+            .where(JobResult.conversation_id.in_(conversation_ids))\
+            .order_by(desc(JobResult.created_at))
+        
+        result = session.execute(job_query)
+        jobs = result.scalars().all()
+        
+        return {
+            "jobs": [
+                {
+                    "id": job.id,
+                    "run_uuid": job.run_uuid,
+                    "sample_name": job.sample_name,
+                    "workflow_type": job.workflow_type,
+                    "status": job.status,
+                    "created_at": job.created_at
+                }
+                for job in jobs
+            ]
+        }
+    finally:
+        session.close()
+
+
+@app.post("/conversations/{conversation_id}/jobs")
+async def link_job_to_conversation(conversation_id: str, run_uuid: str, request: Request):
+    """Link a job to a conversation."""
+    user = request.state.user
+    
+    session = SessionLocal()
+    try:
+        # Verify conversation exists and user owns it
+        conv_query = select(Conversation).where(Conversation.id == conversation_id)
+        result = session.execute(conv_query)
+        conversation = result.scalar_one_or_none()
+        
+        if not conversation or conversation.user_id != user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # TODO: Query server3 for job details
+        # For now, create with minimal info
+        job_result = JobResult(
+            id=str(uuid.uuid4()),
+            conversation_id=conversation_id,
+            run_uuid=run_uuid,
+            sample_name="Unknown",
+            workflow_type="Unknown",
+            status="UNKNOWN",
+            created_at=datetime.datetime.utcnow()
+        )
+        session.add(job_result)
+        session.commit()
+        
+        return {"status": "ok", "job_id": job_result.id}
+    finally:
+        session.close()
+
+
+# --- PROJECT MANAGEMENT ENDPOINTS ---
+
+async def track_project_access(session, user_id: str, project_id: str, project_name: str = None):
+    """Track when a user accesses a project."""
+    # Check if access record exists
+    access_query = select(ProjectAccess)\
+        .where(ProjectAccess.user_id == user_id)\
+        .where(ProjectAccess.project_id == project_id)
+    
+    result = session.execute(access_query)
+    access = result.scalar_one_or_none()
+    
+    if access:
+        # Update last accessed time
+        access.last_accessed = datetime.datetime.utcnow()
+        if project_name:
+            access.project_name = project_name
+    else:
+        # Create new access record
+        access = ProjectAccess(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            project_id=project_id,
+            project_name=project_name or project_id,
+            last_accessed=datetime.datetime.utcnow()
+        )
+        session.add(access)
+    
+    # Update user's last project
+    user_query = select(User).where(User.id == user_id)
+    result = session.execute(user_query)
+    user_obj = result.scalar_one_or_none()
+    if user_obj:
+        user_obj.last_project_id = project_id
+    
+    session.commit()
+
+
+@app.get("/user/last-project")
+async def get_last_project(request: Request):
+    """Get user's last active project."""
+    user = request.state.user
+    
+    session = SessionLocal()
+    try:
+        user_query = select(User).where(User.id == user.id)
+        result = session.execute(user_query)
+        user_obj = result.scalar_one_or_none()
+        
+        if user_obj and user_obj.last_project_id:
+            return {
+                "last_project_id": user_obj.last_project_id
+            }
+        
+        return {"last_project_id": None}
+    finally:
+        session.close()
+
+
+@app.get("/user/projects")
+async def get_user_projects(request: Request):
+    """Get all projects the user has accessed."""
+    user = request.state.user
+    
+    session = SessionLocal()
+    try:
+        query = select(ProjectAccess)\
+            .where(ProjectAccess.user_id == user.id)\
+            .order_by(desc(ProjectAccess.last_accessed))
+        
+        result = session.execute(query)
+        projects = result.scalars().all()
+        
+        return {
+            "projects": [
+                {
+                    "id": proj.project_id,
+                    "name": proj.project_name,
+                    "last_accessed": proj.last_accessed
+                }
+                for proj in projects
+            ]
+        }
+    finally:
+        session.close()
+
+
+@app.post("/projects/{project_id}/access")
+async def record_project_access(project_id: str, request: Request, project_name: str = None):
+    """Record that user accessed a project."""
+    user = request.state.user
+    
+    session = SessionLocal()
+    try:
+        await track_project_access(session, user.id, project_id, project_name)
+        return {"status": "ok"}
+    finally:
+        session.close()
+
+# =============================================================================
+# SERVER 4 ANALYSIS PROXY ENDPOINTS
+# =============================================================================
+
+SERVER4_URL = "http://localhost:8004"
+
+@app.get("/analysis/jobs/{run_uuid}/summary")
+async def get_job_analysis_summary(run_uuid: str, request: Request):
+    """
+    Get comprehensive analysis summary for a completed job.
+    Proxies to Server 4 analysis engine.
+    """
+    user = request.state.user
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{SERVER4_URL}/analysis/summary/{run_uuid}")
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+
+@app.get("/analysis/jobs/{run_uuid}/files")
+async def list_job_files(run_uuid: str, extensions: Optional[str] = None, request: Request = None):
+    """
+    List all files for a completed job.
+    Query params:
+      - extensions: Comma-separated list (e.g., ".csv,.txt")
+    """
+    user = request.state.user
+    
+    try:
+        params = {}
+        if extensions:
+            params['extensions'] = extensions
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{SERVER4_URL}/analysis/jobs/{run_uuid}/files",
+                params=params
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+
+@app.get("/analysis/jobs/{run_uuid}/files/categorize")
+async def categorize_job_files(run_uuid: str, request: Request):
+    """
+    Categorize job files by type (csv, txt, bed, other).
+    """
+    user = request.state.user
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{SERVER4_URL}/analysis/jobs/{run_uuid}/files/categorize"
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+
+@app.get("/analysis/files/content")
+async def read_file_content(
+    run_uuid: str,
+    file_path: str,
+    preview_lines: Optional[int] = 50,
+    request: Request = None
+):
+    """
+    Read content of a specific file.
+    Query params:
+      - run_uuid: Job UUID
+      - file_path: Relative path to file
+      - preview_lines: Number of lines to preview (default 50)
+    """
+    user = request.state.user
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{SERVER4_URL}/analysis/files/content",
+                params={
+                    "run_uuid": run_uuid,
+                    "file_path": file_path,
+                    "preview_lines": preview_lines
+                }
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+
+@app.get("/analysis/files/parse/csv")
+async def parse_csv_file(
+    run_uuid: str,
+    file_path: str,
+    max_rows: Optional[int] = 100,
+    request: Request = None
+):
+    """
+    Parse CSV/TSV file into structured data.
+    Query params:
+      - run_uuid: Job UUID
+      - file_path: Relative path to CSV/TSV file
+      - max_rows: Maximum rows to return (default 100)
+    """
+    user = request.state.user
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{SERVER4_URL}/analysis/files/parse/csv",
+                params={
+                    "run_uuid": run_uuid,
+                    "file_path": file_path,
+                    "max_rows": max_rows
+                }
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+
+@app.get("/analysis/files/parse/bed")
+async def parse_bed_file(
+    run_uuid: str,
+    file_path: str,
+    max_records: Optional[int] = 100,
+    request: Request = None
+):
+    """
+    Parse BED genomic file.
+    Query params:
+      - run_uuid: Job UUID
+      - file_path: Relative path to BED file
+      - max_records: Maximum records to return (default 100)
+    """
+    user = request.state.user
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{SERVER4_URL}/analysis/files/parse/bed",
+                params={
+                    "run_uuid": run_uuid,
+                    "file_path": file_path,
+                    "max_records": max_records
+                }
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")

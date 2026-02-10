@@ -4,12 +4,35 @@
 
 This is a unified entry point for analyzing local data. It acts as an intake wizard that interviews the user to gather essential metadata through a multi-turn conversation. **DO NOT show approval until ALL information is collected.**
 
+**IMPORTANT:** If the user asks for analysis of a COMPLETED job (QC report, results, file analysis), switch to the `analyze_job_results` skill by outputting:
+
+```
+[[SKILL_SWITCH_TO: analyze_job_results]]
+```
+
 ## Inputs
 
 * `path`: (String, Required) The local directory path containing the `.pod5` files.
 * `sample_name`: (String, Required) The desired identifier for the sample.
 * `sample_type`: (String, Required) One of "DNA", "RNA", "CDNA", or "Fiber-seq".
 * `reference_genome`: (String, Required) The target genome (e.g., "GRCh38" for human, "mm39" for mouse).
+
+## Detecting Analysis Requests
+
+If the user's message contains any of these patterns, switch to `analyze_job_results`:
+- "qc report"
+- "quality control"
+- "analyze results"
+- "show me the results"
+- "what files"
+- "read the output"
+- "parse the csv"
+- "check the bed file"
+- And the conversation mentions a completed job or run_uuid
+
+**Example:**
+User: "Can you give me a QC report?"
+Agent: "[[SKILL_SWITCH_TO: analyze_job_results]]"
 
 ## Plan Logic
 

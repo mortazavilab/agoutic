@@ -16,9 +16,24 @@ st.set_page_config(page_title="AGOUTIC v3.0", layout="wide")
 user = require_auth(API_URL)
 
 # --- 1. STATE MANAGEMENT ---
-# Initialize with a random project ID if none exists
+# Initialize with user's last project or create new one
 if "active_project_id" not in st.session_state:
-    st.session_state.active_project_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # Try to get user's last project
+    try:
+        resp = make_authenticated_request("GET", f"{API_URL}/user/last-project", timeout=3)
+        if resp.status_code == 200:
+            last_project = resp.json().get("last_project_id")
+            if last_project:
+                st.session_state.active_project_id = last_project
+            else:
+                # No previous project, create new one
+                st.session_state.active_project_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        else:
+            # Fallback to new project
+            st.session_state.active_project_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    except:
+        # Error fetching, create new project
+        st.session_state.active_project_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
 # Initialize other state variables
 if "blocks" not in st.session_state:
@@ -67,6 +82,86 @@ with st.sidebar:
     if st.button("🧹 Force Clear / Refresh"):
         st.rerun()
 
+    st.divider()
+    
+    # [D] PROJECT SWITCHER
+    st.subheader("📁 Projects")
+    try:
+        # Get user's projects
+        proj_resp = make_authenticated_request(
+            "GET",
+            f"{API_URL}/user/projects",
+            timeout=3
+        )
+        if proj_resp.status_code == 200:
+            user_projects = proj_resp.json().get("projects", [])
+            if user_projects and len(user_projects) > 1:
+                st.caption(f"{len(user_projects)} project(s)")
+                for proj in user_projects[:5]:  # Show last 5 projects
+                    proj_id = proj.get("id", "")
+                    proj_name = proj.get("name", proj_id)[:30]
+                    is_current = proj_id == st.session_state.active_project_id
+                    
+                    if is_current:
+                        st.info(f"📌 {proj_name}")
+                    else:
+                        if st.button(f"📂 {proj_name}", key=f"proj_{proj_id}", use_container_width=True):
+                            # Switch to this project
+                            st.session_state.active_project_id = proj_id
+                            st.session_state.blocks = []  # Clear blocks
+                            st.rerun()
+    except Exception:
+        pass  # Silently fail if projects not available
+    
+    st.divider()
+    
+    # [E] CONVERSATION HISTORY
+    st.subheader("💬 History")
+    try:
+        # Get conversations for this project
+        conv_resp = make_authenticated_request(
+            "GET",
+            f"{API_URL}/projects/{st.session_state.active_project_id}/conversations",
+            timeout=3
+        )
+        if conv_resp.status_code == 200:
+            conversations = conv_resp.json().get("conversations", [])
+            if conversations:
+                st.caption(f"{len(conversations)} conversation(s)")
+                for conv in conversations[:5]:  # Show last 5
+                    conv_title = conv.get("title", "Untitled")[:30]
+                    if st.button(f"📝 {conv_title}...", key=f"conv_{conv['id']}", use_container_width=True):
+                        # Load this conversation
+                        msg_resp = make_authenticated_request(
+                            "GET",
+                            f"{API_URL}/conversations/{conv['id']}/messages",
+                            timeout=3
+                        )
+                        if msg_resp.status_code == 200:
+                            st.session_state.loaded_conversation = msg_resp.json()
+                            st.rerun()
+            else:
+                st.caption("No history yet")
+        
+        # Get previous jobs
+        job_resp = make_authenticated_request(
+            "GET",
+            f"{API_URL}/projects/{st.session_state.active_project_id}/jobs",
+            timeout=3
+        )
+        if job_resp.status_code == 200:
+            jobs = job_resp.json().get("jobs", [])
+            if jobs:
+                st.caption(f"📊 {len(jobs)} job(s)")
+                for job in jobs[:3]:  # Show last 3
+                    status_emoji = "✅" if job.get("status") == "COMPLETED" else "⏳"
+                    job_name = job.get("sample_name", "Unknown")[:20]
+                    if st.button(f"{status_emoji} {job_name}", key=f"job_{job['id']}", use_container_width=True):
+                        st.session_state.selected_job = job
+                        st.rerun()
+    except Exception:
+        pass  # Silently fail if history not available
+    
     st.divider()
     
     model_choice = st.selectbox("Brain Model", ["default", "fast", "smart"], index=0)

@@ -4,6 +4,28 @@
 
 This skill processes cDNA long-read data. It focuses on high-accuracy isoform quantification and spliced alignment. Unlike Direct RNA or DNA, **it does not perform modification calling**, making it faster but limited to transcriptomic analysis.
 
+**IMPORTANT:** If the user asks for analysis of a COMPLETED job (QC report, results, file analysis), switch to the `analyze_job_results` skill by outputting:
+
+```
+[[SKILL_SWITCH_TO: analyze_job_results]]
+```
+
+## Detecting Analysis Requests
+
+If the user's message contains any of these patterns, switch to `analyze_job_results`:
+- "qc report" / "quality control" / "quality check"
+- "analyze results" / "show results" / "check results"
+- "what files" / "list files" / "show files"
+- "read the output" / "show output"
+- "parse" / "view" / "display" (referring to output files)
+
+**Example:**
+User: "Can you give me a QC report?"
+Agent: "[[SKILL_SWITCH_TO: analyze_job_results]]"
+
+User: "Show me the output files"
+Agent: "[[SKILL_SWITCH_TO: analyze_job_results]]"
+
 ## Inputs
 
 * `query`: (String) The sample identifier or directory path.

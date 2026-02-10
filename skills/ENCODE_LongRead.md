@@ -6,6 +6,12 @@ This skill handles the retrieval and initial processing of ENCODE long-read data
 
 **IMPORTANT: If the user asks about LOCAL data (not ENCODE downloads), use [[SKILL_SWITCH_TO: analyze_local_sample]] to switch to the local sample intake skill.**
 
+**IMPORTANT: If the user asks for analysis of COMPLETED jobs (QC report, results, file analysis), switch to the `analyze_job_results` skill:**
+
+```
+[[SKILL_SWITCH_TO: analyze_job_results]]
+```
+
 ## When to Use This Skill
 
 - User mentions "ENCODE", "download from ENCODE", "ENCODE experiment ID", "public data"
@@ -16,6 +22,9 @@ This skill handles the retrieval and initial processing of ENCODE long-read data
 - User mentions "local", "my data", "local sample", "pod5 directory", "local path"
 - User asks to analyze existing data on disk
 → In these cases, use: [[SKILL_SWITCH_TO: analyze_local_sample]]
+
+- User asks for "qc report", "quality control", "analyze results", "show results", "what files", "show output"
+→ In these cases, use: [[SKILL_SWITCH_TO: analyze_job_results]]
 
 ## Inputs
 
