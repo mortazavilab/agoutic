@@ -1,8 +1,10 @@
 """
-Server 2 Configuration - Consortium & Service Registries
+Server 2 Configuration - Consortium Registry
 
-Defines all external consortium MCP servers and internal service MCP servers
-that Server 1 can route tool calls to.
+Defines external consortium MCP servers (ENCODE, GEO, SRA, etc.)
+that Server 1 can route data queries to.
+
+Internal service servers (Server 3, Server 4) are configured in server1/config.py.
 
 To add a new consortium:
   1. Add an entry to CONSORTIUM_REGISTRY below
@@ -82,81 +84,27 @@ CONSORTIUM_REGISTRY = {
     # },
 }
 
-# =============================================================================
-# SERVICE REGISTRY - Internal MCP servers (Server 3, Server 4)
-# =============================================================================
-# These are Agoutic's own servers that also communicate via MCP over HTTP.
 
-SERVICE_REGISTRY = {
-    "server3": {
-        "url": os.getenv("SERVER3_MCP_URL", "http://localhost:8002"),
-        "display_name": "Job Execution (Nextflow/Dogme)",
-        "emoji": "🚀",
-        "table_columns": [],
-        "count_field": None,
-        "count_label": None,
-        "skills": [
-            "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
-            "analyze_local_sample",
-        ],
-        "fallback_patterns": {},
-    },
-    "server4": {
-        "url": os.getenv("SERVER4_MCP_URL", "http://localhost:8004"),
-        "display_name": "Analysis Engine",
-        "emoji": "📊",
-        "table_columns": [],
-        "count_field": None,
-        "count_label": None,
-        "skills": ["analyze_job_results"],
-        "fallback_patterns": {},
-    },
-}
-
-
-def get_service_url(key: str) -> str:
-    """Get the MCP URL for a consortium or service by key."""
+def get_consortium_url(key: str) -> str:
+    """Get the MCP URL for a consortium by key."""
     if key in CONSORTIUM_REGISTRY:
         return CONSORTIUM_REGISTRY[key]["url"]
-    if key in SERVICE_REGISTRY:
-        return SERVICE_REGISTRY[key]["url"]
-    raise KeyError(f"Unknown service/consortium: {key}")
+    raise KeyError(f"Unknown consortium: {key}")
 
 
-def get_registry_entry(key: str) -> dict:
-    """Get the full registry entry for a consortium or service."""
+def get_consortium_entry(key: str) -> dict:
+    """Get the full registry entry for a consortium."""
     if key in CONSORTIUM_REGISTRY:
         return CONSORTIUM_REGISTRY[key]
-    if key in SERVICE_REGISTRY:
-        return SERVICE_REGISTRY[key]
-    raise KeyError(f"Unknown service/consortium: {key}")
-
-
-def get_source_for_skill(skill_key: str) -> tuple[str, str] | None:
-    """
-    Look up which consortium or service a skill belongs to.
-    
-    Returns:
-        (source_key, source_type) e.g. ("encode", "consortium") or ("server4", "service")
-        None if skill doesn't belong to any registered source
-    """
-    for key, entry in CONSORTIUM_REGISTRY.items():
-        if skill_key in entry.get("skills", []):
-            return (key, "consortium")
-    for key, entry in SERVICE_REGISTRY.items():
-        if skill_key in entry.get("skills", []):
-            return (key, "service")
-    return None
+    raise KeyError(f"Unknown consortium: {key}")
 
 
 def get_all_fallback_patterns() -> dict[str, str]:
     """
-    Collect all fallback patterns from all registered consortia and services.
+    Collect all fallback patterns from all registered consortia.
     Returns a merged dict of regex pattern -> replacement.
     """
     patterns = {}
     for entry in CONSORTIUM_REGISTRY.values():
-        patterns.update(entry.get("fallback_patterns", {}))
-    for entry in SERVICE_REGISTRY.values():
         patterns.update(entry.get("fallback_patterns", {}))
     return patterns

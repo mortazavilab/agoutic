@@ -1,20 +1,17 @@
 """
-Server 2 - Consortium Router & MCP Client Layer
+Server 2 - Consortium Router
 
-Routes tool calls to external consortium MCP servers (ENCODE, GEO, SRA, etc.)
-and internal service MCP servers (Server 3 Job Execution, Server 4 Analysis).
+Routes tool calls to external consortium MCP servers (ENCODE, GEO, SRA, etc.).
+Each consortium is an external MCP server providing domain-specific data tools.
 
-All downstream communication uses MCP over HTTP/SSE to persistent server processes.
+Internal services (Server 3/4) are owned by Server 1 directly.
+The generic MCP HTTP client lives in common/mcp_client.py.
 """
 
-from server2.config import CONSORTIUM_REGISTRY, SERVICE_REGISTRY, get_service_url
-from server2.mcp_http_client import MCPHttpClient
+from server2.config import CONSORTIUM_REGISTRY
 from server2.result_formatter import format_results
 
 __all__ = [
     "CONSORTIUM_REGISTRY",
-    "SERVICE_REGISTRY",
-    "get_service_url",
-    "MCPHttpClient",
     "format_results",
 ]

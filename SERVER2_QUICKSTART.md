@@ -46,14 +46,19 @@ This launches:
 
 ## Files
 
-### New (`server2/` package)
+### New (`server2/` package — consortium routing)
 | File | Purpose |
 |------|---------|
 | `server2/__init__.py` | Package exports |
-| `server2/config.py` | `CONSORTIUM_REGISTRY`, `SERVICE_REGISTRY`, helper functions |
-| `server2/mcp_http_client.py` | `MCPHttpClient` — generic MCP-over-HTTP client |
+| `server2/config.py` | `CONSORTIUM_REGISTRY`, consortium helper functions |
 | `server2/result_formatter.py` | Registry-driven markdown table formatting |
 | `server2/launch_encode.py` | Thin wrapper to serve ENCODELIB over HTTP |
+
+### New (`common/` package — shared infrastructure)
+| File | Purpose |
+|------|---------|
+| `common/__init__.py` | Package exports |
+| `common/mcp_client.py` | `MCPHttpClient` — generic MCP-over-HTTP client |
 
 ### New (root)
 | File | Purpose |
@@ -65,7 +70,7 @@ This launches:
 |------|--------|
 | `server1/app.py` | Unified `DATA_CALL` dispatch, Server3/4 proxy endpoints use MCP |
 | `server1/agent_engine.py` | Dynamic `DATA_CALL` tag generation based on skill source |
-| `server1/config.py` | Removed stale `ENCODELIB_PATH`, `SERVER2_MCP_COMMAND`, `SERVER3_URL`, `SERVER4_URL` |
+| `server1/config.py` | Added `SERVICE_REGISTRY` (Server 3/4 URLs); removed stale vars |
 | `server3/mcp_server.py` | Added `get_job_logs`, `get_job_debug` tools; expanded `submit_dogme_job` params |
 | `server3/mcp_tools.py` | Implemented `get_job_logs`, `get_job_debug`; added advanced submit params |
 | `server4/mcp_server.py` | Migrated from official MCP SDK (stdio) to FastMCP with HTTP support |
@@ -76,15 +81,15 @@ This launches:
 ### Deleted
 | File | Reason |
 |------|--------|
-| `server1/server2_mcp_client.py` | Replaced by `server2/mcp_http_client.py` |
-| `server1/mcp_client.py` | Replaced by `server2/mcp_http_client.py` |
-| `server1/server4_mcp_client.py` | Replaced by `server2/mcp_http_client.py` |
+| `server1/server2_mcp_client.py` | Replaced by `common/mcp_client.py` |
+| `server1/mcp_client.py` | Replaced by `common/mcp_client.py` |
+| `server1/server4_mcp_client.py` | Replaced by `common/mcp_client.py` |
 
 ## Example Usage
 
 ### Python — Call an MCP tool directly
 ```python
-from server2 import MCPHttpClient
+from common import MCPHttpClient
 
 async def search_encode():
     client = MCPHttpClient(name="encode", base_url="http://localhost:8006")

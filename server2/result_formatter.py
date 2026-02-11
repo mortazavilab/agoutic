@@ -10,10 +10,10 @@ import json
 from collections import Counter
 from typing import Any
 
-from server2.config import CONSORTIUM_REGISTRY, SERVICE_REGISTRY
+from server2.config import CONSORTIUM_REGISTRY
 
 
-def format_results(source_key: str, results: list[dict]) -> str:
+def format_results(source_key: str, results: list[dict], registry_entry: dict | None = None) -> str:
     """
     Format a list of tool call results into markdown for display.
 
@@ -23,6 +23,8 @@ def format_results(source_key: str, results: list[dict]) -> str:
     Args:
         source_key: Key from CONSORTIUM_REGISTRY or SERVICE_REGISTRY
         results: List of tool result dicts
+        registry_entry: Optional pre-looked-up registry entry dict.
+                        If not provided, looks up from CONSORTIUM_REGISTRY.
 
     Returns:
         Markdown string ready to append to the chat response
@@ -30,8 +32,8 @@ def format_results(source_key: str, results: list[dict]) -> str:
     if not results:
         return ""
 
-    # Look up registry entry for formatting config
-    entry = _get_registry_entry(source_key)
+    # Use provided entry or look up from consortium registry
+    entry = registry_entry if registry_entry is not None else _get_registry_entry(source_key)
     emoji = entry.get("emoji", "📡")
     display_name = entry.get("display_name", source_key.upper())
     table_columns = entry.get("table_columns", [])
@@ -119,11 +121,9 @@ def _format_data(
 
 
 def _get_registry_entry(key: str) -> dict:
-    """Look up a registry entry from either registry."""
+    """Look up a registry entry from the consortium registry."""
     if key in CONSORTIUM_REGISTRY:
         return CONSORTIUM_REGISTRY[key]
-    if key in SERVICE_REGISTRY:
-        return SERVICE_REGISTRY[key]
     # Return sensible defaults for unknown sources
     return {
         "display_name": key.upper(),

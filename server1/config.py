@@ -55,10 +55,71 @@ LLM_MODELS = {
 }
 
 # --- SERVER INTEGRATION CONFIGURATION ---
-# Server URLs are now managed via server2/config.py registries (CONSORTIUM_REGISTRY, SERVICE_REGISTRY).
-# ENCODELIB_PATH is read directly from environment by server2/launch_encode.py.
 # Default ENCODELIB location (for reference / fallback scripts):
 _default_encodelib = AGOUTIC_CODE / "ENCODELIB"
+
+# =============================================================================
+# SERVICE REGISTRY - Internal MCP servers (Server 3, Server 4)
+# =============================================================================
+# Server 1 connects directly to these via MCP over HTTP.
+# Consortium MCP servers (ENCODE, etc.) are managed in server2/config.py.
+
+SERVICE_REGISTRY = {
+    "server3": {
+        "url": os.getenv("SERVER3_MCP_URL", "http://localhost:8002"),
+        "display_name": "Job Execution (Nextflow/Dogme)",
+        "emoji": "\U0001f680",
+        "table_columns": [],
+        "count_field": None,
+        "count_label": None,
+        "skills": [
+            "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
+            "analyze_local_sample",
+        ],
+        "fallback_patterns": {},
+    },
+    "server4": {
+        "url": os.getenv("SERVER4_MCP_URL", "http://localhost:8004"),
+        "display_name": "Analysis Engine",
+        "emoji": "\U0001f4ca",
+        "table_columns": [],
+        "count_field": None,
+        "count_label": None,
+        "skills": ["analyze_job_results"],
+        "fallback_patterns": {},
+    },
+}
+
+
+def get_service_url(key: str) -> str:
+    """Get the MCP URL for a service or consortium by key."""
+    if key in SERVICE_REGISTRY:
+        return SERVICE_REGISTRY[key]["url"]
+    # Also check consortium registry for unified dispatch
+    from server2.config import CONSORTIUM_REGISTRY
+    if key in CONSORTIUM_REGISTRY:
+        return CONSORTIUM_REGISTRY[key]["url"]
+    raise KeyError(f"Unknown service/consortium: {key}")
+
+
+def get_source_for_skill(skill_key: str) -> tuple[str, str] | None:
+    """
+    Look up which consortium or service a skill belongs to.
+
+    Returns:
+        (source_key, source_type) e.g. ("encode", "consortium") or ("server4", "service")
+        None if skill doesn't belong to any registered source.
+    """
+    # Check consortia (imported lazily to avoid circular imports)
+    from server2.config import CONSORTIUM_REGISTRY
+    for key, entry in CONSORTIUM_REGISTRY.items():
+        if skill_key in entry.get("skills", []):
+            return (key, "consortium")
+    # Check internal services
+    for key, entry in SERVICE_REGISTRY.items():
+        if skill_key in entry.get("skills", []):
+            return (key, "service")
+    return None
 
 # --- GENOME ALIASES ---
 # Map common genome names to canonical IDs

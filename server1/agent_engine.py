@@ -1,7 +1,8 @@
 import os
 from openai import OpenAI
 from server1.config import SKILLS_DIR, SKILLS_REGISTRY, LLM_URL, LLM_MODELS
-from server2.config import get_source_for_skill, CONSORTIUM_REGISTRY, SERVICE_REGISTRY
+from server1.config import get_source_for_skill, SERVICE_REGISTRY
+from server2.config import CONSORTIUM_REGISTRY
 
 # --- LLM CONNECTION ---
 # We use the standard OpenAI client but point it to the configured URL

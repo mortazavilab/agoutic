@@ -88,12 +88,13 @@ SERVICE_REGISTRY = {
 ```
 
 **Helper functions:**
-- `get_service_url(key)` — returns URL from either registry
-- `get_registry_entry(key)` — returns full entry from either registry
-- `get_source_for_skill(skill_name)` — maps a skill name to its data source
+- `get_consortium_url(key)` — returns URL for a consortium
+- `get_consortium_entry(key)` — returns full consortium entry
 - `get_all_fallback_patterns()` — collects regex fallback patterns from all consortia
 
-### 2. `server2/mcp_http_client.py` — Generic MCP Client
+Internal services (Server 3/4) are configured in `server1/config.py` (`SERVICE_REGISTRY`).
+
+### 2. `common/mcp_client.py` — Generic MCP Client
 
 `MCPHttpClient` replaces all three old clients (`server2_mcp_client.py`, `mcp_client.py`, `server4_mcp_client.py`):
 
@@ -117,6 +118,7 @@ Converts raw MCP results into markdown tables using `table_columns` and `count_f
 
 ```python
 from server2 import format_results
+from common import MCPHttpClient
 markdown = format_results("encode", raw_result)
 # → "🧬 **ENCODE Portal Results** (42 experiments)\n| Accession | Assay | ..."
 ```
@@ -192,9 +194,9 @@ Legacy `ENCODE_CALL` and `ANALYSIS_CALL` tags are still recognized (backward com
 | Server4 MCP used official `mcp` SDK (stdio only) | Server4 MCP uses FastMCP (HTTP + stdio) |
 
 ### Files Deleted
-- `server1/server2_mcp_client.py` (666 lines) — replaced by `server2/mcp_http_client.py`
-- `server1/mcp_client.py` (~200 lines) — replaced by `server2/mcp_http_client.py`
-- `server1/server4_mcp_client.py` (~150 lines) — replaced by `server2/mcp_http_client.py`
+- `server1/server2_mcp_client.py` (666 lines) — replaced by `common/mcp_client.py`
+- `server1/mcp_client.py` (~200 lines) — replaced by `common/mcp_client.py`
+- `server1/server4_mcp_client.py` (~150 lines) — replaced by `common/mcp_client.py`
 
 ## Adding a New Consortium
 

@@ -22,11 +22,13 @@ from server1.models import ProjectBlock, Conversation, ConversationMessage, JobR
 from server1.middleware import AuthMiddleware
 from server1.auth import router as auth_router
 from server1.admin import router as admin_router
-from server2 import MCPHttpClient, format_results
+from common import MCPHttpClient
+from server2 import format_results
 from server2.config import (
-    CONSORTIUM_REGISTRY, SERVICE_REGISTRY,
-    get_registry_entry, get_all_fallback_patterns, get_service_url,
+    CONSORTIUM_REGISTRY,
+    get_consortium_entry, get_all_fallback_patterns,
 )
+from server1.config import SERVICE_REGISTRY, get_service_url
 
 # --- APP ---
 app = FastAPI()
@@ -1162,7 +1164,9 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # 6c. Format results and append to response
         for source_key, results in all_results.items():
             if results:
-                results_markdown = format_results(source_key, results)
+                # Pass registry entry for service keys so formatter doesn't need SERVICE_REGISTRY
+                entry = SERVICE_REGISTRY.get(source_key)
+                results_markdown = format_results(source_key, results, registry_entry=entry)
                 clean_markdown += results_markdown
         
         # 7. Save AGENT_PLAN (The Text)
