@@ -26,14 +26,26 @@ async def submit_dogme_job(
     reference_genome: str,
     pod5_directory: str,
     modifications: str | None = None,
+    input_type: str | None = None,
+    entry_point: str | None = None,
+    modkit_filter_threshold: float | None = None,
+    min_cov: int | None = None,
+    per_mod: int | None = None,
+    accuracy: str | None = None,
 ) -> str:
     """Submit a DOGME job for processing."""
     result = await tools.submit_dogme_job(
         sample_name=sample_name,
         mode=mode,
         reference_genome=reference_genome,
-        pod5_directory=pod5_directory,
+        input_directory=pod5_directory,
         modifications=modifications,
+        input_type=input_type,
+        entry_point=entry_point,
+        modkit_filter_threshold=modkit_filter_threshold,
+        min_cov=min_cov,
+        per_mod=per_mod,
+        accuracy=accuracy,
     )
     return json.dumps(result, indent=2)
 
@@ -95,6 +107,28 @@ async def scaffold_dogme_dir(
         base_path=base_path,
         sample_name=sample_name,
         mode=mode,
+    )
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
+async def get_job_logs(
+    run_uuid: str,
+    limit: int = 50,
+) -> str:
+    """Get recent log entries for a running or completed job."""
+    result = await tools.get_job_logs(
+        run_uuid=run_uuid,
+        limit=limit,
+    )
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
+async def get_job_debug(
+    run_uuid: str,
+) -> str:
+    """Get detailed debug information for troubleshooting a job."""
+    result = await tools.get_job_debug(
+        run_uuid=run_uuid,
     )
     return json.dumps(result, indent=2)
 

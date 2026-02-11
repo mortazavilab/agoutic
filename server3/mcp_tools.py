@@ -24,6 +24,12 @@ class Server3MCPTools:
         input_directory: str,
         reference_genome: str = "GRCh38",
         modifications: Optional[str] = None,
+        input_type: Optional[str] = None,
+        entry_point: Optional[str] = None,
+        modkit_filter_threshold: Optional[float] = None,
+        min_cov: Optional[int] = None,
+        per_mod: Optional[int] = None,
+        accuracy: Optional[str] = None,
     ) -> dict:
         """
         Submit a Dogme/Nextflow analysis job to Server 3.
@@ -41,6 +47,12 @@ class Server3MCPTools:
                 - DNA: "5mCG_5hmCG,6mA"
                 - RNA: "inosine_m6A,pseU,m5C"
                 - cDNA: None (not supported)
+            input_type: Optional input file type (e.g., "pod5", "fastq")
+            entry_point: Optional pipeline entry point
+            modkit_filter_threshold: Optional modkit filter threshold (0.0-1.0)
+            min_cov: Optional minimum coverage
+            per_mod: Optional per-modification threshold
+            accuracy: Optional basecalling accuracy level (e.g., "sup", "hac")
         
         Returns:
             {"run_uuid": str, "sample_name": str, "status": str, "work_directory": str}
@@ -55,8 +67,21 @@ class Server3MCPTools:
             "input_directory": input_directory,
             "reference_genome": reference_genome,
         }
+        # Add optional parameters if provided
         if modifications:
             payload["modifications"] = modifications
+        if input_type is not None:
+            payload["input_type"] = input_type
+        if entry_point is not None:
+            payload["entry_point"] = entry_point
+        if modkit_filter_threshold is not None:
+            payload["modkit_filter_threshold"] = modkit_filter_threshold
+        if min_cov is not None:
+            payload["min_cov"] = min_cov
+        if per_mod is not None:
+            payload["per_mod"] = per_mod
+        if accuracy is not None:
+            payload["accuracy"] = accuracy
         
         try:
             async with httpx.AsyncClient() as client:
@@ -314,6 +339,71 @@ class Server3MCPTools:
             "message": f"Workspace validated for {sample_name}"
         }
 
+    async def get_job_logs(
+        self,
+        run_uuid: str,
+        limit: int = 50,
+    ) -> dict:
+        """
+        Get recent log entries for a running or completed job.
+        
+        Args:
+            run_uuid: The job UUID
+            limit: Maximum number of log entries to return (default: 50)
+        
+        Returns:
+            {"logs": list[str]} — list of recent log lines
+        
+        Raises:
+            Exception: If job not found or logs unavailable
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.server_url}/jobs/{run_uuid}/logs",
+                    params={"limit": limit},
+                    timeout=self.timeout,
+                )
+                if response.status_code == 404:
+                    raise RuntimeError(f"Job {run_uuid} not found")
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to get logs: {str(e)}")
+
+    async def get_job_debug(
+        self,
+        run_uuid: str,
+    ) -> dict:
+        """
+        Get detailed debug information for a job.
+        
+        Includes work directory contents, Nextflow logs, process details,
+        and error traces for troubleshooting failed or stalled jobs.
+        
+        Args:
+            run_uuid: The job UUID
+        
+        Returns:
+            Dict with debug info (work_dir, log files, process state, etc.)
+        
+        Raises:
+            Exception: If job not found
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.server_url}/jobs/{run_uuid}/debug",
+                    timeout=self.timeout,
+                )
+                if response.status_code == 404:
+                    raise RuntimeError(f"Job {run_uuid} not found")
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to get debug info: {str(e)}")
+
+
 # Tool registry for MCP server
 TOOL_REGISTRY = {
     "submit_dogme_job": {
@@ -404,6 +494,29 @@ TOOL_REGISTRY = {
                 "input_dir": {"type": "string", "description": "Input directory path"},
             },
             "required": ["sample_name", "input_dir"],
+        }
+    },
+    "get_job_logs": {
+        "description": "Get recent log entries for a job",
+        "tool_function": "get_job_logs",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_uuid": {"type": "string", "description": "Job UUID"},
+                "limit": {"type": "integer", "description": "Max log entries to return (default: 50)"},
+            },
+            "required": ["run_uuid"],
+        }
+    },
+    "get_job_debug": {
+        "description": "Get detailed debug information for troubleshooting a job",
+        "tool_function": "get_job_debug",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_uuid": {"type": "string", "description": "Job UUID"},
+            },
+            "required": ["run_uuid"],
         }
     },
 }

@@ -22,7 +22,7 @@ This skill handles **downloading and processing ENCODE long-read sequencing data
 
 ## Server 2 Tools Available
 
-This skill can use [[ENCODE_CALL:...]] tags for metadata and download operations:
+This skill can use [[DATA_CALL: consortium=encode, tool=...]] tags for metadata and download operations:
 
 ```
 get_experiment(accession="ENCSR123ABC")          # Get experiment metadata
@@ -42,13 +42,13 @@ If the user provides an accession, fetch its metadata:
 ```
 I'll fetch the experiment details:
 
-[[ENCODE_CALL: get_experiment, accession=ENCSR000ABC]]
+[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR000ABC]]
 ```
 
 Then check available files:
 
 ```
-[[ENCODE_CALL: get_files_summary, accession=ENCSR000ABC]]
+[[DATA_CALL: consortium=encode, tool=get_files_summary, accession=ENCSR000ABC]]
 ```
 
 ### Step 2: Present Download Plan (APPROVAL GATE)
@@ -83,7 +83,7 @@ Do you want to proceed with downloading these files?
 Once approved, execute the download:
 
 ```
-[[ENCODE_CALL: download_files, accession=ENCSR000ABC, file_types=pod5]]
+[[DATA_CALL: consortium=encode, tool=download_files, accession=ENCSR000ABC, file_types=pod5]]
 ```
 
 Report results:
@@ -150,7 +150,7 @@ The experiment may be:
 - Archived or restricted
 - Missing the requested file types
 
-Try: [[ENCODE_CALL: get_file_types, accession={accession}]]
+Try: [[DATA_CALL: consortium=encode, tool=get_file_types, accession={accession}]]
 ```
 
 ### Download Failures

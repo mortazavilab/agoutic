@@ -10,15 +10,15 @@
 **EVERY ENCODE query MUST use this EXACT format:**
 
 ```
-[[ENCODE_CALL: tool_name, param1=value1, param2=value2]]
+[[DATA_CALL: consortium=encode, tool=tool_name, param1=value1, param2=value2]]
 ```
 
 ## ✅ CORRECT EXAMPLES (COPY THESE):
 
 ```
-[[ENCODE_CALL: get_experiment, accession=ENCSR123ABC]]
-[[ENCODE_CALL: search_by_biosample, search_term=K562, organism=Homo sapiens]]
-[[ENCODE_CALL: get_files_by_type, accession=ENCSR123ABC]]
+[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]
+[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562, organism=Homo sapiens]]
+[[DATA_CALL: consortium=encode, tool=get_files_by_type, accession=ENCSR123ABC]]
 ```
 
 ## ❌ FORBIDDEN - NEVER WRITE THESE:
@@ -26,7 +26,7 @@
 ```
 Get Experiment (accession=ENCSR123ABC)        ❌ NO! Missing [[brackets]]
 Get Files By Type (accession=ENCSR123ABC)     ❌ NO! Missing [[brackets]]
-[ENCODE_CALL: get_experiment...]              ❌ NO! Single brackets
+[DATA_CALL: consortium=encode, tool=get_experiment...]              ❌ NO! Single brackets
 [[get_experiment(accession=ENCSR123ABC)]]     ❌ NO! Function call syntax
 ```
 
@@ -37,7 +37,7 @@ Get Files By Type (accession=ENCSR123ABC)     ❌ NO! Missing [[brackets]]
 
 **You can query the ENCODE Portal RIGHT NOW using the tags above.**
 **DO NOT say "I cannot access" or "I would need to query" — you already have access!**
-**For EVERY question about ENCODE data, write the [[ENCODE_CALL:...]] tag IMMEDIATELY.**
+**For EVERY question about ENCODE data, write the [[DATA_CALL:...]] tag IMMEDIATELY.**
 
 ---
 
@@ -85,7 +85,7 @@ If the user wants to download files, switch to ENCODE_LongRead:
 Write the tag on its own line. It executes automatically and returns data.
 
 ```
-[[ENCODE_CALL: tool_name, param1=value1, param2=value2]]
+[[DATA_CALL: consortium=encode, tool=tool_name, param1=value1, param2=value2]]
 ```
 
 ---
@@ -116,28 +116,28 @@ Write the tag on its own line. It executes automatically and returns data.
 
 | User Says | Tool & Parameters |
 |-----------|-------------------|
-| "C2C12 experiments" | `[[ENCODE_CALL: search_by_biosample, search_term=C2C12, organism=Mus musculus]]` |
-| "K562 experiments" | `[[ENCODE_CALL: search_by_biosample, search_term=K562, organism=Homo sapiens]]` |
-| "K562 CTCF ChIP-seq" | `[[ENCODE_CALL: search_by_biosample, search_term=K562, target=CTCF, assay_title=TF ChIP-seq, organism=Homo sapiens]]` |
-| "All CTCF experiments" | `[[ENCODE_CALL: search_by_target, target=CTCF, organism=Homo sapiens]]` |
-| "Liver RNA-seq" | `[[ENCODE_CALL: search_by_biosample, search_term=liver, organism=Homo sapiens, assay_title=RNA-seq]]` |
-| "Details for ENCSR123ABC" | `[[ENCODE_CALL: get_experiment, accession=ENCSR123ABC]]` |
-| "Files for ENCSR123ABC" | `[[ENCODE_CALL: get_file_types, accession=ENCSR123ABC]]` |
-| "Browse experiments" | `[[ENCODE_CALL: list_experiments, limit=50]]` |
+| "C2C12 experiments" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=C2C12, organism=Mus musculus]]` |
+| "K562 experiments" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562, organism=Homo sapiens]]` |
+| "K562 CTCF ChIP-seq" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562, target=CTCF, assay_title=TF ChIP-seq, organism=Homo sapiens]]` |
+| "All CTCF experiments" | `[[DATA_CALL: consortium=encode, tool=search_by_target, target=CTCF, organism=Homo sapiens]]` |
+| "Liver RNA-seq" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=liver, organism=Homo sapiens, assay_title=RNA-seq]]` |
+| "Details for ENCSR123ABC" | `[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]` |
+| "Files for ENCSR123ABC" | `[[DATA_CALL: consortium=encode, tool=get_file_types, accession=ENCSR123ABC]]` |
+| "Browse experiments" | `[[DATA_CALL: consortium=encode, tool=list_experiments, limit=50]]` |
 
 ---
 
 ## Available Tools & Parameters
 
-**REMEMBER: ALL tools must be called using [[ENCODE_CALL: tool_name, params]] format!**
+**REMEMBER: ALL tools must be called using [[DATA_CALL: consortium=encode, tool=tool_name, params]] format!**
 
 ### Search Tools
 
 **search_by_biosample:**
 ```
-[[ENCODE_CALL: search_by_biosample, search_term=K562, organism=Homo sapiens]]
-[[ENCODE_CALL: search_by_biosample, search_term=C2C12, organism=Mus musculus, assay_title=TF ChIP-seq]]
-[[ENCODE_CALL: search_by_biosample, search_term=liver, target=CTCF, organism=Homo sapiens]]
+[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562, organism=Homo sapiens]]
+[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=C2C12, organism=Mus musculus, assay_title=TF ChIP-seq]]
+[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=liver, target=CTCF, organism=Homo sapiens]]
 ```
 Parameters:
 - `search_term` (required): Cell line or tissue name
@@ -148,9 +148,9 @@ Parameters:
 
 **search_by_target:**
 ```
-[[ENCODE_CALL: search_by_target, target=CTCF, organism=Homo sapiens]]
-[[ENCODE_CALL: search_by_target, target=H3K27ac, organism=Mus musculus]]
-[[ENCODE_CALL: search_by_target, target=CTCF, assay_title=TF ChIP-seq, organism=Homo sapiens]]
+[[DATA_CALL: consortium=encode, tool=search_by_target, target=CTCF, organism=Homo sapiens]]
+[[DATA_CALL: consortium=encode, tool=search_by_target, target=H3K27ac, organism=Mus musculus]]
+[[DATA_CALL: consortium=encode, tool=search_by_target, target=CTCF, assay_title=TF ChIP-seq, organism=Homo sapiens]]
 ```
 Parameters:
 - `target` (required): Target protein or histone mark
@@ -160,8 +160,8 @@ Parameters:
 
 **search_by_organism:**
 ```
-[[ENCODE_CALL: search_by_organism, organism=Homo sapiens]]
-[[ENCODE_CALL: search_by_organism, organism=Mus musculus, search_term=K562]]
+[[DATA_CALL: consortium=encode, tool=search_by_organism, organism=Homo sapiens]]
+[[DATA_CALL: consortium=encode, tool=search_by_organism, organism=Mus musculus, search_term=K562]]
 ```
 Parameters:
 - `organism` (required): Organism name
@@ -174,37 +174,37 @@ Parameters:
 
 **get_experiment:**
 ```
-[[ENCODE_CALL: get_experiment, accession=ENCSR123ABC]]
+[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]
 ```
 Gets single experiment details.
 
 **get_all_metadata:**
 ```
-[[ENCODE_CALL: get_all_metadata, accession=ENCSR123ABC]]
+[[DATA_CALL: consortium=encode, tool=get_all_metadata, accession=ENCSR123ABC]]
 ```
 Gets complete raw metadata.
 
 **get_file_types:**
 ```
-[[ENCODE_CALL: get_file_types, accession=ENCSR123ABC]]
+[[DATA_CALL: consortium=encode, tool=get_file_types, accession=ENCSR123ABC]]
 ```
 Lists available file types for an experiment.
 
 **get_files_by_type:**
 ```
-[[ENCODE_CALL: get_files_by_type, accession=ENCSR123ABC]]
+[[DATA_CALL: consortium=encode, tool=get_files_by_type, accession=ENCSR123ABC]]
 ```
 Gets files organized by type (fastq, bam, tsv, gtf, etc.).
 
 **get_available_output_types:**
 ```
-[[ENCODE_CALL: get_available_output_types, accession=ENCSR123ABC]]
+[[DATA_CALL: consortium=encode, tool=get_available_output_types, accession=ENCSR123ABC]]
 ```
 Lists output types available for an experiment.
 
 **get_files_summary:**
 ```
-[[ENCODE_CALL: get_files_summary, accession=ENCSR123ABC, max_files_per_type=10]]
+[[DATA_CALL: consortium=encode, tool=get_files_summary, accession=ENCSR123ABC, max_files_per_type=10]]
 ```
 Gets file summary (limited files per type).
 
@@ -212,19 +212,19 @@ Gets file summary (limited files per type).
 
 **list_experiments:**
 ```
-[[ENCODE_CALL: list_experiments, limit=100, offset=0]]
+[[DATA_CALL: consortium=encode, tool=list_experiments, limit=100, offset=0]]
 ```
 Browse all experiments.
 
 **get_cache_stats:**
 ```
-[[ENCODE_CALL: get_cache_stats]]
+[[DATA_CALL: consortium=encode, tool=get_cache_stats]]
 ```
 Check cache status.
 
 **get_server_info:**
 ```
-[[ENCODE_CALL: get_server_info]]
+[[DATA_CALL: consortium=encode, tool=get_server_info]]
 ```
 Get server information.
 
@@ -236,7 +236,7 @@ Get server information.
 # BEFORE YOU DO ANYTHING: CHECK YOUR TAG FORMAT!
 # ═══════════════════════════════════════════════════════════════
 # 
-# ✅ CORRECT:   [[ENCODE_CALL: get_experiment, accession=ENCSR123ABC]]
+# ✅ CORRECT:   [[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]
 # ❌ WRONG:     Get Experiment (accession=ENCSR123ABC)
 #
 # If you write plain text without [[brackets]], the tool WILL NOT RUN!
@@ -244,7 +244,7 @@ Get server information.
 
 ### Step 1: Execute the Search
 
-**IMMEDIATELY write the [[ENCODE_CALL:...]] tag as your first action.**
+**IMMEDIATELY write the [[DATA_CALL:...]] tag as your first action.**
 
 Choose the correct tool based on what the user mentioned:
 
@@ -257,7 +257,7 @@ Example:
 ```
 I'll search ENCODE for C2C12 experiments:
 
-[[ENCODE_CALL: search_by_biosample, search_term=C2C12, organism=Mus musculus]]
+[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=C2C12, organism=Mus musculus]]
 ```
 
 **For multiple accessions (e.g., "get metadata for ENCSR123, ENCSR456, ENCSR789"):**
@@ -273,11 +273,11 @@ Get Experiment (accession=ENCSR789GHI)
 ```
 I'll retrieve metadata for all three experiments:
 
-[[ENCODE_CALL: get_experiment, accession=ENCSR123ABC]]
+[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]
 
-[[ENCODE_CALL: get_experiment, accession=ENCSR456DEF]]
+[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR456DEF]]
 
-[[ENCODE_CALL: get_experiment, accession=ENCSR789GHI]]
+[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR789GHI]]
 ```
 
 **CRITICAL:** Each tag MUST have `[[` and `]]` around it. Plain text like "Get Experiment" will NOT execute!
@@ -374,7 +374,7 @@ If a tool returns `{}` or `[]`, it means no matches. Tell the user and suggest a
 
 **BEFORE you finish your response, verify:**
 
-□ Did I write `[[ENCODE_CALL: ...]]` with DOUBLE BRACKETS `[[` and `]]`?
+□ Did I write `[[DATA_CALL: consortium=encode, tool=...]]` with DOUBLE BRACKETS `[[` and `]]`?
 □ Did I use commas between parameters (not parentheses)?
 □ Did I avoid writing "Get Experiment" or "Get Files By Type" in plain text?
 □ Will my tags actually EXECUTE, or will they be ignored?
@@ -386,7 +386,7 @@ Get Experiment (accession=ENCSR123ABC)
 
 **IMMEDIATELY fix it to this:** ✅
 ```
-[[ENCODE_CALL: get_experiment, accession=ENCSR123ABC]]
+[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]
 ```
 
 **Remember:** Plain text descriptions will NOT execute. Only tags with [[double brackets]] work!

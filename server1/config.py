@@ -55,17 +55,10 @@ LLM_MODELS = {
 }
 
 # --- SERVER INTEGRATION CONFIGURATION ---
-# Server2 (ENCODELIB): ENCODE Portal data retrieval
-# Default to ENCODELIB in same directory as agoutic code
+# Server URLs are now managed via server2/config.py registries (CONSORTIUM_REGISTRY, SERVICE_REGISTRY).
+# ENCODELIB_PATH is read directly from environment by server2/launch_encode.py.
+# Default ENCODELIB location (for reference / fallback scripts):
 _default_encodelib = AGOUTIC_CODE / "ENCODELIB"
-ENCODELIB_PATH = Path(os.getenv("ENCODELIB_PATH", str(_default_encodelib)))
-SERVER2_MCP_COMMAND = f"python {ENCODELIB_PATH}/encode_server.py"
-
-# Server3 (Job Execution): Nextflow/Dogme pipeline execution
-SERVER3_URL = os.getenv("SERVER3_URL", "http://localhost:8001")
-
-# Server4 (Analysis): Results analysis engine
-SERVER4_URL = os.getenv("SERVER4_URL", "http://localhost:8002")
 
 # --- GENOME ALIASES ---
 # Map common genome names to canonical IDs

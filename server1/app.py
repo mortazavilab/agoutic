@@ -16,13 +16,17 @@ from sqlalchemy import select, desc
 # ✅ Import from your package
 from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from server1.agent_engine import AgentEngine
-from server1.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES, SERVER2_MCP_COMMAND
+from server1.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES
 from server1.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
 from server1.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess
 from server1.middleware import AuthMiddleware
 from server1.auth import router as auth_router
 from server1.admin import router as admin_router
-from server1.server2_mcp_client import Server2MCPClient
+from server2 import MCPHttpClient, format_results
+from server2.config import (
+    CONSORTIUM_REGISTRY, SERVICE_REGISTRY,
+    get_registry_entry, get_all_fallback_patterns, get_service_url,
+)
 
 # --- APP ---
 app = FastAPI()
@@ -66,6 +70,23 @@ def get_block_payload(block: ProjectBlock) -> dict:
     """Helper to get payload as dict from payload_json"""
     return json.loads(block.payload_json) if block.payload_json else {}
 
+
+def _parse_tag_params(params_str: str | None) -> dict:
+    """
+    Parse a comma-separated key=value parameter string from a DATA_CALL tag.
+    E.g., "search_term=K562, organism=Homo sapiens" -> {"search_term": "K562", "organism": "Homo sapiens"}
+    """
+    params = {}
+    if params_str:
+        for param_pair in params_str.split(','):
+            param_pair = param_pair.strip()
+            if '=' in param_pair:
+                key, value = param_pair.split('=', 1)
+                value = value.strip().strip('"\'')
+                params[key.strip()] = value
+    return params
+
+
 def _create_block_internal(session, project_id, block_type, payload, status="NEW", owner_id=None):
     """
     Internal helper to insert a block and handle the sequence number safely.
@@ -107,26 +128,10 @@ async def get_available_skills():
 @app.get("/jobs/{run_uuid}/debug")
 async def get_job_debug_info(run_uuid: str):
     """
-    Proxy endpoint for Server 3 job debug info.
+    Proxy endpoint for Server 3 job debug info via MCP.
     This allows the UI to get debug info without calling Server 3 directly.
     """
-    import requests
-    from server1.config import INTERNAL_API_SECRET
-    
-    try:
-        headers = {}
-        if INTERNAL_API_SECRET:
-            headers["X-Internal-Secret"] = INTERNAL_API_SECRET
-        
-        resp = requests.get(
-            f"http://127.0.0.1:8003/jobs/{run_uuid}/debug",
-            headers=headers,
-            timeout=10
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch debug info: {str(e)}")
+    return await _call_server3_tool("get_job_debug", run_uuid=run_uuid)
 
 @app.post("/block", response_model=BlockOut)
 async def create_block(block_in: BlockCreate, request: Request):
@@ -601,7 +606,6 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
     Background task to submit a job to Server3 after approval.
     Uses edited_params if available, otherwise falls back to extracted_params.
     """
-    import requests
     session = SessionLocal()
     
     try:
@@ -667,23 +671,21 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         
         print(f"📋 Job parameters (using {'edited' if gate_payload.get('edited_params') else 'extracted'}): {job_data}")
         
-        # Prepare headers with internal secret
-        from server1.config import INTERNAL_API_SECRET
-        headers = {}
-        if INTERNAL_API_SECRET:
-            headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+        # Submit job to Server3 via MCP
+        try:
+            server3_url = get_service_url("server3")
+            client = MCPHttpClient(name="server3", base_url=server3_url)
+            await client.connect()
+            try:
+                result = await client.call_tool("submit_dogme_job", **job_data)
+            finally:
+                await client.disconnect()
+        except Exception as e:
+            raise Exception(f"MCP call to Server3 failed: {e}")
         
-        # Submit job to Server3
-        resp = requests.post(
-            "http://127.0.0.1:8003/jobs/submit",
-            json=job_data,
-            headers=headers,
-            timeout=10,
-        )
+        run_uuid = result.get("run_uuid") if isinstance(result, dict) else None
         
-        if resp.status_code == 200:
-            result = resp.json()
-            run_uuid = result.get("run_uuid")
+        if run_uuid:
             
             # Create EXECUTION_JOB block
             job_block = _create_block_internal(
@@ -713,33 +715,26 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             # Start polling job status in background
             asyncio.create_task(poll_job_status(project_id, job_block.id, run_uuid))
         else:
-            # Create error block
-            error_detail = resp.text
-            try:
-                error_json = resp.json()
-                error_detail = error_json.get("detail", resp.text)
-            except:
-                pass
-            
+            # MCP call succeeded but no run_uuid in response
             _create_block_internal(
                 session,
                 project_id,
                 "EXECUTION_JOB",
                 {
-                    "error": f"Failed to submit job: {resp.status_code}",
-                    "message": error_detail,
+                    "error": "Failed to submit job: no run_uuid returned",
+                    "message": str(result),
                     "job_status": {
                         "status": "FAILED",
                         "progress_percent": 0,
-                        "message": f"Submission failed: {resp.status_code}",
+                        "message": "Submission failed: no run_uuid in response",
                         "tasks": {}
                     }
                 },
                 status="FAILED",
                 owner_id=owner_id
             )
-            print(f"❌ Job submission failed: {resp.status_code}")
-            print(f"   Error details: {error_detail}")
+            print(f"❌ Job submission failed: no run_uuid in response")
+            print(f"   Result: {result}")
             print(f"   Job data sent: {job_data}")
     
     except Exception as e:
@@ -766,10 +761,9 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
 
 async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
     """
-    Background task to poll Server3 for job status and update the EXECUTION_JOB block.
+    Background task to poll Server3 for job status via MCP and update the EXECUTION_JOB block.
     Continues until job is completed or failed.
     """
-    import requests
     
     poll_interval = 3  # seconds
     max_polls = 600  # 30 minutes max
@@ -779,33 +773,21 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
         
         session = SessionLocal()
         try:
-            # Prepare headers with internal secret
-            from server1.config import INTERNAL_API_SECRET
-            headers = {}
-            if INTERNAL_API_SECRET:
-                headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+            # Get current status from Server3 via MCP
+            server3_url = get_service_url("server3")
+            client = MCPHttpClient(name="server3", base_url=server3_url)
+            await client.connect()
+            try:
+                status_data = await client.call_tool("check_nextflow_status", run_uuid=run_uuid)
+                logs_data = await client.call_tool("get_job_logs", run_uuid=run_uuid, limit=50)
+            finally:
+                await client.disconnect()
             
-            # Get current status from Server3
-            status_resp = requests.get(
-                f"http://127.0.0.1:8003/jobs/{run_uuid}/status",
-                headers=headers,
-                timeout=5,
-            )
-            
-            if status_resp.status_code != 200:
+            if not isinstance(status_data, dict):
                 print(f"⚠️ Failed to get status for {run_uuid}")
                 continue
             
-            status_data = status_resp.json()
-            
-            # Get logs from Server3
-            logs_resp = requests.get(
-                f"http://127.0.0.1:8003/jobs/{run_uuid}/logs",
-                params={"limit": 50},
-                headers=headers,
-                timeout=5,
-            )
-            logs = logs_resp.json().get("logs", []) if logs_resp.status_code == 200 else []
+            logs = logs_data.get("logs", []) if isinstance(logs_data, dict) else []
             
             # Update the block with new data
             block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
@@ -1034,34 +1016,16 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         trigger_tag = "[[APPROVAL_NEEDED]]"
         needs_approval = trigger_tag in raw_response
         
-        # 5. Parse Analysis Call Tags
-        analysis_call_pattern = r'\[\[ANALYSIS_CALL:\s*(\w+),\s*run_uuid=([a-f0-9-]+)\]\]'
-        analysis_matches = list(re.finditer(analysis_call_pattern, raw_response))
-        
-        # 5b. Parse ENCODE Call Tags (for Server2)
-        # Format: [[ENCODE_CALL: tool_name, param1=value1, param2=value2]]
+        # 5. Parse DATA_CALL Tags (unified format for all consortia and services)
+        # Format: [[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562]]
+        #     or: [[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=...]]
         
         # FALLBACK: Fix common LLM mistakes by converting plain text patterns to proper tags
-        # Some LLMs write "Get Experiment (accession=X)" instead of [[ENCODE_CALL: get_experiment, accession=X]]
-        fallback_patterns = {
-            r'Get Experiment\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_experiment, \1]]',
-            r'Get All Metadata\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_all_metadata, \1]]',
-            r'Get File Types\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_file_types, \1]]',
-            r'Get Files By Type\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_files_by_type, \1]]',
-            r'Get Available Output Types\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_available_output_types, \1]]',
-            r'Get Files Summary\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_files_summary, \1]]',
-            r'Search By Biosample\s*\(([^)]+)\)': r'[[ENCODE_CALL: search_by_biosample, \1]]',
-            r'Search By Target\s*\(([^)]+)\)': r'[[ENCODE_CALL: search_by_target, \1]]',
-            r'Search By Organism\s*\(([^)]+)\)': r'[[ENCODE_CALL: search_by_organism, \1]]',
-            r'List Experiments\s*\(([^)]+)\)': r'[[ENCODE_CALL: list_experiments, \1]]',
-            r'Get Cache Stats\s*\(\)': r'[[ENCODE_CALL: get_cache_stats]]',
-            r'Get Server Info\s*\(\)': r'[[ENCODE_CALL: get_server_info]]',
-        }
+        all_fallback_patterns = get_all_fallback_patterns()
         
-        # Apply fallback conversions
         corrected_response = raw_response
         fallback_fixes_applied = 0
-        for pattern, replacement in fallback_patterns.items():
+        for pattern, replacement in all_fallback_patterns.items():
             before = corrected_response
             corrected_response = re.sub(pattern, replacement, corrected_response, flags=re.IGNORECASE)
             if before != corrected_response:
@@ -1070,189 +1034,136 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         if fallback_fixes_applied > 0:
             print(f"⚠️  Applied {fallback_fixes_applied} fallback tag fix(es) to LLM response")
         
-        # Now parse the corrected response for proper ENCODE_CALL tags
-        encode_call_pattern = r'\[\[ENCODE_CALL:\s*([\w_]+)(?:,\s*([^\]]+))?\]\]'
-        encode_matches = list(re.finditer(encode_call_pattern, corrected_response))
+        # Parse unified DATA_CALL tags
+        # Groups: (1) source_type [consortium|service], (2) source_key, (3) tool_name, (4) remaining params
+        data_call_pattern = r'\[\[DATA_CALL:\s*(?:(consortium|service)=(\w+)),\s*tool=(\w+)(?:,\s*([^\]]+))?\]\]'
+        data_call_matches = list(re.finditer(data_call_pattern, corrected_response))
         
-        # Clean all tags out of the text so the user doesn't see them
+        # Also support legacy ENCODE_CALL and ANALYSIS_CALL tags for backward compatibility
+        legacy_encode_pattern = r'\[\[ENCODE_CALL:\s*([\w_]+)(?:,\s*([^\]]+))?\]\]'
+        legacy_analysis_pattern = r'\[\[ANALYSIS_CALL:\s*(\w+),\s*run_uuid=([a-f0-9-]+)\]\]'
+        legacy_encode_matches = list(re.finditer(legacy_encode_pattern, corrected_response))
+        legacy_analysis_matches = list(re.finditer(legacy_analysis_pattern, corrected_response))
+        
+        # Clean all tags from user-visible text
         clean_markdown = corrected_response.replace(trigger_tag, "").strip()
         clean_markdown = re.sub(r'\[\[SKILL_SWITCH_TO:\s*\w+\]\]', '', clean_markdown).strip()
-        clean_markdown = re.sub(analysis_call_pattern, '', clean_markdown).strip()
-        clean_markdown = re.sub(encode_call_pattern, '', clean_markdown).strip()
+        clean_markdown = re.sub(data_call_pattern, '', clean_markdown).strip()
+        clean_markdown = re.sub(legacy_encode_pattern, '', clean_markdown).strip()
+        clean_markdown = re.sub(legacy_analysis_pattern, '', clean_markdown).strip()
         
         # Also remove any remaining plain text patterns that might not have been converted
-        for pattern in fallback_patterns.keys():
+        for pattern in all_fallback_patterns.keys():
             clean_markdown = re.sub(pattern, '', clean_markdown, flags=re.IGNORECASE).strip()
         
-        # 6. Execute Analysis Calls if present
-        analysis_results = []
-        for match in analysis_matches:
-            analysis_type = match.group(1)  # summary, categorize_files, list_files
+        # 6. Collect all tool calls into a unified structure
+        # Structure: {source_key: [{"tool": str, "params": dict}, ...]}
+        calls_by_source = {}
+        
+        # From new DATA_CALL tags
+        for match in data_call_matches:
+            source_type = match.group(1)  # "consortium" or "service"
+            source_key = match.group(2)   # e.g., "encode", "server4"
+            tool_name = match.group(3)
+            params_str = match.group(4)
+            
+            params = _parse_tag_params(params_str)
+            
+            calls_by_source.setdefault(source_key, []).append({
+                "tool": tool_name,
+                "params": params,
+            })
+        
+        # From legacy ENCODE_CALL tags (backward compat)
+        for match in legacy_encode_matches:
+            tool_name = match.group(1)
+            params_str = match.group(2)
+            params = _parse_tag_params(params_str)
+            
+            calls_by_source.setdefault("encode", []).append({
+                "tool": tool_name,
+                "params": params,
+            })
+        
+        # From legacy ANALYSIS_CALL tags (backward compat)
+        for match in legacy_analysis_matches:
+            analysis_type = match.group(1)
             run_uuid = match.group(2)
             
-            print(f"📊 Executing analysis call: {analysis_type} for UUID {run_uuid}")
+            # Map legacy analysis types to Server4 MCP tool names
+            tool_map = {
+                "summary": "get_analysis_summary",
+                "categorize_files": "categorize_job_files",
+                "list_files": "list_job_files",
+            }
+            tool_name = tool_map.get(analysis_type, analysis_type)
             
-            try:
-                # Call the appropriate Server4 endpoint
-                if analysis_type == "summary":
-                    endpoint_url = f"http://localhost:8004/analysis/summary/{run_uuid}"
-                elif analysis_type == "categorize_files":
-                    endpoint_url = f"http://localhost:8004/analysis/jobs/{run_uuid}/files/categorize"
-                elif analysis_type == "list_files":
-                    endpoint_url = f"http://localhost:8004/analysis/jobs/{run_uuid}/files"
-                else:
-                    print(f"❌ Unknown analysis type: {analysis_type}")
-                    continue
-                
-                # Make async HTTP call to Server4
-                import httpx
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.get(endpoint_url)
-                    if response.status_code == 200:
-                        result_data = response.json()
-                        analysis_results.append({
-                            "type": analysis_type,
-                            "uuid": run_uuid,
-                            "data": result_data
-                        })
-                        print(f"✅ Analysis call successful: {analysis_type}")
-                    else:
-                        print(f"❌ Analysis call failed: {response.status_code} - {response.text}")
-                        analysis_results.append({
-                            "type": analysis_type,
-                            "uuid": run_uuid,
-                            "error": f"HTTP {response.status_code}: {response.text[:200]}"
-                        })
-            except Exception as e:
-                print(f"❌ Analysis call exception: {e}")
-                analysis_results.append({
-                    "type": analysis_type,
-                    "uuid": run_uuid,
-                    "error": str(e)
-                })
+            calls_by_source.setdefault("server4", []).append({
+                "tool": tool_name,
+                "params": {"run_uuid": run_uuid},
+            })
         
-        # 6b. Execute ENCODE Calls if present
-        encode_results = []
-        if encode_matches:
-            print(f"🧬 Executing {len(encode_matches)} ENCODE call(s)...")
-            server2 = Server2MCPClient(mcp_server_command=SERVER2_MCP_COMMAND)
+        # 6b. Execute all tool calls grouped by source
+        all_results = {}  # {source_key: [result_dicts]}
+        
+        for source_key, calls in calls_by_source.items():
+            print(f"📡 Executing {len(calls)} call(s) to {source_key}...")
             
             try:
-                await server2.connect()
+                url = get_service_url(source_key)
+            except KeyError:
+                print(f"❌ Unknown source: {source_key}")
+                all_results[source_key] = [{
+                    "tool": c["tool"],
+                    "params": c["params"],
+                    "error": f"Unknown source: {source_key}",
+                } for c in calls]
+                continue
+            
+            mcp_client = MCPHttpClient(name=source_key, base_url=url)
+            source_results = []
+            
+            try:
+                await mcp_client.connect()
                 
-                for match in encode_matches:
-                    tool_name = match.group(1)
-                    params_str = match.group(2)  # Everything after tool name
+                for call in calls:
+                    tool_name = call["tool"]
+                    params = call["params"]
                     
-                    # Parse parameters (format: param1=value1, param2=value2)
-                    params = {}
-                    if params_str:
-                        for param_pair in params_str.split(','):
-                            param_pair = param_pair.strip()
-                            if '=' in param_pair:
-                                key, value = param_pair.split('=', 1)
-                                # Remove quotes if present
-                                value = value.strip().strip('"\'')
-                                params[key.strip()] = value
-                    
-                    print(f"📞 Calling Server2.{tool_name}({params})")
+                    print(f"📞 Calling {source_key}.{tool_name}({params})")
                     
                     try:
-                        # Get the method and call it
-                        if hasattr(server2, tool_name):
-                            method = getattr(server2, tool_name)
-                            result_data = await method(**params)
-                            encode_results.append({
-                                "tool": tool_name,
-                                "params": params,
-                                "data": result_data
-                            })
-                            print(f"✅ ENCODE call successful: {tool_name}")
-                        else:
-                            print(f"❌ Unknown Server2 method: {tool_name}")
-                            encode_results.append({
-                                "tool": tool_name,
-                                "params": params,
-                                "error": f"Unknown method: {tool_name}"
-                            })
-                    except Exception as e:
-                        print(f"❌ ENCODE call exception: {e}")
-                        encode_results.append({
+                        result_data = await mcp_client.call_tool(tool_name, **params)
+                        source_results.append({
                             "tool": tool_name,
                             "params": params,
-                            "error": str(e)
+                            "data": result_data,
                         })
+                        print(f"✅ {source_key}.{tool_name} successful")
+                    except Exception as e:
+                        print(f"❌ {source_key}.{tool_name} exception: {e}")
+                        source_results.append({
+                            "tool": tool_name,
+                            "params": params,
+                            "error": str(e),
+                        })
+            except Exception as e:
+                print(f"❌ Failed to connect to {source_key}: {e}")
+                source_results = [{
+                    "tool": c["tool"],
+                    "params": c["params"],
+                    "error": f"Connection failed: {e}",
+                } for c in calls]
             finally:
-                await server2.disconnect()
+                await mcp_client.disconnect()
+            
+            all_results[source_key] = source_results
         
-        # If we have ENCODE results, format them and append to the response
-        if encode_results:
-            encode_markdown = "\n\n---\n\n### 🧬 ENCODE Data\n\n"
-            for result in encode_results:
-                encode_markdown += f"**{result['tool'].replace('_', ' ').title()}**"
-                if result['params']:
-                    encode_markdown += f" ({', '.join(f'{k}={v}' for k, v in result['params'].items())})"
-                encode_markdown += "\n\n"
-                
-                if "error" in result:
-                    encode_markdown += f"❌ Error: {result['error']}\n\n"
-                elif "data" in result:
-                    data = result['data']
-                    # Format based on data type
-                    if isinstance(data, list):
-                        encode_markdown += f"Found {len(data)} result(s):\n\n"
-                        # Show ALL results as a table so LLM can analyze them
-                        if data and isinstance(data[0], dict):
-                            encode_markdown += "| Accession | Assay | Biosample | Target |\n"
-                            encode_markdown += "|-----------|-------|-----------|--------|\n"
-                            for item in data:
-                                accession = item.get('accession', '')
-                                assay = item.get('assay', item.get('assay_title', ''))
-                                biosample = item.get('biosample', item.get('biosample_summary', ''))
-                                targets = item.get('targets', [])
-                                target_str = ', '.join(targets) if isinstance(targets, list) else str(targets)
-                                encode_markdown += f"| {accession} | {assay} | {biosample} | {target_str} |\n"
-                            
-                            # Auto-generate summary: count by assay type
-                            from collections import Counter
-                            assay_counts = Counter()
-                            for item in data:
-                                assay = item.get('assay', item.get('assay_title', 'Unknown'))
-                                if assay:
-                                    assay_counts[assay] += 1
-                            
-                            if assay_counts:
-                                encode_markdown += f"\n**📊 Summary: {len(assay_counts)} unique assay type(s)**\n\n"
-                                encode_markdown += "| Assay Type | Count |\n"
-                                encode_markdown += "|------------|-------|\n"
-                                for assay_type, count in assay_counts.most_common():
-                                    encode_markdown += f"| {assay_type} | {count} |\n"
-                                encode_markdown += f"\n**Total: {len(data)} experiments**\n"
-                        else:
-                            for item in data:
-                                encode_markdown += f"- {str(item)[:200]}\n"
-                    elif isinstance(data, dict):
-                        # Show formatted dict - no truncation for metadata
-                        import json
-                        json_str = json.dumps(data, indent=2)
-                        encode_markdown += f"```json\n{json_str}\n```\n"
-                    else:
-                        encode_markdown += f"{str(data)}\n"
-                    encode_markdown += "\n"
-            clean_markdown += encode_markdown
-        
-        # If we have analysis results, format them and append to the response
-        if analysis_results:
-            analysis_markdown = "\n\n---\n\n### 📊 Analysis Results\n\n"
-            for result in analysis_results:
-                analysis_markdown += f"**{result['type'].replace('_', ' ').title()} for job {result['uuid'][:8]}...**\n\n"
-                if "error" in result:
-                    analysis_markdown += f"❌ Error: {result['error']}\n\n"
-                elif "data" in result:
-                    # Format the data nicely
-                    import json
-                    analysis_markdown += f"```json\n{json.dumps(result['data'], indent=2)[:2000]}\n```\n\n"
-            clean_markdown += analysis_markdown
+        # 6c. Format results and append to response
+        for source_key, results in all_results.items():
+            if results:
+                results_markdown = format_results(source_key, results)
+                clean_markdown += results_markdown
         
         # 7. Save AGENT_PLAN (The Text)
         # Status is DONE because the text itself is just informational. 
@@ -1621,24 +1532,17 @@ async def record_project_access(project_id: str, request: Request, project_name:
 # =============================================================================
 # SERVER 4 ANALYSIS PROXY ENDPOINTS
 # =============================================================================
-
-SERVER4_URL = "http://localhost:8004"
+# These proxy endpoints allow the UI to access Server 4 analysis tools
+# via MCP over HTTP. The Server 4 MCP server must be running.
 
 @app.get("/analysis/jobs/{run_uuid}/summary")
 async def get_job_analysis_summary(run_uuid: str, request: Request):
     """
     Get comprehensive analysis summary for a completed job.
-    Proxies to Server 4 analysis engine.
+    Proxies to Server 4 analysis engine via MCP.
     """
     user = request.state.user
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{SERVER4_URL}/analysis/summary/{run_uuid}")
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+    return await _call_server4_tool("get_analysis_summary", run_uuid=run_uuid)
 
 @app.get("/analysis/jobs/{run_uuid}/files")
 async def list_job_files(run_uuid: str, extensions: Optional[str] = None, request: Request = None):
@@ -1648,21 +1552,10 @@ async def list_job_files(run_uuid: str, extensions: Optional[str] = None, reques
       - extensions: Comma-separated list (e.g., ".csv,.txt")
     """
     user = request.state.user
-    
-    try:
-        params = {}
-        if extensions:
-            params['extensions'] = extensions
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{SERVER4_URL}/analysis/jobs/{run_uuid}/files",
-                params=params
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+    kwargs = {"run_uuid": run_uuid}
+    if extensions:
+        kwargs["extensions"] = extensions
+    return await _call_server4_tool("list_job_files", **kwargs)
 
 @app.get("/analysis/jobs/{run_uuid}/files/categorize")
 async def categorize_job_files(run_uuid: str, request: Request):
@@ -1670,16 +1563,7 @@ async def categorize_job_files(run_uuid: str, request: Request):
     Categorize job files by type (csv, txt, bed, other).
     """
     user = request.state.user
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{SERVER4_URL}/analysis/jobs/{run_uuid}/files/categorize"
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+    return await _call_server4_tool("categorize_job_files", run_uuid=run_uuid)
 
 @app.get("/analysis/files/content")
 async def read_file_content(
@@ -1690,27 +1574,14 @@ async def read_file_content(
 ):
     """
     Read content of a specific file.
-    Query params:
-      - run_uuid: Job UUID
-      - file_path: Relative path to file
-      - preview_lines: Number of lines to preview (default 50)
     """
     user = request.state.user
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{SERVER4_URL}/analysis/files/content",
-                params={
-                    "run_uuid": run_uuid,
-                    "file_path": file_path,
-                    "preview_lines": preview_lines
-                }
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+    return await _call_server4_tool(
+        "read_file_content",
+        run_uuid=run_uuid,
+        file_path=file_path,
+        preview_lines=preview_lines,
+    )
 
 @app.get("/analysis/files/parse/csv")
 async def parse_csv_file(
@@ -1721,27 +1592,14 @@ async def parse_csv_file(
 ):
     """
     Parse CSV/TSV file into structured data.
-    Query params:
-      - run_uuid: Job UUID
-      - file_path: Relative path to CSV/TSV file
-      - max_rows: Maximum rows to return (default 100)
     """
     user = request.state.user
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{SERVER4_URL}/analysis/files/parse/csv",
-                params={
-                    "run_uuid": run_uuid,
-                    "file_path": file_path,
-                    "max_rows": max_rows
-                }
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+    return await _call_server4_tool(
+        "parse_csv_file",
+        run_uuid=run_uuid,
+        file_path=file_path,
+        max_rows=max_rows,
+    )
 
 @app.get("/analysis/files/parse/bed")
 async def parse_bed_file(
@@ -1752,24 +1610,40 @@ async def parse_bed_file(
 ):
     """
     Parse BED genomic file.
-    Query params:
-      - run_uuid: Job UUID
-      - file_path: Relative path to BED file
-      - max_records: Maximum records to return (default 100)
     """
     user = request.state.user
-    
+    return await _call_server4_tool(
+        "parse_bed_file",
+        run_uuid=run_uuid,
+        file_path=file_path,
+        max_records=max_records,
+    )
+
+
+async def _call_server4_tool(tool_name: str, **kwargs):
+    """Helper to call a Server4 MCP tool via the generic MCP HTTP client."""
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{SERVER4_URL}/analysis/files/parse/bed",
-                params={
-                    "run_uuid": run_uuid,
-                    "file_path": file_path,
-                    "max_records": max_records
-                }
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPError as e:
+        server4_url = get_service_url("server4")
+        client = MCPHttpClient(name="server4", base_url=server4_url)
+        await client.connect()
+        try:
+            result = await client.call_tool(tool_name, **kwargs)
+            return result
+        finally:
+            await client.disconnect()
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
+
+async def _call_server3_tool(tool_name: str, **kwargs):
+    """Helper to call a Server3 MCP tool via the generic MCP HTTP client."""
+    try:
+        server3_url = get_service_url("server3")
+        client = MCPHttpClient(name="server3", base_url=server3_url)
+        await client.connect()
+        try:
+            result = await client.call_tool(tool_name, **kwargs)
+            return result
+        finally:
+            await client.disconnect()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server 3 error: {str(e)}")

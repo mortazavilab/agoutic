@@ -49,18 +49,18 @@ Once you have the job identifier, use the analysis endpoints to examine existing
 To trigger an analysis API call, include a special tag in your response:
 
 ```
-[[ANALYSIS_CALL: summary, run_uuid=<uuid>]]
+[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
 ```
 
 Supported analysis calls:
-- `[[ANALYSIS_CALL: summary, run_uuid=<uuid>]]` - Get comprehensive QC summary
-- `[[ANALYSIS_CALL: categorize_files, run_uuid=<uuid>]]` - Get files grouped by type  
-- `[[ANALYSIS_CALL: list_files, run_uuid=<uuid>]]` - List all job files
+- `[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]` - Get comprehensive QC summary
+- `[[DATA_CALL: service=server4, tool=categorize_job_files, run_uuid=<uuid>]]` - Get files grouped by type  
+- `[[DATA_CALL: service=server4, tool=list_job_files, run_uuid=<uuid>]]` - List all job files
 
 Example response:
 "I'll analyze the recently completed job jamshid (UUID: 4d9376a5-5a4b-4642-86cd-78f7a63fab3d). Let me retrieve the analysis summary...
 
-[[ANALYSIS_CALL: summary, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]"
+[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]"
 
 The system will automatically call the Server4 endpoint and return the results to continue the conversation.
 

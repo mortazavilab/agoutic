@@ -1,6 +1,7 @@
 import os
 from openai import OpenAI
 from server1.config import SKILLS_DIR, SKILLS_REGISTRY, LLM_URL, LLM_MODELS
+from server2.config import get_source_for_skill, CONSORTIUM_REGISTRY, SERVICE_REGISTRY
 
 # --- LLM CONNECTION ---
 # We use the standard OpenAI client but point it to the configured URL
@@ -46,11 +47,75 @@ class AgentEngine:
     def construct_system_prompt(self, skill_key: str) -> str:
         """
         Combines the 'Persona' with the specific 'Skill' instructions.
+        Dynamically generates DATA_CALL tag examples based on which
+        consortium or service the active skill belongs to.
         """
         skill_content = self._load_skill_text(skill_key)
         
         # Build list of all available skills
         all_skills = "\n".join([f"  - {key}" for key in SKILLS_REGISTRY.keys()])
+        
+        # Determine the data source for this skill (if any)
+        source_info = get_source_for_skill(skill_key)
+        
+        # Build the DATA_CALL tag instructions dynamically
+        data_call_block = ""
+        if source_info:
+            source_key, source_type = source_info
+            
+            if source_type == "consortium":
+                tag_prefix = f"consortium={source_key}"
+                registry = CONSORTIUM_REGISTRY[source_key]
+            else:
+                tag_prefix = f"service={source_key}"
+                registry = SERVICE_REGISTRY[source_key]
+            
+            display_name = registry.get("display_name", source_key.upper())
+            
+            # Build examples based on the source type
+            if source_key == "encode":
+                examples = f"""
+        ✅ CORRECT EXAMPLES:
+        [[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]
+        [[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562, organism=Homo sapiens]]
+        [[DATA_CALL: consortium=encode, tool=get_files_by_type, accession=ENCSR123ABC]]
+        
+        ❌ FORBIDDEN - NEVER WRITE THESE:
+        Get Experiment (accession=ENCSR123ABC)        ❌ NO BRACKETS - WILL NOT EXECUTE
+        **Get Experiment** (accession=ENCSR123ABC)    ❌ NO BRACKETS - WILL NOT EXECUTE
+        Get Files By Type (accession=ENCSR123ABC)     ❌ NO BRACKETS - WILL NOT EXECUTE"""
+            elif source_key == "server4":
+                examples = f"""
+        ✅ CORRECT EXAMPLES:
+        [[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]
+        [[DATA_CALL: service=server4, tool=categorize_job_files, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]
+        [[DATA_CALL: service=server4, tool=list_job_files, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]
+        
+        ❌ FORBIDDEN - NEVER WRITE THESE:
+        Get Analysis Summary (run_uuid=...)           ❌ NO BRACKETS - WILL NOT EXECUTE"""
+            else:
+                examples = f"""
+        ✅ CORRECT EXAMPLE:
+        [[DATA_CALL: {tag_prefix}, tool=tool_name, param1=value1, param2=value2]]
+        
+        ❌ FORBIDDEN - NEVER WRITE THESE:
+        Tool Name (param1=value1)                     ❌ NO BRACKETS - WILL NOT EXECUTE"""
+            
+            data_call_block = f"""
+        ═══════════════════════════════════════════════════════════════════════════════
+        🚨 CRITICAL: DATA CALL TAG FORMAT - READ THIS BEFORE DOING ANYTHING 🚨
+        ═══════════════════════════════════════════════════════════════════════════════
+        
+        When querying {display_name}, you MUST use this EXACT tag format:
+        
+        [[DATA_CALL: {tag_prefix}, tool=tool_name, param1=value1, param2=value2]]
+        {examples}
+        
+        If you write plain text without [[double brackets]], the tool will NOT run and you 
+        will be forced to hallucinate results from memory instead of retrieving real data!
+        
+        ═══════════════════════════════════════════════════════════════════════════════
+        """
         
         system_prompt = f"""
         You are Agoutic, an autonomous bioinformatics agent.
@@ -59,30 +124,7 @@ class AgentEngine:
 {all_skills}
         
         YOUR CURRENT SKILL: {skill_key}
-        
-        ═══════════════════════════════════════════════════════════════════════════════
-        🚨 CRITICAL: ENCODE TAG FORMAT - READ THIS BEFORE DOING ANYTHING 🚨
-        ═══════════════════════════════════════════════════════════════════════════════
-        
-        When querying ENCODE data, you MUST use this EXACT tag format:
-        
-        [[ENCODE_CALL: tool_name, param1=value1, param2=value2]]
-        
-        ✅ CORRECT EXAMPLES:
-        [[ENCODE_CALL: get_experiment, accession=ENCSR123ABC]]
-        [[ENCODE_CALL: search_by_biosample, search_term=K562, organism=Homo sapiens]]
-        [[ENCODE_CALL: get_files_by_type, accession=ENCSR123ABC]]
-        
-        ❌ FORBIDDEN - NEVER WRITE THESE:
-        Get Experiment (accession=ENCSR123ABC)        ❌ NO BRACKETS - WILL NOT EXECUTE
-        **Get Experiment** (accession=ENCSR123ABC)    ❌ NO BRACKETS - WILL NOT EXECUTE
-        Get Files By Type (accession=ENCSR123ABC)     ❌ NO BRACKETS - WILL NOT EXECUTE
-        
-        If you write plain text without [[double brackets]], the tool will NOT run and you 
-        will be forced to hallucinate results from memory instead of retrieving real data!
-        
-        ═══════════════════════════════════════════════════════════════════════════════
-        
+        {data_call_block}
         INSTRUCTIONS:
         The user will ask for a task. You must strictly follow the "Plan Logic" 
         defined in the skill below.

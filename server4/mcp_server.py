@@ -1,17 +1,18 @@
 """
 MCP Server for Server4 (Analysis Server).
 Exposes analysis tools via Model Context Protocol.
+Supports both stdio and HTTP transports.
 """
 
 import asyncio
+import json
 import logging
+import sys
 from typing import Any
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from fastmcp import FastMCP
 
-from server4.mcp_tools import TOOL_REGISTRY, TOOL_SCHEMAS
+from server4.mcp_tools import TOOL_REGISTRY
 from server4.config import SERVER4_MCP_PORT
 
 # Configure logging
@@ -21,91 +22,85 @@ logging.basicConfig(
 )
 logger = logging.getLogger("server4.mcp_server")
 
-# Create MCP server instance
-mcp_server = Server("agoutic-server4-analysis")
+# Create FastMCP server instance
+mcp = FastMCP("AGOUTIC-Server4-Analysis", version="0.4.0")
 
 
-# ==================== Tool Registration ====================
+# ==================== Register tools from TOOL_REGISTRY ====================
 
-@mcp_server.list_tools()
-async def list_tools() -> list[Tool]:
-    """List all available analysis tools."""
-    tools = []
-    
-    for tool_name, schema in TOOL_SCHEMAS.items():
-        tools.append(Tool(
-            name=tool_name,
-            description=schema["description"],
-            inputSchema=schema["parameters"]
-        ))
-    
-    logger.info(f"Listed {len(tools)} tools")
-    return tools
+@mcp.tool()
+async def list_job_files(run_uuid: str, extensions: str | None = None) -> str:
+    """List all files in a job's work directory with optional extension filtering."""
+    return await TOOL_REGISTRY["list_job_files"](run_uuid=run_uuid, extensions=extensions)
 
+@mcp.tool()
+async def read_file_content(run_uuid: str, file_path: str, preview_lines: int | None = None) -> str:
+    """Read content from a specific file in a job's work directory."""
+    return await TOOL_REGISTRY["read_file_content"](run_uuid=run_uuid, file_path=file_path, preview_lines=preview_lines)
 
-@mcp_server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """Execute a tool with given arguments."""
-    logger.info(f"Tool called: {name} with arguments: {arguments}")
-    
-    # Check if tool exists
-    if name not in TOOL_REGISTRY:
-        error_msg = f"Unknown tool: {name}"
-        logger.error(error_msg)
-        return [TextContent(
-            type="text",
-            text=f'{{"success": false, "error": "{error_msg}"}}'
-        )]
-    
-    try:
-        # Get tool function
-        tool_func = TOOL_REGISTRY[name]
-        
-        # Execute tool
-        result = await tool_func(**arguments)
-        
-        logger.info(f"Tool {name} executed successfully")
-        return [TextContent(type="text", text=result)]
-    
-    except TypeError as e:
-        error_msg = f"Invalid arguments for tool {name}: {str(e)}"
-        logger.error(error_msg)
-        return [TextContent(
-            type="text",
-            text=f'{{"success": false, "error": "{error_msg}"}}'
-        )]
-    
-    except Exception as e:
-        error_msg = f"Tool execution failed: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        return [TextContent(
-            type="text",
-            text=f'{{"success": false, "error": "{error_msg}"}}'
-        )]
+@mcp.tool()
+async def parse_csv_file(run_uuid: str, file_path: str, max_rows: int | None = 100) -> str:
+    """Parse a CSV or TSV file and return structured tabular data."""
+    return await TOOL_REGISTRY["parse_csv_file"](run_uuid=run_uuid, file_path=file_path, max_rows=max_rows)
+
+@mcp.tool()
+async def parse_bed_file(run_uuid: str, file_path: str, max_records: int | None = 100) -> str:
+    """Parse a BED format file and return structured genomic records."""
+    return await TOOL_REGISTRY["parse_bed_file"](run_uuid=run_uuid, file_path=file_path, max_records=max_records)
+
+@mcp.tool()
+async def get_analysis_summary(run_uuid: str) -> str:
+    """Get comprehensive analysis summary for a completed job including file categorization and parsed reports."""
+    return await TOOL_REGISTRY["get_analysis_summary"](run_uuid=run_uuid)
+
+@mcp.tool()
+async def categorize_job_files(run_uuid: str) -> str:
+    """Categorize all files in a job's work directory by type (txt, csv, bed, other)."""
+    return await TOOL_REGISTRY["categorize_job_files"](run_uuid=run_uuid)
 
 
-# ==================== Server Entry Point ====================
+# ==================== Server Entry Points ====================
 
-async def main():
-    """Run the MCP server."""
-    logger.info("Starting Server4 MCP Server (Analysis Server)")
+async def main_stdio():
+    """Run the MCP server in stdio mode (for subprocess spawning)."""
+    logger.info("Starting Server4 MCP Server (stdio mode)")
     logger.info(f"Registered tools: {list(TOOL_REGISTRY.keys())}")
-    
-    # Run server with stdio transport
-    async with stdio_server() as (read_stream, write_stream):
-        logger.info("MCP Server running on stdio")
-        await mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp_server.create_initialization_options()
-        )
+    await mcp.run_async(transport="stdio")
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Server shutting down...")
-    except Exception as e:
-        logger.error(f"Server error: {e}", exc_info=True)
-        raise
+    import argparse
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="AGOUTIC Server 4 MCP Server")
+    parser.add_argument(
+        "--mode",
+        choices=["http", "stdio"],
+        default="http",
+        help="Transport mode: 'http' (default) or 'stdio'",
+    )
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Host to bind to (default: 0.0.0.0 — all interfaces)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=SERVER4_MCP_PORT,
+        help=f"Port to bind to (default: {SERVER4_MCP_PORT})",
+    )
+
+    args = parser.parse_args()
+
+    if args.mode == "stdio":
+        asyncio.run(main_stdio())
+    else:
+        print(f"🚀 Server 4 MCP server starting on HTTP at {args.host}:{args.port}", file=sys.stderr)
+        print("Available tools:", file=sys.stderr)
+        for tool_name in TOOL_REGISTRY.keys():
+            print(f"  - {tool_name}", file=sys.stderr)
+        print(f"📍 Access endpoint: http://<your-ip>:{args.port}", file=sys.stderr)
+
+        app = mcp.http_app
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
