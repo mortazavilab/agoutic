@@ -16,6 +16,20 @@ st.set_page_config(page_title="AGOUTIC v3.0", layout="wide")
 user = require_auth(API_URL)
 
 # --- 1. STATE MANAGEMENT ---
+# Check if we're creating a new project (flag set by New Project button)
+if st.session_state.get("_create_new_project", False):
+    # Generate new project ID
+    new_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    st.session_state.active_project_id = new_id
+    st.session_state.blocks = []
+    # Clear project-related data
+    for key in ['loaded_conversation', 'selected_job', 'chat_history', 
+                'skill_content', 'selected_skill', 'job_status', 'messages']:
+        if key in st.session_state:
+            del st.session_state[key]
+    # Clear the flag
+    del st.session_state["_create_new_project"]
+
 # Initialize with user's last project or create new one
 if "active_project_id" not in st.session_state:
     # Try to get user's last project
@@ -53,14 +67,8 @@ with st.sidebar:
     st.divider()
     # [A] NEW PROJECT (Generates Random ID)
     if st.button("✨ New Project", use_container_width=True):
-        # Create a unique ID
-        new_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        # Clear ALL state variables for fresh start
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        # Set the new project ID
-        st.session_state.active_project_id = new_id
-        st.session_state.blocks = []
+        # Set flag to create new project on next rerun
+        st.session_state["_create_new_project"] = True
         st.rerun()
 
     # [B] PROJECT ID INPUT
@@ -729,7 +737,7 @@ if prompt := st.chat_input("Ask Agoutic to do something..."):
             json={
                 "project_id": active_id, 
                 "message": prompt,
-                "skill": "ENCODE_LongRead",
+                "skill": "ENCODE_Search",
                 "model": model_choice
             }
         )

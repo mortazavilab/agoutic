@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 2.3  
+**Version:** 2.4  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -9,7 +9,9 @@ AGOUTIC is a general-purpose agent for analyzing and interpreting long-read geno
 
 The system is composed of:
 - **Server 1**: Agent Engine - AI-powered orchestration and user interaction
+- **Server 2**: ENCODE Integration - Public data retrieval via ENCODELIB
 - **Server 3**: Execution Engine - Dogme/Nextflow pipeline management
+- **Server 4**: Analysis Engine - Results analysis and QC reporting
 - **UI**: Web interface for monitoring and control
 
 ## 🚀 Quick Start
@@ -33,71 +35,129 @@ uvicorn server1.app:app --host 0.0.0.0 --port 8000 --reload
 
 # Terminal 3: Start UI
 cd ui && python app.py
+
+# Optional: Server 2 & 4 start automatically when needed
+# But can be started manually for testing:
+# cd /Users/eli/code/ENCODELIB && python encode_server.py  # Server 2
+# cd server4 && uvicorn app:app --port 8002                # Server 4
 ```
 
 ### Verify Installation
 
 ```bash
+# Check Server 1 health
+curl http://localhost:8000/health
+
 # Check Server 3 health
 curl http://localhost:8001/health
 
-# Expected: {"status":"ok","version":"0.3.0",...}
+# Test Server 2 connection
+python server1/server2_mcp_client.py
+
+# Expected: Connection success and K562 search results
 ```
 
 ## 📋 Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        AGOUTIC System                       │
+┌──────────────────────────────────────────────────────────────┐
+│                       AGOUTIC System v2.4                    │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
-│  ┌─────────────────┐              ┌──────────────────┐     │
-│  │   Web UI        │              │   AI Agent       │     │
-│  │  (Dashboard)    │◄────REST────►│   (Server 1)     │     │
-│  └─────────────────┘              └────────┬─────────┘     │
-│                                            │                │
-│                                    REST API│ + MCP          │
-│                                            ↓                │
-│                                  ┌──────────────────┐       │
-│                                  │   Job Executor   │       │
-│                                  │   (Server 3)     │       │
-│                                  └────────┬─────────┘       │
-│                                           │                 │
-│                            Nextflow API   │                 │
-│                                           ↓                 │
-│                           ┌──────────────────────┐          │
-│                           │  Dogme Pipelines     │          │
-│                           │  - Basecalling       │          │
-│                           │  - Alignment         │          │
-│                           │  - Quantification    │          │
-│                           │  - Modification Call │          │
-│                           └──────────────────────┘          │
-└─────────────────────────────────────────────────────────────┘
+│  ┌──────────┐                                               │
+│  │  Web UI  │ (Streamlit)                                   │
+│  └────┬─────┘                                               │
+│       │ REST API                                            │
+│       ↓                                                      │
+│  ┌────────────────────────────────────────┐                │
+│  │        Server 1 (Agent Engine)         │                │
+│  │     AI Orchestration + Coordination    │                │
+│  └────┬────────────┬────────────┬─────────┘                │
+│       │            │            │                           │
+│       │ MCP        │ REST       │ MCP                       │
+│       ↓            ↓            ↓                           │
+│  ┌────────┐  ┌──────────┐  ┌──────────┐                   │
+│  │Server 2│  │ Server 3 │  │ Server 4 │                   │
+│  │ENCODE  │  │ Nextflow │  │ Analysis │                   │
+│  │ Portal │  │ Pipeline │  │  Engine  │                   │
+│  └────┬───┘  └─────┬────┘  └─────┬────┘                   │
+│       │            │              │                         │
+│       ↓            ↓              ↓                         │
+│    ENCODE      Dogme          Results                      │
+│    Portal    Pipelines         Files                       │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+## 🔧 System Components
+
+### Server 1: Agent Engine (Port 8000)
+- **Role:** Central orchestrator with LLM reasoning
+- **Tech:** FastAPI + OpenAI-compatible LLM
+- **Features:**
+  - Chat interface with skill-based workflows
+  - Coordinates Server 2, 3, and 4
+  - Block-based project timeline
+  - Background job monitoring
+  - User authentication
+
+### Server 2: ENCODELIB (Port 8080)
+- **Role:** ENCODE Portal data retrieval
+- **Tech:** fastmcp + ENCODE API
+- **Features:**
+  - Search experiments by biosample/organism/target
+  - Download experiment files
+  - Metadata caching
+  - 15 MCP tools for data access
+- **Docs:** [SERVER2_IMPLEMENTATION.md](SERVER2_IMPLEMENTATION.md)
+
+### Server 3: Execution Engine (Port 8001)
+- **Role:** Nextflow pipeline execution
+- **Tech:** FastAPI + Nextflow + Dogme
+- **Features:**
+  - Submit Dogme DNA/RNA/cDNA pipelines
+  - Real-time job monitoring
+  - Log streaming
+  - Working directory management
+- **Docs:** [server3/README.md](server3/README.md)
+
+### Server 4: Analysis Engine (Port 8002)
+- **Role:** Results analysis and QC
+- **Tech:** fastmcp + Python analysis tools
+- **Features:**
+  - Parse pipeline outputs
+  - Generate QC reports
+  - Summarize results
+  - File content analysis
+- **Docs:** [server4/README.md](server4/README.md)
 
 ## 📁 Project Structure
 
 ```
 agoutic/
-├── README.md                    # This file
-├── environment.yml              # Conda environment specification
-├── CONFIGURATION.md             # Path configuration guide
-├── QUICK_REFERENCE.md           # Quick reference for configs
+├── README.md                     # This file
+├── environment.yml               # Conda environment specification
+├── CONFIGURATION.md              # Path configuration guide
+├── ARCHITECTURE_UPDATE.md        # System architecture (all servers)
+├── SERVER2_IMPLEMENTATION.md     # Server 2 integration guide
+├── SERVER2_QUICKSTART.md         # Server 2 quick reference
 │
-├── server1/                     # Agent Engine
-│   ├── README.md               # Server 1 documentation
-│   ├── app.py                  # FastAPI application
-│   ├── agent_engine.py         # AI agent orchestration
-│   ├── mcp_client.py           # MCP client for Server 3
-│   ├── models.py               # Database models
-│   ├── schemas.py              # Request/response schemas
-│   ├── config.py               # Configuration
-│   ├── db.py                   # Database connection
-│   └── test_chat.py            # Tests
+├── server1/                      # Agent Engine
+│   ├── README.md                # Server 1 documentation
+│   ├── app.py                   # FastAPI application
+│   ├── agent_engine.py          # AI agent orchestration
+│   ├── mcp_client.py            # MCP client for Server 3
+│   ├── server2_mcp_client.py   # ✨ NEW: MCP client for Server 2
+│   ├── server4_mcp_client.py   # MCP client for Server 4
+│   ├── models.py                # Database models
+│   ├── schemas.py               # Request/response schemas
+│   ├── config.py                # Configuration (updated for Server 2)
+│   ├── db.py                    # Database connection
+│   └── test_chat.py             # Tests
 │
-├── server3/                     # Execution Engine
-│   ├── README.md               # Server 3 documentation
-│   ├── app.py                  # FastAPI application
+├── server3/                      # Execution Engine
+│   ├── README.md                # Server 3 documentation
+│   ├── app.py                   # FastAPI application
 │   ├── nextflow_executor.py    # Nextflow wrapper
 │   ├── mcp_tools.py            # MCP tool definitions
 │   ├── mcp_server.py           # MCP server

@@ -3,6 +3,7 @@ import datetime
 import uuid
 import json
 import os
+import re
 import httpx
 from typing import Optional
 
@@ -15,12 +16,13 @@ from sqlalchemy import select, desc
 # ✅ Import from your package
 from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from server1.agent_engine import AgentEngine
-from server1.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES
+from server1.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES, SERVER2_MCP_COMMAND
 from server1.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
 from server1.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess
 from server1.middleware import AuthMiddleware
 from server1.auth import router as auth_router
 from server1.admin import router as admin_router
+from server1.server2_mcp_client import Server2MCPClient
 
 # --- APP ---
 app = FastAPI()
@@ -56,7 +58,7 @@ async def startup_event():
 class ChatRequest(BaseModel):
     project_id: str
     message: str
-    skill: str = "ENCODE_LongRead" # Default skill
+    skill: str = "ENCODE_Search" # Default skill
     model: str = "default"         # Default model (devstral-2)
 
 # --- HELPERS ---
@@ -1036,10 +1038,51 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         analysis_call_pattern = r'\[\[ANALYSIS_CALL:\s*(\w+),\s*run_uuid=([a-f0-9-]+)\]\]'
         analysis_matches = list(re.finditer(analysis_call_pattern, raw_response))
         
+        # 5b. Parse ENCODE Call Tags (for Server2)
+        # Format: [[ENCODE_CALL: tool_name, param1=value1, param2=value2]]
+        
+        # FALLBACK: Fix common LLM mistakes by converting plain text patterns to proper tags
+        # Some LLMs write "Get Experiment (accession=X)" instead of [[ENCODE_CALL: get_experiment, accession=X]]
+        fallback_patterns = {
+            r'Get Experiment\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_experiment, \1]]',
+            r'Get All Metadata\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_all_metadata, \1]]',
+            r'Get File Types\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_file_types, \1]]',
+            r'Get Files By Type\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_files_by_type, \1]]',
+            r'Get Available Output Types\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_available_output_types, \1]]',
+            r'Get Files Summary\s*\(([^)]+)\)': r'[[ENCODE_CALL: get_files_summary, \1]]',
+            r'Search By Biosample\s*\(([^)]+)\)': r'[[ENCODE_CALL: search_by_biosample, \1]]',
+            r'Search By Target\s*\(([^)]+)\)': r'[[ENCODE_CALL: search_by_target, \1]]',
+            r'Search By Organism\s*\(([^)]+)\)': r'[[ENCODE_CALL: search_by_organism, \1]]',
+            r'List Experiments\s*\(([^)]+)\)': r'[[ENCODE_CALL: list_experiments, \1]]',
+            r'Get Cache Stats\s*\(\)': r'[[ENCODE_CALL: get_cache_stats]]',
+            r'Get Server Info\s*\(\)': r'[[ENCODE_CALL: get_server_info]]',
+        }
+        
+        # Apply fallback conversions
+        corrected_response = raw_response
+        fallback_fixes_applied = 0
+        for pattern, replacement in fallback_patterns.items():
+            before = corrected_response
+            corrected_response = re.sub(pattern, replacement, corrected_response, flags=re.IGNORECASE)
+            if before != corrected_response:
+                fallback_fixes_applied += 1
+        
+        if fallback_fixes_applied > 0:
+            print(f"⚠️  Applied {fallback_fixes_applied} fallback tag fix(es) to LLM response")
+        
+        # Now parse the corrected response for proper ENCODE_CALL tags
+        encode_call_pattern = r'\[\[ENCODE_CALL:\s*([\w_]+)(?:,\s*([^\]]+))?\]\]'
+        encode_matches = list(re.finditer(encode_call_pattern, corrected_response))
+        
         # Clean all tags out of the text so the user doesn't see them
-        clean_markdown = raw_response.replace(trigger_tag, "").strip()
+        clean_markdown = corrected_response.replace(trigger_tag, "").strip()
         clean_markdown = re.sub(r'\[\[SKILL_SWITCH_TO:\s*\w+\]\]', '', clean_markdown).strip()
         clean_markdown = re.sub(analysis_call_pattern, '', clean_markdown).strip()
+        clean_markdown = re.sub(encode_call_pattern, '', clean_markdown).strip()
+        
+        # Also remove any remaining plain text patterns that might not have been converted
+        for pattern in fallback_patterns.keys():
+            clean_markdown = re.sub(pattern, '', clean_markdown, flags=re.IGNORECASE).strip()
         
         # 6. Execute Analysis Calls if present
         analysis_results = []
@@ -1087,6 +1130,116 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     "uuid": run_uuid,
                     "error": str(e)
                 })
+        
+        # 6b. Execute ENCODE Calls if present
+        encode_results = []
+        if encode_matches:
+            print(f"🧬 Executing {len(encode_matches)} ENCODE call(s)...")
+            server2 = Server2MCPClient(mcp_server_command=SERVER2_MCP_COMMAND)
+            
+            try:
+                await server2.connect()
+                
+                for match in encode_matches:
+                    tool_name = match.group(1)
+                    params_str = match.group(2)  # Everything after tool name
+                    
+                    # Parse parameters (format: param1=value1, param2=value2)
+                    params = {}
+                    if params_str:
+                        for param_pair in params_str.split(','):
+                            param_pair = param_pair.strip()
+                            if '=' in param_pair:
+                                key, value = param_pair.split('=', 1)
+                                # Remove quotes if present
+                                value = value.strip().strip('"\'')
+                                params[key.strip()] = value
+                    
+                    print(f"📞 Calling Server2.{tool_name}({params})")
+                    
+                    try:
+                        # Get the method and call it
+                        if hasattr(server2, tool_name):
+                            method = getattr(server2, tool_name)
+                            result_data = await method(**params)
+                            encode_results.append({
+                                "tool": tool_name,
+                                "params": params,
+                                "data": result_data
+                            })
+                            print(f"✅ ENCODE call successful: {tool_name}")
+                        else:
+                            print(f"❌ Unknown Server2 method: {tool_name}")
+                            encode_results.append({
+                                "tool": tool_name,
+                                "params": params,
+                                "error": f"Unknown method: {tool_name}"
+                            })
+                    except Exception as e:
+                        print(f"❌ ENCODE call exception: {e}")
+                        encode_results.append({
+                            "tool": tool_name,
+                            "params": params,
+                            "error": str(e)
+                        })
+            finally:
+                await server2.disconnect()
+        
+        # If we have ENCODE results, format them and append to the response
+        if encode_results:
+            encode_markdown = "\n\n---\n\n### 🧬 ENCODE Data\n\n"
+            for result in encode_results:
+                encode_markdown += f"**{result['tool'].replace('_', ' ').title()}**"
+                if result['params']:
+                    encode_markdown += f" ({', '.join(f'{k}={v}' for k, v in result['params'].items())})"
+                encode_markdown += "\n\n"
+                
+                if "error" in result:
+                    encode_markdown += f"❌ Error: {result['error']}\n\n"
+                elif "data" in result:
+                    data = result['data']
+                    # Format based on data type
+                    if isinstance(data, list):
+                        encode_markdown += f"Found {len(data)} result(s):\n\n"
+                        # Show ALL results as a table so LLM can analyze them
+                        if data and isinstance(data[0], dict):
+                            encode_markdown += "| Accession | Assay | Biosample | Target |\n"
+                            encode_markdown += "|-----------|-------|-----------|--------|\n"
+                            for item in data:
+                                accession = item.get('accession', '')
+                                assay = item.get('assay', item.get('assay_title', ''))
+                                biosample = item.get('biosample', item.get('biosample_summary', ''))
+                                targets = item.get('targets', [])
+                                target_str = ', '.join(targets) if isinstance(targets, list) else str(targets)
+                                encode_markdown += f"| {accession} | {assay} | {biosample} | {target_str} |\n"
+                            
+                            # Auto-generate summary: count by assay type
+                            from collections import Counter
+                            assay_counts = Counter()
+                            for item in data:
+                                assay = item.get('assay', item.get('assay_title', 'Unknown'))
+                                if assay:
+                                    assay_counts[assay] += 1
+                            
+                            if assay_counts:
+                                encode_markdown += f"\n**📊 Summary: {len(assay_counts)} unique assay type(s)**\n\n"
+                                encode_markdown += "| Assay Type | Count |\n"
+                                encode_markdown += "|------------|-------|\n"
+                                for assay_type, count in assay_counts.most_common():
+                                    encode_markdown += f"| {assay_type} | {count} |\n"
+                                encode_markdown += f"\n**Total: {len(data)} experiments**\n"
+                        else:
+                            for item in data:
+                                encode_markdown += f"- {str(item)[:200]}\n"
+                    elif isinstance(data, dict):
+                        # Show formatted dict - no truncation for metadata
+                        import json
+                        json_str = json.dumps(data, indent=2)
+                        encode_markdown += f"```json\n{json_str}\n```\n"
+                    else:
+                        encode_markdown += f"{str(data)}\n"
+                    encode_markdown += "\n"
+            clean_markdown += encode_markdown
         
         # If we have analysis results, format them and append to the response
         if analysis_results:
@@ -1153,7 +1306,10 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        error_detail = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+        print(f"❌ Chat endpoint error: {error_detail}")
+        raise HTTPException(status_code=500, detail=error_detail)
     finally:
         session.close()
 

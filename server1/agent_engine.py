@@ -60,6 +60,29 @@ class AgentEngine:
         
         YOUR CURRENT SKILL: {skill_key}
         
+        ═══════════════════════════════════════════════════════════════════════════════
+        🚨 CRITICAL: ENCODE TAG FORMAT - READ THIS BEFORE DOING ANYTHING 🚨
+        ═══════════════════════════════════════════════════════════════════════════════
+        
+        When querying ENCODE data, you MUST use this EXACT tag format:
+        
+        [[ENCODE_CALL: tool_name, param1=value1, param2=value2]]
+        
+        ✅ CORRECT EXAMPLES:
+        [[ENCODE_CALL: get_experiment, accession=ENCSR123ABC]]
+        [[ENCODE_CALL: search_by_biosample, search_term=K562, organism=Homo sapiens]]
+        [[ENCODE_CALL: get_files_by_type, accession=ENCSR123ABC]]
+        
+        ❌ FORBIDDEN - NEVER WRITE THESE:
+        Get Experiment (accession=ENCSR123ABC)        ❌ NO BRACKETS - WILL NOT EXECUTE
+        **Get Experiment** (accession=ENCSR123ABC)    ❌ NO BRACKETS - WILL NOT EXECUTE
+        Get Files By Type (accession=ENCSR123ABC)     ❌ NO BRACKETS - WILL NOT EXECUTE
+        
+        If you write plain text without [[double brackets]], the tool will NOT run and you 
+        will be forced to hallucinate results from memory instead of retrieving real data!
+        
+        ═══════════════════════════════════════════════════════════════════════════════
+        
         INSTRUCTIONS:
         The user will ask for a task. You must strictly follow the "Plan Logic" 
         defined in the skill below.
@@ -87,7 +110,7 @@ class AgentEngine:
         """
         return system_prompt
 
-    def think(self, user_message: str, skill_key: str = "ENCODE_LongRead", conversation_history: list = None):
+    def think(self, user_message: str, skill_key: str = "ENCODE_Search", conversation_history: list = None):
         """
         Sends the skill + user request to the local LLM and gets the plan.
         
