@@ -37,12 +37,12 @@ CONSORTIUM_REGISTRY = {
         # Result formatting: (column_header, field_key) pairs for table output
         "table_columns": [
             ("Accession", "accession"),
-            ("Assay", "assay_title"),
-            ("Biosample", "biosample_summary"),
+            ("Assay", "assay"),
+            ("Biosample", "biosample"),
             ("Target", "targets"),
         ],
         # Field for auto-summary counting (e.g., count by assay type)
-        "count_field": "assay_title",
+        "count_field": "assay",
         "count_label": "assay type",
 
         # Skills that belong to this consortium

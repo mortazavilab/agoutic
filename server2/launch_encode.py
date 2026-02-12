@@ -50,13 +50,23 @@ def main():
     # Add ENCODELIB to Python path so we can import encode_server
     sys.path.insert(0, str(encodelib_path))
 
+    # Try different possible export names (mcp, server, app)
+    mcp_instance = None
     try:
-        # Import the FastMCP instance from ENCODELIB's encode_server
-        from encode_server import mcp  # noqa: E402
-    except ImportError as e:
-        print(f"❌ Failed to import encode_server from {encodelib_path}: {e}", file=sys.stderr)
-        print("   Make sure ENCODELIB is installed and encode_server.py exists.", file=sys.stderr)
-        sys.exit(1)
+        from encode_server import mcp as mcp_instance  # noqa: E402
+        print("✅ Imported 'mcp' from encode_server", file=sys.stderr)
+    except ImportError:
+        try:
+            from encode_server import server as mcp_instance  # noqa: E402
+            print("✅ Imported 'server' from encode_server", file=sys.stderr)
+        except ImportError:
+            try:
+                from encode_server import app as mcp_instance  # noqa: E402
+                print("✅ Imported 'app' from encode_server", file=sys.stderr)
+            except ImportError as e:
+                print(f"❌ Failed to import encode_server from {encodelib_path}: {e}", file=sys.stderr)
+                print("   Make sure ENCODELIB is installed and encode_server.py exports 'mcp', 'server', or 'app'.", file=sys.stderr)
+                sys.exit(1)
 
     import uvicorn
 
@@ -65,7 +75,13 @@ def main():
     print(f"📍 Access endpoint: http://{args.host}:{args.port}", file=sys.stderr)
 
     # Serve the FastMCP instance over HTTP
-    app = mcp.http_app
+    # FastMCP instances have .http_app for serving over HTTP
+    if hasattr(mcp_instance, 'http_app'):
+        app = mcp_instance.http_app
+    else:
+        # Fallback: assume it's already an ASGI app
+        app = mcp_instance
+    
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

@@ -50,6 +50,7 @@ class MCPHttpClient:
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=self.timeout,
+            follow_redirects=True,
         )
 
         # MCP initialize handshake
@@ -72,11 +73,14 @@ class MCPHttpClient:
             response = await self._client.post(
                 "/mcp/",
                 json=init_request,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
             )
             response.raise_for_status()
 
-            result = response.json()
+            result = self._parse_response(response)
             if "error" in result:
                 raise RuntimeError(f"MCP initialization failed: {result['error']}")
 
@@ -128,7 +132,10 @@ class MCPHttpClient:
             },
         }
 
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
         if self._session_id:
             headers["mcp-session-id"] = self._session_id
 
@@ -140,7 +147,7 @@ class MCPHttpClient:
             )
             response.raise_for_status()
 
-            rpc_response = response.json()
+            rpc_response = self._parse_response(response)
 
             if "error" in rpc_response:
                 raise RuntimeError(f"Tool error: {rpc_response['error']}")
@@ -175,7 +182,10 @@ class MCPHttpClient:
             "params": {},
         }
 
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
         if self._session_id:
             headers["mcp-session-id"] = self._session_id
 
@@ -186,7 +196,7 @@ class MCPHttpClient:
         )
         response.raise_for_status()
 
-        rpc_response = response.json()
+        rpc_response = self._parse_response(response)
         if "error" in rpc_response:
             raise RuntimeError(f"tools/list error: {rpc_response['error']}")
 
@@ -196,28 +206,68 @@ class MCPHttpClient:
 
     def _extract_result(self, rpc_response: dict) -> Any:
         """Extract the tool result from a JSON-RPC response."""
+        logger.info(f"[MCP HTTP] Extracting result from RPC response keys: {list(rpc_response.keys())}")
         rpc_result = rpc_response.get("result")
         if not rpc_result:
+            logger.warning(f"[MCP HTTP] No 'result' field in RPC response")
             return {}
 
         # FastMCP wraps tool results in content[0].text as a JSON string
         if isinstance(rpc_result, dict) and "content" in rpc_result:
             content_list = rpc_result.get("content", [])
+            logger.info(f"[MCP HTTP] Found content list with {len(content_list)} items")
             if content_list and len(content_list) > 0:
                 text_content = content_list[0].get("text", "")
+                logger.info(f"[MCP HTTP] Text content length: {len(text_content)} chars")
                 if text_content:
                     try:
-                        return json.loads(text_content)
-                    except json.JSONDecodeError:
+                        parsed = json.loads(text_content)
+                        logger.info(f"[MCP HTTP] Successfully parsed JSON from text content")
+                        return parsed
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"[MCP HTTP] Failed to parse JSON from text content: {e}")
                         return text_content
 
             # Check for isError flag from FastMCP
             if rpc_result.get("isError", False):
                 raise RuntimeError(f"Tool returned error: {rpc_result}")
+            logger.warning(f"[MCP HTTP] Returning empty dict - no text content found")
             return {}
 
         # Fallback for non-FastMCP format
+        logger.info(f"[MCP HTTP] Using fallback - returning rpc_result directly")
         return rpc_result
+
+    def _parse_response(self, response: httpx.Response) -> dict:
+        """
+        Parse HTTP response, handling both JSON and SSE formats.
+        FastMCP's StreamableHTTP can return either format depending on Accept header.
+        """
+        content_type = response.headers.get("content-type", "").lower()
+        
+        # If response is SSE format (text/event-stream)
+        if "text/event-stream" in content_type:
+            text = response.text.strip()
+            logger.info(f"[MCP HTTP] SSE response (first 500 chars): {text[:500]}")
+            # SSE format: "data: {...}\n\n"
+            # Extract JSON from SSE wrapper
+            for line in text.split("\n"):
+                if line.startswith("data: "):
+                    json_str = line[6:]  # Remove "data: " prefix
+                    try:
+                        result = json.loads(json_str)
+                        logger.info(f"[MCP HTTP] Parsed SSE JSON successfully")
+                        return result
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"[MCP HTTP] Failed to parse SSE line: {line[:100]} - {e}")
+                        continue
+            # If no valid JSON found in SSE stream
+            raise RuntimeError(f"No valid JSON in SSE response: {text[:200]}")
+        
+        # Default to JSON parsing
+        result = response.json()
+        logger.info(f"[MCP HTTP] JSON response received")
+        return result
 
     async def _cleanup(self) -> None:
         """Close HTTP client if open."""
