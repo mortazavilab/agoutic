@@ -123,6 +123,7 @@ Write the tag on its own line. It executes automatically and returns data.
 | "Liver RNA-seq" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=liver, organism=Homo sapiens, assay_title=RNA-seq]]` |
 | "Details for ENCSR123ABC" | `[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]` |
 | "Files for ENCSR123ABC" | `[[DATA_CALL: consortium=encode, tool=get_file_types, accession=ENCSR123ABC]]` |
+| "BAM files for ENCSR123ABC" | `[[DATA_CALL: consortium=encode, tool=get_files_by_type, accession=ENCSR123ABC]]` (then show result['bam']) |
 | "Browse experiments" | `[[DATA_CALL: consortium=encode, tool=list_experiments, limit=50]]` |
 
 ---
@@ -195,6 +196,11 @@ Lists available file types for an experiment.
 [[DATA_CALL: consortium=encode, tool=get_files_by_type, accession=ENCSR123ABC]]
 ```
 Gets files organized by type (fastq, bam, tsv, gtf, etc.).
+Returns: Dict with keys for each file type ('bam', 'fastq', 'bigWig', etc.), values are lists of file objects.
+
+**To show only specific file types (e.g., BAM files):**
+Call this tool and then present only the relevant section from the returned dict.
+Example: After calling the tool, look at result['bam'] for BAM files, result['fastq'] for FASTQ files, etc.
 
 **get_available_output_types:**
 ```
@@ -337,6 +343,10 @@ Format based on what the user asked:
 If the user wants to:
 - **See more details** → Use `get_experiment` or `get_all_metadata`
 - **Check files** → Use `get_file_types` or `get_files_summary`
+- **Get BAM/FASTQ/specific files** → Use `get_files_by_type`, then present the specific file type from the result
+  - Result will be a dict: `{'bam': [...], 'fastq': [...], 'bigWig': [...], ...}`
+  - To show only BAM files: present `result['bam']`
+  - To show only FASTQ files: present `result['fastq']`
 - **Download data** → Switch to ENCODE_LongRead: `[[SKILL_SWITCH_TO: ENCODE_LongRead]]`
 - **Analyze local data** → Switch: `[[SKILL_SWITCH_TO: analyze_local_sample]]`
 
