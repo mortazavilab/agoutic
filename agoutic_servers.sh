@@ -1,9 +1,14 @@
 #!/bin/bash
 # =============================================================================
-# AGOUTIC - Start All Servers
+# AGOUTIC - Server Manager
 # =============================================================================
 # Launches all server processes (Server 1, 3, 4, and consortium MCP servers)
 # as background processes with PID tracking and log files.
+#
+# Features:
+#   - Reliable port-based process killing (fallback from PIDs)
+#   - Automatic log rotation with timestamps on start/restart
+#   - Structured JSON-lines logging via Python structlog
 #
 # Usage:
 #   ./agoutic_servers.sh              # Start all servers
@@ -12,7 +17,7 @@
 #   ./agoutic_servers.sh --restart    # Restart all servers
 # =============================================================================
 
-set -e
+# Don't use set -e — helper functions return nonzero legitimately
 
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +25,7 @@ export AGOUTIC_CODE="${AGOUTIC_CODE:-$SCRIPT_DIR}"
 export AGOUTIC_DATA="${AGOUTIC_DATA:-$AGOUTIC_CODE/data}"
 
 PIDS_DIR="$AGOUTIC_CODE/pids"
-LOGS_DIR="$AGOUTIC_CODE/logs"
+LOGS_DIR="$AGOUTIC_DATA/logs"
 
 # Port assignments
 SERVER1_PORT="${SERVER1_PORT:-8000}"
@@ -30,6 +35,16 @@ SERVER4_PORT="${SERVER4_PORT:-8004}"
 SERVER4_MCP_PORT="${SERVER4_MCP_PORT:-8005}"
 ENCODE_MCP_PORT="${ENCODE_MCP_PORT:-8006}"
 UI_PORT="${UI_PORT:-8501}"
+
+# Map service names to ports
+declare -A PORT_MAP=(
+    ["server3-rest"]=$SERVER3_PORT
+    ["server3-mcp"]=$SERVER3_MCP_PORT
+    ["server4-rest"]=$SERVER4_PORT
+    ["server4-mcp"]=$SERVER4_MCP_PORT
+    ["encode-mcp"]=$ENCODE_MCP_PORT
+    ["server1"]=$SERVER1_PORT
+)
 
 # Colors
 RED='\033[0;31m'
@@ -60,15 +75,149 @@ error() {
     echo -e "${RED}  ❌ $1${NC}"
 }
 
+# --- Log Rotation ---
+
+rotate_logs() {
+    # Rotate existing log files by renaming them with a timestamp.
+    # Called at the start of cmd_start so each run gets fresh logs.
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+
+    if [ ! -d "$LOGS_DIR" ]; then
+        return
+    fi
+
+    local rotated=0
+    for logfile in "$LOGS_DIR"/*.jsonl "$LOGS_DIR"/*.log; do
+        # Skip glob patterns that didn't match
+        [ -e "$logfile" ] || continue
+
+        # Skip empty files
+        [ -s "$logfile" ] || continue
+
+        local base
+        base=$(basename "$logfile")
+        local ext="${base##*.}"
+        local name="${base%.*}"
+
+        mv "$logfile" "$LOGS_DIR/${name}.${timestamp}.${ext}"
+        rotated=$((rotated + 1))
+    done
+
+    if [ "$rotated" -gt 0 ]; then
+        log "Rotated $rotated log file(s) with timestamp $timestamp"
+    fi
+}
+
+# --- Process management ---
+
+is_pid_our_process() {
+    # Verify that a PID belongs to a Python/uvicorn process (not a recycled PID).
+    local pid="$1"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        return 1
+    fi
+    local cmd
+    cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    if [[ "$cmd" == *python* ]] || [[ "$cmd" == *uvicorn* ]]; then
+        return 0
+    fi
+    return 1
+}
+
 is_running() {
-    local pid_file="$PIDS_DIR/$1.pid"
+    local name="$1"
+    local pid_file="$PIDS_DIR/$name.pid"
     if [ -f "$pid_file" ]; then
-        local pid=$(cat "$pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
+        local pid
+        pid=$(cat "$pid_file")
+        if is_pid_our_process "$pid"; then
             return 0  # Running
         fi
     fi
+    # Fallback: check if anything is listening on the expected port
+    local port="${PORT_MAP[$name]}"
+    if [ -n "$port" ]; then
+        local port_pid
+        port_pid=$(lsof -ti :"$port" 2>/dev/null | head -1)
+        if [ -n "$port_pid" ] && is_pid_our_process "$port_pid"; then
+            return 0
+        fi
+    fi
     return 1  # Not running
+}
+
+get_running_pid() {
+    # Return the PID of the running process for a service name.
+    # Tries PID file first, then port-based lookup.
+    local name="$1"
+    local pid_file="$PIDS_DIR/$name.pid"
+
+    # Try PID file first
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file")
+        if is_pid_our_process "$pid"; then
+            echo "$pid"
+            return 0
+        fi
+    fi
+
+    # Fallback: port-based lookup
+    local port="${PORT_MAP[$name]}"
+    if [ -n "$port" ]; then
+        local port_pid
+        port_pid=$(lsof -ti :"$port" 2>/dev/null | head -1)
+        if [ -n "$port_pid" ]; then
+            echo "$port_pid"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+kill_by_port() {
+    # Kill any process listening on a given port.
+    local port="$1"
+    local pids
+    pids=$(lsof -ti :"$port" 2>/dev/null || true)
+
+    if [ -z "$pids" ]; then
+        return 1
+    fi
+
+    for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Wait for graceful shutdown
+    local waited=0
+    while [ $waited -lt 5 ]; do
+        local still_alive=false
+        for pid in $pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                still_alive=true
+                break
+            fi
+        done
+        if ! $still_alive; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    # Force kill remaining
+    for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+
+    return 0
 }
 
 start_process() {
@@ -78,17 +227,21 @@ start_process() {
     local pid_file="$PIDS_DIR/${name}.pid"
 
     if is_running "$name"; then
-        warn "$name is already running (PID: $(cat "$pid_file"))"
+        local running_pid
+        running_pid=$(get_running_pid "$name")
+        warn "$name is already running (PID: $running_pid)"
         return
     fi
 
     log "Starting $name..."
-    # Run in background, redirect stdout/stderr to log file
+    # Run in background; shell-level stdout/stderr capture serves as
+    # safety net for pre-logging crashes. Application-level structured
+    # logs go to logs/*.jsonl via common.logging_config.
     cd "$AGOUTIC_CODE"
     eval "$command" >> "$log_file" 2>&1 &
     local pid=$!
     echo "$pid" > "$pid_file"
-    
+
     # Brief pause to check if process started successfully
     sleep 1
     if kill -0 "$pid" 2>/dev/null; then
@@ -102,42 +255,64 @@ start_process() {
 stop_process() {
     local name="$1"
     local pid_file="$PIDS_DIR/${name}.pid"
+    local port="${PORT_MAP[$name]}"
+    local killed=false
 
-    if [ ! -f "$pid_file" ]; then
-        warn "$name: no PID file found"
-        return
+    # Strategy 1: PID file (validated)
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file")
+        if is_pid_our_process "$pid"; then
+            log "Stopping $name (PID: $pid)..."
+            kill "$pid" 2>/dev/null || true
+
+            # Wait up to 5 seconds for graceful shutdown
+            for i in {1..5}; do
+                if ! kill -0 "$pid" 2>/dev/null; then
+                    break
+                fi
+                sleep 1
+            done
+
+            # Force kill if still running
+            if kill -0 "$pid" 2>/dev/null; then
+                warn "Force killing $name (PID: $pid)..."
+                kill -9 "$pid" 2>/dev/null || true
+                sleep 1
+            fi
+
+            killed=true
+        fi
+        rm -f "$pid_file"
     fi
 
-    local pid=$(cat "$pid_file")
-    if kill -0 "$pid" 2>/dev/null; then
-        log "Stopping $name (PID: $pid)..."
-        kill "$pid" 2>/dev/null
-        
-        # Wait up to 5 seconds for graceful shutdown
-        for i in {1..5}; do
-            if ! kill -0 "$pid" 2>/dev/null; then
-                break
+    # Strategy 2: Port-based fallback — kill whatever is on the port
+    if [ -n "$port" ]; then
+        local port_pids
+        port_pids=$(lsof -ti :"$port" 2>/dev/null || true)
+        if [ -n "$port_pids" ]; then
+            if ! $killed; then
+                log "Stopping $name via port $port..."
+            else
+                log "Cleaning up orphan(s) on port $port..."
             fi
-            sleep 1
-        done
-
-        # Force kill if still running
-        if kill -0 "$pid" 2>/dev/null; then
-            warn "Force killing $name..."
-            kill -9 "$pid" 2>/dev/null
+            kill_by_port "$port"
+            killed=true
         fi
+    fi
 
+    if $killed; then
         success "$name stopped"
     else
-        warn "$name was not running"
+        warn "$name: not running"
     fi
-    rm -f "$pid_file"
 }
 
 # --- Commands ---
 
 cmd_start() {
     ensure_dirs
+    rotate_logs
     log "Starting AGOUTIC servers..."
     echo ""
 
@@ -174,6 +349,8 @@ cmd_start() {
     echo "  Server 4 (Analysis MCP):   http://localhost:$SERVER4_MCP_PORT"
     echo "  ENCODE (Consortium MCP):   http://localhost:$ENCODE_MCP_PORT"
     echo ""
+    log "Structured logs:  $LOGS_DIR/*.jsonl"
+    log "Unified log:      $LOGS_DIR/agoutic.jsonl"
     log "Start the UI separately:  streamlit run ui/app.py --server.port $UI_PORT"
 }
 
@@ -202,11 +379,13 @@ cmd_status() {
     for i in "${!services[@]}"; do
         local name="${services[$i]}"
         local label="${labels[$i]}"
+        local port="${PORT_MAP[$name]}"
         if is_running "$name"; then
-            local pid=$(cat "$PIDS_DIR/${name}.pid")
-            success "$label: running (PID: $pid)"
+            local pid
+            pid=$(get_running_pid "$name")
+            success "$label: running (PID: $pid, port: $port)"
         else
-            error "$label: not running"
+            error "$label: not running (port: $port)"
         fi
     done
     echo ""

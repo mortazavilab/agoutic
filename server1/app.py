@@ -23,6 +23,8 @@ from server1.middleware import AuthMiddleware
 from server1.auth import router as auth_router
 from server1.admin import router as admin_router
 from common import MCPHttpClient
+from common.logging_config import setup_logging, get_logger
+from common.logging_middleware import RequestLoggingMiddleware
 from server2 import format_results
 from server2.config import (
     CONSORTIUM_REGISTRY,
@@ -30,10 +32,17 @@ from server2.config import (
 )
 from server1.config import SERVICE_REGISTRY, get_service_url
 
+# --- LOGGING ---
+setup_logging("server1")
+logger = get_logger(__name__)
+
 # --- APP ---
 app = FastAPI()
 
-# Add auth middleware FIRST (before CORS)
+# Add request logging middleware FIRST (outermost)
+app.add_middleware(RequestLoggingMiddleware)
+
+# Add auth middleware (before CORS)
 app.add_middleware(AuthMiddleware)
 
 # Add CORS middleware for Streamlit UI cross-origin requests
@@ -401,7 +410,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         elif "sup" in all_user_text:
             params["accuracy"] = "sup"
     
-    print(f"✅ Extracted parameters (heuristics): {params}")
+    logger.info("Extracted parameters", method="heuristics", params=params)
     return params
 
 
@@ -416,7 +425,7 @@ async def handle_rejection(project_id: str, gate_block_id: str):
         # Get the rejected gate block
         gate_block = session.query(ProjectBlock).filter(ProjectBlock.id == gate_block_id).first()
         if not gate_block:
-            print(f"❌ Gate block {gate_block_id} not found")
+            logger.error("Gate block not found", gate_block_id=gate_block_id)
             return
         
         # Get owner_id from the gate block
@@ -440,12 +449,11 @@ async def handle_rejection(project_id: str, gate_block_id: str):
         gate_block.payload_json = json.dumps(gate_payload)
         session.commit()
         
-        print(f"🔄 Handling rejection for {project_id}, attempt {attempt_number}/3")
-        print(f"   Reason: {rejection_reason}")
+        logger.info("Handling rejection", project_id=project_id, attempt=attempt_number, reason=rejection_reason)
         
         # Check attempt limit
         if attempt_number >= 3:
-            print(f"❌ Max attempts (3) reached for {project_id}. Creating manual parameter form.")
+            logger.warning("Max attempts reached, creating manual parameter form", project_id=project_id)
             
             # Extract parameters for manual form
             params = await extract_job_parameters_from_conversation(session, project_id)
@@ -581,12 +589,12 @@ Please use the parameter editing form below to make corrections.""",
                     status="PENDING",
                     owner_id=owner_id
                 )
-                print(f"✅ Generated revised plan for {project_id} (attempt {attempt_number + 1}/3)")
+                logger.info("Generated revised plan", project_id=project_id, attempt=attempt_number + 1)
             else:
-                print(f"✅ Agent is asking for more information (attempt {attempt_number + 1}/3)")
+                logger.info("Agent requesting more information", project_id=project_id, attempt=attempt_number + 1)
             
         except Exception as e:
-            print(f"❌ LLM failed during revision: {e}")
+            logger.error("LLM failed during revision", error=str(e), project_id=project_id)
             # Create error block
             _create_block_internal(
                 session,
@@ -615,7 +623,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         gate_block = session.query(ProjectBlock).filter(ProjectBlock.id == gate_block_id).first()
         
         if not gate_block:
-            print(f"❌ Gate block {gate_block_id} not found")
+            logger.error("Gate block not found", gate_block_id=gate_block_id)
             return
         
         # Get owner_id from the gate block
@@ -647,7 +655,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 },
                 status="FAILED"
             )
-            print(f"❌ Failed to extract parameters for project {project_id}")
+            logger.error("Failed to extract parameters", project_id=project_id)
             return
         
         # Normalize reference_genome to list for Server3
@@ -671,7 +679,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "accuracy": job_params.get("accuracy") or "sup",
         }
         
-        print(f"📋 Job parameters (using {'edited' if gate_payload.get('edited_params') else 'extracted'}): {job_data}")
+        logger.info("Job parameters prepared", source="edited" if gate_payload.get('edited_params') else "extracted", job_data=job_data)
         
         # Submit job to Server3 via MCP
         try:
@@ -712,7 +720,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 owner_id=owner_id
             )
             
-            print(f"✅ Job submitted: {run_uuid}")
+            logger.info("Job submitted", run_uuid=run_uuid, project_id=project_id)
             
             # Start polling job status in background
             asyncio.create_task(poll_job_status(project_id, job_block.id, run_uuid))
@@ -735,9 +743,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 status="FAILED",
                 owner_id=owner_id
             )
-            print(f"❌ Job submission failed: no run_uuid in response")
-            print(f"   Result: {result}")
-            print(f"   Job data sent: {job_data}")
+            logger.error("Job submission failed: no run_uuid in response", result=result, job_data=job_data)
     
     except Exception as e:
         # Create error block
@@ -757,7 +763,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             },
             status="FAILED"
         )
-        print(f"❌ Job submission error: {e}")
+        logger.error("Job submission error", error=str(e), project_id=project_id)
     finally:
         session.close()
 
@@ -786,7 +792,7 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                 await client.disconnect()
             
             if not isinstance(status_data, dict):
-                print(f"⚠️ Failed to get status for {run_uuid}")
+                logger.warning("Failed to get status", run_uuid=run_uuid)
                 continue
             
             logs = logs_data.get("logs", []) if isinstance(logs_data, dict) else []
@@ -813,19 +819,19 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                 session.commit()
                 session.refresh(block)
                 
-                print(f"🔄 Updated job {run_uuid}: {job_status} ({status_data.get('progress_percent', 0)}%)")
+                logger.info("Job status updated", run_uuid=run_uuid, job_status=job_status, progress=status_data.get('progress_percent', 0))
                 
                 # Stop polling if job is done
                 if job_status in ("COMPLETED", "FAILED"):
-                    print(f"✅ Job {run_uuid} finished with status: {job_status}")
+                    logger.info("Job finished", run_uuid=run_uuid, job_status=job_status)
                     break
         
         except Exception as e:
-            print(f"⚠️ Error polling job {run_uuid}: {e}")
+            logger.warning("Error polling job", run_uuid=run_uuid, error=str(e))
         finally:
             session.close()
     
-    print(f"🛑 Stopped polling job {run_uuid}")
+    logger.info("Stopped polling job", run_uuid=run_uuid)
 
 
 # --- CHAT & AGENT LOGIC ---
@@ -872,11 +878,11 @@ async def chat_with_agent(req: ChatRequest, request: Request):
             last_skill = get_block_payload(last_agent_block).get("skill")
             if last_skill:
                 active_skill = last_skill
-                print(f"📌 Continuing with active skill: {active_skill}")
+                logger.info("Continuing with active skill", skill=active_skill)
         elif approval_block and approval_block.status in ["APPROVED", "REJECTED"]:
             # If the last approval was resolved, allow new skill from UI
             active_skill = req.skill
-            print(f"🆕 Starting fresh with skill: {active_skill}")
+            logger.info("Starting fresh with skill", skill=active_skill)
         
         # Track project access
         await track_project_access(session, user.id, req.project_id, req.project_id)
@@ -1003,7 +1009,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         if skill_switch_match:
             new_skill = skill_switch_match.group(1)
             if new_skill in SKILLS_REGISTRY:
-                print(f"🔄 Agent switching from '{active_skill}' to '{new_skill}'")
+                logger.info("Agent switching skill", from_skill=active_skill, to_skill=new_skill)
                 # Re-run with the new skill
                 engine = AgentEngine(model_key=req.model)
                 raw_response = await run_in_threadpool(
@@ -1034,7 +1040,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 fallback_fixes_applied += 1
         
         if fallback_fixes_applied > 0:
-            print(f"⚠️  Applied {fallback_fixes_applied} fallback tag fix(es) to LLM response")
+            logger.warning("Applied fallback tag fixes to LLM response", count=fallback_fixes_applied)
         
         # Parse unified DATA_CALL tags
         # Groups: (1) source_type [consortium|service], (2) source_key, (3) tool_name, (4) remaining params
@@ -1109,12 +1115,12 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         all_results = {}  # {source_key: [result_dicts]}
         
         for source_key, calls in calls_by_source.items():
-            print(f"📡 Executing {len(calls)} call(s) to {source_key}...")
+            logger.info("Executing tool calls", source=source_key, count=len(calls))
             
             try:
                 url = get_service_url(source_key)
             except KeyError:
-                print(f"❌ Unknown source: {source_key}")
+                logger.error("Unknown source", source=source_key)
                 all_results[source_key] = [{
                     "tool": c["tool"],
                     "params": c["params"],
@@ -1132,7 +1138,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     tool_name = call["tool"]
                     params = call["params"]
                     
-                    print(f"📞 Calling {source_key}.{tool_name}({params})")
+                    logger.info("Calling tool", source=source_key, tool=tool_name, params=params)
                     
                     try:
                         result_data = await mcp_client.call_tool(tool_name, **params)
@@ -1141,16 +1147,16 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                             "params": params,
                             "data": result_data,
                         })
-                        print(f"✅ {source_key}.{tool_name} successful")
+                        logger.info("Tool call successful", source=source_key, tool=tool_name)
                     except Exception as e:
-                        print(f"❌ {source_key}.{tool_name} exception: {e}")
+                        logger.error("Tool call failed", source=source_key, tool=tool_name, error=str(e))
                         source_results.append({
                             "tool": tool_name,
                             "params": params,
                             "error": str(e),
                         })
             except Exception as e:
-                print(f"❌ Failed to connect to {source_key}: {e}")
+                logger.error("Failed to connect to source", source=source_key, error=str(e))
                 source_results = [{
                     "tool": c["tool"],
                     "params": c["params"],
@@ -1223,7 +1229,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
     except Exception as e:
         import traceback
         error_detail = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-        print(f"❌ Chat endpoint error: {error_detail}")
+        logger.error("Chat endpoint error", error=error_detail, exc_info=True)
         raise HTTPException(status_code=500, detail=error_detail)
     finally:
         session.close()

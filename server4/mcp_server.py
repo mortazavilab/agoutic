@@ -6,21 +6,18 @@ Supports both stdio and HTTP transports.
 
 import asyncio
 import json
-import logging
 import sys
 from typing import Any
 
 from fastmcp import FastMCP
 
+from common.logging_config import setup_logging, get_logger
 from server4.mcp_tools import TOOL_REGISTRY
 from server4.config import SERVER4_MCP_PORT
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("server4.mcp_server")
+setup_logging("server4-mcp")
+logger = get_logger(__name__)
 
 # Create FastMCP server instance
 mcp = FastMCP("AGOUTIC-Server4-Analysis", version="0.4.0")
@@ -96,11 +93,8 @@ if __name__ == "__main__":
     if args.mode == "stdio":
         asyncio.run(main_stdio())
     else:
-        print(f"🚀 Server 4 MCP server starting on HTTP at {args.host}:{args.port}", file=sys.stderr)
-        print("Available tools:", file=sys.stderr)
-        for tool_name in TOOL_REGISTRY.keys():
-            print(f"  - {tool_name}", file=sys.stderr)
-        print(f"📍 Access endpoint: http://<your-ip>:{args.port}", file=sys.stderr)
+        logger.info("Server 4 MCP server starting", host=args.host, port=args.port,
+                    tools=list(TOOL_REGISTRY.keys()))
 
         app = mcp.http_app
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")

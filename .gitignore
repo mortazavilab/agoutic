@@ -19,3 +19,13 @@ server3/__pycache__/mcp_server.cpython-311.pyc
 .gitignore
 server3/__pycache__/mcp_tools.cpython-311.pyc
 server4/__pycache__/mcp_server.cpython-311.pyc
+common/__pycache__/logging_config.cpython-311.pyc
+common/__pycache__/logging_middleware.cpython-311.pyc
+server3/__pycache__/app.cpython-311.pyc
+server3/__pycache__/nextflow_executor.cpython-311.pyc
+.gitignore
+.gitignore
+server1/__pycache__/__init__.cpython-311.pyc
+server1/__pycache__/middleware.cpython-311.pyc
+.gitignore
+server4/__pycache__/app.cpython-311.pyc

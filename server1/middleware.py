@@ -12,6 +12,9 @@ from sqlalchemy import select
 
 from server1.db import SessionLocal
 from server1.models import User, Session as SessionModel
+from common.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -42,6 +45,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         session_id = request.cookies.get("session")
         
         if not session_id:
+            logger.debug("Unauthenticated request", path=request.url.path)
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Not authenticated. Please log in."}
@@ -116,6 +120,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return response
             
         except Exception as e:
+            logger.error("Authentication error", error=str(e), path=request.url.path)
             return JSONResponse(
                 status_code=500,
                 content={"detail": f"Authentication error: {str(e)}"}

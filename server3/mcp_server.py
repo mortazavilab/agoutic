@@ -10,7 +10,12 @@ import sys
 
 from fastmcp import FastMCP
 
+from common.logging_config import setup_logging, get_logger
 from server3.mcp_tools import Server3MCPTools, TOOL_REGISTRY
+
+# --- LOGGING ---
+setup_logging("server3-mcp")
+logger = get_logger(__name__)
 
 # Create fastMCP server
 mcp = FastMCP("AGOUTIC-Server3-MCP", version="0.3.0")
@@ -151,11 +156,8 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    print(f"🚀 Server 3 MCP server starting on HTTP at {args.host}:{args.port}", file=sys.stderr)
-    print("Available tools:", file=sys.stderr)
-    for tool_name in TOOL_REGISTRY.keys():
-        print(f"  - {tool_name}", file=sys.stderr)
-    print(f"📍 Access endpoint: http://<your-ip>:{args.port}", file=sys.stderr)
+    logger.info("Server 3 MCP server starting", host=args.host, port=args.port,
+                tools=list(TOOL_REGISTRY.keys()))
     
     # Get the FastAPI app from fastMCP
     app = mcp.http_app

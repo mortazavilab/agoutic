@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import select
 
+from common.logging_config import setup_logging, get_logger
+from common.logging_middleware import RequestLoggingMiddleware
 from server3.config import (
     JobStatus,
     MAX_CONCURRENT_JOBS,
@@ -43,12 +45,19 @@ from server3.schemas import (
     HealthCheckResponse,
 )
 
+# --- LOGGING ---
+setup_logging("server3-rest")
+logger = get_logger(__name__)
+
 # --- APP SETUP ---
 app = FastAPI(
     title="AGOUTIC Server 3",
     description="Dogme/Nextflow Job Execution Engine",
     version="0.3.0",
 )
+
+# Add request logging middleware FIRST (outermost)
+app.add_middleware(RequestLoggingMiddleware)
 
 # Internal API secret validation middleware
 class InternalSecretMiddleware(BaseHTTPMiddleware):
@@ -66,7 +75,7 @@ class InternalSecretMiddleware(BaseHTTPMiddleware):
         
         # If INTERNAL_API_SECRET is not configured, allow all (dev mode)
         if not INTERNAL_API_SECRET:
-            print("⚠️  Warning: INTERNAL_API_SECRET not set - Server 3 is unprotected!")
+            logger.warning("INTERNAL_API_SECRET not set - Server 3 is unprotected")
             return await call_next(request)
         
         # Check for secret header
@@ -108,9 +117,7 @@ job_monitors: dict = {}  # Maps run_uuid -> monitoring task
 async def startup():
     """Initialize database on startup."""
     await init_db()
-    print("✅ Server 3 initialized: Database ready")
-    print(f"📍 Max concurrent jobs: {MAX_CONCURRENT_JOBS}")
-    print(f"⏱️  Job poll interval: {JOB_POLL_INTERVAL}s")
+    logger.info("Server 3 initialized", max_concurrent_jobs=MAX_CONCURRENT_JOBS, poll_interval=JOB_POLL_INTERVAL)
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -119,7 +126,7 @@ async def shutdown():
     for task in job_monitors.values():
         if isinstance(task, asyncio.Task):
             task.cancel()
-    print("👋 Server 3 shutdown complete")
+    logger.info("Server 3 shutdown complete")
 
 # --- MONITORING BACKGROUND TASK ---
 async def monitor_job(run_uuid: str, work_dir):
@@ -185,7 +192,7 @@ async def monitor_job(run_uuid: str, work_dir):
                 await asyncio.sleep(JOB_POLL_INTERVAL)
                 
             except asyncio.CancelledError:
-                print(f"🛑 Monitoring stopped for job {run_uuid}")
+                logger.info("Monitoring stopped", run_uuid=run_uuid)
                 break
             except Exception as e:
                 await add_log_entry(
@@ -322,8 +329,7 @@ async def submit_job(req: SubmitJobRequest):
             # Job submission failed
             import traceback
             error_trace = traceback.format_exc()
-            print(f"❌ Nextflow submission error: {e}")
-            print(f"   Full traceback:\n{error_trace}")
+            logger.error("Nextflow submission error", run_uuid=run_uuid, error=str(e), exc_info=True)
             
             job.status = JobStatus.FAILED
             job.error_message = str(e)
@@ -347,8 +353,7 @@ async def submit_job(req: SubmitJobRequest):
     except Exception as e:
         import traceback
         error_trace = traceback.format_exc()
-        print(f"❌ Submit endpoint error: {e}")
-        print(f"   Full traceback:\n{error_trace}")
+        logger.error("Submit endpoint error", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         await session.close()

@@ -29,6 +29,9 @@ dependencies:
     - sqlalchemy>=2.0
     - aiosqlite                # Async SQLite driver
     
+    # --- Observability ---
+    - structlog                # Structured logging (JSON lines)
+    
     # --- AI Integration ---
     - openai                   # Compatible with OpenAI and local vLLM
     - tiktoken

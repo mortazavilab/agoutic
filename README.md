@@ -281,7 +281,67 @@ AGOUTIC_DATA/
 └── server3_logs/     # Server logs
 ```
 
-## 🚀 Running the System
+## � Logging & Observability
+
+AGOUTIC uses **structlog** for unified structured logging across all servers. Every log entry is a JSON object written to both per-server and unified log files.
+
+### Log Files
+
+Logs are written to `$AGOUTIC_DATA/logs/`:
+
+```
+$AGOUTIC_DATA/logs/
+├── agoutic.jsonl          # Unified log (all servers)
+├── server1.jsonl          # Server 1 only
+├── server3-rest.jsonl     # Server 3 REST API
+├── server3-mcp.jsonl      # Server 3 MCP
+├── server4-rest.jsonl     # Server 4 REST API
+├── server4-mcp.jsonl      # Server 4 MCP
+├── encode-mcp.jsonl       # ENCODE MCP server
+├── *.log                  # Raw stdout/stderr (safety net)
+└── *.YYYYMMDD_HHMMSS.*   # Rotated previous logs
+```
+
+### Reading Logs
+
+```bash
+# Stream the unified log
+tail -f $AGOUTIC_DATA/logs/agoutic.jsonl | jq .
+
+# Filter by server
+cat $AGOUTIC_DATA/logs/agoutic.jsonl | jq 'select(.server == "server1")'
+
+# Filter by log level
+cat $AGOUTIC_DATA/logs/agoutic.jsonl | jq 'select(.level == "error")'
+
+# Filter requests by path
+cat $AGOUTIC_DATA/logs/agoutic.jsonl | jq 'select(.path == "/chat")'
+
+# Find slow requests (>1s)
+cat $AGOUTIC_DATA/logs/agoutic.jsonl | jq 'select(.duration_ms > 1000)'
+
+# Trace a request across servers by request_id
+cat $AGOUTIC_DATA/logs/agoutic.jsonl | jq 'select(.request_id == "some-uuid")'
+```
+
+### Request Tracing
+
+Every HTTP request receives a unique `X-Request-ID` header. This ID is:
+- Bound to all log entries emitted during the request
+- Returned in the response `X-Request-ID` header
+- Available at `request.state.request_id` in route handlers
+
+### Log Rotation
+
+When servers are started or restarted via `agoutic_servers.sh`, existing log files are automatically renamed with a timestamp (e.g., `server1.20260213_143052.jsonl`). Empty log files are skipped.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGOUTIC_LOG_FORMAT` | `json` | Set to `dev` for coloured human-readable console output |
+
+## �🚀 Running the System
 
 ### Development Mode
 

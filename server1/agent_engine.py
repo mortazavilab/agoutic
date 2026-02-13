@@ -3,6 +3,9 @@ from openai import OpenAI
 from server1.config import SKILLS_DIR, SKILLS_REGISTRY, LLM_URL, LLM_MODELS
 from server1.config import get_source_for_skill, SERVICE_REGISTRY
 from server2.config import CONSORTIUM_REGISTRY
+from common.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # --- LLM CONNECTION ---
 # We use the standard OpenAI client but point it to the configured URL
@@ -162,8 +165,7 @@ class AgentEngine:
             skill_key: The skill to use
             conversation_history: List of previous messages in format [{"role": "user/assistant", "content": "..."}]
         """
-        print(f"🧠 Loading Skill: {skill_key}")
-        print(f"🔌 Connecting to LLM at {LLM_URL} using model: {self.display_name}...")
+        logger.info("Loading skill", skill=skill_key, model=self.display_name, llm_url=LLM_URL)
         
         system_prompt = self.construct_system_prompt(skill_key)
         

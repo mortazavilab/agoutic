@@ -8,8 +8,9 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from typing import Optional
-import logging
 
+from common.logging_config import setup_logging, get_logger
+from common.logging_middleware import RequestLoggingMiddleware
 from server4.config import SERVER4_HOST, SERVER4_PORT
 from server4.analysis_engine import (
     discover_files,
@@ -32,11 +33,8 @@ from server4.schemas import (
 )
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("server4.app")
+setup_logging("server4-rest")
+logger = get_logger(__name__)
 
 # Create FastAPI app
 app = FastAPI(
@@ -44,6 +42,9 @@ app = FastAPI(
     description="File discovery, parsing, and analysis for Dogme job results",
     version="0.1.0"
 )
+
+# Add request logging middleware FIRST (outermost)
+app.add_middleware(RequestLoggingMiddleware)
 
 # Add CORS middleware
 app.add_middleware(

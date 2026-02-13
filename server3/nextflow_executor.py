@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional
 import uuid
 
+from common.logging_config import get_logger
 from server3.config import (
     DOGME_REPO,
     NEXTFLOW_BIN,
@@ -22,6 +23,8 @@ from server3.config import (
     REFERENCE_GENOMES,
     JOB_POLL_INTERVAL,
 )
+
+logger = get_logger(__name__)
 
 class NextflowConfig:
     """Generates Nextflow configuration for Dogme pipeline."""
@@ -272,7 +275,7 @@ class NextflowExecutor:
                 if pod5_link.exists():
                     pod5_link.unlink()
                 pod5_link.symlink_to(Path(input_dir).resolve())
-                print(f"📁 Created pod5 symlink for basecalling: {pod5_link} -> {input_dir}")
+                logger.info("Created pod5 symlink for basecalling", link=str(pod5_link), target=input_dir)
             except Exception as e:
                 raise RuntimeError(f"Failed to create pod5 symlink: {e}")
         
@@ -290,7 +293,7 @@ class NextflowExecutor:
                 if bam_link.exists():
                     bam_link.unlink()
                 bam_link.symlink_to(bam_file.resolve())
-                print(f"📁 Created unmapped BAM symlink for remapping: {bam_link} -> {input_dir}")
+                logger.info("Created unmapped BAM symlink for remapping", link=str(bam_link), target=input_dir)
             except Exception as e:
                 raise RuntimeError(f"Failed to create BAM symlink: {e}")
         
@@ -308,7 +311,7 @@ class NextflowExecutor:
                 if bam_link.exists():
                     bam_link.unlink()
                 bam_link.symlink_to(bam_file.resolve())
-                print(f"📁 Created mapped BAM symlink for modkit: {bam_link} -> {input_dir}")
+                logger.info("Created mapped BAM symlink for modkit", link=str(bam_link), target=input_dir)
             except Exception as e:
                 raise RuntimeError(f"Failed to create BAM symlink: {e}")
         
@@ -326,14 +329,14 @@ class NextflowExecutor:
                 if bam_link.exists():
                     bam_link.unlink()
                 bam_link.symlink_to(bam_file.resolve())
-                print(f"📁 Created mapped BAM symlink for annotation: {bam_link} -> {input_dir}")
+                logger.info("Created mapped BAM symlink for annotation", link=str(bam_link), target=input_dir)
             except Exception as e:
                 raise RuntimeError(f"Failed to create BAM symlink: {e}")
         
         elif entry_point == "reports":
             # reports: existing work directory → generate reports
             # Input_dir should point to existing work directory with outputs
-            print(f"📊 Report generation will use existing outputs in: {input_dir}")
+            logger.info("Report generation using existing outputs", input_dir=input_dir)
             # No symlink needed, just use the directory as-is
         
         elif input_type == "bam":
@@ -350,7 +353,7 @@ class NextflowExecutor:
                 if bam_link.exists():
                     bam_link.unlink()
                 bam_link.symlink_to(bam_file.resolve())
-                print(f"📁 Created BAM symlink: {bam_link} -> {input_dir}")
+                logger.info("Created BAM symlink", link=str(bam_link), target=input_dir)
             except Exception as e:
                 raise RuntimeError(f"Failed to create BAM symlink: {e}")
             
@@ -364,7 +367,7 @@ class NextflowExecutor:
                 if pod5_link.exists():
                     pod5_link.unlink()
                 pod5_link.symlink_to(Path(input_dir).resolve())
-                print(f"📁 Created pod5 symlink: {pod5_link} -> {input_dir}")
+                logger.info("Created pod5 symlink", link=str(pod5_link), target=input_dir)
             except Exception as e:
                 raise RuntimeError(f"Failed to create pod5 symlink: {e}")
         
@@ -376,11 +379,11 @@ class NextflowExecutor:
             # Copy from repo
             import shutil
             shutil.copy2(dogme_profile_src, dogme_profile_dst)
-            print(f"📋 Copied dogme.profile from {dogme_profile_src}")
+            logger.debug("Copied dogme.profile", source=str(dogme_profile_src))
         else:
             # Create a minimal one
             dogme_profile_dst.write_text("# Dogme environment profile\n# Add environment variables here if needed\n")
-            print(f"📋 Created minimal dogme.profile")
+            logger.debug("Created minimal dogme.profile")
         
         # Generate configuration
         config_string = NextflowConfig.generate_config(
@@ -417,12 +420,12 @@ class NextflowExecutor:
         # Add entry point if specified
         if entry_point:
             cmd.extend(["-entry", entry_point])
-            print(f"🎯 Using Dogme entry point: {entry_point}")
+            logger.info("Using Dogme entry point", entry_point=entry_point)
             
             # Add -CDNA flag for annotateRNA with cDNA samples
             if entry_point == "annotateRNA" and mode == "CDNA":
                 cmd.append("-CDNA")
-                print(f"📝 Adding -CDNA flag for cDNA annotation")
+                logger.info("Adding -CDNA flag for cDNA annotation")
         
         cmd.extend([
             "-c", str(config_path),
@@ -464,11 +467,9 @@ class NextflowExecutor:
             pid_file = work_dir / ".nextflow_pid"
             pid_file.write_text(str(process.pid))
             
-            print(f"✅ Job submitted: {run_uuid}")
-            print(f"   PID: {process.pid}")
-            print(f"   Command: {' '.join(cmd)}")
-            print(f"   Working directory: {work_dir}")
-            print(f"   Logs: {stdout_file}, {stderr_file}")
+            logger.info("Job submitted", run_uuid=run_uuid, pid=process.pid,
+                        command=" ".join(cmd), work_dir=str(work_dir),
+                        stdout_log=str(stdout_file), stderr_log=str(stderr_file))
             
             # Start background task to monitor process completion
             asyncio.create_task(self._monitor_process(process, run_uuid, work_dir, stdout_fd, stderr_fd))
@@ -504,7 +505,7 @@ class NextflowExecutor:
             if returncode == 0:
                 success_marker = work_dir / ".nextflow_success"
                 success_marker.write_text(f"Completed at {datetime.utcnow().isoformat()}\n")
-                print(f"✅ Job {run_uuid} completed successfully")
+                logger.info("Job completed successfully", run_uuid=run_uuid)
             else:
                 failed_marker = work_dir / ".nextflow_failed"
                 error_file = work_dir / ".nextflow_error"
@@ -520,10 +521,10 @@ class NextflowExecutor:
                 
                 failed_marker.write_text(f"Failed at {datetime.utcnow().isoformat()}\n")
                 error_file.write_text(error_msg)
-                print(f"❌ Job {run_uuid} failed with code {returncode}")
+                logger.error("Job failed", run_uuid=run_uuid, returncode=returncode)
                 
         except Exception as e:
-            print(f"⚠️ Error monitoring process {run_uuid}: {e}")
+            logger.error("Error monitoring process", run_uuid=run_uuid, error=str(e))
     
     async def check_status(self, run_uuid: str, work_dir: Path) -> dict:
         """
