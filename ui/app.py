@@ -27,6 +27,10 @@ if st.session_state.get("_create_new_project", False):
                 'skill_content', 'selected_skill', 'job_status', 'messages']:
         if key in st.session_state:
             del st.session_state[key]
+    # Reset the project ID text input widget so it doesn't hold the old value
+    st.session_state["_project_id_input"] = new_id
+    # Guard: prevent text_input comparison from reverting the ID on this rerun
+    st.session_state["_project_just_switched"] = True
     # Clear the flag
     del st.session_state["_create_new_project"]
 
@@ -53,6 +57,11 @@ if "active_project_id" not in st.session_state:
 if "blocks" not in st.session_state:
     st.session_state.blocks = []
 
+# Detect project switch: clear stale blocks immediately so they never render
+if st.session_state.get("_last_rendered_project") != st.session_state.active_project_id:
+    st.session_state.blocks = []
+    st.session_state._last_rendered_project = st.session_state.active_project_id
+
 # --- 2. SIDEBAR ---
 with st.sidebar:
     st.title("🧬 AGOUTIC")
@@ -72,16 +81,24 @@ with st.sidebar:
         st.rerun()
 
     # [B] PROJECT ID INPUT
-    # We display the current state. If user types here, we update state & rerun.
+    # Initialize the widget key if not set
+    if "_project_id_input" not in st.session_state:
+        st.session_state["_project_id_input"] = st.session_state.active_project_id
+    
     user_input = st.text_input(
         "Project ID", 
-        value=st.session_state.active_project_id
+        key="_project_id_input",
     )
     
-    # Handle manual renaming
-    if user_input != st.session_state.active_project_id:
+    # Sync: if user manually edited the field, update active project
+    # Skip if we just did a project switch (flag prevents revert)
+    if not st.session_state.get("_project_just_switched") and user_input and user_input != st.session_state.active_project_id:
         st.session_state.active_project_id = user_input
+        st.session_state.blocks = []
+        st.session_state._last_rendered_project = user_input
         st.rerun()
+    # Clear the switch guard after it's served its purpose
+    st.session_state.pop("_project_just_switched", None)
 
     st.divider()
     
@@ -116,7 +133,10 @@ with st.sidebar:
                         if st.button(f"📂 {proj_name}", key=f"proj_{proj_id}", use_container_width=True):
                             # Switch to this project
                             st.session_state.active_project_id = proj_id
-                            st.session_state.blocks = []  # Clear blocks
+                            st.session_state.blocks = []
+                            st.session_state._last_rendered_project = proj_id
+                            st.session_state["_project_id_input"] = proj_id
+                            st.session_state["_project_just_switched"] = True
                             st.rerun()
     except Exception:
         pass  # Silently fail if projects not available
@@ -739,6 +759,25 @@ st.session_state.blocks = blocks  # Update session state with fresh blocks
 
 # 2. Render
 if not st.session_state.blocks:
+    # Auto-send welcome prompt for empty projects so the LLM introduces itself
+    if not st.session_state.get("_welcome_sent_for") or st.session_state["_welcome_sent_for"] != active_id:
+        st.session_state["_welcome_sent_for"] = active_id
+        try:
+            resp = make_authenticated_request(
+                "POST",
+                f"{API_URL}/chat",
+                json={
+                    "project_id": active_id,
+                    "message": "Hello, what can you help me with?",
+                    "skill": "welcome",
+                    "model": model_choice
+                }
+            )
+            if resp.status_code == 200:
+                time.sleep(0.5)
+                st.rerun()
+        except Exception:
+            pass  # Fall through to empty state if request fails
     st.info(f"👋 **Project `{active_id}` is empty.**\n\nAsk Agoutic to start a task!")
 else:
     for blk in st.session_state.blocks:
@@ -759,7 +798,7 @@ if prompt := st.chat_input("Ask Agoutic to do something..."):
             json={
                 "project_id": active_id, 
                 "message": prompt,
-                "skill": "ENCODE_Search",
+                "skill": "welcome",
                 "model": model_choice
             }
         )

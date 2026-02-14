@@ -10,7 +10,7 @@ class SubmitJobRequest(BaseModel):
     project_id: str = Field(..., min_length=1)
     sample_name: str = Field(..., min_length=1)
     mode: str = Field(..., min_length=1)  # DNA, RNA, CDNA
-    input_type: Literal["pod5", "bam"] = "pod5"  # Type of input files
+    input_type: Literal["pod5", "bam", "fastq"] = "pod5"  # Type of input files
     input_directory: str = Field(..., min_length=1)
     reference_genome: Union[str, List[str]] = "mm39"  # Single or multiple genomes
     modifications: Optional[str] = None

@@ -51,9 +51,9 @@ Then check available files:
 [[DATA_CALL: consortium=encode, tool=get_files_summary, accession=ENCSR000ABC]]
 ```
 
-### Step 2: Present Download Plan (APPROVAL GATE)
+### Step 2: Present Available Files and Ask User to Choose
 
-Show the user what will be downloaded and ask for confirmation:
+Show the user what file types are available and **ask which type to download**:
 
 ```
 **Experiment:** ENCSR000ABC - Direct RNA sequencing (Mus musculus)
@@ -65,22 +65,31 @@ Show the user what will be downloaded and ask for confirmation:
 - Status: released
 
 **Available Files:**
-- pod5: 4 files (12.5 GB total)
-- fastq: 4 files (3.2 GB total)
-- bam: 2 files (8.1 GB total)
+- pod5: 4 files (12.5 GB total) — raw signal, best for full Dogme pipeline
+- fastq: 4 files (3.2 GB total) — basecalled reads, skip basecalling step
+- bam: 2 files (8.1 GB total) — aligned reads, for re-analysis or modification calling
 
-**Recommended download:** pod5 files (raw data for Dogme pipeline)
-**Download location:** ./files/ENCSR000ABC/
-**Estimated size:** 12.5 GB
+Which file type would you like to download?
+```
 
-Do you want to proceed with downloading these files?
+**Do NOT auto-select.** The user decides whether to download pod5, fastq, or bam.
+
+### Step 3: Download Files (APPROVAL GATE)
+
+Once the user picks a file type, confirm the download plan:
+
+```
+**Download plan:**
+- **Files:** 4 pod5 files
+- **Location:** ./files/ENCSR000ABC/
+- **Estimated size:** 12.5 GB
+
+Proceed with download?
 
 [[APPROVAL_NEEDED]]
 ```
 
-### Step 3: Download Files (After Approval)
-
-Once approved, execute the download:
+After approval, execute:
 
 ```
 [[DATA_CALL: consortium=encode, tool=download_files, accession=ENCSR000ABC, file_types=pod5]]
@@ -92,52 +101,24 @@ Report results:
 - Any failures
 - Download location
 
-### Step 4: Classify and Route to Dogme
+### Step 4: Hand Off to Local Sample Intake
 
-Based on experiment metadata, determine the analysis mode:
+After download completes, **only `sample_name` and `input_directory` are known**. The remaining settings (sample type, reference genome, Dogme parameters) must still be collected from the user via `analyze_local_sample`, just like a local sample.
 
-**Assay type → Dogme mode:**
-- "Direct RNA sequencing", "direct RNA-seq" → **RNA mode**
-- "long read RNA-seq" with cDNA library → **cDNA mode**
-- "Whole genome sequencing" → **DNA mode**
-- DNA methylation assays → **DNA mode** with modifications
-
-**Extract parameters:**
-- `sample_name`: Use accession (e.g., "ENCSR000ABC")
-- `input_directory`: Download location (./files/ENCSR000ABC/)
-- `reference_genome`: From organism:
-  - "Homo sapiens" → "GRCh38"
-  - "Mus musculus" → "mm39"
-- `mode`: From assay type (DNA/RNA/CDNA)
-- `input_type`: From downloaded file type (pod5 or bam)
-
-**Switch to appropriate Dogme skill:**
+**State what's known and switch:**
 
 ```
-[[SKILL_SWITCH_TO: run_dogme_rna]]
-```
-or
-```
-[[SKILL_SWITCH_TO: run_dogme_dna]]
-```
-or
-```
-[[SKILL_SWITCH_TO: run_dogme_cdna]]
+✅ Files downloaded successfully to ./files/ENCSR000ABC/
+
+- **Sample Name:** ENCSR000ABC
+- **Data Path:** ./files/ENCSR000ABC/
+
+I'll now collect the remaining pipeline settings (sample type, reference genome, etc.).
+
+[[SKILL_SWITCH_TO: analyze_local_sample]]
 ```
 
-### Step 5: Final Status
-
-```
-✅ ENCODE data retrieval completed
-
-Experiment: {accession}
-Downloaded: {file_count} files ({total_size})
-Location: {output_dir}
-Detected assay: {assay_title}
-Mode: {mode}
-
-Switching to {target_skill} for pipeline execution.
-```
+The `analyze_local_sample` skill will see `sample_name` and `input_directory` (path) in the conversation history and only ask for the missing fields: `sample_type` and `reference_genome`.
 
 ## Error Handling
 
@@ -165,21 +146,17 @@ Options:
 3. Select a different experiment
 ```
 
-### Ambiguous Experiment Type
-```
-⚠️ Cannot determine analysis mode for {accession}.
-
-Assay: {assay_title}
-
-Please specify which mode to use:
-1. DNA (genomic sequencing, methylation)
-2. RNA (direct RNA sequencing)
-3. cDNA (polyA RNA-seq, cDNA libraries)
-```
-
 ## Notes
 
 - Long-read experiments typically produce pod5 or fastq files
 - Dogme pipeline handles basecalling, alignment, modification calling, and reporting
 - Downloads are cached — re-running won't re-download existing files
 - File organization: `./files/{accession}/`
+
+## Important Rules
+
+1. **Let the user choose** which file type to download (pod5, fastq, or bam) — do NOT auto-select.
+2. **Only switch to `analyze_local_sample`** after files are downloaded. Never switch to `run_dogme_dna`, `run_dogme_rna`, or `run_dogme_cdna` — those are for post-job analysis only.
+3. **State `sample_name` and data path explicitly** in your message before outputting `[[SKILL_SWITCH_TO: analyze_local_sample]]` so the intake skill can find them in conversation history.
+4. **Do NOT collect sample type, reference genome, or Dogme settings** — that's `analyze_local_sample`'s job.
+5. **Do NOT generate [[DATA_CALL: service=server3, ...]] tags** — job submission is handled automatically after user approval in the intake skill.

@@ -38,43 +38,37 @@ Example questions:
 
 **IMPORTANT:** If you find a UUID in the conversation history, DO NOT submit a new job. Use the EXISTING UUID.
 
-### 2. Job Verification
+### 2. Job Verification and Mode-Aware Routing
 
-Once you have the job identifier, use the analysis endpoints to examine existing results.
-
-**CRITICAL: This is a READ-ONLY skill. You will call HTTP GET endpoints to retrieve information. DO NOT create approval gates. DO NOT submit jobs.**
-
-**How to call the analysis endpoints:**
-
-To trigger an analysis API call, include a special tag in your response:
+Once you have the job identifier, get the analysis summary first:
 
 ```
 [[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
 ```
 
-Supported analysis calls:
-- `[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]` - Get comprehensive QC summary
-- `[[DATA_CALL: service=server4, tool=categorize_job_files, run_uuid=<uuid>]]` - Get files grouped by type  
-- `[[DATA_CALL: service=server4, tool=list_job_files, run_uuid=<uuid>]]` - List all job files
+The summary includes the job's **mode** (DNA, RNA, or CDNA). Based on the mode, switch to the appropriate analysis interpretation skill:
 
-Example response:
-"I'll analyze the recently completed job jamshid (UUID: 4d9376a5-5a4b-4642-86cd-78f7a63fab3d). Let me retrieve the analysis summary...
+**Mode → Analysis skill:**
+- DNA or Fiber-seq → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
+- RNA (direct RNA) → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
+- CDNA → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
+
+Each of these skills contains mode-specific guidance on:
+- What output files to look for
+- How to interpret modification data (DNA/RNA have modifications, cDNA does not)
+- What quality thresholds and metrics matter
+
+**Example response:**
+"I'll analyze the recently completed job jamshid (UUID: 4d9376a5). Let me retrieve the summary...
 
 [[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]"
 
-The system will automatically call the Server4 endpoint and return the results to continue the conversation.
+Then after seeing mode=RNA:
+"This is a direct RNA job. Switching to RNA-specific analysis...
 
-**Available Analysis Endpoints:**
+[[SKILL_SWITCH_TO: run_dogme_rna]]"
 
-- `GET http://localhost:8000/analysis/jobs/{run_uuid}/files?extensions=.csv,.txt` - Lists all files for the job
-- `GET http://localhost:8000/analysis/jobs/{run_uuid}/files/categorize` - Groups files by type (txt/csv/bed/other)
-- `GET http://localhost:8000/analysis/jobs/{run_uuid}/summary` - Comprehensive analysis summary (START HERE)
-
-**Initial verification workflow:**
-1. Tell user which job you're analyzing (mention UUID)
-2. State you're calling the summary endpoint
-3. Wait for the system to return results
-4. Parse and present the QC report to the user
+**CRITICAL: This is a READ-ONLY skill. Do NOT create approval gates. Do NOT submit jobs.**
 
 ### 3. File Discovery & Categorization
 

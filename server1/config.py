@@ -73,7 +73,6 @@ SERVICE_REGISTRY = {
         "count_field": None,
         "count_label": None,
         "skills": [
-            "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
             "analyze_local_sample",
         ],
         "fallback_patterns": {},
@@ -85,7 +84,10 @@ SERVICE_REGISTRY = {
         "table_columns": [],
         "count_field": None,
         "count_label": None,
-        "skills": ["analyze_job_results"],
+        "skills": [
+            "analyze_job_results",
+            "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
+        ],
         "fallback_patterns": {},
     },
 }
@@ -138,6 +140,9 @@ AVAILABLE_GENOMES = ["GRCh38", "mm39"]
 # --- SKILL REGISTRY ---
 # The menu of available workflows.
 SKILLS_REGISTRY = {
+    # Welcome / entry point
+    "welcome": "Welcome.md",
+    
     # ENCODE skills
     "ENCODE_Search": "ENCODE_Search.md",
     "ENCODE_LongRead": "ENCODE_LongRead.md",

@@ -1,86 +1,99 @@
-# Skill: Dogme Direct RNA (`run_dogme_rna`)
+# Skill: Dogme Direct RNA Analysis (`run_dogme_rna`)
 
 ## Description
 
-This skill handles Direct RNA sequencing data. It performs basecalling, splice-aware alignment using `minimap2` (with high intron tolerance), transcript quantification via `kallisto`, and detection of native RNA modifications (m6A, pseU, Inosine).
+This skill provides **downstream analysis interpretation** for completed Dogme Direct RNA jobs. It is activated by `analyze_job_results` when the job mode is RNA.
 
-**IMPORTANT:** If the user asks for analysis of a COMPLETED job (QC report, results, file analysis), switch to the `analyze_job_results` skill by outputting:
+**This skill does NOT submit jobs.** Job submission is handled by `analyze_local_sample` (local data) or `ENCODE_LongRead` (ENCODE data).
 
+If the user wants to submit a new job:
 ```
-[[SKILL_SWITCH_TO: analyze_job_results]]
+[[SKILL_SWITCH_TO: analyze_local_sample]]
 ```
 
-## Detecting Analysis Requests
+## Direct RNA Pipeline Overview
 
-If the user's message contains any of these patterns, switch to `analyze_job_results`:
-- "qc report" / "quality control" / "quality check"
-- "analyze results" / "show results" / "check results"
-- "what files" / "list files" / "show files"
-- "read the output" / "show output"
-- "parse" / "view" / "display" (referring to output files)
+The Dogme RNA pipeline performs:
+1. **Basecalling** (pod5 → fastq) — using Dorado with RNA modification-aware models
+2. **Alignment** (fastq → bam) — mapping to transcriptome + genome reference
+3. **RNA modification calling** — detecting m6A, pseudouridine (Ψ), and other RNA modifications
+4. **Transcript quantification** — counting reads per gene/transcript
+5. **Poly(A) tail length estimation** (if applicable)
+6. **QC and summary reports**
 
-**Example:**
-User: "Can you give me a QC report?"
-Agent: "[[SKILL_SWITCH_TO: analyze_job_results]]"
+## Key Output Files to Examine
 
-## Inputs
+### Alignment Statistics
+- `*.flagstat.txt` — samtools flagstat (mapped reads, supplementary alignments)
+- `*.stats.csv` — alignment summary (note: direct RNA has lower mapping rates than cDNA)
+- `*.mapping_stats.txt` — read length and mapping quality distributions
 
-* `query`: (String) The sample identifier or directory path.
-* `reference_genome`: (String) Genome key (must have associated GTF for splicing).
-* `modifications`: (String, Optional) Default: "inosine_m6A,pseU,m5C".
+### Modification Files (RNA has modifications)
+- `*.modkit_summary.txt` — overall RNA modification summary from modkit
+- `*.m6A.bed` — m6A modification calls with per-site frequencies
+- `*.pseudoU.bed` — pseudouridine modification calls (if model supports)
+- `*.modkit_pileup.bed` — per-position modification pileup across all mod types
+- `*.mod_freq.csv` — modification frequency statistics
 
-## Plan Logic
+### Transcript/Gene Counts
+- `*.counts.csv` or `*.gene_counts.csv` — gene-level expression counts
+- `*.transcript_counts.csv` — transcript-level isoform quantification
+- `*.junctions.bed` — splice junction support (for isoform analysis)
 
-### 1. Discovery & Selection
+### Poly(A) Tail
+- `*.polya.csv` — per-read poly(A) tail length estimates
+- `*.polya_summary.csv` — summary statistics for tail lengths
 
-* **Tool:** `find_pod5_directory(query)`
-* **Context:** The agent locates the raw `.pod5` directory corresponding to the sample ID.
-* **Output:** Directory path and file verification.
+### QC Reports
+- `*qc_summary*` — comprehensive QC metrics
+- `*.html` — visual QC reports (if generated)
 
-### 2. APPROVAL GATE: Data Validation
+## How to Interpret Results
 
-* **Condition:** Confirm sample and RNA-specific modification flags.
-* **Prompt:** "I found Direct RNA data for '{query}'.
-* Modifications to call: '{modifications}'
-* Reference: {reference_genome} (GTF required for splicing)
+### Alignment Quality (Direct RNA specifics)
+- **Mapped reads > 70%** = good for direct RNA (lower than cDNA is normal)
+- **Median read length**: direct RNA reads are typically 500bp-2kb
+- **Supplementary alignments**: common in direct RNA due to RNA structure
 
+### RNA Modification Analysis
+- **m6A sites**: enriched at DRACH motifs (D=A/G/U, R=A/G, H=A/C/U)
+- **m6A frequency per site**: typically 10-80% at true sites
+- **Pseudouridine (Ψ)**: enriched in rRNA and tRNA, also found in mRNA
+- **Filter by coverage**: sites with < min_cov reads are unreliable
+- **Compare to known databases**: m6A-Atlas, RMBase for validation
 
-Proceed with analysis setup?"
+### Expression Analysis
+- **Gene counts**: compare across samples for differential expression
+- **Isoform ratios**: direct RNA preserves full-length transcripts
+- **Read length vs gene coverage**: longer reads = better isoform resolution
 
-### 3. Setup (Config Generation)
+### Poly(A) Tail Length
+- **Median tail length**: typically 50-250nt for mRNA
+- **Tail length vs expression**: shorter tails often correlate with mRNA decay
+- **Distribution shape**: bimodal distributions may indicate regulation
 
-* **Tool:** `scaffold_dogme_dir(sample_name, input_dir)`
-* *Logic:* Sets up the run directory structure.
+## Analysis Workflow
 
+When analyzing a completed RNA job:
 
-* **Tool:** `generate_dogme_config(sample_name, read_type="RNA", genome=reference_genome, modifications=modifications)`
-* *Logic:* Sets `readType = 'RNA'`. Ensures `kallisto` and `bustools` paths are set for isoform quantification. Configures `annotateRNA` step.
+**STEP 1:** Get the analysis summary
+```
+[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+```
 
+**STEP 2:** Check for modification and expression files
+```
+[[DATA_CALL: service=server4, tool=categorize_job_files, run_uuid=<uuid>]]
+```
 
+**STEP 3:** Parse modification summary
+```
+[[DATA_CALL: service=server4, tool=read_file_content, run_uuid=<uuid>, file_path=<modkit_summary>]]
+```
 
-### 4. APPROVAL GATE: Pipeline Launch
+**STEP 4:** Parse gene/transcript counts
+```
+[[DATA_CALL: service=server4, tool=parse_csv, run_uuid=<uuid>, file_path=<counts_file>]]
+```
 
-* **Condition:** The user must review configuration.
-* **Prompt:** "Configuration generated for '{sample_name}'.
-* Pipeline: Dogme v1.2.X (RNA Mode)
-* Splice Awareness: Active (GTF -> Junction BED auto-conversion)
-* Annotation: annotateRNA.py enabled
-
-
-Ready to launch?"
-
-### 5. Execution & Monitoring
-
-* **Tool:** `submit_dogme_nextflow(sample_name)`
-* *Logic:* Submits the job to Server 3.
-
-
-* **Tool:** `check_nextflow_status(run_uuid)`
-* *Logic:* Loops until status is 'COMPLETED' or 'FAILED'.
-
-
-
-### 6. Final Reporting
-
-* **Tool:** `get_dogme_report(sample_name)`
-* **Output:** Returns JSON summary including `qc_summary.csv` stats, isoform counts, and modification rates.
+**STEP 5:** Present results with RNA-specific interpretation (modification sites, expression levels, poly(A) analysis)

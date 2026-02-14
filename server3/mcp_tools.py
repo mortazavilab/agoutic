@@ -12,9 +12,20 @@ import httpx
 class Server3MCPTools:
     """MCP tools for Server 3 job management."""
     
-    def __init__(self, server_url: str = "http://localhost:8001"):
-        self.server_url = server_url.rstrip("/")
+    def __init__(self, server_url: str = None):
+        import os
+        default_url = os.getenv("SERVER3_REST_URL", "http://localhost:8003")
+        self.server_url = (server_url or default_url).rstrip("/")
         self.timeout = 30.0
+        # Internal API secret for Server 3 authentication
+        self._api_secret = os.getenv("INTERNAL_API_SECRET", "")
+    
+    def _headers(self) -> dict:
+        """Build request headers including internal auth secret."""
+        headers = {}
+        if self._api_secret:
+            headers["X-Internal-Secret"] = self._api_secret
+        return headers
     
     async def submit_dogme_job(
         self,
@@ -22,7 +33,7 @@ class Server3MCPTools:
         sample_name: str,
         mode: str,
         input_directory: str,
-        reference_genome: str = "GRCh38",
+        reference_genome: str | list[str] = "GRCh38",
         modifications: Optional[str] = None,
         input_type: Optional[str] = None,
         entry_point: Optional[str] = None,
@@ -41,13 +52,14 @@ class Server3MCPTools:
             project_id: Unique project identifier
             sample_name: Name/ID of the sample
             mode: Analysis mode - "DNA", "RNA", or "CDNA"
-            input_directory: Path to pod5 files or raw data
-            reference_genome: Reference genome (GRCh38, mm39, etc.)
+            input_directory: Path to input data (pod5, bam, or fastq files)
+            reference_genome: Reference genome(s) — single string or list for
+                parallel multi-genome (e.g., "GRCh38" or ["GRCh38", "mm39"])
             modifications: Optional modification motifs to call
                 - DNA: "5mCG_5hmCG,6mA"
                 - RNA: "inosine_m6A,pseU,m5C"
                 - cDNA: None (not supported)
-            input_type: Optional input file type (e.g., "pod5", "fastq")
+            input_type: Input file type — "pod5", "bam", or "fastq" (default: "pod5")
             entry_point: Optional pipeline entry point
             modkit_filter_threshold: Optional modkit filter threshold (0.0-1.0)
             min_cov: Optional minimum coverage
@@ -88,6 +100,7 @@ class Server3MCPTools:
                 response = await client.post(
                     f"{self.server_url}/jobs/submit",
                     json=payload,
+                    headers=self._headers(),
                     timeout=self.timeout,
                 )
                 response.raise_for_status()
@@ -119,6 +132,7 @@ class Server3MCPTools:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.server_url}/jobs/{run_uuid}/status",
+                    headers=self._headers(),
                     timeout=self.timeout,
                 )
                 if response.status_code == 404:
@@ -158,6 +172,7 @@ class Server3MCPTools:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.server_url}/jobs/{run_uuid}",
+                    headers=self._headers(),
                     timeout=self.timeout,
                 )
                 if response.status_code == 404:
@@ -362,6 +377,7 @@ class Server3MCPTools:
                 response = await client.get(
                     f"{self.server_url}/jobs/{run_uuid}/logs",
                     params={"limit": limit},
+                    headers=self._headers(),
                     timeout=self.timeout,
                 )
                 if response.status_code == 404:
@@ -394,6 +410,7 @@ class Server3MCPTools:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.server_url}/jobs/{run_uuid}/debug",
+                    headers=self._headers(),
                     timeout=self.timeout,
                 )
                 if response.status_code == 404:
@@ -407,19 +424,25 @@ class Server3MCPTools:
 # Tool registry for MCP server
 TOOL_REGISTRY = {
     "submit_dogme_job": {
-        "description": "Submit a Dogme/Nextflow analysis job for DNA, RNA, or cDNA samples",
+        "description": "Submit a Dogme/Nextflow analysis job for DNA, RNA, or cDNA samples. Input can be pod5, bam, or fastq. Supports multiple reference genomes in parallel.",
         "tool_function": "submit_dogme_job",
         "input_schema": {
             "type": "object",
             "properties": {
-                "project_id": {"type": "string", "description": "Project identifier"},
                 "sample_name": {"type": "string", "description": "Sample name/ID"},
                 "mode": {"type": "string", "enum": ["DNA", "RNA", "CDNA"], "description": "Analysis mode"},
-                "input_directory": {"type": "string", "description": "Path to input data"},
-                "reference_genome": {"type": "string", "description": "Reference genome (GRCh38, mm39)"},
+                "input_directory": {"type": "string", "description": "Path to input data (pod5, bam, or fastq files)"},
+                "reference_genome": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}}
+                    ],
+                    "description": "Reference genome(s) — single string or list for parallel multi-genome (e.g., ['GRCh38', 'mm39'])"
+                },
+                "input_type": {"type": "string", "enum": ["pod5", "bam", "fastq"], "description": "Type of input files (default: pod5)"},
                 "modifications": {"type": "string", "description": "Modification motifs to call (optional)"},
             },
-            "required": ["project_id", "sample_name", "mode", "input_directory"],
+            "required": ["sample_name", "mode", "input_directory"],
         }
     },
     "check_nextflow_status": {

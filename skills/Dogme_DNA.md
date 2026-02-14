@@ -1,87 +1,81 @@
-# Skill: Dogme DNA / Fiber-Seq (`run_dogme_dna`)
+# Skill: Dogme DNA / Fiber-Seq Analysis (`run_dogme_dna`)
 
 ## Description
 
-This skill manages the analysis of Nanopore Genomic DNA (gDNA) or Fiber-seq data using the Dogme pipeline. It handles basecalling, alignment to a reference genome, and the detection of DNA modifications (e.g., 5mC, 6mA) and open chromatin regions using `modkit`.
+This skill provides **downstream analysis interpretation** for completed Dogme DNA and Fiber-seq jobs. It is activated by `analyze_job_results` when the job mode is DNA.
 
-**IMPORTANT:** If the user asks for analysis of a COMPLETED job (QC report, results, file analysis), switch to the `analyze_job_results` skill by outputting:
+**This skill does NOT submit jobs.** Job submission is handled by `analyze_local_sample` (local data) or `ENCODE_LongRead` (ENCODE data).
 
+If the user wants to submit a new job:
 ```
-[[SKILL_SWITCH_TO: analyze_job_results]]
+[[SKILL_SWITCH_TO: analyze_local_sample]]
 ```
 
-## Detecting Analysis Requests
+## DNA / Fiber-Seq Pipeline Overview
 
-If the user's message contains any of these patterns, switch to `analyze_job_results`:
-- "qc report" / "quality control" / "quality check"
-- "analyze results" / "show results" / "check results"
-- "what files" / "list files" / "show files"
-- "read the output" / "show output"
-- "parse" / "view" / "display" (referring to output files)
+The Dogme DNA pipeline performs:
+1. **Basecalling** (pod5 → fastq) — using Dorado with modification-aware models
+2. **Alignment** (fastq → bam) — mapping to reference genome
+3. **Modification calling** — extracting DNA methylation (5mC, CpG) from basecalled reads
+4. **Fiber-seq analysis** (if applicable) — chromatin accessibility from m6A fiber-seq signal
+5. **Coverage and QC reports**
 
-**Example:**
-User: "Can you give me a QC report?"
-Agent: "[[SKILL_SWITCH_TO: analyze_job_results]]"
+## Key Output Files to Examine
 
-## Inputs
+### Alignment Statistics
+- `*.flagstat.txt` — samtools flagstat (mapped reads, duplicates, pairs)
+- `*.stats.csv` — alignment summary statistics
+- `*.coverage.bed` — per-base or per-region coverage
 
-* `query`: (String) The sample identifier or directory path to search for (e.g., "Hela_gDNA_Rep1").
-* `reference_genome`: (String) The genome key from the config (e.g., "GRCh38", "mm39").
-* `modifications`: (String, Optional) Default: "5mCG_5hmCG,6mA". Specific methylation motifs to call.
+### Modification Files (DNA has modifications)
+- `*.modkit_summary.txt` — overall modification summary from modkit
+- `*.5mC.bed` or `*.CpG.bed` — CpG methylation BED files with modification frequencies
+- `*.modkit_pileup.bed` — per-position modification pileup
+- `*.mod_freq.csv` — modification frequency statistics
 
-## Plan Logic
+### Fiber-Seq Specific (if mode includes fiber-seq)
+- `*.fiberseq.bed` — fiber-seq accessibility regions
+- `*.m6A.bed` — m6A modification calls for chromatin state
 
-### 1. Discovery & Selection
+### QC Reports
+- `*qc_summary*` — comprehensive QC metrics
+- `*.html` — visual QC reports (if generated)
 
-* **Tool:** `find_pod5_directory(query)`
-* **Context:** The agent locates the raw `.pod5` directory corresponding to the sample ID or path.
-* **Output:** A valid directory path and a file count/size summary.
+## How to Interpret Results
 
-### 2. APPROVAL GATE: Data Validation
+### Alignment Quality
+- **Mapped reads > 90%** = good alignment
+- **Duplicate rate < 20%** = acceptable
+- **Mean coverage > 10x** for modification calling, > 30x ideal
 
-* **Condition:** The user must confirm the target dataset and modification settings.
-* **Prompt:** "I located the raw data for '{query}' at `[Path]`.
-* Total Size: [Size]
-* Modifications to call: '{modifications}'
-* Mode: Genomic DNA / Open Chromatin
+### Methylation Analysis
+- **CpG modification frequency**: fraction of reads showing 5mC at each CpG site
+- **Global methylation level**: typically 70-80% for mammalian genomes
+- **Hypomethylated regions**: promoters, CpG islands (expected low methylation)
+- **Differentially methylated regions**: compare across samples or conditions
 
+### Fiber-Seq Interpretation
+- **m6A marks** indicate nucleosome-free regions (accessible chromatin)
+- **Fiber length** affects resolution of chromatin state calls
+- Compare accessibility patterns to known regulatory elements
 
-Do you want to proceed?"
+## Analysis Workflow
 
-### 3. Setup (Config Generation)
+When analyzing a completed DNA job:
 
-* **Tool:** `scaffold_dogme_dir(sample_name, input_dir)`
-* *Logic:* Sets up the run directory structure.
+**STEP 1:** Get the analysis summary
+```
+[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+```
 
+**STEP 2:** Check modification results — look for BED files with modification data
+```
+[[DATA_CALL: service=server4, tool=categorize_job_files, run_uuid=<uuid>]]
+```
 
-* **Tool:** `generate_dogme_config(sample_name, read_type="DNA", genome=reference_genome, modifications=modifications)`
-* *Logic:* Generates `nextflow.config`. Crucially sets `readType = 'DNA'` and ensures `modkit` parameters are active for open chromatin calling.
+**STEP 3:** Parse key metrics from CSV/stats files
+```
+[[DATA_CALL: service=server4, tool=read_file_content, run_uuid=<uuid>, file_path=<stats_file>]]
+```
 
-
-
-### 4. APPROVAL GATE: Pipeline Launch
-
-* **Condition:** User reviews the config before the expensive GPU job starts.
-* **Prompt:** "Configuration generated for '{sample_name}'.
-* Pipeline: Dogme v1.2.X (DNA Mode)
-* Reference: {reference_genome}
-* Modkit: Active (Calling: {modifications})
-
-
-Ready to launch execution on Server 3?"
-
-### 5. Execution & Monitoring
-
-* **Tool:** `submit_dogme_nextflow(sample_name)`
-* *Logic:* Submits the job to Server 3. Returns a Run UUID.
-
-
-* **Tool:** `check_nextflow_status(run_uuid)`
-* *Logic:* Loops until status is 'COMPLETED' or 'FAILED'.
-
-
-
-### 6. Final Reporting
-
-* **Tool:** `get_dogme_report(sample_name)`
-* **Output:** Returns JSON summary including mapping rates and `modkit` open chromatin bed file locations.
+**STEP 4:** Present results with DNA-specific interpretation (methylation levels, coverage, modification calling quality)

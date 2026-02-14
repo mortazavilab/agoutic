@@ -56,8 +56,17 @@ class AgentEngine:
         """
         skill_content = self._load_skill_text(skill_key)
         
-        # Build list of all available skills
-        all_skills = "\n".join([f"  - {key}" for key in SKILLS_REGISTRY.keys()])
+        # Build list of all available skills with brief descriptions
+        # Dogme skills are analysis interpretation guides — show them with
+        # a note so the LLM knows they're for post-job analysis, not submission.
+        analysis_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna"}
+        skill_lines = []
+        for key in SKILLS_REGISTRY.keys():
+            if key in analysis_skills:
+                skill_lines.append(f"  - {key} (analysis interpretation — do NOT use for job submission)")
+            else:
+                skill_lines.append(f"  - {key}")
+        all_skills = "\n".join(skill_lines)
         
         # Determine the data source for this skill (if any)
         source_info = get_source_for_skill(skill_key)
@@ -88,6 +97,23 @@ class AgentEngine:
         Get Experiment (accession=ENCSR123ABC)        ❌ NO BRACKETS - WILL NOT EXECUTE
         **Get Experiment** (accession=ENCSR123ABC)    ❌ NO BRACKETS - WILL NOT EXECUTE
         Get Files By Type (accession=ENCSR123ABC)     ❌ NO BRACKETS - WILL NOT EXECUTE"""
+            elif source_key == "server3":
+                examples = f"""
+        ✅ CORRECT EXAMPLES:
+        [[DATA_CALL: service=server3, tool=submit_dogme_job, sample_name=liver_rep1, mode=DNA, reference_genome=GRCh38, input_directory=/data/samples/pod5/]]
+        [[DATA_CALL: service=server3, tool=submit_dogme_job, sample_name=sample1, mode=CDNA, reference_genome=mm39, input_directory=/data/fastq/, input_type=fastq]]
+        [[DATA_CALL: service=server3, tool=check_nextflow_status, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]
+        
+        NOTE: input_directory can contain pod5, bam, or fastq files (set input_type accordingly).
+        NOTE: reference_genome can be a single genome or a comma-separated list for parallel multi-genome analysis.
+        NOTE: For the analyze_local_sample skill, do NOT use DATA_CALL tags.
+        Instead, collect all parameters and output [[APPROVAL_NEEDED]].
+        The system will automatically submit the job after user approval.
+        
+        ❌ FORBIDDEN - NEVER WRITE THESE:
+        Submit Dogme Job (sample_name=...)             ❌ NO BRACKETS - WILL NOT EXECUTE
+        run_dogme_rna(...)                             ❌ NOT A REAL TOOL - WILL FAIL
+        run_dogme_cdna(...)                            ❌ NOT A REAL TOOL - WILL FAIL"""
             elif source_key == "server4":
                 examples = f"""
         ✅ CORRECT EXAMPLES:
@@ -122,6 +148,17 @@ class AgentEngine:
         """
         
         system_prompt = f"""You are Agoutic, an autonomous bioinformatics agent.
+You specialize in processing and analyzing long-read data, such as long-read RNA-seq (also called long read RNA-seq or LR-RNA-seq)and genomic DNA.
+The long-read RNA may be either cDNA or direct RNA. 
+The genomeic DNA may be either native, which has DNA methylation information, 
+or Fiber-seq, which has in addition unique chromatin modification information embedded in the reads.
+
+You are proficient in using the Dogme pipeline for base calling, alignment, modification detection, and comprehensive analysis of long-read datasets.
+You have expertise in handling various file types including FASTQ, BAM, and the native POD5 format using Dogme. 
+
+Users will ask you to perform tasks that will involve either processing local data or querying external data sources. 
+You have access to a growing library of "Skills" that define how to handle different tasks. 
+Each skill belongs to a specific "Service" or "Consortium" that provides data or tools.
 
 You have DIRECT ACCESS to the following data sources via [[DATA_CALL:...]] tags:
 - **ENCODE Portal** (consortium=encode) — search experiments, get files, metadata
@@ -165,7 +202,7 @@ OUTPUT FORMATTING RULES:
 """
         return system_prompt
 
-    def think(self, user_message: str, skill_key: str = "ENCODE_Search", conversation_history: list = None):
+    def think(self, user_message: str, skill_key: str = "welcome", conversation_history: list = None):
         """
         Sends the skill + user request to the local LLM and gets the plan.
         
@@ -201,7 +238,7 @@ OUTPUT FORMATTING RULES:
             return f"❌ Brain Freeze (Connection Error): {str(e)}"
 
     def analyze_results(self, user_message: str, first_pass_text: str,
-                        data_results: str, skill_key: str = "ENCODE_Search",
+                        data_results: str, skill_key: str = "welcome",
                         conversation_history: list = None):
         """
         Second-pass LLM call: given the raw tool results, produce a clean,

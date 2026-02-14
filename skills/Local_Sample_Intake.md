@@ -137,13 +137,6 @@ I will submit this to the Dogme DNA pipeline for analysis.
 3. **Extract information from user's natural language** (they might say "it's in /data/samples" instead of just "/data/samples")
 4. **Keep questions clear and concise**
 5. **Use the conversation history to track what's already been provided**
-* **If Type is 'Direct RNA':**
--> Calls `run_dogme_rna(query=path, sample_name=sample_name, reference_genome=reference_genome)`
-* **If Type is 'cDNA':**
--> Calls `run_dogme_cdna(query=path, sample_name=sample_name, reference_genome=reference_genome)`
-
-
-
-### 5. Final Status
-
-* **Output:** "Handover complete. The {Target_Skill_Name} skill is now initializing analysis for {sample_name}."
+6. **Do NOT generate any [[DATA_CALL:...]] tags** — after user approval, the system automatically submits the job to the Dogme pipeline using the collected parameters. Your only job is to collect the 4 fields and show [[APPROVAL_NEEDED]].
+7. **Do NOT switch to run_dogme_dna, run_dogme_rna, or run_dogme_cdna** — even if you know the data type. This skill handles ALL local sample intake. Stay on this skill until all 4 fields are collected and approval is granted.
+8. **Do NOT try to validate paths or list files** — you cannot access the filesystem. Just collect the path from the user and include it in the summary.

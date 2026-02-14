@@ -73,7 +73,7 @@ async def startup_event():
 class ChatRequest(BaseModel):
     project_id: str
     message: str
-    skill: str = "ENCODE_Search" # Default skill
+    skill: str = "welcome" # Default skill
     model: str = "default"         # Default model (devstral-2)
 
 # --- HELPERS ---
@@ -398,6 +398,8 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         else:
             params["entry_point"] = "remap"
             params["input_type"] = "bam"
+    elif ".fastq" in all_user_text_original or ".fq" in all_user_text_original or "fastq" in all_user_text:
+        params["input_type"] = "fastq"
     
     # Detect genome from keywords - support multiple genomes
     import re
@@ -754,12 +756,13 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                         "tasks": {}
                     }
                 },
-                status="FAILED"
+                status="FAILED",
+                owner_id=owner_id
             )
             logger.error("Failed to extract parameters", project_id=project_id)
             return
         
-        # Normalize reference_genome to list for Server3
+        # Normalize reference_genome to list for Server3 (Nextflow handles multi-genome in parallel)
         ref_genome = job_params.get("reference_genome", ["mm39"])
         if isinstance(ref_genome, str):
             ref_genome = [ref_genome]
@@ -768,10 +771,10 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "project_id": project_id,
             "sample_name": job_params.get("sample_name", f"sample_{project_id.split('_')[-1]}"),
             "mode": job_params.get("mode", "DNA"),
-            "input_type": job_params.get("input_type", "pod5"),
             "input_directory": job_params.get("input_directory", "/data/samples/test"),
-            "reference_genome": ref_genome,  # Now a list
+            "reference_genome": ref_genome,  # List — Nextflow parallelizes across genomes
             "modifications": job_params.get("modifications"),
+            "input_type": job_params.get("input_type", "pod5"),
             "entry_point": job_params.get("entry_point"),
             # Advanced parameters - use Server3 defaults if None
             "modkit_filter_threshold": job_params.get("modkit_filter_threshold") or 0.9,
@@ -780,9 +783,10 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "accuracy": job_params.get("accuracy") or "sup",
         }
         
-        logger.info("Job parameters prepared", source="edited" if gate_payload.get('edited_params') else "extracted", job_data=job_data)
+        logger.info("Job parameters prepared", source="edited" if gate_payload.get('edited_params') else "extracted",
+                    job_data=job_data)
         
-        # Submit job to Server3 via MCP
+        # Submit job to Server3 via MCP (single call — Nextflow handles multi-genome)
         try:
             server3_url = get_service_url("server3")
             client = MCPHttpClient(name="server3", base_url=server3_url)
@@ -827,44 +831,51 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             asyncio.create_task(poll_job_status(project_id, job_block.id, run_uuid))
         else:
             # MCP call succeeded but no run_uuid in response
+            # Show the actual result for debugging
+            error_detail = str(result) if result else "empty response"
             _create_block_internal(
                 session,
                 project_id,
                 "EXECUTION_JOB",
                 {
-                    "error": "Failed to submit job: no run_uuid returned",
-                    "message": str(result),
+                    "error": f"No run_uuid in Server3 response: {error_detail}",
+                    "message": error_detail,
+                    "job_data": {k: str(v) for k, v in job_data.items()},  # Include params for debugging
                     "job_status": {
                         "status": "FAILED",
                         "progress_percent": 0,
-                        "message": "Submission failed: no run_uuid in response",
+                        "message": f"Submission failed: {error_detail}",
                         "tasks": {}
                     }
                 },
                 status="FAILED",
                 owner_id=owner_id
             )
-            logger.error("Job submission failed: no run_uuid in response", result=result, job_data=job_data)
+            logger.error("Job submission failed: no run_uuid in response", result=result, result_type=type(result).__name__, job_data=job_data)
     
     except Exception as e:
-        # Create error block
+        # Create error block with full details
+        import traceback
+        error_trace = traceback.format_exc()
+        error_msg = str(e)
         _create_block_internal(
             session,
             project_id,
             "EXECUTION_JOB",
             {
-                "error": str(e),
-                "message": "Failed to submit job to Server3",
+                "error": error_msg,
+                "message": f"Failed to submit job to Server3: {error_msg}",
                 "job_status": {
                     "status": "FAILED",
                     "progress_percent": 0,
-                    "message": f"Error: {str(e)}",
+                    "message": f"Error: {error_msg}",
                     "tasks": {}
                 }
             },
-            status="FAILED"
+            status="FAILED",
+            owner_id=owner_id
         )
-        logger.error("Job submission error", error=str(e), project_id=project_id)
+        logger.error("Job submission error", error=error_msg, traceback=error_trace, project_id=project_id)
     finally:
         session.close()
 
@@ -1053,8 +1064,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 "AGENT_PLAN",
                 {
                     "markdown": capabilities_text,
-                    "skill": "system",
-                    "model": engine.model_name
+                    "skill": active_skill or req.skill or "welcome",
+                    "model": req.model or "default"
                 },
                 status="DONE",
                 owner_id=user.id

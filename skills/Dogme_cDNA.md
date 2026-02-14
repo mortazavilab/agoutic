@@ -1,104 +1,94 @@
-# Skill: Dogme cDNA (`run_dogme_cdna`)
+# Skill: Dogme cDNA Analysis (`run_dogme_cdna`)
 
 ## Description
 
-This skill processes cDNA long-read data. It focuses on high-accuracy isoform quantification and spliced alignment. Unlike Direct RNA or DNA, **it does not perform modification calling**, making it faster but limited to transcriptomic analysis.
+This skill provides **downstream analysis interpretation** for completed Dogme cDNA jobs. It is activated by `analyze_job_results` when the job mode is CDNA.
 
-**IMPORTANT:** If the user asks for analysis of a COMPLETED job (QC report, results, file analysis), switch to the `analyze_job_results` skill by outputting:
+**This skill does NOT submit jobs.** Job submission is handled by `analyze_local_sample` (local data) or `ENCODE_LongRead` (ENCODE data).
 
+If the user wants to submit a new job:
 ```
-[[SKILL_SWITCH_TO: analyze_job_results]]
+[[SKILL_SWITCH_TO: analyze_local_sample]]
 ```
 
-## Detecting Analysis Requests
+## cDNA Pipeline Overview
 
-If the user's message contains any of these patterns, switch to `analyze_job_results`:
-- "qc report" / "quality control" / "quality check"
-- "analyze results" / "show results" / "check results"
-- "what files" / "list files" / "show files"
-- "read the output" / "show output"
-- "parse" / "view" / "display" (referring to output files)
+The Dogme cDNA pipeline performs:
+1. **Basecalling** (pod5 → fastq) — using Dorado
+2. **Alignment** (fastq → bam) — mapping to transcriptome + genome reference
+3. **Transcript quantification** — counting reads per gene and transcript isoform
+4. **Isoform analysis** — full-length transcript identification
+5. **QC and summary reports**
 
-**Example:**
-User: "Can you give me a QC report?"
-Agent: "[[SKILL_SWITCH_TO: analyze_job_results]]"
+**⚠️ cDNA does NOT have modification calling** — unlike direct RNA and DNA modes, cDNA sequencing does not preserve base modifications (the reverse transcription step erases them).
 
-User: "Show me the output files"
-Agent: "[[SKILL_SWITCH_TO: analyze_job_results]]"
+## Key Output Files to Examine
 
-## Inputs
+### Alignment Statistics
+- `*.flagstat.txt` — samtools flagstat (mapped reads, duplicates, pairs)
+- `*.stats.csv` — alignment summary statistics
+- `*.mapping_stats.txt` — read length and mapping quality distributions
 
-* `query`: (String) The sample identifier or directory path.
-* `reference_genome`: (String) Genome key (e.g., "GRCh38").
-* `is_single_cell`: (Boolean, Optional) Default: False. (Future proofing for potential single-cell cDNA).
+### Transcript/Gene Counts (primary output for cDNA)
+- `*.counts.csv` or `*.gene_counts.csv` — gene-level expression counts
+- `*.transcript_counts.csv` — transcript-level isoform quantification
+- `*.junctions.bed` — splice junction support
+- `*.isoform_classification.csv` — isoform categorization (known, novel, fusion)
 
-## Plan Logic
+### QC Reports
+- `*qc_summary*` — comprehensive QC metrics
+- `*.html` — visual QC reports (if generated)
 
-### 1. Information Gathering
+### NO Modification Files
+cDNA mode does not produce:
+- ❌ No `*.m6A.bed`
+- ❌ No `*.5mC.bed`
+- ❌ No `*.modkit_summary.txt`
+- ❌ No `*.mod_freq.csv`
 
-**CRITICAL: If the user has not provided:**
-- Sample name/identifier
-- Local path to the data directory
+If the user needs modification data, they should re-run with direct RNA (for RNA mods) or DNA (for DNA mods) mode.
 
-**You MUST ask for this information BEFORE proceeding.** Do NOT guess or hallucinate paths.
+## How to Interpret Results
 
-Example questions:
-- "What is the sample name you'd like to use?"
-- "What is the full local path to the pod5 directory? (e.g., `/data/runs/sample1/pod5/`)"
+### Alignment Quality (cDNA specifics)
+- **Mapped reads > 85%** = good for cDNA
+- **Median read length**: cDNA reads are typically 1-5kb (longer than direct RNA)
+- **Full-length reads**: higher percentage = better library quality
 
-**DO NOT include [[APPROVAL_NEEDED]] when asking for information - just ask the questions.**
+### Expression Analysis (main focus for cDNA)
+- **Gene counts**: primary metric for differential expression
+- **TPM/FPKM normalization**: for cross-sample comparison
+- **Isoform ratios**: cDNA captures full-length transcripts with high accuracy
+- **Novel isoforms**: unannotated splice junctions may indicate novel transcripts
+- **Fusion transcripts**: chimeric reads spanning two genes
 
-### 2. Discovery & Validation
+### Library Quality
+- **5' to 3' coverage ratio**: even coverage indicates good full-length capture
+- **cDNA size distribution**: should match expected transcript lengths
+- **PCR duplicate rate**: high rates indicate low input or over-amplification
 
-Once you have the path from the user:
-* Verify the provided path exists and contains pod5 files
-* Confirm the sample name with the user
-* Note that modification calling will be skipped for cDNA
+## Analysis Workflow
 
-### 3. APPROVAL GATE: Data Validation
+When analyzing a completed cDNA job:
 
-* **Condition:** Confirm sample and strictly note that modification calling will be skipped.
-* **Prompt:** "I found cDNA data for '{query}'.
-* Note: Modification calling is DISABLED for cDNA mode.
-* Analysis Target: Expression & Splicing only.
+**STEP 1:** Get the analysis summary
+```
+[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+```
 
+**STEP 2:** Check for expression and isoform files
+```
+[[DATA_CALL: service=server4, tool=categorize_job_files, run_uuid=<uuid>]]
+```
 
-Do you want to proceed?"
+**STEP 3:** Parse gene counts
+```
+[[DATA_CALL: service=server4, tool=parse_csv, run_uuid=<uuid>, file_path=<gene_counts>]]
+```
 
-### 3. Setup (Config Generation)
+**STEP 4:** Check isoform classification (if available)
+```
+[[DATA_CALL: service=server4, tool=read_file_content, run_uuid=<uuid>, file_path=<isoform_file>]]
+```
 
-* **Tool:** `scaffold_dogme_dir(sample_name, input_dir)`
-* *Logic:* Sets up the run directory structure.
-
-
-* **Tool:** `generate_dogme_config(sample_name, read_type="CDNA", genome=reference_genome)`
-* *Logic:* Sets `readType = 'CDNA'`. Disables `modkit` steps to save compute. Ensures `annotateRNA.py` runs with the `-CDNA` flag.
-
-
-
-### 4. APPROVAL GATE: Pipeline Launch
-
-* **Condition:** Review configuration.
-* **Prompt:** "Configuration generated for '{sample_name}'.
-* Pipeline: Dogme v1.2.X (cDNA Mode)
-* Aligners: minimap2 (spliced) + kallisto
-* Mod calling: Skipped
-
-
-Ready to launch?"
-
-### 5. Execution & Monitoring
-
-* **Tool:** `submit_dogme_nextflow(sample_name)`
-* *Logic:* Submits the job to Server 3.
-
-
-* **Tool:** `check_nextflow_status(run_uuid)`
-* *Logic:* Loops until status is 'COMPLETED' or 'FAILED'.
-
-
-
-### 6. Final Reporting
-
-* **Tool:** `get_dogme_report(sample_name)`
-* **Output:** Returns JSON summary focusing on `inventory_report.tsv` and gene/transcript counts from `reconcileBams.py`.
+**STEP 5:** Present results with cDNA-specific interpretation (expression, isoforms, library quality — NO modification analysis)

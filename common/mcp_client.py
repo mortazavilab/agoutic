@@ -214,11 +214,19 @@ class MCPHttpClient:
 
         # FastMCP wraps tool results in content[0].text as a JSON string
         if isinstance(rpc_result, dict) and "content" in rpc_result:
+            # Check for isError flag FIRST — tool may have raised an exception
+            is_error = rpc_result.get("isError", False)
+
             content_list = rpc_result.get("content", [])
-            logger.info(f"[MCP HTTP] Found content list with {len(content_list)} items")
+            logger.info(f"[MCP HTTP] Found content list with {len(content_list)} items, isError={is_error}")
             if content_list and len(content_list) > 0:
                 text_content = content_list[0].get("text", "")
                 logger.info(f"[MCP HTTP] Text content length: {len(text_content)} chars")
+
+                # If the tool reported an error, raise immediately with the text
+                if is_error:
+                    raise RuntimeError(f"MCP tool error: {text_content}")
+
                 if text_content:
                     try:
                         parsed = json.loads(text_content)
@@ -228,9 +236,9 @@ class MCPHttpClient:
                         logger.warning(f"[MCP HTTP] Failed to parse JSON from text content: {e}")
                         return text_content
 
-            # Check for isError flag from FastMCP
-            if rpc_result.get("isError", False):
-                raise RuntimeError(f"Tool returned error: {rpc_result}")
+            # isError with no content text
+            if is_error:
+                raise RuntimeError(f"MCP tool returned error (no details): {rpc_result}")
             logger.warning(f"[MCP HTTP] Returning empty dict - no text content found")
             return {}
 

@@ -28,8 +28,9 @@ tools = Server3MCPTools()
 async def submit_dogme_job(
     sample_name: str,
     mode: str,
-    reference_genome: str,
-    pod5_directory: str,
+    input_directory: str,
+    reference_genome: str | list[str] = "mm39",
+    project_id: str | None = None,
     modifications: str | None = None,
     input_type: str | None = None,
     entry_point: str | None = None,
@@ -38,12 +39,15 @@ async def submit_dogme_job(
     per_mod: int | None = None,
     accuracy: str | None = None,
 ) -> str:
-    """Submit a DOGME job for processing."""
+    """Submit a DOGME job for processing. Input can be pod5, bam, or fastq files. Supports multiple reference genomes in parallel."""
+    import uuid as _uuid
+    _project_id = project_id or f"mcp_{_uuid.uuid4().hex[:12]}"
     result = await tools.submit_dogme_job(
+        project_id=_project_id,
         sample_name=sample_name,
         mode=mode,
         reference_genome=reference_genome,
-        input_directory=pod5_directory,
+        input_directory=input_directory,
         modifications=modifications,
         input_type=input_type,
         entry_point=entry_point,
@@ -55,15 +59,15 @@ async def submit_dogme_job(
     return json.dumps(result, indent=2)
 
 @mcp.tool()
-async def check_nextflow_status(job_id: str) -> str:
+async def check_nextflow_status(run_uuid: str) -> str:
     """Check the status of a Nextflow job."""
-    result = await tools.check_nextflow_status(job_id=job_id)
+    result = await tools.check_nextflow_status(run_uuid=run_uuid)
     return json.dumps(result, indent=2)
 
 @mcp.tool()
-async def get_dogme_report(job_id: str) -> str:
+async def get_dogme_report(run_uuid: str) -> str:
     """Get the DOGME report for a completed job."""
-    result = await tools.get_dogme_report(job_id=job_id)
+    result = await tools.get_dogme_report(run_uuid=run_uuid)
     return json.dumps(result, indent=2)
 
 @mcp.tool()
