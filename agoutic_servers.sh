@@ -100,6 +100,13 @@ rotate_logs() {
         local ext="${base##*.}"
         local name="${base%.*}"
 
+        # Only rotate the current (non-timestamped) log files.
+        # Already-rotated files contain a dot-separated timestamp like
+        # "server1.20260213_082438.jsonl" — skip them.
+        if [[ "$name" == *.* ]]; then
+            continue
+        fi
+
         mv "$logfile" "$LOGS_DIR/${name}.${timestamp}.${ext}"
         rotated=$((rotated + 1))
     done
@@ -334,7 +341,7 @@ cmd_start() {
 
     # ENCODE MCP Server (consortium)
     start_process "encode-mcp" \
-        "python server2/launch_encode.py --host 0.0.0.0 --port $ENCODE_MCP_PORT"
+        "python -m server2.launch_encode --host 0.0.0.0 --port $ENCODE_MCP_PORT"
 
     # Server 1 - Main orchestrator (start last)
     start_process "server1" \
