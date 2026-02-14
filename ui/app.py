@@ -249,7 +249,29 @@ def render_block(block):
         with st.chat_message("assistant", avatar="🤖"):
             show_metadata()
             if "markdown" in content:
-                st.markdown(content["markdown"])
+                md = content["markdown"]
+                # Split out raw query results into a collapsible expander
+                DETAILS_START = "<details><summary>"
+                DETAILS_END = "</details>"
+                if DETAILS_START in md and DETAILS_END in md:
+                    main_part = md[:md.index(DETAILS_START)].rstrip().rstrip("---").rstrip()
+                    details_block = md[md.index(DETAILS_START):md.index(DETAILS_END) + len(DETAILS_END)]
+                    # Extract the summary text and body
+                    import re as _re
+                    details_match = _re.search(
+                        r'<details><summary>(.*?)</summary>(.*)',
+                        details_block, _re.DOTALL
+                    )
+                    if details_match:
+                        summary_text = details_match.group(1).strip()
+                        details_body = details_match.group(2).strip()
+                        st.markdown(main_part)
+                        with st.expander(summary_text, expanded=False):
+                            st.markdown(details_body)
+                    else:
+                        st.markdown(md)
+                else:
+                    st.markdown(md)
 
     elif btype == "APPROVAL_GATE":
         with st.chat_message("assistant", avatar="🚦"):

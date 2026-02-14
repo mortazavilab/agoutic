@@ -98,6 +98,107 @@ def _parse_tag_params(params_str: str | None) -> dict:
     return params
 
 
+def _auto_generate_data_calls(user_message: str, skill_key: str,
+                              conversation_history: list | None = None) -> list[dict]:
+    """
+    Safety net: if the LLM failed to generate DATA_CALL tags, detect obvious
+    patterns in the user's message and auto-generate the appropriate tool calls.
+
+    Also resolves conversational references ("them", "each of them", "these")
+    by scanning recent conversation history for accessions.
+
+    Returns a list of dicts: [{"source_type": str, "source_key": str, "tool": str, "params": dict}]
+    """
+    calls = []
+    msg_lower = user_message.lower()
+
+    # --- ENCODE patterns ---
+    # Detect ENCODE accession numbers (ENCSR, ENCFF, ENCLB, etc.)
+    accession_matches = re.findall(r'(ENC[A-Z]{2}\d{3}[A-Z]{3})', user_message, re.IGNORECASE)
+    accessions = [a.upper() for a in accession_matches]
+
+    # If no accession in the message, check for conversational references
+    # ("them", "these", "each", "all of them", "for those", etc.)
+    referential_words = ["them", "these", "those", "each", "all of them",
+                         "each of them", "for those", "the experiments",
+                         "the accessions", "same"]
+    if not accessions and any(w in msg_lower for w in referential_words):
+        # Scan recent conversation history (last 4 messages) for accessions.
+        # IMPORTANT: Strip <details>...</details> blocks first so we only
+        # pick up accessions from the clean summary, not from raw query dumps
+        # which may contain unrelated experiments from broader searches.
+        if conversation_history:
+            recent = conversation_history[-4:]
+            for msg in recent:
+                content = msg.get("content", "")
+                # Remove raw data sections that may contain extra accessions
+                content = re.sub(r'<details>.*?</details>', '', content, flags=re.DOTALL)
+                found = re.findall(r'(ENC[A-Z]{2}\d{3}[A-Z]{3})', content, re.IGNORECASE)
+                for acc in found:
+                    acc_upper = acc.upper()
+                    # Only use experiment-level accessions (ENCSR), not file accessions
+                    if acc_upper.startswith("ENCSR") and acc_upper not in accessions:
+                        accessions.append(acc_upper)
+
+    if accessions and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+        # Determine which tool based on what the user is asking
+        file_keywords = ["bam", "fastq", "file", "files", "pod5", "tar", "bigwig",
+                         "download", "available", "methylated", "accessions",
+                         "alignments"]
+        summary_keywords = ["summary", "how many files", "file size"]
+        metadata_keywords = ["detail", "metadata", "info", "what is", "tell me about",
+                            "describe", "experiment"]
+
+        for accession in accessions:
+            if any(kw in msg_lower for kw in file_keywords):
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_files_by_type", "params": {"accession": accession},
+                })
+            elif any(kw in msg_lower for kw in summary_keywords):
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_files_by_type", "params": {"accession": accession},
+                })
+            elif any(kw in msg_lower for kw in metadata_keywords):
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_experiment", "params": {"accession": accession},
+                })
+            else:
+                # Default: get experiment details for an accession
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_experiment", "params": {"accession": accession},
+                })
+
+    # Detect biosample searches (no accession but mentions cell lines/tissues)
+    elif skill_key in ("ENCODE_Search", "ENCODE_LongRead") and not accessions:
+        # Common cell lines and tissues
+        biosamples = {
+            "k562": ("K562", "Homo sapiens"),
+            "gm12878": ("GM12878", "Homo sapiens"),
+            "hela": ("HeLa-S3", "Homo sapiens"),
+            "hepg2": ("HepG2", "Homo sapiens"),
+            "c2c12": ("C2C12", "Mus musculus"),
+            "liver": ("liver", None),
+            "brain": ("brain", None),
+            "heart": ("heart", None),
+        }
+        for keyword, (term, organism) in biosamples.items():
+            if keyword in msg_lower:
+                params = {"search_term": term}
+                if organism:
+                    params["organism"] = organism
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "search_by_biosample", "params": params,
+                })
+                break
+
+    return calls
+
+
 def _create_block_internal(session, project_id, block_type, payload, status="NEW", owner_id=None):
     """
     Internal helper to insert a block and handle the sequence number safely.
@@ -1064,10 +1165,77 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         for pattern in all_fallback_patterns.keys():
             clean_markdown = re.sub(pattern, '', clean_markdown, flags=re.IGNORECASE).strip()
         
+        # 5b. Auto-tag safety net: if LLM failed to generate any DATA_CALL tags,
+        #     detect patterns in the user message and auto-generate appropriate calls.
+        #     ALSO validates accessions when the user uses referential words ("them",
+        #     "each of them", etc.) to catch LLM-hallucinated accession numbers.
+        has_any_tags = bool(data_call_matches or legacy_encode_matches or legacy_analysis_matches)
+        auto_calls = []
+
+        # Check for conversational references in the user's message
+        _ref_words = ["them", "these", "those", "each", "all of them",
+                      "each of them", "for those", "the experiments",
+                      "the accessions", "same"]
+        _msg_lower = req.message.lower()
+        _has_referential = any(w in _msg_lower for w in _ref_words)
+
+        if not has_any_tags:
+            # Case 1: LLM produced no tags at all — auto-generate
+            auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history)
+            if auto_calls:
+                logger.warning("LLM failed to generate DATA_CALL tags, auto-generating",
+                              count=len(auto_calls), skill=active_skill)
+                # Replace the LLM's unhelpful response with a brief note
+                clean_markdown = ""
+        elif has_any_tags and _has_referential:
+            # Case 2: LLM produced tags BUT user used referential words.
+            # Validate that the accessions in the tags actually appeared in
+            # conversation history; if not, they are hallucinated.
+            _llm_accessions = set()
+            for _m in data_call_matches:
+                _p = _parse_tag_params(_m.group(4))
+                if _p.get("accession"):
+                    _llm_accessions.add(_p["accession"].upper())
+            for _m in legacy_encode_matches:
+                _p = _parse_tag_params(_m.group(2))
+                if _p.get("accession"):
+                    _llm_accessions.add(_p["accession"].upper())
+
+            _history_accessions = set()
+            if conversation_history:
+                for _msg in conversation_history:
+                    _content = re.sub(r'<details>.*?</details>', '', _msg.get("content", ""), flags=re.DOTALL)
+                    _found = re.findall(r'(ENCSR\d{3}[A-Z]{3})', _content, re.IGNORECASE)
+                    _history_accessions.update(a.upper() for a in _found)
+
+            if _llm_accessions and _history_accessions and not _llm_accessions & _history_accessions:
+                # None of the LLM's accessions appear in history — hallucinated
+                logger.warning(
+                    "LLM hallucinated accessions in DATA_CALL tags, overriding",
+                    llm_accessions=sorted(_llm_accessions),
+                    history_accessions=sorted(_history_accessions),
+                )
+                auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history)
+                if auto_calls:
+                    # Discard the LLM-generated tags
+                    data_call_matches = []
+                    legacy_encode_matches = []
+                    legacy_analysis_matches = []
+                    has_any_tags = False
+                    clean_markdown = ""
+
         # 6. Collect all tool calls into a unified structure
         # Structure: {source_key: [{"tool": str, "params": dict}, ...]}
         calls_by_source = {}
         
+        # From auto-generated tags (safety net)
+        if not has_any_tags and auto_calls:
+            for ac in auto_calls:
+                calls_by_source.setdefault(ac["source_key"], []).append({
+                    "tool": ac["tool"],
+                    "params": ac["params"],
+                })
+
         # From new DATA_CALL tags
         for match in data_call_matches:
             source_type = match.group(1)  # "consortium" or "service"
@@ -1167,13 +1335,53 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             
             all_results[source_key] = source_results
         
-        # 6c. Format results and append to response
-        for source_key, results in all_results.items():
-            if results:
-                # Pass registry entry for service keys so formatter doesn't need SERVICE_REGISTRY
-                entry = SERVICE_REGISTRY.get(source_key)
-                results_markdown = format_results(source_key, results, registry_entry=entry)
-                clean_markdown += results_markdown
+        # 6c. Format results and run second-pass LLM analysis
+        if all_results:
+            # Check if all results are errors (skip second pass if so)
+            has_real_data = any(
+                any("data" in r for r in results)
+                for results in all_results.values()
+            )
+
+            # Format results into compact markdown for the LLM to analyze
+            formatted_data_parts = []
+            for source_key, results in all_results.items():
+                if results:
+                    entry = SERVICE_REGISTRY.get(source_key)
+                    results_markdown = format_results(source_key, results, registry_entry=entry)
+                    formatted_data_parts.append(results_markdown)
+
+            formatted_data = "\n".join(formatted_data_parts)
+            logger.info("Formatted tool results", size=len(formatted_data),
+                       has_real_data=has_real_data,
+                       preview=formatted_data[:500])
+
+            if has_real_data and formatted_data.strip():
+                # Cap data size to avoid overwhelming the LLM context window
+                MAX_DATA_CHARS = 12000
+                if len(formatted_data) > MAX_DATA_CHARS:
+                    logger.warning("Truncating tool results for LLM",
+                                  original_size=len(formatted_data), max_size=MAX_DATA_CHARS)
+                    formatted_data = formatted_data[:MAX_DATA_CHARS] + "\n\n... (results truncated for brevity)"
+
+                # Second-pass: send data to LLM for analysis/filtering/summarization
+                logger.info("Running second-pass LLM analysis", data_size=len(formatted_data))
+                analyzed_response = await run_in_threadpool(
+                    engine.analyze_results,
+                    req.message,
+                    clean_markdown,
+                    formatted_data,
+                    active_skill,
+                    conversation_history,
+                )
+
+                # Append the formatted source data so user can verify
+                clean_markdown = analyzed_response + "\n\n---\n\n" \
+                    "<details><summary>📋 Raw Query Results (click to expand)</summary>\n\n" \
+                    + formatted_data + "\n\n</details>"
+            else:
+                # All errors or empty — show errors directly, no second pass
+                clean_markdown += formatted_data
         
         # 7. Save AGENT_PLAN (The Text)
         # Status is DONE because the text itself is just informational. 

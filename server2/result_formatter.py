@@ -112,12 +112,110 @@ def _format_data(
         return result
 
     elif isinstance(data, dict):
-        # Show formatted dict as JSON
-        json_str = json.dumps(data, indent=2)
+        # Check if this is a files-by-type dict (e.g., {"bam": [...], "fastq": [...]})
+        # where values are lists of file-like objects with 'accession' keys
+        if data and all(isinstance(v, list) for v in data.values()):
+            first_items = [v[0] for v in data.values() if v and isinstance(v[0], dict)]
+            if first_items and "accession" in first_items[0]:
+                return _format_files_by_type(data)
+
+        # Check if this is a files-summary dict (e.g., {"bam": {"count": 12, "files": [...]}})
+        # where values are dicts containing a 'files' list
+        if data and all(isinstance(v, dict) and "files" in v for v in data.values()):
+            # Unwrap to files-by-type format: {"bam": [...], "fastq": [...]}
+            unwrapped = {}
+            for ftype, info in data.items():
+                files = info.get("files", [])
+                if isinstance(files, list):
+                    unwrapped[ftype] = files
+            if unwrapped:
+                first_items = [v[0] for v in unwrapped.values() if v and isinstance(v[0], dict)]
+                if first_items and "accession" in first_items[0]:
+                    return _format_files_by_type(unwrapped)
+
+        # Generic dict — show as compact JSON (strip deeply nested objects)
+        compact = _compact_dict(data)
+        json_str = json.dumps(compact, indent=2)
         return f"```json\n{json_str}\n```\n"
 
     else:
         return f"{str(data)}\n"
+
+
+def _format_files_by_type(data: dict) -> str:
+    """
+    Format a files-by-type dict into a clean summary table per file type.
+
+    Input: {"bam": [file_objs...], "fastq": [file_objs...], "tar": [...], ...}
+    Output: A markdown section per file type with a summary table.
+    """
+    result = ""
+
+    # Summary overview
+    type_counts = {ftype: len(files) for ftype, files in data.items() if files}
+    total = sum(type_counts.values())
+    result += f"**{total} files** across {len(type_counts)} types: "
+    result += ", ".join(f"{ftype} ({count})" for ftype, count in sorted(type_counts.items()))
+    result += "\n\n"
+
+    for file_type, files in sorted(data.items()):
+        if not files:
+            continue
+
+        result += f"#### {file_type.upper()} ({len(files)} file{'s' if len(files) != 1 else ''})\n\n"
+
+        if isinstance(files[0], dict):
+            result += "| Accession | Output Type | Replicate | Size | Status |\n"
+            result += "|---|---|---|---|---|\n"
+
+            for f in files:
+                acc = f.get("accession", "?")
+                output_type = f.get("output_type", "")
+                reps = f.get("biological_replicates_formatted", "")
+                if not reps:
+                    bio_reps = f.get("biological_replicates", [])
+                    reps = ", ".join(f"Rep {r}" for r in bio_reps) if bio_reps else ""
+                size_bytes = f.get("file_size", 0)
+                size = _human_size(size_bytes) if size_bytes else "?"
+                status = f.get("status", "")
+                result += f"| {acc} | {output_type} | {reps} | {size} | {status} |\n"
+        else:
+            for f in files:
+                result += f"- {str(f)[:200]}\n"
+
+        result += "\n"
+
+    return result
+
+
+def _human_size(nbytes: int) -> str:
+    """Convert bytes to human-readable size string."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(nbytes) < 1024:
+            return f"{nbytes:.1f} {unit}"
+        nbytes /= 1024
+    return f"{nbytes:.1f} PB"
+
+
+def _compact_dict(d: dict, max_depth: int = 2, _depth: int = 0) -> Any:
+    """
+    Recursively compact a dict by truncating deeply nested objects.
+    Prevents multi-thousand-line JSON dumps in the UI.
+    """
+    if _depth >= max_depth:
+        if isinstance(d, dict):
+            return {k: "..." for k in list(d.keys())[:5]}
+        if isinstance(d, list):
+            return f"[{len(d)} items]"
+        return d
+
+    if isinstance(d, dict):
+        return {k: _compact_dict(v, max_depth, _depth + 1) for k, v in d.items()}
+    if isinstance(d, list):
+        if len(d) > 10:
+            return [_compact_dict(item, max_depth, _depth + 1) for item in d[:10]] + [f"... +{len(d) - 10} more"]
+        return [_compact_dict(item, max_depth, _depth + 1) for item in d]
+    return d
 
 
 def _get_registry_entry(key: str) -> dict:

@@ -28,7 +28,7 @@ class MCPHttpClient:
     MCP server using the Streamable HTTP transport.
     """
 
-    def __init__(self, name: str, base_url: str, timeout: float = 60.0):
+    def __init__(self, name: str, base_url: str, timeout: float = 120.0):
         """
         Args:
             name: Human-readable name for logging (e.g., "encode", "server3")
