@@ -1,12 +1,11 @@
-# SERVER2 Implementation: Data Router & MCP Unification
+# SERVER2: Data Router & MCP Unification
 
-**Status:** ✅ Refactored  
-**Date:** June 2025  
+**Status:** Active  
 **Purpose:** Unified MCP-over-HTTP routing for all downstream data sources and services
 
 ## Overview
 
-Server 2 has been refactored from a hardcoded ENCODE-only MCP client into a **registry-driven router** that connects Server 1 to any number of:
+Server 2 serves as a **registry-driven router** that connects Server 1 to any number of:
 
 - **Consortium data sources** (ENCODE, and future additions) via `CONSORTIUM_REGISTRY`
 - **Internal services** (Server 3 for job management, Server 4 for analysis) via `SERVICE_REGISTRY`
