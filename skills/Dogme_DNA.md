@@ -61,6 +61,17 @@ The Dogme DNA pipeline performs:
 
 ## Analysis Workflow
 
+**⚠️ CRITICAL: Finding the Job UUID**
+
+The analysis tools require the actual job UUID (e.g., `6a8613d4-832c-4420-927e-6265b614c8b2`), NOT the sample name.
+
+**Where to find it:**
+- Look in recent conversation history for auto-analysis messages that contain `**Run UUID:** <backtick>uuid<backtick>`
+- Look for job completion messages that show the UUID
+- The most recent completed job UUID is typically what the user wants analyzed
+
+**DO NOT use the sample name as the run_uuid parameter.** Extract the actual UUID string.
+
 When analyzing a completed DNA job:
 
 **STEP 1:** Get the analysis summary

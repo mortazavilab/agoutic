@@ -18,6 +18,22 @@
   - `FileInfo.modified_time` (a `datetime` object) caused `json.dumps` to crash in all Server 4 MCP tools.
   - Added `_dumps()` helper in `server4/mcp_tools.py` with a `default` handler that converts `datetime` to ISO 8601 strings; replaced all 20+ `json.dumps` calls.
 
+- **Skill Resets to "welcome" After Job Completion**
+  - After auto-analysis created an `AGENT_PLAN` block post-job, follow-up messages (e.g. "parse qc_summary.csv") incorrectly reset skill to "welcome" because an older `APPROVAL_GATE` block existed.
+  - Fixed skill resolution in `/chat` to compare sequence numbers: if the latest `AGENT_PLAN` is newer than the latest `APPROVAL_GATE`, continue with the agent's skill instead of resetting.
+
+- **Wrong MCP Tool Names in Skill Files**
+  - `Dogme_cDNA.md` and `Dogme_RNA.md` referenced `tool=parse_csv` instead of `tool=parse_csv_file` (the actual MCP tool name), causing tool-not-found errors when the LLM emitted DATA_CALL tags.
+
+- **LLM Using Sample Name Instead of UUID for Analysis Tools**
+  - Auto-analysis block didn't include the `run_uuid` in the markdown summary, so the LLM used the sample name (e.g., "Jamshid") instead of the actual UUID when calling Server 4 analysis tools.
+  - Added `**Run UUID:** <backtick>uuid<backtick>` line to the auto-analysis summary.
+  - Added explicit UUID-finding instructions to all three Dogme analysis skills (DNA, RNA, cDNA) with examples of how to extract the UUID from conversation history.
+
+- **CSV/BED File Data Truncated to "..." in Results**
+  - `_compact_dict` in `result_formatter.py` limited depth to 2, causing row data in parsed CSV/BED responses to show as `{"sample": "...", "n_reads": "..."}` instead of actual values.
+  - Increased depth limit from 2 to 4 for analysis data (detected by presence of `columns`, `records`, or `preview_rows` keys in the response).
+
 ### Documentation
 - **Consolidated & Standardized Docs**
   - Moved various `*_IMPLEMENTATION.md` files to `archive/` to reduce clutter.

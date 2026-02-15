@@ -1025,6 +1025,7 @@ async def _auto_trigger_analysis(
 
                 summary_md = (
                     f"### 📊 Analysis Ready: {sample_name}\n\n"
+                    f"**Run UUID:** `{run_uuid}`\n"
                     f"**Mode:** {summary.get('mode', mode)} &nbsp;|&nbsp; "
                     f"**Status:** {summary.get('status', 'COMPLETED')} &nbsp;|&nbsp; "
                     f"**Total files:** {total_files}\n\n"
@@ -1130,16 +1131,24 @@ async def chat_with_agent(req: ChatRequest, request: Request):
         # If the last agent block exists and there's no approval gate after it,
         # we're in the middle of a conversation - continue with the same skill
         active_skill = req.skill
-        if last_agent_block and not approval_block:
-            # Continue with the skill from the last agent response
-            last_skill = get_block_payload(last_agent_block).get("skill")
-            if last_skill:
-                active_skill = last_skill
-                logger.info("Continuing with active skill", skill=active_skill)
-        elif approval_block and approval_block.status in ["APPROVED", "REJECTED"]:
-            # If the last approval was resolved, allow new skill from UI
-            active_skill = req.skill
-            logger.info("Starting fresh with skill", skill=active_skill)
+        if last_agent_block:
+            # Check if the most recent AGENT_PLAN is newer than the most recent
+            # APPROVAL_GATE.  If so, the agent has spoken *after* the gate was
+            # resolved (e.g. auto-analysis after job completion) and we should
+            # continue with whatever skill that AGENT_PLAN set.
+            agent_is_latest = (
+                not approval_block
+                or last_agent_block.seq > approval_block.seq
+            )
+            if agent_is_latest:
+                last_skill = get_block_payload(last_agent_block).get("skill")
+                if last_skill:
+                    active_skill = last_skill
+                    logger.info("Continuing with active skill", skill=active_skill)
+            elif approval_block and approval_block.status in ["APPROVED", "REJECTED"]:
+                # Approval gate is the most recent interaction — start fresh
+                active_skill = req.skill
+                logger.info("Starting fresh with skill", skill=active_skill)
         
         # Track project access
         await track_project_access(session, user.id, req.project_id, req.project_id)

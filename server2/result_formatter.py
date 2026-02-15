@@ -134,7 +134,10 @@ def _format_data(
                     return _format_files_by_type(unwrapped)
 
         # Generic dict — show as compact JSON (strip deeply nested objects)
-        compact = _compact_dict(data)
+        # For analysis/parsing results (Server 4), allow deeper nesting so row data is visible
+        is_analysis_data = "columns" in data or "records" in data or "preview_rows" in data
+        depth_limit = 4 if is_analysis_data else 2
+        compact = _compact_dict(data, max_depth=depth_limit)
         json_str = json.dumps(compact, indent=2)
         return f"```json\n{json_str}\n```\n"
 
