@@ -8,6 +8,13 @@
   - Standardized Server 2 documentation: moved `SERVER2_IMPLEMENTATION.md` to `server2/README.md`.
   - Consolidated Server 3 documentation: merged `FILES.md`, `DUAL_INTERFACE.md`, etc., into a single `server3/README.md`.
 
+### Changed
+- **UI Architecture: Server 1 Abstraction Layer**
+  - Refactored `ui/pages/results.py` to route all requests through Server 1 proxy endpoints instead of calling Server 4 directly.
+  - Added file download proxy endpoint (`/analysis/files/download`) to Server 1 to stream files from Server 4 without exposing backend URLs.
+  - Added `rest_url` field to Server 4 `SERVICE_REGISTRY` entry for REST-specific proxying.
+  - All UI pages now exclusively communicate with Server 1; backend architecture is fully abstracted from the frontend.
+
 ### Added
 - **Server2 Implementation** (2026-02-10)
   - Initial implementation of ENCODE search server

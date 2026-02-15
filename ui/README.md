@@ -1,93 +1,81 @@
 # AGOUTIC UI
 
-**Version:** 1.0  
-**Status:** Early Development
+**Version:** 2.0  
+**Status:** Active Development
 
 ## Overview
 
-The UI provides a web interface for monitoring AGOUTIC jobs, managing projects, and viewing analysis results.
+The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUTIC agent, managing projects, monitoring jobs, and viewing analysis results. It communicates **exclusively with Server 1** — all backend architecture (Server 2, 3, 4) is abstracted behind Server 1's API.
 
-## Features (Planned)
+## Features
 
-- 📊 Job monitoring dashboard
-- 📈 Real-time progress tracking
-- 📝 Project history and archival
-- 📤 Result downloads
-- 🔍 Search and filtering
-- 📱 Responsive design
+- 🔐 **Google OAuth authentication** with multi-user support
+- 💬 **Chat interface** for conversing with the AGOUTIC agent
+- ✅ **Approval gates** for reviewing and editing job parameters before submission
+- ⚙️ **Live job monitoring** with Nextflow-style task progress visualization
+- 📊 **Results analysis** page for browsing, parsing, and downloading job outputs
+- 📁 **Project management** with history, switching, and conversation recall
+- 🔑 **Admin panel** for user approval and role management
 
 ## Getting Started
 
-### Installation
-
-```bash
-conda activate agoutic_core
-pip install streamlit  # or flask, depending on framework
-```
+### Prerequisites
+- Python 3.10+ with the `agoutic_core` conda environment
+- Server 1 running at `http://localhost:8000`
 
 ### Run the UI
 
 ```bash
+conda activate agoutic_core
 cd ui
 streamlit run app.py
-# or
-python app.py
 ```
 
-The UI will be available at `http://localhost:8501` (Streamlit) or `http://localhost:5000` (Flask).
+The UI will be available at `http://localhost:8501`.
 
 ## Architecture
+
+The UI follows a strict **single-gateway** pattern: every request goes through Server 1.
 
 ```
 ┌─────────────────────┐
 │   Web Browser       │
-│  (Streamlit/Flask)  │
+│    (Streamlit)      │
 └──────────┬──────────┘
            │
-      REST API
+      REST API (authenticated)
            │
     ┌──────┴──────┐
-    │              │
-Server 1      Server 3
-(Agent)      (Executor)
+    │   Server 1  │  ← Only server the UI talks to
+    │   (Agent)   │
+    └──────┬──────┘
+           │ MCP / REST proxies
+     ┌─────┼─────┐
+     │     │     │
+   Srv 2  Srv 3  Srv 4
+ (ENCODE) (Exec) (Analysis)
 ```
 
-## Components
+## Pages
 
-### Dashboard
-- Display running jobs
-- Show completed jobs
-- View project timelines
+### Main App ([app.py](app.py))
+- Chat with the AGOUTIC agent
+- Approval gates for job submission parameters
+- Live Nextflow job progress with task-level detail
+- Project switching, conversation history
+- Model selection (default / fast / smart)
 
-### Job Monitoring
-- Real-time status updates
-- Progress bars
-- Log viewing
-- Error alerts
+### Results ([pages/results.py](pages/results.py))
+- Browse completed job files (CSV, BED, text)
+- Parse and preview structured data as tables
+- Download result files
+- All data fetched via Server 1 analysis proxy endpoints
 
-### Project Management
-- Create new projects
-- View project history
-- Archive projects
-
-## Integration Points
-
-### Server 1 Integration
-- Pull project history
-- Display agent responses
-- Show workflow plans
-
-### Server 3 Integration
-- Fetch job status
-- Display progress
-- Show results and reports
+### Admin ([pages/admin.py](pages/admin.py))
+- Approve or reject pending user registrations
+- Promote users to admin role
+- Revoke user access
 
 ## Development Notes
 
-See [app.py](app.py) for current implementation status.
-
-## Next Steps
-
-- Core dashboard
-- Real-time updates
-- Polish and optimization
+See [app.py](app.py) and [auth.py](auth.py) for implementation details.

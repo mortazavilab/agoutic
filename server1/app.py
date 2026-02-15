@@ -1849,6 +1849,44 @@ async def parse_bed_file(
     )
 
 
+@app.get("/analysis/files/download")
+async def proxy_download_file(
+    run_uuid: str,
+    file_path: str,
+    request: Request = None,
+):
+    """
+    Proxy file download from Server 4 REST API.
+    Streams the file through Server 1 so the UI never contacts Server 4 directly.
+    """
+    user = request.state.user
+    from starlette.responses import StreamingResponse
+    try:
+        server4_rest = SERVICE_REGISTRY["server4"]["rest_url"]
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.get(
+                f"{server4_rest}/analysis/files/download",
+                params={"run_uuid": run_uuid, "file_path": file_path},
+            )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=resp.status_code, detail=resp.text)
+            # Forward the file as a streaming response
+            content_disposition = resp.headers.get("content-disposition", "")
+            media_type = resp.headers.get("content-type", "application/octet-stream")
+            headers = {}
+            if content_disposition:
+                headers["content-disposition"] = content_disposition
+            return StreamingResponse(
+                iter([resp.content]),
+                media_type=media_type,
+                headers=headers,
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Download proxy error: {str(e)}")
+
+
 async def _call_server4_tool(tool_name: str, **kwargs):
     """Helper to call a Server4 MCP tool via the generic MCP HTTP client."""
     try:

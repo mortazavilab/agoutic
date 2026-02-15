@@ -1,24 +1,30 @@
 """
 Job Results Analysis Page
-Displays and analyzes completed job results using Server4 API
+Displays and analyzes completed job results via Server 1 proxy endpoints.
+All requests go through Server 1 — the UI never contacts backend servers directly.
 """
 
 import streamlit as st
-import requests
 import pandas as pd
-from typing import Optional
+import sys
+import os
+from pathlib import Path
 
-# Server4 configuration
-SERVER4_URL = "http://localhost:8004"
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from auth import require_auth, make_authenticated_request
+
+# Server 1 API URL (the only server the UI talks to)
+API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title="Job Results", page_icon="📊", layout="wide")
 
+# Require authentication
+user = require_auth(API_URL)
+
 st.title("📊 Job Results Analysis")
 st.markdown("Analyze completed Dogme job results")
-
-# Sidebar configuration
-st.sidebar.header("Configuration")
-server4_url = st.sidebar.text_input("Server4 URL", SERVER4_URL)
 
 # Main interface
 st.header("Select Job")
@@ -32,9 +38,13 @@ run_uuid = st.text_input(
 
 if run_uuid:
     try:
-        # Get analysis summary
+        # Get analysis summary via Server 1 proxy
         with st.spinner("Loading job analysis..."):
-            response = requests.get(f"{server4_url}/analysis/summary/{run_uuid}")
+            response = make_authenticated_request(
+                "GET",
+                f"{API_URL}/analysis/jobs/{run_uuid}/summary",
+                timeout=15
+            )
             
         if response.status_code == 200:
             summary = response.json()
@@ -74,13 +84,15 @@ if run_uuid:
                             with col2:
                                 if st.button("Parse CSV", key=f"parse_{csv_file['path']}"):
                                     try:
-                                        parse_response = requests.get(
-                                            f"{server4_url}/analysis/files/parse/csv",
+                                        parse_response = make_authenticated_request(
+                                            "GET",
+                                            f"{API_URL}/analysis/files/parse/csv",
                                             params={
                                                 "run_uuid": run_uuid,
                                                 "file_path": csv_file['path'],
                                                 "max_rows": 100
-                                            }
+                                            },
+                                            timeout=15
                                         )
                                         
                                         if parse_response.status_code == 200:
@@ -93,8 +105,8 @@ if run_uuid:
                                                 df = pd.DataFrame(parsed_data['data'])
                                                 st.dataframe(df, use_container_width=True)
                                             
-                                            # Download button
-                                            download_url = f"{server4_url}/analysis/files/download?run_uuid={run_uuid}&file_path={csv_file['path']}"
+                                            # Download button via Server 1 proxy
+                                            download_url = f"{API_URL}/analysis/files/download?run_uuid={run_uuid}&file_path={csv_file['path']}"
                                             st.markdown(f"[⬇️ Download File]({download_url})")
                                         else:
                                             st.error(f"Error parsing CSV: {parse_response.text}")
@@ -119,13 +131,15 @@ if run_uuid:
                             with col2:
                                 if st.button("Parse BED", key=f"parse_{bed_file['path']}"):
                                     try:
-                                        parse_response = requests.get(
-                                            f"{server4_url}/analysis/files/parse/bed",
+                                        parse_response = make_authenticated_request(
+                                            "GET",
+                                            f"{API_URL}/analysis/files/parse/bed",
                                             params={
                                                 "run_uuid": run_uuid,
                                                 "file_path": bed_file['path'],
                                                 "max_records": 100
-                                            }
+                                            },
+                                            timeout=15
                                         )
                                         
                                         if parse_response.status_code == 200:
@@ -139,8 +153,8 @@ if run_uuid:
                                                 df = pd.DataFrame(records)
                                                 st.dataframe(df, use_container_width=True)
                                             
-                                            # Download button
-                                            download_url = f"{server4_url}/analysis/files/download?run_uuid={run_uuid}&file_path={bed_file['path']}"
+                                            # Download button via Server 1 proxy
+                                            download_url = f"{API_URL}/analysis/files/download?run_uuid={run_uuid}&file_path={bed_file['path']}"
                                             st.markdown(f"[⬇️ Download File]({download_url})")
                                         else:
                                             st.error(f"Error parsing BED: {parse_response.text}")
@@ -165,13 +179,15 @@ if run_uuid:
                             with col2:
                                 if st.button("Read File", key=f"read_{txt_file['path']}"):
                                     try:
-                                        read_response = requests.get(
-                                            f"{server4_url}/analysis/files/content",
+                                        read_response = make_authenticated_request(
+                                            "GET",
+                                            f"{API_URL}/analysis/files/content",
                                             params={
                                                 "run_uuid": run_uuid,
                                                 "file_path": txt_file['path'],
                                                 "preview_lines": 100
-                                            }
+                                            },
+                                            timeout=15
                                         )
                                         
                                         if read_response.status_code == 200:
@@ -182,8 +198,8 @@ if run_uuid:
                                             if content_data.get('is_truncated'):
                                                 st.warning(f"Showing first {content_data.get('line_count', 0)} lines")
                                             
-                                            # Download button
-                                            download_url = f"{server4_url}/analysis/files/download?run_uuid={run_uuid}&file_path={txt_file['path']}"
+                                            # Download button via Server 1 proxy
+                                            download_url = f"{API_URL}/analysis/files/download?run_uuid={run_uuid}&file_path={txt_file['path']}"
                                             st.markdown(f"[⬇️ Download File]({download_url})")
                                         else:
                                             st.error(f"Error reading file: {read_response.text}")
@@ -196,8 +212,12 @@ if run_uuid:
             with tab4:
                 st.subheader("All Files")
                 
-                # Get full file listing
-                list_response = requests.get(f"{server4_url}/analysis/jobs/{run_uuid}/files")
+                # Get full file listing via Server 1 proxy
+                list_response = make_authenticated_request(
+                    "GET",
+                    f"{API_URL}/analysis/jobs/{run_uuid}/files",
+                    timeout=15
+                )
                 
                 if list_response.status_code == 200:
                     file_listing = list_response.json()
@@ -238,10 +258,8 @@ if run_uuid:
         else:
             st.error(f"Error loading job: {response.status_code} - {response.text}")
     
-    except requests.exceptions.ConnectionError:
-        st.error(f"Cannot connect to Server4 at {server4_url}. Make sure it's running.")
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Cannot connect to AGOUTIC API at {API_URL}. Make sure the servers are running.\n\nError: {e}")
 
 else:
     st.info("👆 Enter a job UUID above to view results")
@@ -256,4 +274,4 @@ else:
 
 # Footer
 st.divider()
-st.caption(f"Connected to Server4: {server4_url}")
+st.caption(f"Connected to AGOUTIC API: {API_URL}")
