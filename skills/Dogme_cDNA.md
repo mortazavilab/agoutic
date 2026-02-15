@@ -107,14 +107,18 @@ If the user needs modification data, they should re-run with direct RNA (for RNA
 
 ## Quick Workflow: Parse a File
 
-**See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for step-by-step instructions.**
+Follow the comprehensive workflow in the included guide: `[INCLUDED REFERENCE: DOGME_QUICK_WORKFLOW_GUIDE.md]`
 
-That consolidated guide covers:
-- UUID verification and selection
-- Directory prefix requirement 
-- Step-by-step find_file → parse workflow
-- Critical rules for all modes
-- Data presentation guidelines
+That guide includes:
+- **Filename retrieval** if switched from analyze_job_results
+- **STEP 1-5:** Find file, extract path, parse, validate, present
+- **Directory prefix requirement** (critical for success)
+
+**cDNA-specific tools:**
+- Gene counts: `parse_csv_file` for `*gene_counts.csv` or `*final_stats.csv`
+- Transcript quantification: `parse_csv_file` for `*transcript_counts.csv`
+- Junction support: `parse_bed_file` for `*.junctions.bed`
+- Alignment stats: `read_file_content` for `*.flagstat.txt` or `*.stats.csv`
 
 ### cDNA-Specific Notes
 
@@ -146,12 +150,16 @@ When user says "analyze the results":
 [[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
 ```
 
-**STEP 2:** Parse cDNA-specific key results
+**STEP 2:** Present filtered file summary
+- The summary now excludes work/intermediate files automatically
+- Shows only final result files: txt, csv, bed files
+
+**STEP 3:** Parse cDNA-specific key results
 - Gene counts CSV: `parse_csv_file(...)` for expression overview
-- Transcript counts: `parse_csv_file(...)` for isoform composition  
+- Transcript counts: `parse_csv_file(...)` for isoform composition
 - Alignment stats: `read_file_content(...)` for QC metrics
 
-**STEP 3:** Present results with cDNA interpretation
+**STEP 4:** Present results with cDNA interpretation
 - Library quality (full-length coverage, duplicate rate)
 - Expression findings (gene/transcript counts)
 - Novel discoveries (new genes/isoforms)

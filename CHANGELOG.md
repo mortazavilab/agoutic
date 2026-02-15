@@ -3,6 +3,32 @@
 ## [Unreleased] - 2026-02-15
 
 ### Fixed
+- **Welcome Skill Not Routing UUID + Parse Requests**
+  - Problem: When user said "use UUID: X" + "parse filename", Welcome skill didn't route to analyze_job_results
+  - Instead stayed in Welcome and said "I don't have tools to parse files"
+  - Root cause: Welcome routing rules weren't looking for UUID patterns or "parse" keyword
+  - Solution: Added explicit detection for:
+    - "use UUID:" pattern
+    - "parse {filename}" pattern  
+    - Combined UUID + parse requests
+  - Now: Welcome immediately routes to analyze_job_results when UUID + parse request detected
+  - Applied to: `Welcome.md`
+
+- **UUID Corruption/Truncation by LLM (Known Issue with Enhanced Workaround)**
+  - Problem: LLMs corrupt long UUIDs during transmission (truncation AND character scrambling)
+  - Examples:
+    - Truncation: `b954620b-a2c7-4474-9249-f31d8d55856f` → `b954620b-a2c7-4474-9249-f31d8d558566` (last 3 chars lost)
+    - Character corruption: `b954620b-a2c7-4474-9249-f31d8d55856f` → `b954620b-a274-4474-9249-f31d8d55856f` (a2c7→a274)
+  - Root cause: Model-level string corruption in transmission layer, not skill configuration
+  - Workaround enhanced: Added UUID format validation (not just length check)
+  - Now agent validates:
+    - Length must be exactly 36 characters
+    - Format must be 8-4-4-4-12 segments separated by dashes
+    - All characters must be lowercase hex (0-9, a-f)
+    - If "Job not found" error, agent compares tool's UUID char-by-char to original user input
+    - If mismatch detected, agent re-reads original user input and uses correct UUID
+  - Applied to: `Analyze_Job_Results.md`, `DOGME_QUICK_WORKFLOW_GUIDE.md`
+
 - **MCP Tool Return Types – Protocol Serialization**
   - All Server4 MCP tools were returning JSON strings via `_dumps()` instead of native Python dicts
   - FastMCP was aggressively summarizing/truncating nested responses, showing fields as `"..."` instead of values
@@ -29,6 +55,36 @@
   - Enables rapid diagnosis of work directory or path resolution failures
 
 ### Changed
+- **Enhanced UUID Validation in Analysis Skills**
+  - Added explicit 36-character format validation to Analyze_Job_Results.md
+  - Agent now checks UUID completeness before executing any tool calls
+  - Detects and flags potential LLM truncation of UUIDs
+  - Instructs agent to re-read original user input if truncation is suspected
+  - Applied to: `Analyze_Job_Results.md`, `DOGME_QUICK_WORKFLOW_GUIDE.md`
+
+- **Fixed Duplication in Dogme Skills Workflows** 
+  - Realized we had re-created duplication by putting STEP 1-4 in each skill file
+  - Consolidated back: All detailed workflow steps now live in `DOGME_QUICK_WORKFLOW_GUIDE.md`
+  - Each skill now just references the guide with brief mode-specific tool hints
+  - True single source of truth — workflow updates only need to happen once
+
+- **Enhanced STEP 4-5 (Results Presentation) in Shared Guide**
+  - Expanded with explicit ❌ anti-patterns agent should never exhibit:
+    - ❌ "The query did not return expected data" (it is there in `data` field)
+    - ❌ "content is not provided in usable format" (extract and format it)
+    - ❌ "results show metadata but actual content..." (extract `data` field immediately)
+  - Added explicit presentation formats (markdown tables for CSV, tabular for BED, text blocks)
+  - Added tool selection guide: when to use parse_csv_file vs parse_bed_file vs read_file_content
+  - Result: Agent knows exactly what to do when parse succeeds — extract and present
+
+- **Auto-Load Referenced Skill Files (Generalized)**
+  - Enhanced `_load_skill_text()` in `agent_engine.py` to detect and auto-load referenced .md files
+  - Pattern: `[filename.md](filename.md)` automatically triggers file inclusion in skill context
+  - When agent loads `run_dogme_dna`, it now gets both the skill AND the referenced `DOGME_QUICK_WORKFLOW_GUIDE.md`
+  - Files are appended with clear section markers: `[INCLUDED REFERENCE: filename.md]`
+  - Applies to any skill that references other markdown files using this pattern
+  - Result: Agents have full context without manual file configuration
+
 - **Consolidated Dogme Workflow Documentation**
   - Created `DOGME_QUICK_WORKFLOW_GUIDE.md` as single source of truth for all Dogme analysis workflow steps
   - Moved repetitive UUID verification (~300 lines) and directory prefix warnings from individual skills to shared guide
@@ -126,6 +182,11 @@
 - **CSV/BED File Data Truncated to "..." in Results**
   - `_compact_dict` in `result_formatter.py` limited depth to 2, causing row data in parsed CSV/BED responses to show as `{"sample": "...", "n_reads": "..."}` instead of actual values.
   - Increased depth limit from 2 to 4 for analysis data (detected by presence of `columns`, `records`, or `preview_rows` keys in the response).
+
+- **File Discovery Filtering Out Work Folder Files**
+  - MCP tools in Server 4 now filter out files in the work/ directory to prevent bloated file counts from Nextflow intermediate artifacts.
+  - Modified `discover_files()` in `server4/analysis_engine.py` to exclude files with paths starting with "work/".
+  - This affects all MCP tools: `get_analysis_summary`, `list_job_files`, `find_file`, and parsing tools.
 
 ### Documentation
 - **Consolidated & Standardized Docs**

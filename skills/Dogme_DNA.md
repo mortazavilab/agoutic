@@ -99,14 +99,17 @@ The Dogme DNA pipeline performs:
 
 ## Quick Workflow: Parse a File
 
-**See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for comprehensive step-by-step instructions.**
+Follow the comprehensive workflow in the included guide: `[INCLUDED REFERENCE: DOGME_QUICK_WORKFLOW_GUIDE.md]`
 
-That consolidated guide covers:
-- UUID verification and selection (most critical step!)
-- Directory prefix requirement and why it matters
-- Step-by-step find_file → parse_bed_file workflow
-- Critical rules for all modes
-- Data presentation guidelines
+That guide includes:
+- **Filename retrieval** if switched from analyze_job_results
+- **STEP 1-5:** Find file, extract path, parse, validate, present
+- **Directory prefix requirement** (critical for success)
+
+**DNA-specific tools:**
+- Methylation data: `parse_bed_file` for `*.5mC.bed` or `*.CpG.bed`
+- Fiber-seq data: `parse_bed_file` for `*.fiberseq.bed` or `*.m6A.bed`  
+- Alignment stats: `parse_csv_file` for `*.stats.csv` or `read_file_content` for `*.flagstat.txt`
 
 ### DNA-Specific Notes
 
@@ -138,10 +141,14 @@ When user says "analyze the results":
 [[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
 ```
 
-**STEP 2:** Follow the shared workflow for finding and parsing files
+**STEP 2:** Present filtered file summary
+- The summary now excludes work/intermediate files automatically
+- Shows only final result files: txt, csv, bed files
+
+**STEP 3:** Follow the shared workflow for finding and parsing files
 - See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the complete step-by-step workflow
 
-**STEP 3:** Present results with DNA-specific interpretation
+**STEP 4:** Present results with DNA-specific interpretation
 - Methylation levels and site frequencies
 - Coverage and alignment quality
 - Modification quality metrics

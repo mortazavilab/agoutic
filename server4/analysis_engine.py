@@ -67,6 +67,11 @@ def discover_files(run_uuid: str, extensions: Optional[List[str]] = None) -> Fil
     # Recursively find all files
     for file_path in work_dir.rglob("*"):
         if file_path.is_file():
+            # Skip files in work/ subdirectory (intermediate processing files)
+            relative_path = file_path.relative_to(work_dir)
+            if str(relative_path).startswith("work/"):
+                continue
+            
             # Filter by extension if specified
             if extensions and file_path.suffix.lower() not in extensions:
                 continue

@@ -1,4 +1,5 @@
 import os
+import re
 from openai import OpenAI
 from server1.config import SKILLS_DIR, SKILLS_REGISTRY, LLM_URL, LLM_MODELS
 from server1.config import get_source_for_skill, SERVICE_REGISTRY
@@ -35,6 +36,9 @@ class AgentEngine:
     def _load_skill_text(self, skill_key: str) -> str:
         """
         Reads the Markdown content of a specific skill from the skills/ folder.
+        Also automatically includes any referenced .md files using markdown link patterns.
+        
+        Detects patterns like [filename.md](filename.md) and auto-loads those files.
         """
         if skill_key not in SKILLS_REGISTRY:
             raise ValueError(f"Skill '{skill_key}' not found in Registry.")
@@ -46,7 +50,31 @@ class AgentEngine:
             raise FileNotFoundError(f"Skill file missing: {file_path}")
             
         with open(file_path, "r") as f:
-            return f.read()
+            skill_content = f.read()
+        
+        # Auto-detect and load referenced .md files
+        # Pattern: [filename.md](filename.md) — both must match
+        pattern = r'\[([a-zA-Z0-9_\-\.]+\.md)\]\(\1\)'
+        referenced_files = re.findall(pattern, skill_content)
+        
+        # Load each referenced file and append to content
+        for ref_filename in set(referenced_files):  # set() to avoid duplicates
+            ref_file_path = SKILLS_DIR / ref_filename
+            if ref_file_path.exists():
+                try:
+                    with open(ref_file_path, "r") as f:
+                        ref_content = f.read()
+                    # Append with a clear section marker
+                    skill_content += f"\n\n{'='*80}\n"
+                    skill_content += f"[INCLUDED REFERENCE: {ref_filename}]\n"
+                    skill_content += f"{'='*80}\n\n"
+                    skill_content += ref_content
+                except Exception as e:
+                    logger.warning(f"Failed to load referenced file {ref_filename}: {e}")
+            else:
+                logger.warning(f"Referenced file not found: {ref_filename} (referenced from {filename})")
+        
+        return skill_content
 
     def construct_system_prompt(self, skill_key: str) -> str:
         """

@@ -4,23 +4,58 @@ This document contains the consolidated workflow steps for parsing files across 
 
 ## UUID Guidance - Critical Foundation
 
-⚠️ **🚨 CRITICAL - DO THIS FIRST: Get and Verify the UUID 🚨**
+⚠️ **🚨 CRITICAL - DO THIS FIRST: Validate and Verify the UUID 🚨**
 
-**The #1 cause of "File not found" errors is using the WRONG UUID.**
+**The #1 cause of "File not found" errors is using the WRONG or CORRUPTED UUID.**
 
-**ACTION:** Before making ANY tool calls, look at the conversation for the MOST RECENT "📊 Analysis Ready" message. Extract the UUID from that message.
+**STEP 1: VALIDATE UUID FORMAT FIRST - BEFORE ANY TOOL CALLS**
+
+⚠️ **UUID corruption happens**: LLMs commonly corrupt long strings including UUIDs
+- Pattern: Valid UUID = 36 characters in format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+- Each segment must be lowercase hex (0-9, a-f)
+- Common errors: Character scrambling (`a2c7` → `a274`), truncation, or case changes
+
+**Validation checklist BEFORE using UUID:**
+- ✅ Length is exactly 36 characters
+- ✅ Format matches: `8-4-4-4-12` segments separated by dashes
+- ✅ All characters are lowercase hex (0-9, a-f)
+- ✅ No spaces or extra characters
+
+**Example of corruption:**
+```
+Original from user: b954620b-a2c7-4474-9249-f31d8d55856f (CORRECT - 36 chars, all hex)
+What tool might receive: b954620b-a274-4474-9249-f31d8d55856f (WRONG - a2c7→a274)
+
+✅ CORRECT pattern: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (8-4-4-4-12)
+❌ WRONG: A2C7-a2c7 (mixed case)
+❌ WRONG: b954620ba2c74474 (missing dashes)
+❌ WRONG: b954620b-a27-4474-9249-f31d8d55856f (wrong segment length)
+```
+
+**If you see "Job not found" error:**
+1. Check the UUID in the error message
+2. Compare character-by-character to original user input
+3. If they differ (especially in the middle segments), UUID was corrupted
+4. Re-read the original user input and use THAT UUID
+
+**STEP 2: Extract UUID from current conversation**
+
+Before making ANY tool calls, look at the conversation for the MOST RECENT "use UUID:" message or "Analysis Ready" message. Extract the UUID from that message.
 
 **WRONG:** Using a UUID from an earlier section of the conversation
 - ❌ `6a8613d4-832c-4420-927e-6265b614c8b2` (from analysis of a different job earlier)
 - ❌ An old text from history
 
 **RIGHT:** Using the CURRENT, MOST RECENT job UUID
-- ✅ `b954620b-a2c7-4474-9249-f31d8d55856f` (from the latest "Analysis Ready" message in THIS conversation)
+- ✅ `b954620b-a2c7-4474-9249-f31d8d55856f` (from the latest message in THIS conversation)
 
 **Example - What to look for:**
 ```
 Most recent message in conversation:
 ———————————————
+use UUID: b954620b-a2c7-4474-9249-f31d8d55856f     ← COPY THIS EXACTLY, ALL 36 CHARS
+
+Or from analysis:
 📊 Analysis Ready: sample_name
 Run UUID: b954620b-a2c7-4474-9249-f31d8d55856f     ← THIS IS WHAT YOU USE
 
@@ -30,7 +65,68 @@ Use this UUID in EVERY tool call:
 ———————————————
 ```
 
-**Rule:** If you see multiple "Analysis Ready" messages in conversation history, use ONLY the last one. The most recent one is the active job.
+**Rule:** If you see multiple "use UUID:" messages in conversation history, use ONLY the last one. The most recent one is the active job.
+
+---
+
+## File Summary Filtering - Exclude Work/Intermediate Files
+
+⚠️ **CRITICAL: When presenting file summaries to users, filter out work/intermediate files**
+
+**The get_analysis_summary tool counts ALL files in the work directory, including intermediate processing files.** For user-facing summaries, exclude work files to show only final results.
+
+**Filtering rules:**
+- ✅ **Include final result files:**
+  - Files in `annot/` (annotations, final stats)
+  - Files in `counts/` (gene/transcript counts)
+  - Files in `bedMethyl/` (methylation/modification data)
+  - Files in `modkit/` (modification pileup data)
+  - Files in `fiberseq/` (chromatin accessibility data)
+
+- ❌ **Exclude work/intermediate files:**
+  - Files in `work/` directory (Nextflow intermediate files)
+  - Temporary files (*.tmp, *.log during processing)
+  - Processing artifacts and cache files
+
+**Example filtered summary presentation:**
+```
+📊 Final Result Files (excluding work/intermediate files):
+- TXT files: 13 (QC reports, summaries, stats)
+- CSV files: 12 (gene counts, transcript data, metrics)  
+- BED files: 1 (genomic regions, modifications)
+
+Total result files: 26 (vs 502 total including work files)
+```
+
+**Why filter:** Work directories can contain hundreds of intermediate files that are not meaningful to users. Focus on final analysis outputs.
+
+---
+
+## Retrieving Filename When Switched by analyze_job_results
+
+⚠️ **CRITICAL: When Dogme skill is activated via analyze_job_results**
+
+If you were switched from `analyze_job_results` with a "parse {filename}" request:
+
+**The user provided a filename but analyze_job_results doesn't forward it to your skill.** You must retrieve it yourself:
+
+1. **Look back at conversation history** for what filename the user requested
+   - Search for: "parse {filename}" in recent messages
+   - Example: "parse jamshid.mm39_final_stats.csv"
+   
+2. **Extract the exact filename** the user mentioned
+   - `jamshid.mm39_final_stats.csv` or
+   - `gene_counts` or
+   - `mapping_stats`
+
+3. **Use that filename in find_file call**
+   ```
+   [[DATA_CALL: service=server4, tool=find_file, run_uuid={uuid}, file_name=jamshid.mm39_final_stats.csv]]
+   ```
+
+4. **Continue with STEP 1-5 below** to find and parse the file
+
+**Key difference:** User asked for a SPECIFIC file, not a full analysis. Find and parse ONLY what they requested, then present it. Don't do full analysis unless they ask.
 
 ---
 
@@ -96,13 +192,66 @@ Replace `{tool}` with `parse_csv_file`, `parse_bed_file`, or `read_file_content`
 [[DATA_CALL: service=server4, tool={tool}, run_uuid={uuid}, file_path=directory/filename.ext]]
 ```
 
-### STEP 5: WHEN parse SUCCEEDS - Present the data immediately
+**Tool selection guide:**
+- **CSV files** (gene counts, stats): Use `parse_csv_file`
+- **BED files** (genomic regions, modifications): Use `parse_bed_file`
+- **Text files** (summaries, logs, flagstat): Use `read_file_content`
 
-✅ If the response has `"success": true`:
-- You have received the data successfully
-- Do NOT say "The query did not return the expected data"
-- Do NOT ask for more data
-- Present the data to the user in a clear format
+### STEP 5: WHEN parse SUCCEEDS - Present data immediately
+
+✅ **When response has `"success": true`:**
+- Extract the `data` field (contains parsed rows/content)
+- Extract the `columns` field if present (column names)
+- Format as readable table or structure
+- Present to user immediately
+- Include brief interpretation (mode-specific)
+
+❌ **NEVER exhibit these patterns:**
+- Say "The query did not return expected data" (it is there in `data` field)
+- Say "content is not provided in usable format" (extract and format it)
+- Say "results show metadata but actual content..." (extract `data` field immediately)
+- Ask for different parameters or tools (success means parsing worked)
+
+**CSV data presentation:**
+```
+Here's the parsed data from {filename}:
+
+| {Column1} | {Column2} | ... |
+|-----------|-----------|-----|
+| {val}     | {val}     | ... |
+(show all rows from data array)
+
+Summary:
+- Total rows: {row_count}
+- File: {file_path}
+```
+
+**BED/genomic data presentation:**
+```
+Here's the genomic data from {filename}:
+
+| Chromosome | Start | End | Name | Feature | Value |
+|-----------|-------|-----|------|---------|-------|
+| {chr}     | {s}   | {e} | {n}  | {feat}  | {val} |
+(show all records)
+
+Summary:
+- Total features: {feature_count}
+- File: {file_path}
+```
+
+**Text file content presentation:**
+```
+Here's the content from {filename}:
+
+{key sections or full content}
+
+Summary:
+- File: {file_path}
+- Total lines: {line_count}
+```
+
+Then add mode-specific interpretation (see individual Dogme skills)
 
 ---
 

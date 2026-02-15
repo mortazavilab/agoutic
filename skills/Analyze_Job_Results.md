@@ -62,21 +62,95 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 
 ## Plan Logic
 
+### IMMEDIATE EXECUTION FOR ANALYSIS REQUESTS
+
+**Execute immediately with get_analysis_summary to get mode for routing:**
+
+```
+[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+```
+
+**Then immediately switch to the appropriate Dogme skill based on the mode field from get_analysis_summary.**
+
+**If user just wants summary/overview, use get_analysis_summary:**
+
+```
+[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+```
+
+**But for analysis requests, use list_job_files with filtering to exclude work files:**
+
+```
+[[DATA_CALL: service=server4, tool=list_job_files, run_uuid=<uuid>, extensions=.csv,.tsv,.bed,.txt]]
+```
+
+**This shows only final result files (CSV, TSV, BED, TXT) and excludes work/intermediate files that bloat the counts.**
+
+**Then immediately switch to the appropriate Dogme skill based on the mode field in the response.**
+
+**ROUTING LOGIC - Execute this EXACT pattern:**
+```
+# Get the mode from the JSON response
+# If mode equals "CDNA" exactly:
+[[SKILL_SWITCH_TO: run_dogme_cdna]]
+# If mode equals "DNA" exactly:  
+[[SKILL_SWITCH_TO: run_dogme_dna]]
+# If mode equals "RNA" exactly:
+[[SKILL_SWITCH_TO: run_dogme_rna]]
+```
+
+**CRITICAL: Do NOT use complex conditionals. Use exact string matching.**
+
+**❌ ABSOLUTELY DO NOT:**
+- Output "STEP 1: Verify job exists..."
+- Output "STEP 2: Route to mode-specific skill..."
+- Output "Call: GET /analysis/jobs/..."
+- Output "📋 Raw Query Results"
+- Describe any numbered steps
+- Explain your process
+
+**✅ ONLY:**
+- Execute the tool call
+- Switch skills immediately using exact string match
+- Let Dogme skill handle everything else
+
+---
+
 ### 1. Information Gathering
 
-**STEP 1: Check Conversation History FIRST**
+**BEFORE DOING ANYTHING ELSE - UUID CONFIRMATION**
 
-Before asking the user, scan the recent conversation history for job completion messages:
+When you see "use UUID: {uuid}" in the user's message:
+1. Write it out: "Using UUID: {uuid}"
+2. Check it's 36 chars long: `len(uuid) == 36`
+3. Tell the user which UUID you're using
+4. THEN proceed with get_analysis_summary using THAT UUID
+
+This prevents silently using the wrong UUID.
+
+**STEP 1: Check Current Request FIRST**
+
+**PRIORITY 1 - EXPLICIT UUID IN CURRENT MESSAGE:**
+- If user says "use UUID: {uuid}" → COPY THAT UUID EXACTLY AND USE IT IMMEDIATELY
+- Do NOT look elsewhere
+- Do NOT grab a UUID from earlier in the conversation
+- Do NOT use a previous job's UUID
+- When user says "use UUID: b954620b-a2c7-4474-9249-f31d8d55856f", use EXACTLY that UUID, character-for-character
+- If user says "parse {filename}" → LOOK FOR "use UUID:" in THIS message or the IMMEDIATELY PREVIOUS message ONLY
+
+**PRIORITY 2 - Check Conversation History**
+
+Only if no explicit UUID in current request, scan recent conversation history:
 - Look for "Run UUID: {uuid}" in recent messages (especially from job submission responses)
 - Look for sample names mentioned with "completed successfully" or "Job completed"
 - The most recent completed job UUID is likely what the user wants analyzed
 
-**STEP 2: If UUID Found in History**
+**STEP 2: If UUID Found (Current or History)**
 - Use that UUID immediately
 - Mention to the user which job you're analyzing: "I'll analyze the recently completed job {sample_name} (UUID: {uuid})"
 - Proceed to job verification
 
-**STEP 3: If NO UUID Found in History**
+**STEP 3: If NO UUID Found Anywhere**
 Ask the user for the information:
 
 Example questions:
@@ -127,28 +201,81 @@ Current message shows:
 #
 # 🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 
-⚠️ **The DataCall below MUST execute right now:**
+⚠️ **UUID VALIDATION FIRST - CRITICAL:**
+
+Before you execute ANY tool call, validate the UUID:
+- The user-provided UUID must be COMPLETE — check the FULL string
+- Common error: LLM corrupts UUIDs (characters get scrambled, not just truncated)
+- Format: Should be 36 characters in pattern `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12)
+- All characters must be lowercase hex (0-9, a-f) and no other characters
+
+**UUID validation checklist:**
+- ✅ Exactly 36 characters
+- ✅ Format: `8-4-4-4-12` segments with dashes
+- ✅ All characters lowercase hex or dash
+- ✅ No spaces, uppercase letters, or symbols (except dashes)
+
+**Example - UUID validation with corruption detection:**
+```
+User says: "use UUID: b954620b-a2c7-4474-9249-f31d8d55856f"
+YOUR CHECK: Does this match format? Let me verify:
+  Length: 36 ✅
+  Format: 8-4-4-4-12 ✅
+  Hex chars: b954620b-a2c7-4474-9249-f31d8d55856f ✅
+  RESULT: ✅ VALID - Use this UUID
+
+If you see in error: "UUID b954620b-a274-4474-9249-f31d8d55856f not found"
+⚠️  ALERT: Compare to original: b954620b-a2c7-4474-9249-f31d8d55856f
+  Segment 2 is different: a2c7 vs a274 (CORRUPTED)
+  ❌ DO NOT USE - UUID was corrupted during transmission
+  ✅ Re-read user input and use: b954620b-a2c7-4474-9249-f31d8d55856f
+```
+
+⚠️ **The DataCall below MUST execute right now with the FULL VALID UUID:**
 
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=b954620b-a2c7-4474-9249-f31d8d55856f]]
+[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<FULL_36_CHAR_UUID>]]
 ```
 
 **After you get the response with `mode` field:**
 
+⚠️ **IMMEDIATELY switch to the appropriate Dogme skill. DO NOT DISPLAY the summary response:**
+
+**CRITICAL: Check the mode value EXACTLY:**
+- Look for `"mode": "CDNA"` (case sensitive, exact match)
+- If mode is "CDNA" → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
+- If mode is "DNA" → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
+- If mode is "RNA" → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
+
+**⚠️ KNOWN ISSUE: If mode="CDNA" but agent switches to DNA skill:**
+- This indicates the conditional logic failed
+- Force manual override: `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
+- Do NOT use the conditional routing if it chooses wrong skill
+
 Switch to the appropriate Dogme skill based on mode:
+- If `mode=CDNA`: `[[SKILL_SWITCH_TO: run_dogme_cdna]]`  ← Check CDNA first (most specific)
 - If `mode=DNA` or `mode=Fiber-seq`: `[[SKILL_SWITCH_TO: run_dogme_dna]]`
 - If `mode=RNA`: `[[SKILL_SWITCH_TO: run_dogme_rna]]`
-- If `mode=CDNA`: `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
 
-**Then:** The Dogme skill will execute its Quick Workflow automatically.
+**Critically important:**
+- ❌ DO NOT show/display the get_analysis_summary response to the user
+- ❌ DO NOT say "Here's the summary" or "Job found"
+- ✅ DO immediately trigger [[SKILL_SWITCH_TO: ...]] without any other messages
+- ✅ The Dogme skill will receive the UUID and filename and handle everything else
+
+**Then:** The Dogme skill will execute file finding and parsing automatically.
 
 **⚠️ CRITICAL RULES:**
 - ❌ DO NOT spend time describing "I will parse the file"
 - ❌ DO NOT explain the steps first
 - ❌ DO NOT print warnings without executing
+- ❌ DO NOT display ANY output before switching skills
 - ❌ DO NOT call multiple tools — just get mode and switch skill
-- ✅ DO call get_analysis_summary immediately
-- ✅ DO switch to Dogme skill immediately after
+- ❌ DO NOT truncate or shorten the UUID
+- ✅ DO validate UUID is 36 characters long
+- ✅ DO call get_analysis_summary immediately with FULL UUID
+- ✅ DO switch to Dogme skill IMMEDIATELY after receiving response
+- ✅ DO NOT display summary table or file listing before skill switch
 - ✅ Let the Dogme skill handle find_file and parse_csv_file calls
 
 ### 2. Job Verification and Mode-Aware Routing
@@ -162,24 +289,42 @@ Once you have the job identifier, get the analysis summary first:
 The summary includes the job's **mode** (DNA, RNA, or CDNA). Based on the mode, switch to the appropriate analysis interpretation skill:
 
 **Mode → Analysis skill:**
+- CDNA → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`  ← Check CDNA first
 - DNA or Fiber-seq → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
-- RNA (direct RNA) → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
-- CDNA → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
+- RNA (direct RNA) → `[[SKILL_SWITCH_TO: run_dogme_rrun_dogme_rna]]`
 
 Each of these skills contains mode-specific guidance on:
 - What output files to look for
 - How to interpret modification data (DNA/RNA have modifications, cDNA does not)
 - What quality thresholds and metrics matter
 
-**Example response:**
-"I'll analyze the recently completed job jamshid (UUID: 4d9376a5). Let me retrieve the summary...
+**⚠️ CRITICAL: After receiving the analysis summary response:**
+- ❌ DO NOT display/show the summary output
+- ❌ DO NOT say "Here's the job summary" or "Files available"
+- ❌ DO NOT describe the file counts or statistics
+- ✅ DO immediately execute [[SKILL_SWITCH_TO: ...]] with NO other output
+- ✅ Let the Dogme skill handle all analysis and presentation
 
-[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]"
+**Example - CORRECT flow:**
+```
+User: "analyze job UUID xyz"
 
-Then after seeing mode=RNA:
-"This is a direct RNA job. Switching to RNA-specific analysis...
+[INTERNALLY: Call get_analysis_summary, receive mode=CDNA]
+[Do NOT display the response]
 
-[[SKILL_SWITCH_TO: run_dogme_rna]]"
+[[SKILL_SWITCH_TO: run_dogme_cdna]]
+```
+
+**Example - INCORRECT flow (don't do this):**
+```
+User: "analyze job UUID xyz"
+
+[Call get_analysis_summary, receive mode=CDNA]
+[DISPLAY: "Job jamshid (UUID: xyz) has 12 CSV files, 1 BED file..."]  ❌ WRONG
+[Then say: "Now analyzing..." or "Let me parse the key files..."] ❌ WRONG
+
+[[SKILL_SWITCH_TO: run_dogme_cdna]]
+```
 
 **CRITICAL: This is a READ-ONLY skill. Do NOT create approval gates. Do NOT submit jobs.**
 
@@ -291,30 +436,21 @@ Present results in clear sections:
 [List key output files with descriptions]
 ```
 
-## Example Usage
+## Example Usage (Documentation Only - Do Not Follow as Instructions)
+
+**These are examples of what the skill CAN do, but for actual execution, follow the immediate tool call pattern above.**
 
 **User:** "Give me a QC report for job 4d9376a5-5a4b-4642-86cd-78f7a63fab3d"
 
-**Agent Response:**
-1. Verify job exists and is completed
-2. Call: `GET /analysis/jobs/4d9376a5-5a4b-4642-86cd-78f7a63fab3d/files/categorize`
-3. Call: `GET /analysis/jobs/4d9376a5-5a4b-4642-86cd-78f7a63fab3d/summary`
-4. Parse key CSV files for metrics
-5. Present comprehensive QC report with file lists, key metrics, and assessment
+**Agent Response:** (Should execute tool calls immediately, not list numbered steps)
 
 **User:** "What files are in the jamshid run?"
 
-**Agent Response:**
-1. Look up job UUID for "jamshid" sample from recent jobs
-2. Call: `GET /analysis/jobs/{run_uuid}/files`
-3. Present organized file list grouped by type
+**Agent Response:** (Should execute tool calls immediately, not list numbered steps)
 
 **User:** "Show me the alignment statistics"
 
-**Agent Response:**
-1. Find alignment stats CSV file from file list
-2. Call: `GET /analysis/files/parse/csv?run_uuid={uuid}&file_path=stats.csv`
-3. Extract and present key statistics in readable format with explanations
+**Agent Response:** (Should execute tool calls immediately, not list numbered steps)
 
 ## Available API Endpoints Summary
 

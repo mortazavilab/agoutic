@@ -113,14 +113,18 @@ The Dogme RNA pipeline performs:
 
 ## Quick Workflow: Parse a File
 
-**See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for comprehensive step-by-step instructions.**
+Follow the comprehensive workflow in the included guide: `[INCLUDED REFERENCE: DOGME_QUICK_WORKFLOW_GUIDE.md]`
 
-That consolidated guide covers:
-- UUID verification and selection (most critical step!)
-- Directory prefix requirement and why it matters
-- Step-by-step find_file → parse workflow
-- Critical rules for all modes
-- Data presentation guidelines
+That guide includes:
+- **Filename retrieval** if switched from analyze_job_results
+- **STEP 1-5:** Find file, extract path, parse, validate, present
+- **Directory prefix requirement** (critical for success)
+
+**RNA-specific tools:**
+- Modification sites: `parse_bed_file` for `*.m6A.bed`, `*.pseudoU.bed`
+- Gene counts: `parse_csv_file` for expression data
+- Poly(A) tails: `parse_csv_file` for tail length distributions
+- Summaries: `read_file_content` for `*.modkit_summary.txt`
 
 ### RNA-Specific Notes
 
@@ -154,10 +158,14 @@ When user says "analyze the results":
 [[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
 ```
 
-**STEP 2:** Follow the shared workflow for finding and parsing files
+**STEP 2:** Present filtered file summary
+- The summary now excludes work/intermediate files automatically
+- Shows only final result files: txt, csv, bed files
+
+**STEP 3:** Follow the shared workflow for finding and parsing files
 - See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the complete step-by-step workflow
 
-**STEP 3:** Present results with RNA-specific interpretation
+**STEP 4:** Present results with RNA-specific interpretation
 - Modification site locations and frequencies
 - Expression levels and isoform composition
 - Poly(A) tail length patterns
