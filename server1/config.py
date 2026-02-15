@@ -78,7 +78,7 @@ SERVICE_REGISTRY = {
         "fallback_patterns": {},
     },
     "server4": {
-        "url": os.getenv("SERVER4_MCP_URL", "http://localhost:8004"),
+        "url": os.getenv("SERVER4_MCP_URL", "http://localhost:8005"),
         "rest_url": os.getenv("SERVER4_REST_URL", "http://localhost:8004"),
         "display_name": "Analysis Engine",
         "emoji": "\U0001f4ca",

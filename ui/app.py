@@ -24,7 +24,8 @@ if st.session_state.get("_create_new_project", False):
     st.session_state.blocks = []
     # Clear project-related data
     for key in ['loaded_conversation', 'selected_job', 'chat_history', 
-                'skill_content', 'selected_skill', 'job_status', 'messages']:
+                'skill_content', 'selected_skill', 'job_status', 'messages',
+                '_max_visible_blocks']:
         if key in st.session_state:
             del st.session_state[key]
     # Reset the project ID text input widget so it doesn't hold the old value
@@ -102,10 +103,29 @@ with st.sidebar:
 
     st.divider()
     
-    # [C] DEBUG TOOLS
-    # If things get weird, this button forces a hard reload
-    if st.button("🧹 Force Clear / Refresh"):
-        st.rerun()
+    # [C] CHAT CONTROLS
+    col_clear, col_refresh = st.columns(2)
+    with col_clear:
+        if st.button("🗑️ Clear Chat", use_container_width=True):
+            try:
+                resp = make_authenticated_request(
+                    "DELETE",
+                    f"{API_URL}/projects/{st.session_state.active_project_id}/blocks",
+                    timeout=5,
+                )
+                if resp.status_code == 200:
+                    st.session_state.blocks = []
+                    # Reset welcome flag so agent re-introduces itself
+                    st.session_state.pop("_welcome_sent_for", None)
+                    st.toast(f"Chat cleared ({resp.json().get('deleted', 0)} messages removed)")
+                    st.rerun()
+                else:
+                    st.error(f"Failed to clear: {resp.status_code}")
+            except Exception as e:
+                st.error(f"Error: {e}")
+    with col_refresh:
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
 
     st.divider()
     
@@ -780,7 +800,20 @@ if not st.session_state.blocks:
             pass  # Fall through to empty state if request fails
     st.info(f"👋 **Project `{active_id}` is empty.**\n\nAsk Agoutic to start a task!")
 else:
-    for blk in st.session_state.blocks:
+    all_blocks = st.session_state.blocks
+    # Default: show last 30 blocks. User can load more.
+    max_visible = st.session_state.get("_max_visible_blocks", 30)
+    
+    if len(all_blocks) > max_visible:
+        hidden_count = len(all_blocks) - max_visible
+        if st.button(f"⬆️ Load {min(hidden_count, 30)} older messages ({hidden_count} hidden)"):
+            st.session_state["_max_visible_blocks"] = max_visible + 30
+            st.rerun()
+        visible_blocks = all_blocks[-max_visible:]
+    else:
+        visible_blocks = all_blocks
+    
+    for blk in visible_blocks:
         render_block(blk)
 
 st.write("---")

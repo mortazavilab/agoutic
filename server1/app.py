@@ -322,6 +322,30 @@ async def update_block(
     finally:
         session.close()
 
+
+@app.delete("/projects/{project_id}/blocks")
+async def clear_project_blocks(project_id: str, request: Request):
+    """
+    Delete all blocks for a project, effectively clearing the chat history.
+    Conversation records are preserved separately.
+    """
+    user = request.state.user
+    session = SessionLocal()
+    try:
+        result = session.execute(
+            select(ProjectBlock).where(ProjectBlock.project_id == project_id)
+        )
+        blocks = result.scalars().all()
+        count = len(blocks)
+        for b in blocks:
+            session.delete(b)
+        session.commit()
+        logger.info("Cleared project blocks", project_id=project_id, count=count, user=user.email)
+        return {"status": "ok", "deleted": count}
+    finally:
+        session.close()
+
+
 async def extract_job_parameters_from_conversation(session, project_id: str) -> dict:
     """
     Extract job parameters from conversation history using LLM.
@@ -936,6 +960,13 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                 # Stop polling if job is done
                 if job_status in ("COMPLETED", "FAILED"):
                     logger.info("Job finished", run_uuid=run_uuid, job_status=job_status)
+                    
+                    # On completion, auto-trigger analysis
+                    if job_status == "COMPLETED":
+                        await _auto_trigger_analysis(
+                            project_id, run_uuid, payload, block.owner_id
+                        )
+                    
                     break
         
         except Exception as e:
@@ -944,6 +975,120 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
             session.close()
     
     logger.info("Stopped polling job", run_uuid=run_uuid)
+
+
+async def _auto_trigger_analysis(
+    project_id: str, run_uuid: str, job_payload: dict, owner_id: str | None
+):
+    """
+    Automatically start analysing a just-completed Dogme job.
+
+    Creates a system USER_MESSAGE + AGENT_PLAN block that fetches the analysis
+    summary from Server 4 and presents it to the user, then invites further
+    exploration using the mode-specific Dogme analysis skill.
+    """
+    sample_name = job_payload.get("sample_name", "Unknown")
+    mode = job_payload.get("mode", "DNA")
+
+    logger.info("Auto-triggering analysis", run_uuid=run_uuid, sample_name=sample_name, mode=mode)
+
+    session = SessionLocal()
+    try:
+        # 1. Create a system message announcing the transition
+        _create_block_internal(
+            session,
+            project_id,
+            "USER_MESSAGE",
+            {"text": f"Job \"{sample_name}\" completed. Analyze the results."},
+            owner_id=owner_id,
+        )
+
+        # 2. Fetch analysis summary from Server 4
+        summary_md = ""
+        try:
+            server4_url = get_service_url("server4")
+            client = MCPHttpClient(name="server4", base_url=server4_url)
+            await client.connect()
+            try:
+                summary = await client.call_tool("get_analysis_summary", run_uuid=run_uuid)
+            finally:
+                await client.disconnect()
+
+            if isinstance(summary, dict):
+                # Build a concise overview from the summary
+                file_summary = summary.get("file_summary", {})
+                key_results = summary.get("key_results", {})
+                total_files = key_results.get("total_files", 0)
+                csv_count = len(file_summary.get("csv_files", []))
+                bed_count = len(file_summary.get("bed_files", []))
+                txt_count = len(file_summary.get("txt_files", []))
+
+                summary_md = (
+                    f"### 📊 Analysis Ready: {sample_name}\n\n"
+                    f"**Mode:** {summary.get('mode', mode)} &nbsp;|&nbsp; "
+                    f"**Status:** {summary.get('status', 'COMPLETED')} &nbsp;|&nbsp; "
+                    f"**Total files:** {total_files}\n\n"
+                    f"| Category | Count |\n"
+                    f"|----------|-------|\n"
+                    f"| CSV / TSV | {csv_count} |\n"
+                    f"| BED | {bed_count} |\n"
+                    f"| Text / other | {txt_count} |\n\n"
+                )
+
+                # List key result files
+                csv_files = file_summary.get("csv_files", [])
+                if csv_files:
+                    summary_md += "**Key result files:**\n"
+                    for f in csv_files[:8]:
+                        size_kb = f.get("size", 0) / 1024
+                        summary_md += f"- `{f['name']}` ({size_kb:.1f} KB)\n"
+                    if len(csv_files) > 8:
+                        summary_md += f"- _…and {len(csv_files) - 8} more_\n"
+                    summary_md += "\n"
+        except Exception as e:
+            logger.warning("Failed to fetch analysis summary", run_uuid=run_uuid, error=str(e))
+            summary_md = (
+                f"### 📊 Job Completed: {sample_name}\n\n"
+                f"The {mode} job finished successfully. "
+                f"I couldn't fetch the file summary automatically, but you can ask me to "
+                f"analyze the results.\n\n"
+            )
+
+        # 3. Map mode → Dogme analysis skill
+        mode_skill_map = {
+            "DNA": "run_dogme_dna",
+            "RNA": "run_dogme_rna",
+            "CDNA": "run_dogme_cdna",
+        }
+        analysis_skill = mode_skill_map.get(mode.upper(), "analyze_job_results")
+
+        summary_md += (
+            "💡 *You can ask me to dive deeper — for example:*\n"
+            "- \"Show me the modification summary\"\n"
+            "- \"Parse the CSV results\"\n"
+            "- \"Give me a QC report\"\n"
+        )
+
+        # 4. Create AGENT_PLAN block with the summary
+        _create_block_internal(
+            session,
+            project_id,
+            "AGENT_PLAN",
+            {
+                "markdown": summary_md,
+                "skill": analysis_skill,
+                "model": "system",
+            },
+            status="DONE",
+            owner_id=owner_id,
+        )
+
+        logger.info("Auto-analysis block created", run_uuid=run_uuid, skill=analysis_skill)
+
+    except Exception as e:
+        logger.error("Auto-trigger analysis failed", run_uuid=run_uuid, error=str(e))
+    finally:
+        session.close()
 
 
 # --- CHAT & AGENT LOGIC ---
@@ -1895,9 +2040,19 @@ async def _call_server4_tool(tool_name: str, **kwargs):
         await client.connect()
         try:
             result = await client.call_tool(tool_name, **kwargs)
+            # Surface MCP tool errors as proper HTTP errors
+            if isinstance(result, dict) and result.get("success") is False:
+                detail = result.get("error", "Unknown error")
+                extra = result.get("detail", "")
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{detail}: {extra}" if extra else detail,
+                )
             return result
         finally:
             await client.disconnect()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server 4 error: {str(e)}")
 
@@ -1909,8 +2064,17 @@ async def _call_server3_tool(tool_name: str, **kwargs):
         await client.connect()
         try:
             result = await client.call_tool(tool_name, **kwargs)
+            if isinstance(result, dict) and result.get("success") is False:
+                detail = result.get("error", "Unknown error")
+                extra = result.get("detail", "")
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{detail}: {extra}" if extra else detail,
+                )
             return result
         finally:
             await client.disconnect()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server 3 error: {str(e)}")

@@ -2,6 +2,22 @@
 
 ## [Unreleased] - 2026-02-14
 
+### Fixed
+- **Results Page – MCP Response Format Alignment**
+  - Fixed UI to match MCP response field names: `total_size` → `total_size_bytes` (file listing), `workflow_type` → `mode` (summary).
+  - Made `file_count`, `total_size_bytes`, and `files` accesses defensive with `.get()` to prevent `KeyError` crashes.
+  - Fixed `_auto_trigger_analysis` to read `mode` field correctly from MCP summary.
+  - Server 1 analysis proxy endpoints remain MCP-based (consistent with the rest of the architecture).
+
+- **MCP Tool Errors Silently Swallowed**
+  - `_call_server4_tool` and `_call_server3_tool` now check the `success` field in MCP responses; if `false`, they raise a proper HTTP 422 with the error message instead of returning the error dict as a 200.
+  - Added fallback guard in the results page UI to detect and display any MCP error that slips through.
+  - This was the root cause of the "all N/A" results page — an MCP tool error was returned as a valid 200 JSON response.
+
+- **`datetime` Not JSON Serializable in MCP Tools**
+  - `FileInfo.modified_time` (a `datetime` object) caused `json.dumps` to crash in all Server 4 MCP tools.
+  - Added `_dumps()` helper in `server4/mcp_tools.py` with a `default` handler that converts `datetime` to ISO 8601 strings; replaced all 20+ `json.dumps` calls.
+
 ### Documentation
 - **Consolidated & Standardized Docs**
   - Moved various `*_IMPLEMENTATION.md` files to `archive/` to reduce clutter.
@@ -14,6 +30,17 @@
   - Added file download proxy endpoint (`/analysis/files/download`) to Server 1 to stream files from Server 4 without exposing backend URLs.
   - Added `rest_url` field to Server 4 `SERVICE_REGISTRY` entry for REST-specific proxying.
   - All UI pages now exclusively communicate with Server 1; backend architecture is fully abstracted from the frontend.
+
+- **Auto-Analysis on Job Completion**
+  - When a Dogme job finishes, Server 1 now automatically fetches the analysis summary from Server 4 and presents it in the chat.
+  - The agent skill switches to the mode-specific analysis skill (DNA/RNA/cDNA) so follow-up questions use the right context.
+  - Users see a file overview with counts and key results immediately, with suggested next steps.
+
+- **Chat Management**
+  - Added `DELETE /projects/{project_id}/blocks` endpoint to Server 1 for clearing chat history.
+  - Replaced the no-op "Force Clear" button with a working "Clear Chat" button that deletes all blocks from the database.
+  - Added a "Refresh" button for manual reloads.
+  - Long conversations now show only the last 30 messages by default, with a "Load older messages" button to page back.
 
 ### Added
 - **Server2 Implementation** (2026-02-10)

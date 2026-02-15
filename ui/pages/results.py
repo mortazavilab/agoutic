@@ -49,12 +49,17 @@ if run_uuid:
         if response.status_code == 200:
             summary = response.json()
             
+            # Guard against MCP error responses that slipped through
+            if summary.get("success") is False:
+                st.error(f"Analysis error: {summary.get('error', 'Unknown')} — {summary.get('detail', '')}")
+                st.stop()
+            
             # Display job info
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Sample", summary.get("sample_name", "N/A"))
             with col2:
-                st.metric("Workflow", summary.get("workflow_type", "N/A"))
+                st.metric("Workflow", summary.get("mode", "N/A"))
             with col3:
                 st.metric("Status", summary.get("status", "N/A"))
             with col4:
@@ -222,12 +227,12 @@ if run_uuid:
                 if list_response.status_code == 200:
                     file_listing = list_response.json()
                     
-                    st.metric("Total Files", file_listing['file_count'])
-                    st.metric("Total Size", f"{file_listing['total_size_bytes'] / (1024*1024):.2f} MB")
+                    st.metric("Total Files", file_listing.get('file_count', 0))
+                    st.metric("Total Size", f"{file_listing.get('total_size_bytes', 0) / (1024*1024):.2f} MB")
                     
                     # Display all files in a table
                     files_data = []
-                    for f in file_listing['files']:
+                    for f in file_listing.get('files', []):
                         files_data.append({
                             'Name': f['name'],
                             'Path': f['path'],

@@ -4,6 +4,7 @@ Provides file discovery, reading, parsing, and analysis tools via MCP protocol.
 """
 
 import json
+from datetime import datetime
 from typing import Dict, Any, Optional
 
 from server4.analysis_engine import (
@@ -15,6 +16,18 @@ from server4.analysis_engine import (
     generate_analysis_summary
 )
 from server4.config import MAX_PREVIEW_LINES
+
+
+def _json_serial(obj: Any) -> str:
+    """JSON serializer for objects not serializable by default (e.g. datetime)."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Type {type(obj)} not serializable")
+
+
+def _dumps(obj: Any) -> str:
+    """json.dumps wrapper that handles datetime serialisation."""
+    return json.dumps(obj, indent=2, default=_json_serial)
 
 
 # ==================== MCP Tool Definitions ====================
@@ -42,27 +55,27 @@ async def list_job_files(
         # Discover files
         file_listing = discover_files(run_uuid, ext_list)
         
-        return json.dumps({
+        return _dumps({
             "success": True,
             "run_uuid": file_listing.run_uuid,
             "work_dir": file_listing.work_dir,
             "file_count": file_listing.file_count,
             "total_size_bytes": file_listing.total_size,
             "files": [f.dict() for f in file_listing.files]
-        }, indent=2)
+        })
     
     except FileNotFoundError as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Job not found or work directory missing",
             "detail": str(e)
-        }, indent=2)
+        })
     except Exception as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Failed to list files",
             "detail": str(e)
-        }, indent=2)
+        })
 
 
 async def read_file_content_tool(
@@ -89,7 +102,7 @@ async def read_file_content_tool(
         # Read file content
         content_response = read_file_content(run_uuid, file_path, preview_lines)
         
-        return json.dumps({
+        return _dumps({
             "success": True,
             "run_uuid": content_response.run_uuid,
             "file_path": content_response.file_path,
@@ -97,26 +110,26 @@ async def read_file_content_tool(
             "line_count": content_response.line_count,
             "is_truncated": content_response.is_truncated,
             "file_size_bytes": content_response.file_size
-        }, indent=2)
+        })
     
     except FileNotFoundError as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "File not found",
             "detail": str(e)
-        }, indent=2)
+        })
     except ValueError as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Invalid file or path",
             "detail": str(e)
-        }, indent=2)
+        })
     except Exception as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Failed to read file",
             "detail": str(e)
-        }, indent=2)
+        })
 
 
 async def parse_csv_file_tool(
@@ -139,7 +152,7 @@ async def parse_csv_file_tool(
         # Parse CSV file
         parsed_data = parse_csv_file(run_uuid, file_path, max_rows)
         
-        return json.dumps({
+        return _dumps({
             "success": True,
             "run_uuid": parsed_data.run_uuid,
             "file_path": parsed_data.file_path,
@@ -148,26 +161,26 @@ async def parse_csv_file_tool(
             "preview_rows": parsed_data.preview_rows,
             "data": parsed_data.data,
             "metadata": parsed_data.metadata
-        }, indent=2)
+        })
     
     except FileNotFoundError as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "File not found",
             "detail": str(e)
-        }, indent=2)
+        })
     except ValueError as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Invalid CSV file or parsing error",
             "detail": str(e)
-        }, indent=2)
+        })
     except Exception as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Failed to parse CSV file",
             "detail": str(e)
-        }, indent=2)
+        })
 
 
 async def parse_bed_file_tool(
@@ -190,7 +203,7 @@ async def parse_bed_file_tool(
         # Parse BED file
         parsed_data = parse_bed_file(run_uuid, file_path, max_records)
         
-        return json.dumps({
+        return _dumps({
             "success": True,
             "run_uuid": parsed_data.run_uuid,
             "file_path": parsed_data.file_path,
@@ -198,26 +211,26 @@ async def parse_bed_file_tool(
             "preview_records": parsed_data.preview_records,
             "records": [r.dict() for r in parsed_data.records],
             "metadata": parsed_data.metadata
-        }, indent=2)
+        })
     
     except FileNotFoundError as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "File not found",
             "detail": str(e)
-        }, indent=2)
+        })
     except ValueError as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Invalid BED file or parsing error",
             "detail": str(e)
-        }, indent=2)
+        })
     except Exception as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Failed to parse BED file",
             "detail": str(e)
-        }, indent=2)
+        })
 
 
 async def get_analysis_summary_tool(run_uuid: str) -> str:
@@ -235,7 +248,7 @@ async def get_analysis_summary_tool(run_uuid: str) -> str:
         # Generate summary
         summary = generate_analysis_summary(run_uuid)
         
-        return json.dumps({
+        return _dumps({
             "success": True,
             "run_uuid": summary.run_uuid,
             "sample_name": summary.sample_name,
@@ -250,20 +263,20 @@ async def get_analysis_summary_tool(run_uuid: str) -> str:
             },
             "key_results": summary.key_results,
             "parsed_reports": summary.parsed_reports
-        }, indent=2)
+        })
     
     except ValueError as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Job not found",
             "detail": str(e)
-        }, indent=2)
+        })
     except Exception as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Failed to generate analysis summary",
             "detail": str(e)
-        }, indent=2)
+        })
 
 
 async def categorize_job_files_tool(run_uuid: str) -> str:
@@ -281,7 +294,7 @@ async def categorize_job_files_tool(run_uuid: str) -> str:
         # Categorize files
         file_summary = categorize_files(run_uuid)
         
-        return json.dumps({
+        return _dumps({
             "success": True,
             "run_uuid": run_uuid,
             "txt_files": [f.dict() for f in file_summary.txt_files],
@@ -294,20 +307,20 @@ async def categorize_job_files_tool(run_uuid: str) -> str:
                 "bed": len(file_summary.bed_files),
                 "other": len(file_summary.other_files)
             }
-        }, indent=2)
+        })
     
     except FileNotFoundError as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Job not found or work directory missing",
             "detail": str(e)
-        }, indent=2)
+        })
     except Exception as e:
-        return json.dumps({
+        return _dumps({
             "success": False,
             "error": "Failed to categorize files",
             "detail": str(e)
-        }, indent=2)
+        })
 
 
 # ==================== Tool Registry ====================
