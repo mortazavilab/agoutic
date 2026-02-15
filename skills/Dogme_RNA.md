@@ -4,12 +4,51 @@
 
 This skill provides **downstream analysis interpretation** for completed Dogme Direct RNA jobs. It is activated by `analyze_job_results` when the job mode is RNA.
 
-**This skill does NOT submit jobs.** Job submission is handled by `analyze_local_sample` (local data) or `ENCODE_LongRead` (ENCODE data).
+## Skill Scope & Routing
 
-If the user wants to submit a new job:
-```
-[[SKILL_SWITCH_TO: analyze_local_sample]]
-```
+### ✅ This Skill Handles:
+- Interpreting RNA modifications (m6A, pseudouridine, inosine)
+- RNA modification frequency and stoichiometry analysis
+- Direct RNA alignment and mapping quality assessment
+- Transcript quantification from direct RNA reads
+- Poly(A) tail length analysis
+- Explaining QC metrics specific to direct RNA sequencing
+
+**Example questions:**
+- "Show me the m6A modification sites"
+- "What's the RNA modification frequency?"
+- "Parse the RNA mod BED file"
+- "Analyze poly(A) tail lengths"
+
+### ❌ This Skill Does NOT Handle:
+
+- **Submitting new jobs** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
+  - "Analyze my pod5 files"
+  - "Run Dogme on my RNA data"
+  - "Submit a new direct RNA job"
+
+- **ENCODE data lookup** → `[[SKILL_SWITCH_TO: encode_search]]`
+  - "How many BAM files are there for ENCSR160HKZ?"
+  - "What RNA-seq experiments are available for K562?"
+  - "Find ENCODE direct RNA data"
+
+- **Analyzing different jobs** → `[[SKILL_SWITCH_TO: analyze_job_results]]`
+  - "Check results for job XYZ" (when switching to a different job)
+  - "Give me QC for another sample"
+
+- **DNA modifications or cDNA expression** → Direct RNA mode only
+  - For DNA methylation, use DNA mode
+  - For standard gene expression, cDNA mode is more appropriate
+
+### 🔀 General Routing Rules:
+
+**When the user's question is outside direct RNA analysis:**
+- **New data / file paths** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
+- **ENCODE accessions/experiments** → `[[SKILL_SWITCH_TO: encode_search]]`
+- **Different job results** → `[[SKILL_SWITCH_TO: analyze_job_results]]`
+- **General help / unclear intent** → `[[SKILL_SWITCH_TO: welcome]]`
+
+**When uncertain:** If the question is clearly outside direct RNA result interpretation, switch to the appropriate skill rather than saying "I can't help."
 
 ## Direct RNA Pipeline Overview
 
@@ -72,39 +111,86 @@ The Dogme RNA pipeline performs:
 - **Tail length vs expression**: shorter tails often correlate with mRNA decay
 - **Distribution shape**: bimodal distributions may indicate regulation
 
-## Analysis Workflow
+## Quick Workflow: Parse a File
 
-**⚠️ CRITICAL: Finding the Job UUID**
+**See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for comprehensive step-by-step instructions.**
 
-The analysis tools require the actual job UUID (e.g., `6a8613d4-832c-4420-927e-6265b614c8b2`), NOT the sample name.
+That consolidated guide covers:
+- UUID verification and selection (most critical step!)
+- Directory prefix requirement and why it matters
+- Step-by-step find_file → parse workflow
+- Critical rules for all modes
+- Data presentation guidelines
 
-**Where to find it:**
-- Look in recent conversation history for auto-analysis messages that contain `**Run UUID:** <backtick>uuid<backtick>`
-- Look for job completion messages that show the UUID
-- The most recent completed job UUID is typically what the user wants analyzed
+### RNA-Specific Notes
 
-**DO NOT use the sample name as the run_uuid parameter.** Extract the actual UUID string.
+**Files to search for:**
+- Modification sites: `find_file(run_uuid=..., file_name=m6A)` or `modkit`
+- Gene expression: `find_file(run_uuid=..., file_name=gene_counts)` or `transcript`
+- Poly(A) tails: `find_file(run_uuid=..., file_name=polya)`
+- Alignment stats: `find_file(run_uuid=..., file_name=stats)` or `flagstat`
 
-When analyzing a completed RNA job:
+**Typical directories:**
+- `modkit/` — RNA modification calls and pileup data
+- `counts/` — gene and transcript quantification
+- `annot/` — alignment statistics and summaries
+
+**Parsing and interpreting RNA results:**
+- Modification BED → use `parse_bed_file` → shows m6A, pseudouridine sites with frequencies
+- Gene counts CSV → use `parse_csv_file` → shows transcript abundance
+- Poly(A) data → use `parse_csv_file` → shows tail length distributions
+- Alignment stats → use `read_file_content` → shows mapping quality and coverage
+- m6A sites enriched at DRACH motifs indicate authentic modification sites
+- Poly(A) tail length correlates with stability and translation
+
+---
+
+## Full Analysis Workflow
+
+When user says "analyze the results":
 
 **STEP 1:** Get the analysis summary
 ```
 [[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
 ```
 
-**STEP 2:** Check for modification and expression files
+**STEP 2:** Follow the shared workflow for finding and parsing files
+- See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the complete step-by-step workflow
+
+**STEP 3:** Present results with RNA-specific interpretation
+- Modification site locations and frequencies
+- Expression levels and isoform composition
+- Poly(A) tail length patterns
+- Alignment quality and read characteristics
+- Enrichment of modifications at known regulatory motifs
+
+---
+
+## KEY RULES
+
+**DO:**
+- Reference [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the standard workflow
+- Execute tool calls immediately — don't explain what you're about to do
+- Present results with clear explanations of what they mean
+- Offer suggestions for further analysis
+
+**DON'T:**
+- Explain your process step-by-step before executing
+- Say "the query did not return expected data" when parse succeeds
+- Ask permission for obvious next steps
+- Forget the directory prefix in file_path parameter
+- Ask permission for obvious next steps ("Would you like me to parse this file?")
+- Get stuck in explanation loops — act first, explain results
+````
+
+**STEP 5:** Parse gene/transcript counts using FULL path from STEP 3
 ```
-[[DATA_CALL: service=server4, tool=categorize_job_files, run_uuid=<uuid>]]
+[[DATA_CALL: service=server4, tool=parse_csv_file, run_uuid=<uuid>, file_path=counts/sample_name_gene_counts.csv]]
 ```
 
-**STEP 3:** Parse modification summary
+**STEP 6:** Parse modification BED files to get detailed m6A and other modification locations from STEP 3
 ```
-[[DATA_CALL: service=server4, tool=read_file_content, run_uuid=<uuid>, file_path=<modkit_summary>]]
-```
-
-**STEP 4:** Parse gene/transcript counts
-```
-[[DATA_CALL: service=server4, tool=parse_csv_file, run_uuid=<uuid>, file_path=<counts_file>]]
+[[DATA_CALL: service=server4, tool=parse_bed_file, run_uuid=<uuid>, file_path=bedMethyl/sample_name.mod.bed]]
 ```
 
-**STEP 5:** Present results with RNA-specific interpretation (modification sites, expression levels, poly(A) analysis)
+**STEP 7:** Present results with RNA-specific interpretation (modification sites, expression levels, poly(A) analysis)

@@ -4,12 +4,50 @@
 
 This skill provides **downstream analysis interpretation** for completed Dogme DNA and Fiber-seq jobs. It is activated by `analyze_job_results` when the job mode is DNA.
 
-**This skill does NOT submit jobs.** Job submission is handled by `analyze_local_sample` (local data) or `ENCODE_LongRead` (ENCODE data).
+## Skill Scope & Routing
 
-If the user wants to submit a new job:
-```
-[[SKILL_SWITCH_TO: analyze_local_sample]]
-```
+### ✅ This Skill Handles:
+- Interpreting DNA methylation (5mC, CpG) results
+- Fiber-seq chromatin accessibility analysis (m6A signal)
+- DNA modification frequency and coverage analysis
+- Explaining QC metrics for completed DNA jobs
+- Parsing BED files with modification calls
+- Alignment statistics interpretation for DNA
+
+**Example questions:**
+- "Show me the DNA methylation patterns"
+- "What's the CpG methylation frequency?"
+- "Parse the modification BED file"
+- "Analyze the Fiber-seq accessibility data"
+
+### ❌ This Skill Does NOT Handle:
+
+- **Submitting new jobs** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
+  - "Analyze my pod5 files"
+  - "Run Dogme on my DNA data"
+  - "Submit a new Fiber-seq job"
+
+- **ENCODE data lookup** → `[[SKILL_SWITCH_TO: encode_search]]`
+  - "How many BAM files are there for ENCSR160HKZ?"
+  - "What DNA-seq experiments are available for K562?"
+  - "Find ENCODE Fiber-seq data"
+
+- **Analyzing different jobs** → `[[SKILL_SWITCH_TO: analyze_job_results]]`
+  - "Check results for job XYZ" (when switching to a different job)
+  - "Give me QC for another sample"
+
+- **RNA or cDNA analysis** → DNA mode only
+  - For RNA modifications or gene expression, different modes are required
+
+### 🔀 General Routing Rules:
+
+**When the user's question is outside DNA analysis:**
+- **New data / file paths** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
+- **ENCODE accessions/experiments** → `[[SKILL_SWITCH_TO: encode_search]]`
+- **Different job results** → `[[SKILL_SWITCH_TO: analyze_job_results]]`
+- **General help / unclear intent** → `[[SKILL_SWITCH_TO: welcome]]`
+
+**When uncertain:** If the question is clearly outside DNA result interpretation, switch to the appropriate skill rather than saying "I can't help."
 
 ## DNA / Fiber-Seq Pipeline Overview
 
@@ -59,34 +97,69 @@ The Dogme DNA pipeline performs:
 - **Fiber length** affects resolution of chromatin state calls
 - Compare accessibility patterns to known regulatory elements
 
-## Analysis Workflow
+## Quick Workflow: Parse a File
 
-**⚠️ CRITICAL: Finding the Job UUID**
+**See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for comprehensive step-by-step instructions.**
 
-The analysis tools require the actual job UUID (e.g., `6a8613d4-832c-4420-927e-6265b614c8b2`), NOT the sample name.
+That consolidated guide covers:
+- UUID verification and selection (most critical step!)
+- Directory prefix requirement and why it matters
+- Step-by-step find_file → parse_bed_file workflow
+- Critical rules for all modes
+- Data presentation guidelines
 
-**Where to find it:**
-- Look in recent conversation history for auto-analysis messages that contain `**Run UUID:** <backtick>uuid<backtick>`
-- Look for job completion messages that show the UUID
-- The most recent completed job UUID is typically what the user wants analyzed
+### DNA-Specific Notes
 
-**DO NOT use the sample name as the run_uuid parameter.** Extract the actual UUID string.
+**Files to search for:**
+- Methylation data: `find_file(run_uuid=..., file_name=5mC)` or `CpG`
+- Fiber-seq data: `find_file(run_uuid=..., file_name=fiberseq)` or `m6A`
+- Alignment stats: `find_file(run_uuid=..., file_name=stats)` or `flagstat`
 
-When analyzing a completed DNA job:
+**Typical directories:**
+- `bedMethyl/` — methylation calls and CpG frequencies
+- `annot/` — alignment statistics and summaries
+- `modkit/` — raw modification pileup data
+
+**Parsing and interpreting DNA results:**
+- Methylation BED → use `parse_bed_file` → shows CpG modification frequencies
+- Fiber-seq data → use `parse_bed_file` → shows chromatin accessibility regions
+- Alignment stats → use `parse_csv_file` or `read_file_content` → shows mapping quality and coverage
+- Global methylation patterns indicate imprinting status, tissue type, disease state
+- Hypomethylated regions often indicate active regulatory elements
+
+---
+
+## Full Analysis Workflow
+
+When user says "analyze the results":
 
 **STEP 1:** Get the analysis summary
 ```
 [[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
 ```
 
-**STEP 2:** Check modification results — look for BED files with modification data
-```
-[[DATA_CALL: service=server4, tool=categorize_job_files, run_uuid=<uuid>]]
-```
+**STEP 2:** Follow the shared workflow for finding and parsing files
+- See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the complete step-by-step workflow
 
-**STEP 3:** Parse key metrics from CSV/stats files
-```
-[[DATA_CALL: service=server4, tool=read_file_content, run_uuid=<uuid>, file_path=<stats_file>]]
-```
+**STEP 3:** Present results with DNA-specific interpretation
+- Methylation levels and site frequencies
+- Coverage and alignment quality
+- Modification quality metrics
+- Comparison to expected patterns (promoters should be hypomethylated, etc.)
 
-**STEP 4:** Present results with DNA-specific interpretation (methylation levels, coverage, modification calling quality)
+---
+
+## KEY RULES
+
+**DO:**
+- Reference [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the standard workflow
+- Execute tool calls immediately — don't explain what you're about to do
+- Present results with clear explanations of what they mean
+- Offer suggestions for further analysis
+
+**DON'T:**
+- Explain your process step-by-step before executing
+- Say "the query did not return expected data" when parse succeeds
+- Ask permission for obvious next steps
+- Forget the directory prefix in file_path parameter
+````

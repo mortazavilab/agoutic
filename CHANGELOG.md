@@ -1,5 +1,98 @@
 # Changelog - February 2026
 
+## [Unreleased] - 2026-02-15
+
+### Fixed
+- **MCP Tool Return Types – Protocol Serialization**
+  - All Server4 MCP tools were returning JSON strings via `_dumps()` instead of native Python dicts
+  - FastMCP was aggressively summarizing/truncating nested responses, showing fields as `"..."` instead of values
+  - Changed all 7 tools in `mcp_tools.py` to return `Dict[str, Any]` natively; removed all `_dumps()` calls
+  - Updated tool decorator return types in `mcp_server.py` to declare `Dict[str, Any]` for proper protocol handling
+  - Result: Response fields are no longer truncated; structured data is preserved through MCP protocol layer
+
+- **File Discovery Response Structure – Avoiding Nested Object Truncation**
+  - `find_file` response had a `matches` array with nested objects that MCP was truncating to `"..."`
+  - Removed problematic `matches` array entirely from response
+  - Added flat top-level fields: `paths` (simple string array), `primary_path` (first match for direct use)
+  - Response now contains only: `success`, `run_uuid`, `search_term`, `file_count`, `paths`, `primary_path`
+  - Eliminates confusion about which path to use and prevents field truncation
+
+- **Missing `find_file` Tool Registration**
+  - `find_file` tool was implemented in `mcp_tools.py` but not registered in `TOOL_REGISTRY`
+  - Added `find_file_tool` to `TOOL_REGISTRY` and MCP server registration in `mcp_server.py`
+  - Tool now available: `[[DATA_CALL: service=server4, tool=find_file, run_uuid=..., file_name=...]]`
+
+- **File Path Resolution Error Messages**
+  - Parse and read operations showed generic "File not found" error without diagnostic info
+  - Enhanced error messages in `analysis_engine.py` for `read_file_content`, `parse_csv_file`, `parse_bed_file`
+  - Error now shows both relative and absolute paths: `"File not found: {file_path} (absolute path: {full_path})"`
+  - Enables rapid diagnosis of work directory or path resolution failures
+
+### Changed
+- **Consolidated Dogme Workflow Documentation**
+  - Created `DOGME_QUICK_WORKFLOW_GUIDE.md` as single source of truth for all Dogme analysis workflow steps
+  - Moved repetitive UUID verification (~300 lines) and directory prefix warnings from individual skills to shared guide
+  - Refactored `Dogme_DNA.md` and `Dogme_RNA.md` to reference shared guide instead of duplicating sections
+  - Kept mode-specific content: file types (bedMethyl/, modkit/, counts/) and interpretation guidance
+  - Reduces documentation maintenance burden; all three Dogme skills now use consistent workflow reference
+  - Applied to: `Dogme_DNA.md`, `Dogme_RNA.md` (cDNA already used external reference)
+
+- **Agent Workflow Routing for Specific File Requests**
+  - Updated `Analyze_Job_Results.md` with "SPECIAL CASE: User Requests Specific File Parsing" section
+  - When user says "parse [filename]", analyzeJobResults now routes immediately to appropriate Dogme skill
+  - Prevents verbose workflow description loops; enables fast-track execution
+  - Example: "parse jamshid.mm39_final_stats.csv" → Get mode → Route to Dogme_cDNA → Execute quick workflow
+
+- **File Path Extraction in Dogme Skills**
+  - Completely rewrote "Quick Workflow: User Asks to Parse a File" section in all three Dogme skills
+  - Added 5-step critical workflow with explicit copy-paste examples
+  - Enhanced "MOST COMMON MISTAKE" section showing 3 specific wrong patterns:
+    - ❌ `file_path=jamshid.mm39_final_stats.csv` (dropped directory part)
+    - ❌ `file_path=final_stats.csv` (extracted partial filename)
+    - ❌ `file_path=Annot/jamshid...` (modified case)
+  - Added bold ✅ CORRECT example: use EXACT copy of `primary_path` from find_file response
+  - Applied to: `Dogme_DNA.md`, `Dogme_RNA.md`, `Dogme_cDNA.md`
+
+- **MCP Tool Return Type Declarations**
+  - Updated all `@mcp.tool()` decorators in `mcp_server.py` to declare `Dict[str, Any]` return types
+  - Ensures FastMCP properly recognizes and serializes dict responses without truncation
+  - Affected tools: `list_job_files`, `find_file`, `read_file_content`, `parse_csv_file`, `parse_bed_file`, `get_analysis_summary`, `categorize_job_files`
+
+### Added
+- **find_file MCP Tool**
+  - New tool for locating files by partial name match in job work directories
+  - Parameters: `run_uuid`, `file_name` (case-insensitive substring match)
+  - Returns: Structured response with flat `paths` array and `primary_path` highlighting best match
+  - Purpose: Enable quick file discovery without browsing full directory listings
+  - Useful when response truncation makes `list_job_files` unusable for large directories
+
+- **Skill Routing Pattern Template**
+  - Added `skills/SKILL_ROUTING_PATTERN.md` as reusable template for defining skill boundaries
+  - Provides standard "Skill Scope & Routing" section structure with ✅/❌ lists and examples
+  - Used as template for all Dogme skills, Analyze_Job_Results, and ENCODE skills
+  - Ensures consistent agent routing behavior across all skills
+
+- **Skill Scope & Routing Sections**
+  - Added comprehensive scope definitions to all Dogme skills (DNA, RNA, cDNA)
+  - Added scope definitions to `Analyze_Job_Results.md` routing skill
+  - Each section includes: ✅ what skill handles, ❌ what it doesn't, 🔀 routing rules with examples
+  - Clarifies mode-specific analysis vs job submission vs ENCODE data vs local samples
+
+### Documentation
+- **Enhanced UUID Guidance in All Dogme Skills**
+  - Added 🚨 CRITICAL section at top of Analysis Workflow in all three Dogme skills
+  - Emphasizes: "Use ONLY the MOST RECENT UUID from current conversation"
+  - Includes WRONG (old UUID) vs RIGHT (current UUID) examples
+  - Prevents agent from using cached UUIDs from earlier in conversation history
+
+- **SKILL_ROUTING_PATTERN.md**
+  - Comprehensive documentation of skill scope/routing architecture
+  - Lists 6 core skills with their scope boundaries and routing targets
+  - Provides implementation guidelines for adding routing sections to new skills
+  - Key principle: "Always route rather than refusing"
+
+---
+
 ## [Unreleased] - 2026-02-14
 
 ### Fixed

@@ -56,9 +56,10 @@ Use this skill to:
 
 - User mentions "ENCODE", "search ENCODE", "what experiments", "how many assays"
 - User asks about cell lines (K562, C2C12, GM12878, HeLa, etc.)
+- User asks about tissues
 - User asks about targets (CTCF, H3K27ac, etc.)
+- User asks about a specific accession, which have the form ENCXXYYYYYY, where XX is alphabetical and YY is alphanumeric
 - User wants tables, counts, or summaries of ENCODE data
-- Default skill for new conversations
 
 ## When to Switch to Other Skills
 

@@ -156,7 +156,7 @@ def read_file_content(
         raise ValueError(f"Invalid file path: {file_path}") from e
     
     if not full_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path} (absolute path: {full_path})")
     
     # Check file size
     file_size = full_path.stat().st_size
@@ -236,7 +236,7 @@ def parse_csv_file(
         raise ValueError(f"Invalid file path: {file_path}")
     
     if not full_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path} (absolute path: {full_path})")
     
     # Determine delimiter
     delimiter = '\t' if file_path.endswith('.tsv') else ','
@@ -309,7 +309,7 @@ def parse_bed_file(
         raise ValueError(f"Invalid file path: {file_path}")
     
     if not full_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path} (absolute path: {full_path})")
     
     records = []
     total_records = 0
