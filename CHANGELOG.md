@@ -1,5 +1,42 @@
 # Changelog - February 2026
 
+## [Unreleased] - 2026-02-16
+
+### Fixed
+- **UI Project Switching Race Condition**
+  - Problem: When creating a new project, old chat messages from previous project would briefly appear below welcome message
+  - Root cause: Streamlit's `text_input` widget takes 2-3 rerun cycles to sync its displayed value after programmatic changes. During this window, the old project ID in the text input triggered sync logic that silently reverted `active_project_id` back to the old project, which then fetched and rendered the old project's blocks
+  - Solution: 
+    - Replaced boolean `_project_just_switched` flag with grace counter `_switch_grace_reruns = 3` that survives multiple rerun cycles
+    - Added `_welcome_sent_for` to cleanup list on new project creation and all project-switch paths
+    - Added defensive render-time filter to drop any block whose `project_id` doesn't match active project
+  - Result: New projects now show only their own messages with no ghost messages from previous projects
+  - Applied to: [ui/app.py](ui/app.py)
+
+### Changed
+- **Enhanced Server4 Analysis File Discovery**
+  - Extended file filtering to exclude both `work/` and `dor*/` subdirectories from analysis to prevent bloated file counts from Nextflow intermediate artifacts
+  - Added intelligent key file identification based on analysis mode (DNA/RNA/cDNA) with mode-specific patterns
+  - Modified `generate_analysis_summary()` to:
+    - Filter displayed files to key result files only (qc_summary, stats, flagstat, gene_counts, etc.)
+    - Keep full file counts in separate `all_file_counts` field for reference
+    - Parse mode-specific files (gene_counts, transcript_counts for cDNA mode)
+    - Extract key metrics from parsed reports into top-level `key_results` dict
+  - Added `all_file_counts` field to `AnalysisSummary` schema to preserve total file statistics
+  - Result: Analysis summaries now focus on important result files while maintaining awareness of total file counts
+  - Applied to: [server4/analysis_engine.py](server4/analysis_engine.py), [server4/schemas.py](server4/schemas.py)
+
+- **Improved Analysis Summary Formatting**
+  - Changed `get_analysis_summary_tool` to return formatted markdown tables instead of raw JSON structures
+  - Summary now includes:
+    - Basic info table (Sample Name, Mode, Status, Work Directory)
+    - File summary table (counts by file type)
+    - Key results with availability status
+    - Top 10 files from each category with size information
+    - Natural language description of analysis results
+  - Result: Analysis summaries are more readable and user-friendly, avoiding nested JSON truncation by MCP protocol
+  - Applied to: [server4/mcp_tools.py](server4/mcp_tools.py)
+
 ## [Unreleased] - 2026-02-15
 
 ### Fixed
@@ -184,8 +221,8 @@
   - Increased depth limit from 2 to 4 for analysis data (detected by presence of `columns`, `records`, or `preview_rows` keys in the response).
 
 - **File Discovery Filtering Out Work Folder Files**
-  - MCP tools in Server 4 now filter out files in the work/ directory to prevent bloated file counts from Nextflow intermediate artifacts.
-  - Modified `discover_files()` in `server4/analysis_engine.py` to exclude files with paths starting with "work/".
+  - MCP tools in Server 4 now filter out files in the work/ and dor*/ directories to prevent bloated file counts from Nextflow intermediate artifacts.
+  - Modified `discover_files()` in `server4/analysis_engine.py` to exclude files with paths starting with "work/" or "dor".
   - This affects all MCP tools: `get_analysis_summary`, `list_job_files`, `find_file`, and parsing tools.
 
 ### Documentation

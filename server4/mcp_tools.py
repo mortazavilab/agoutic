@@ -318,40 +318,78 @@ async def get_analysis_summary_tool(run_uuid: str) -> Dict[str, Any]:
         run_uuid: Job UUID
     
     Returns:
-        Dict with complete analysis summary
+        Dict with success and formatted summary
     """
     try:
         # Generate summary
         summary = generate_analysis_summary(run_uuid)
         
+        # Format as markdown tables
+        output = f"Analysis Summary for UUID: {summary.run_uuid}\n\n"
+        
+        # Basic info table
+        output += "Field | Value\n--- | ---\n"
+        output += f"Sample Name | {summary.sample_name}\n"
+        output += f"Mode | {summary.mode}\n"
+        output += f"Status | {summary.status}\n"
+        output += f"Work Directory | {summary.work_dir}\n\n"
+        
+        # File summary table
+        output += "File Summary\n"
+        output += "File Type | Count\n--- | ---\n"
+        counts = summary.all_file_counts
+        output += f"TXT Files | {counts.get('txt_count', 0)}\n"
+        output += f"CSV Files | {counts.get('csv_count', 0)}\n"
+        output += f"BED Files | {counts.get('bed_count', 0)}\n"
+        output += f"Other Files | {counts.get('other_count', 0)}\n"
+        output += f"Total | {counts.get('total_files', 0)}\n\n"
+        
+        # Key results
+        output += "Key Results\n"
+        for key, value in summary.key_results.items():
+            output += f"{key}: {value}\n"
+        
+        # Add file names if available
+        if summary.file_summary.txt_files:
+            output += "\nTXT Files:\n"
+            for f in summary.file_summary.txt_files[:10]:  # Limit to 10
+                output += f"- {f.name} ({f.size} bytes)\n"
+            if len(summary.file_summary.txt_files) > 10:
+                output += f"- ... and {len(summary.file_summary.txt_files) - 10} more\n"
+        
+        if summary.file_summary.csv_files:
+            output += "\nCSV Files:\n"
+            for f in summary.file_summary.csv_files[:10]:
+                output += f"- {f.name} ({f.size} bytes)\n"
+            if len(summary.file_summary.csv_files) > 10:
+                output += f"- ... and {len(summary.file_summary.csv_files) - 10} more\n"
+        
+        if summary.file_summary.bed_files:
+            output += "\nBED Files:\n"
+            for f in summary.file_summary.bed_files[:10]:
+                output += f"- {f.name} ({f.size} bytes)\n"
+            if len(summary.file_summary.bed_files) > 10:
+                output += f"- ... and {len(summary.file_summary.bed_files) - 10} more\n"
+        
+        # Description
+        counts = summary.all_file_counts
+        output += f"\nThis analysis is for a {summary.mode} sample named {summary.sample_name}, and the job has {summary.status.lower()} successfully. "
+        output += f"The work directory contains {counts.get('total_files', 0)} files, including {counts.get('txt_count', 0)} TXT files, {counts.get('csv_count', 0)} CSV files, {counts.get('bed_count', 0)} BED files, and {counts.get('other_count', 0)} other files."
+        
         return {
             "success": True,
-            "run_uuid": summary.run_uuid,
-            "sample_name": summary.sample_name,
-            "mode": summary.mode,
-            "status": summary.status,
-            "work_dir": summary.work_dir,
-            "file_summary": {
-                "txt_files": [f.dict() for f in summary.file_summary.txt_files],
-                "csv_files": [f.dict() for f in summary.file_summary.csv_files],
-                "bed_files": [f.dict() for f in summary.file_summary.bed_files],
-                "other_files": [f.dict() for f in summary.file_summary.other_files]
-            },
-            "key_results": summary.key_results,
-            "parsed_reports": summary.parsed_reports
+            "summary": output
         }
     
     except ValueError as e:
         return {
             "success": False,
-            "error": "Job not found",
-            "detail": str(e)
+            "error": f"Job not found - {str(e)}"
         }
     except Exception as e:
         return {
             "success": False,
-            "error": "Failed to generate analysis summary",
-            "detail": str(e)
+            "error": f"Analysis failed - {str(e)}"
         }
 
 

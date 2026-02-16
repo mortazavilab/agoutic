@@ -25,13 +25,15 @@ if st.session_state.get("_create_new_project", False):
     # Clear project-related data
     for key in ['loaded_conversation', 'selected_job', 'chat_history', 
                 'skill_content', 'selected_skill', 'job_status', 'messages',
-                '_max_visible_blocks']:
+                '_max_visible_blocks', '_welcome_sent_for']:
         if key in st.session_state:
             del st.session_state[key]
     # Reset the project ID text input widget so it doesn't hold the old value
     st.session_state["_project_id_input"] = new_id
-    # Guard: prevent text_input comparison from reverting the ID on this rerun
-    st.session_state["_project_just_switched"] = True
+    # Guard: prevent text_input comparison from reverting the ID on this rerun.
+    # Use a counter (not a bool) so the guard survives multiple rerun cycles
+    # while Streamlit's text_input widget syncs to the new value.
+    st.session_state["_switch_grace_reruns"] = 3
     # Clear the flag
     del st.session_state["_create_new_project"]
 
@@ -62,6 +64,7 @@ if "blocks" not in st.session_state:
 if st.session_state.get("_last_rendered_project") != st.session_state.active_project_id:
     st.session_state.blocks = []
     st.session_state._last_rendered_project = st.session_state.active_project_id
+    st.session_state.pop("_welcome_sent_for", None)
 
 # --- 2. SIDEBAR ---
 with st.sidebar:
@@ -91,15 +94,18 @@ with st.sidebar:
         key="_project_id_input",
     )
     
-    # Sync: if user manually edited the field, update active project
-    # Skip if we just did a project switch (flag prevents revert)
-    if not st.session_state.get("_project_just_switched") and user_input and user_input != st.session_state.active_project_id:
+    # Sync: if user manually edited the field, update active project.
+    # Skip while the grace counter is active (prevents the text_input's stale
+    # old value from silently reverting active_project_id back).
+    grace = st.session_state.get("_switch_grace_reruns", 0)
+    if grace > 0:
+        st.session_state["_switch_grace_reruns"] = grace - 1
+    elif user_input and user_input != st.session_state.active_project_id:
         st.session_state.active_project_id = user_input
         st.session_state.blocks = []
         st.session_state._last_rendered_project = user_input
+        st.session_state.pop("_welcome_sent_for", None)
         st.rerun()
-    # Clear the switch guard after it's served its purpose
-    st.session_state.pop("_project_just_switched", None)
 
     st.divider()
     
@@ -156,7 +162,8 @@ with st.sidebar:
                             st.session_state.blocks = []
                             st.session_state._last_rendered_project = proj_id
                             st.session_state["_project_id_input"] = proj_id
-                            st.session_state["_project_just_switched"] = True
+                            st.session_state["_switch_grace_reruns"] = 3
+                            st.session_state.pop("_welcome_sent_for", None)
                             st.rerun()
     except Exception:
         pass  # Silently fail if projects not available
@@ -775,10 +782,12 @@ st.title(f"Project: {active_id}")
 
 # 1. Fetch & Sanitize (only if we need to refresh)
 blocks = get_sanitized_blocks(active_id)
+# Defensive: drop any block whose project_id drifted (e.g. server cache race)
+blocks = [b for b in blocks if b.get("project_id") == active_id]
 st.session_state.blocks = blocks  # Update session state with fresh blocks
 
 # 2. Render
-if not st.session_state.blocks:
+if not blocks:
     # Auto-send welcome prompt for empty projects so the LLM introduces itself
     if not st.session_state.get("_welcome_sent_for") or st.session_state["_welcome_sent_for"] != active_id:
         st.session_state["_welcome_sent_for"] = active_id

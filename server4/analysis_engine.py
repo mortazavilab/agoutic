@@ -67,9 +67,9 @@ def discover_files(run_uuid: str, extensions: Optional[List[str]] = None) -> Fil
     # Recursively find all files
     for file_path in work_dir.rglob("*"):
         if file_path.is_file():
-            # Skip files in work/ subdirectory (intermediate processing files)
+            # Skip files in work/ or dor*/ subdirectories (intermediate processing files)
             relative_path = file_path.relative_to(work_dir)
-            if str(relative_path).startswith("work/"):
+            if str(relative_path).startswith("work/") or str(relative_path).startswith("dor"):
                 continue
             
             # Filter by extension if specified
@@ -390,8 +390,41 @@ def generate_analysis_summary(run_uuid: str) -> AnalysisSummary:
         if not job:
             raise ValueError(f"Job not found: {run_uuid}")
         
-        # Categorize files
-        file_summary = categorize_files(run_uuid)
+        # Categorize all files
+        all_file_summary = categorize_files(run_uuid)
+        
+        # Filter to key result files only for display
+        key_file_patterns = []
+        if job.mode.upper() == 'CDNA':
+            key_file_patterns = [
+                'qc_summary', 'qc', 'stats', 'flagstat', 'gene_counts', 'transcript_counts', 
+                'isoform', 'junctions', 'counts'
+            ]
+        elif job.mode.upper() == 'DNA':
+            key_file_patterns = [
+                'qc_summary', 'qc', 'stats', 'flagstat', 'modkit', 'methylation', 'mod_freq'
+            ]
+        elif job.mode.upper() == 'RNA':
+            key_file_patterns = [
+                'qc_summary', 'qc', 'stats', 'flagstat', 'gene_counts', 'transcript_counts', 'isoform'
+            ]
+        
+        def is_key_file(file_info):
+            name_lower = file_info.name.lower()
+            return any(pattern in name_lower for pattern in key_file_patterns)
+        
+        # Filter file lists to key files only for display
+        filtered_txt = [f for f in all_file_summary.txt_files if is_key_file(f)]
+        filtered_csv = [f for f in all_file_summary.csv_files if is_key_file(f)]
+        filtered_bed = [f for f in all_file_summary.bed_files if is_key_file(f)]
+        filtered_other = [f for f in all_file_summary.other_files if is_key_file(f)]
+        
+        file_summary = JobFileSummary(
+            txt_files=filtered_txt,
+            csv_files=filtered_csv,
+            bed_files=filtered_bed,
+            other_files=filtered_other
+        )
         
         # Parse key result files
         key_results = {}
@@ -401,7 +434,7 @@ def generate_analysis_summary(run_uuid: str) -> AnalysisSummary:
         work_dir = get_job_work_dir(run_uuid)
         if work_dir:
             # Parse QC summary if exists
-            qc_files = [f for f in file_summary.csv_files if 'qc_summary' in f.name.lower()]
+            qc_files = [f for f in file_summary.csv_files if 'qc_summary' in f.name.lower() or 'qc' in f.name.lower()]
             if qc_files:
                 try:
                     qc_data = parse_csv_file(run_uuid, qc_files[0].path, max_rows=100)
@@ -410,7 +443,7 @@ def generate_analysis_summary(run_uuid: str) -> AnalysisSummary:
                     pass
             
             # Parse stats files
-            stats_files = [f for f in file_summary.csv_files if 'stats' in f.name.lower()]
+            stats_files = [f for f in file_summary.csv_files if 'stats' in f.name.lower() or 'flagstat' in f.name.lower()]
             if stats_files:
                 try:
                     stats_data = parse_csv_file(run_uuid, stats_files[0].path, max_rows=100)
@@ -418,17 +451,71 @@ def generate_analysis_summary(run_uuid: str) -> AnalysisSummary:
                 except Exception:
                     pass
             
-            # Count key file types
+            # Mode-specific parsing
+            if job.mode.upper() == 'CDNA':
+                # Parse gene counts
+                gene_files = [f for f in file_summary.csv_files if 'gene_counts' in f.name.lower() or 'counts' in f.name.lower() and 'gene' in f.name.lower()]
+                if gene_files:
+                    try:
+                        gene_data = parse_csv_file(run_uuid, gene_files[0].path, max_rows=50)
+                        parsed_reports['gene_counts'] = gene_data.dict()
+                    except Exception:
+                        pass
+                
+                # Parse transcript counts
+                transcript_files = [f for f in file_summary.csv_files if 'transcript_counts' in f.name.lower() or 'isoform' in f.name.lower()]
+                if transcript_files:
+                    try:
+                        transcript_data = parse_csv_file(run_uuid, transcript_files[0].path, max_rows=50)
+                        parsed_reports['transcript_counts'] = transcript_data.dict()
+                    except Exception:
+                        pass
+            
+            # Count key file types from all files
             key_results = {
-                "total_files": file_summary.txt_files.__len__() + 
-                              file_summary.csv_files.__len__() + 
-                              file_summary.bed_files.__len__() + 
-                              file_summary.other_files.__len__(),
-                "txt_count": len(file_summary.txt_files),
-                "csv_count": len(file_summary.csv_files),
-                "bed_count": len(file_summary.bed_files),
-                "other_count": len(file_summary.other_files)
+                "total_files": all_file_summary.txt_files.__len__() + 
+                              all_file_summary.csv_files.__len__() + 
+                              all_file_summary.bed_files.__len__() + 
+                              all_file_summary.other_files.__len__(),
+                "txt_count": len(all_file_summary.txt_files),
+                "csv_count": len(all_file_summary.csv_files),
+                "bed_count": len(all_file_summary.bed_files),
+                "other_count": len(all_file_summary.other_files)
             }
+            
+            # Add availability of parsed reports
+            key_results["QC Summary"] = "Available" if 'qc_summary' in parsed_reports else "Not found"
+            key_results["Stats"] = "Available" if 'stats' in parsed_reports else "Not found"
+            
+            # Extract key metrics from parsed reports
+            if 'qc_summary' in parsed_reports and parsed_reports['qc_summary'].get('data'):
+                qc_data = parsed_reports['qc_summary']['data']
+                if qc_data:
+                    # Extract common QC metrics
+                    for row in qc_data:
+                        if 'metric' in row and 'value' in row:
+                            key_results[row['metric']] = row['value']
+            
+            if 'stats' in parsed_reports and parsed_reports['stats'].get('data'):
+                stats_data = parsed_reports['stats']['data']
+                if stats_data:
+                    for row in stats_data:
+                        for key, value in row.items():
+                            if key.lower() in ['mapped_reads', 'total_reads', 'mapping_rate', 'duplicates']:
+                                key_results[key] = value
+            
+            # Mode-specific key results
+            if job.mode.upper() == 'CDNA':
+                key_results["Gene Counts"] = "Available" if 'gene_counts' in parsed_reports else "Not found"
+                key_results["Transcript Counts"] = "Available" if 'transcript_counts' in parsed_reports else "Not found"
+                
+                if 'gene_counts' in parsed_reports and parsed_reports['gene_counts'].get('data'):
+                    gene_data = parsed_reports['gene_counts']['data']
+                    key_results['genes_detected'] = len(gene_data)
+                
+                if 'transcript_counts' in parsed_reports and parsed_reports['transcript_counts'].get('data'):
+                    transcript_data = parsed_reports['transcript_counts']['data']
+                    key_results['transcripts_detected'] = len(transcript_data)
         
         return AnalysisSummary(
             run_uuid=run_uuid,
@@ -436,7 +523,14 @@ def generate_analysis_summary(run_uuid: str) -> AnalysisSummary:
             mode=job.mode,
             status=job.status,
             work_dir=str(work_dir) if work_dir else "",
-            file_summary=file_summary,
+            file_summary=file_summary,  # Filtered
+            all_file_counts={
+                "txt_count": len(all_file_summary.txt_files),
+                "csv_count": len(all_file_summary.csv_files),
+                "bed_count": len(all_file_summary.bed_files),
+                "other_count": len(all_file_summary.other_files),
+                "total_files": len(all_file_summary.txt_files) + len(all_file_summary.csv_files) + len(all_file_summary.bed_files) + len(all_file_summary.other_files)
+            },
             key_results=key_results,
             parsed_reports=parsed_reports
         )

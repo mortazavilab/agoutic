@@ -93,7 +93,8 @@ class AnalysisSummary(BaseModel):
     mode: str  # DNA/RNA/CDNA
     status: str
     work_dir: str
-    file_summary: JobFileSummary
+    file_summary: JobFileSummary  # Filtered key files
+    all_file_counts: Dict[str, int] = Field(default_factory=dict)  # Counts for all files
     key_results: Dict[str, Any] = Field(default_factory=dict)
     parsed_reports: Dict[str, Any] = Field(default_factory=dict)
 
