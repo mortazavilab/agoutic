@@ -253,6 +253,56 @@ def _parse_tag_params(params_str: str | None) -> dict:
     return params
 
 
+def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | None:
+    """
+    Pre-LLM safety net: detect when the user's message obviously requires
+    a different skill than the currently active one.
+
+    Returns the correct skill key if a switch is needed, or None to stay.
+    Only triggers on strong, unambiguous signals to avoid false positives.
+    """
+    msg_lower = user_message.lower()
+
+    # --- Signals for analyze_local_sample ---
+    # User mentions a local file path + analysis intent
+    _has_local_path = bool(re.search(r'(/[a-z_][\w/.-]+|~[\w/.-]+)', user_message))
+    _analysis_words = ["analyze", "analyse", "process", "run", "submit", "launch"]
+    _has_analysis = any(w in msg_lower for w in _analysis_words)
+    _sample_words = ["sample", "pod5", "local", "my data", "my files"]
+    _has_sample = any(w in msg_lower for w in _sample_words)
+    _data_type_words = ["cdna", "dna", "rna", "fiber-seq", "fiberseq"]
+    _has_data_type = any(w in msg_lower for w in _data_type_words)
+
+    if current_skill not in ("analyze_local_sample", "run_dogme_dna",
+                              "run_dogme_rna", "run_dogme_cdna"):
+        # Strong signal: path + (analysis verb OR sample keyword OR data type)
+        if _has_local_path and (_has_analysis or _has_sample or _has_data_type):
+            return "analyze_local_sample"
+
+    # --- Signals for ENCODE_Search ---
+    _encode_words = ["encode", "encsr", "encff", "encode portal"]
+    _search_words = ["search", "how many", "experiments", "accession", "biosample"]
+    _has_encode = any(w in msg_lower for w in _encode_words)
+    _has_search = any(w in msg_lower for w in _search_words)
+
+    if current_skill not in ("ENCODE_Search", "ENCODE_LongRead"):
+        if _has_encode and _has_search:
+            return "ENCODE_Search"
+        # Strong signal: explicit accession mention
+        if re.search(r'ENCSR[A-Z0-9]{6}', user_message, re.IGNORECASE):
+            return "ENCODE_Search"
+
+    # --- Signals for analyze_job_results ---
+    _results_words = ["qc report", "quality control", "parse the",
+                      "read the output", "show me the results",
+                      "check the bed", "analyze results", "job results"]
+    if current_skill != "analyze_job_results":
+        if any(w in msg_lower for w in _results_words):
+            return "analyze_job_results"
+
+    return None
+
+
 def _auto_generate_data_calls(user_message: str, skill_key: str,
                               conversation_history: list | None = None) -> list[dict]:
     """
@@ -376,7 +426,7 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
 
     # --- Dogme / Server4 file-parsing patterns ---
     # When in a Dogme analysis skill and user asks to parse/show a file,
-    # auto-generate the find_file call so the LLM doesn't just describe it.
+    # auto-generate find_file + parse/read calls so the LLM gets real data.
     dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
                     "analyze_job_results"}
     if not calls and skill_key in dogme_skills:
@@ -398,14 +448,26 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 job_context = _extract_job_context_from_history(conversation_history)
                 run_uuid = job_context.get("run_uuid")
                 if run_uuid:
-                    # First call: find_file to locate the full path
+                    # Step 1: find_file to locate the full relative path
                     calls.append({
                         "source_type": "service", "source_key": "server4",
                         "tool": "find_file",
                         "params": {"run_uuid": run_uuid, "file_name": filename},
+                        "_chain": _pick_file_tool(filename),  # follow-up tool
                     })
 
     return calls
+
+
+def _pick_file_tool(filename: str) -> str:
+    """Return the right server4 tool for a given filename extension."""
+    lower = filename.lower()
+    if lower.endswith((".csv", ".tsv")):
+        return "parse_csv_file"
+    elif lower.endswith(".bed"):
+        return "parse_bed_file"
+    else:
+        return "read_file_content"
 
 
 def _extract_job_context_from_history(conversation_history: list | None) -> dict:
@@ -1305,6 +1367,7 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                 payload = get_block_payload(block)
                 payload["job_status"] = status_data
                 payload["logs"] = logs
+                payload["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
                 
                 # Update block status based on job status
                 job_status = status_data.get("status", "UNKNOWN")
@@ -1380,13 +1443,16 @@ async def _auto_trigger_analysis(
                 await client.disconnect()
 
             if isinstance(summary, dict):
-                # Build a concise overview from the summary
+                # Build a concise overview from the structured data
+                # The MCP tool returns both a markdown 'summary' string and
+                # structured fields (all_file_counts, file_summary, etc.)
+                all_counts = summary.get("all_file_counts", {})
                 file_summary = summary.get("file_summary", {})
                 key_results = summary.get("key_results", {})
-                total_files = key_results.get("total_files", 0)
-                csv_count = len(file_summary.get("csv_files", []))
-                bed_count = len(file_summary.get("bed_files", []))
-                txt_count = len(file_summary.get("txt_files", []))
+                total_files = all_counts.get("total_files", 0)
+                csv_count = all_counts.get("csv_count", len(file_summary.get("csv_files", [])))
+                bed_count = all_counts.get("bed_count", len(file_summary.get("bed_files", [])))
+                txt_count = all_counts.get("txt_count", len(file_summary.get("txt_files", [])))
 
                 summary_md = (
                     f"### 📊 Analysis Ready: {sample_name}\n\n"
@@ -1637,6 +1703,16 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         engine = AgentEngine(model_key=req.model)
         _emit_progress(req.request_id, "thinking", f"Thinking using {engine.model_name}...")
         
+        # 2a. Pre-LLM skill switch detection — catch obvious mismatches
+        # before wasting time on an LLM call with the wrong skill.
+        auto_skill = _auto_detect_skill_switch(req.message, active_skill)
+        if auto_skill and auto_skill in SKILLS_REGISTRY:
+            logger.info("Auto-detected skill switch before LLM call",
+                       from_skill=active_skill, to_skill=auto_skill)
+            _emit_progress(req.request_id, "switching",
+                          f"Switching to {auto_skill} skill...")
+            active_skill = auto_skill
+
         # Inject job context (UUID, work_dir) for Dogme skills so the LLM
         # doesn't waste time searching conversation history for known info.
         augmented_message = _inject_job_context(
@@ -1790,10 +1866,10 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # From auto-generated tags (safety net)
         if not has_any_tags and auto_calls:
             for ac in auto_calls:
-                calls_by_source.setdefault(ac["source_key"], []).append({
-                    "tool": ac["tool"],
-                    "params": ac["params"],
-                })
+                entry = {"tool": ac["tool"], "params": ac["params"]}
+                if "_chain" in ac:
+                    entry["_chain"] = ac["_chain"]
+                calls_by_source.setdefault(ac["source_key"], []).append(entry)
 
         # From new DATA_CALL tags
         for match in data_call_matches:
@@ -1920,6 +1996,44 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                             "data": result_data,
                         })
                         logger.info("Tool call successful", source=source_key, tool=tool_name)
+
+                        # --- Chaining: follow up find_file with parse/read ---
+                        # Works whether _chain was set by auto_calls or needs
+                        # to be inferred (e.g. LLM generated the find_file tag directly).
+                        if tool_name == "find_file" and isinstance(result_data, dict) \
+                                and result_data.get("success") and result_data.get("primary_path"):
+                            chain_tool = call.get("_chain")
+                            primary_path = result_data["primary_path"]
+                            # Infer follow-up tool from filename if not explicitly set
+                            if not chain_tool:
+                                chain_tool = _pick_file_tool(primary_path)
+                            chain_uuid = result_data.get("run_uuid") or params.get("run_uuid")
+                            if chain_uuid:
+                                logger.info("Chaining find_file → parse/read",
+                                           chain_tool=chain_tool, file_path=primary_path)
+                                try:
+                                    chain_params = {"run_uuid": chain_uuid, "file_path": primary_path}
+                                    if chain_tool == "parse_csv_file":
+                                        chain_params["max_rows"] = 100
+                                    elif chain_tool == "parse_bed_file":
+                                        chain_params["max_records"] = 100
+                                    elif chain_tool == "read_file_content":
+                                        chain_params["preview_lines"] = 50
+                                    chain_result = await mcp_client.call_tool(chain_tool, **chain_params)
+                                    source_results.append({
+                                        "tool": chain_tool,
+                                        "params": chain_params,
+                                        "data": chain_result,
+                                    })
+                                    logger.info("Chain call successful", tool=chain_tool)
+                                except Exception as ce:
+                                    logger.error("Chain call failed", tool=chain_tool, error=str(ce))
+                                    source_results.append({
+                                        "tool": chain_tool,
+                                        "params": chain_params,
+                                        "error": str(ce),
+                                    })
+
                     except Exception as e:
                         logger.error("Tool call failed", source=source_key, tool=tool_name, error=str(e))
                         source_results.append({

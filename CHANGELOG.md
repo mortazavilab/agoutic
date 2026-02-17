@@ -1,5 +1,31 @@
 # Changelog - February 2026
 
+## [Unreleased] - 2026-02-17
+
+### Fixed
+- **CSV/TSV File Parsing Returns Path Only, No Contents**
+  - Problem: When user asks "parse jamshid.mm39_final_stats.csv", the system calls `find_file` (returns the relative path) but never follows up with `parse_csv_file` to read the actual data
+  - Root cause (v1): `_auto_generate_data_calls()` only generated a `find_file` call with no chaining
+  - Root cause (v2): Even after adding `_chain` key to auto_calls, the LLM generates its own `[[DATA_CALL: ... tool=find_file ...]]` tag (trained by skill files like DOGME_QUICK_WORKFLOW_GUIDE.md), which sets `has_any_tags = True` and **skips auto_calls entirely** — so the `_chain` key never reaches the execution loop
+  - Solution: Made chaining independent of how `find_file` was triggered. In the execution loop, **any** successful `find_file` call automatically chains to the appropriate parse/read tool by inferring it from the filename extension via `_pick_file_tool()` (`.csv/.tsv` → `parse_csv_file`, `.bed` → `parse_bed_file`, else → `read_file_content`). Works regardless of whether the call came from auto_calls or LLM-generated DATA_CALL tags.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Job Progress Not Auto-Refreshing During Nextflow Runs**
+  - Problem: User had to manually refresh the browser to see Nextflow job progress updates (running tasks, completion status), even with "Live Stream" toggle on
+  - Root cause (v1): Auto-refresh depended on the "Live Stream" toggle. No forced refresh for running jobs.
+  - Root cause (v2): Used `locals().get("_has_running_job")` to pass the running-job flag to the auto-refresh section at script bottom — unreliable in Streamlit's execution model since the variable was only defined inside a conditional `else:` branch
+  - Solution:
+    1. Replaced `locals().get()` with `st.session_state["_has_running_job"]` for reliable flag persistence across Streamlit reruns
+    2. Track EXECUTION_JOB blocks with RUNNING status + APPROVAL_GATE blocks just approved (async submission in-flight) to force auto-refresh
+    3. Clear flag when job finishes (DONE/FAILED) to stop unnecessary polling
+  - Applied to: [ui/app.py](ui/app.py)
+
+### Added
+- **Job Duration & Last Update Timestamps in Nextflow Progress Display**
+  - Shows elapsed runtime ("Running for 2m 34s") calculated from block creation time
+  - Shows recency of last status poll ("Updated 3s ago") from a `last_updated` timestamp stored in the EXECUTION_JOB payload on each poll cycle
+  - Applied to: [ui/app.py](ui/app.py), [server1/app.py](server1/app.py)
+
 ## [Unreleased] - 2026-02-16
 
 ### Added
@@ -8,10 +34,28 @@
   - Solution: Added a progress tracking system with polling-based status updates
   - Backend: Added `_emit_progress()` status tracker, `request_id` field on `ChatRequest`, and `/chat/status/{request_id}` polling endpoint. Status events emitted at key stages: "Thinking...", "Switching skill...", "Querying [service]...", "Analyzing results...", "Done"
   - Frontend: Chat input now uses a background thread + `st.status()` widget that polls the backend every 1.5s for progress updates. Shows animated stage icons, descriptive messages, and elapsed time
+
+- **Pre-LLM Automatic Skill Switch Detection**
+  - Problem: LLM sometimes fails to emit `[[SKILL_SWITCH_TO:...]]` tags when the user's message clearly requires a different skill — e.g., asking to "analyze a local cDNA sample at /path/..." while in ENCODE_Search, the LLM just describes what should be done instead of switching
+  - Solution: Added `_auto_detect_skill_switch()` function that runs BEFORE the LLM call to catch obvious skill mismatches and switch proactively, avoiding a wasted LLM round-trip with the wrong skill
+  - Detection signals:
+    - **analyze_local_sample**: file path + (analysis verb OR sample keyword OR data type like "cDNA/DNA/RNA")
+    - **ENCODE_Search**: ENCODE keyword + search verb, or explicit ENCSR accession
+    - **analyze_job_results**: QC report, parse, show results, etc.
+  - Only triggers on strong unambiguous signals to avoid false positives
+  - Applied to: [server1/app.py](server1/app.py)
   - Cleanup: stale progress entries auto-purged after 5 minutes
   - Applied to: [server1/app.py](server1/app.py), [ui/app.py](ui/app.py)
 
 ### Fixed
+- **Post-Job Analysis Summary Showing "Total files: 0"**
+  - Problem: After a Dogme job completes successfully (11 tasks, files clearly present in work directory), the auto-triggered analysis shows "Total files: 0" with all category counts at 0
+  - Root cause: The `get_analysis_summary` MCP tool in server4 returns `{"success": True, "summary": "<markdown text>"}` — a pre-formatted markdown string. But `_auto_trigger_analysis()` in server1 expected structured dict fields (`file_summary`, `key_results`) that don't exist at the top level of the response
+  - Solution (2 parts):
+    1. Extended MCP tool response in `server4/mcp_tools.py` to include structured data fields (`all_file_counts`, `file_summary`, `key_results`, `mode`, `status`, etc.) alongside the markdown `summary` string
+    2. Fixed `_auto_trigger_analysis()` in `server1/app.py` to read from `all_file_counts` for totals (not `key_results`) and use fallback arithmetic from `file_summary` lists
+  - Applied to: [server1/app.py](server1/app.py), [server4/mcp_tools.py](server4/mcp_tools.py)
+
 - **LLM Re-querying Instead of Using Data Already in Conversation**
   - Problem: After fetching data (file listings, search results), follow-up questions like "which of them are methylated reads?" or "what are the accessions for the long read RNA-seq samples?" cause the LLM to make new API calls instead of reading its own previous response
   - Root cause (v1): Keyword-based detection (`_filter_words`, `_referential`) was too narrow — only caught phrasings like "which of them", "those", "sort them" but missed "what are the accessions for..." style questions

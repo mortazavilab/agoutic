@@ -378,7 +378,20 @@ async def get_analysis_summary_tool(run_uuid: str) -> Dict[str, Any]:
         
         return {
             "success": True,
-            "summary": output
+            "summary": output,
+            # Structured data for programmatic access
+            "mode": summary.mode,
+            "status": summary.status,
+            "sample_name": summary.sample_name,
+            "work_dir": summary.work_dir,
+            "all_file_counts": summary.all_file_counts,
+            "key_results": summary.key_results,
+            "file_summary": {
+                "csv_files": [f.dict() for f in summary.file_summary.csv_files],
+                "bed_files": [f.dict() for f in summary.file_summary.bed_files],
+                "txt_files": [f.dict() for f in summary.file_summary.txt_files],
+                "other_files": [f.dict() for f in summary.file_summary.other_files],
+            },
         }
     
     except ValueError as e:

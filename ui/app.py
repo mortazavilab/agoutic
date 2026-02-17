@@ -702,6 +702,29 @@ def render_block(block, expected_project_id: str = ""):
                 elif status_str == "RUNNING":
                     st.info(f"🔄 {message}")
                     
+                    # Job timing info
+                    _job_created = block.get("created_at", "")
+                    _last_upd = content.get("last_updated", "")
+                    _timing_parts = []
+                    if _job_created:
+                        try:
+                            _start_dt = datetime.datetime.fromisoformat(_job_created.replace("Z", "+00:00"))
+                            _elapsed = datetime.datetime.now(datetime.timezone.utc) - _start_dt
+                            _mins, _secs = divmod(int(_elapsed.total_seconds()), 60)
+                            _timing_parts.append(f"⏱️ Running for {_mins}m {_secs}s")
+                        except (ValueError, TypeError):
+                            pass
+                    if _last_upd:
+                        try:
+                            _upd_dt = datetime.datetime.fromisoformat(_last_upd.replace("Z", "+00:00"))
+                            _ago = datetime.datetime.now(datetime.timezone.utc) - _upd_dt
+                            _ago_secs = int(_ago.total_seconds())
+                            _timing_parts.append(f"🔄 Updated {_ago_secs}s ago")
+                        except (ValueError, TypeError):
+                            pass
+                    if _timing_parts:
+                        st.caption(" | ".join(_timing_parts))
+                    
                     # Progress bar
                     st.progress(progress / 100.0, text=f"Progress: {progress}%")
                     
@@ -813,6 +836,7 @@ st.session_state.blocks = blocks  # Update session state with fresh blocks
 chat_area = st.empty()
 with chat_area.container():
     if not blocks:
+        st.session_state["_has_running_job"] = False  # No blocks = no running job
         # Auto-send welcome prompt for empty projects so the LLM introduces itself
         if not st.session_state.get("_welcome_sent_for") or st.session_state["_welcome_sent_for"] != active_id:
             st.session_state["_welcome_sent_for"] = active_id
@@ -847,8 +871,28 @@ with chat_area.container():
         else:
             visible_blocks = blocks
         
+        _has_running_job = False
+        _has_pending_submission = False
+        _has_finished_job = False
         for blk in visible_blocks:
             render_block(blk, expected_project_id=active_id)
+            btype = blk.get("type")
+            bstatus = blk.get("status")
+            # Track whether any EXECUTION_JOB block is still in-progress
+            if btype == "EXECUTION_JOB" and bstatus == "RUNNING":
+                _has_running_job = True
+            if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
+                _has_finished_job = True
+            # Track if an APPROVAL_GATE was just approved (job submission in-flight)
+            if btype == "APPROVAL_GATE" and bstatus == "APPROVED":
+                _has_pending_submission = True
+        # If approval was given but no EXECUTION_JOB block exists yet,
+        # the async job submission is still in-flight — keep refreshing.
+        # But skip if a finished job block already exists (job is done).
+        if _has_pending_submission and not _has_running_job and not _has_finished_job:
+            _has_running_job = True
+        # Persist to session_state for reliable access in the auto-refresh section
+        st.session_state["_has_running_job"] = _has_running_job
 
 st.write("---")
 
@@ -949,8 +993,13 @@ if prompt := st.chat_input("Ask Agoutic to do something..."):
 # Suppress auto-refresh for a few cycles after a project switch so
 # Streamlit's frontend can settle and old DOM nodes are fully discarded.
 _suppress = st.session_state.get("_suppress_auto_refresh", 0)
+_has_running = st.session_state.get("_has_running_job", False)
 if _suppress > 0:
     st.session_state["_suppress_auto_refresh"] = _suppress - 1
+elif _has_running:
+    # Force fast refresh while a Nextflow job is running (regardless of toggle)
+    time.sleep(min(poll_seconds, 2))
+    st.rerun()
 elif auto_refresh:
     time.sleep(poll_seconds)
     st.rerun()
