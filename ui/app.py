@@ -5,6 +5,7 @@ import requests
 import datetime
 import os
 import streamlit as st
+import streamlit.components.v1 as _st_components
 from auth import require_auth, logout_button, make_authenticated_request, get_session_cookie
 
 # --- CONFIG ---
@@ -242,6 +243,8 @@ with st.sidebar:
                     if st.button(f"{status_emoji} {job_name}", key=f"job_{job['id']}", use_container_width=True):
                         st.session_state.selected_job = job
                         st.rerun()
+            else:
+                st.caption("No jobs yet")
     except Exception:
         pass  # Silently fail if history not available
     
@@ -578,7 +581,6 @@ def render_block(block, expected_project_id: str = ""):
     
     elif btype == "EXECUTION_JOB":
         # Job execution monitoring with Nextflow progress visualization
-        # All data comes from Server1 (which polls Server3 and updates the block)
         with st.chat_message("assistant", avatar="⚙️"):
             run_uuid = content.get("run_uuid", "")
             sample_name = content.get("sample_name", "Unknown")
@@ -587,8 +589,21 @@ def render_block(block, expected_project_id: str = ""):
             st.write(f"### 🧬 Nextflow Job: {sample_name} ({mode})")
             st.caption(f"Run UUID: `{run_uuid}`")
             
-            # Read job status from block payload (updated by Server1)
+            # For RUNNING jobs, live-fetch status directly from Server 1
+            # (bypasses stale block payload — always fresh from Server 3)
             job_status = content.get("job_status", {})
+            block_status_str = block.get("status", "")
+            if run_uuid and block_status_str == "RUNNING":
+                try:
+                    live_resp = make_authenticated_request(
+                        "GET",
+                        f"{API_URL}/jobs/{run_uuid}/status",
+                        timeout=5,
+                    )
+                    if live_resp.status_code == 200:
+                        job_status = live_resp.json()
+                except Exception:
+                    pass  # Fall back to block payload
             
             if job_status:
                 status_str = job_status.get("status", content.get("status", "UNKNOWN"))
@@ -887,26 +902,43 @@ with chat_area.container():
         else:
             visible_blocks = blocks
         
+        # --- Scan ALL blocks (not just visible) for running jobs ---
         _has_running_job = False
         _has_pending_submission = False
         _has_finished_job = False
-        for blk in visible_blocks:
-            render_block(blk, expected_project_id=active_id)
+        for blk in blocks:
             btype = blk.get("type")
             bstatus = blk.get("status")
-            # Track whether any EXECUTION_JOB block is still in-progress
             if btype == "EXECUTION_JOB" and bstatus == "RUNNING":
                 _has_running_job = True
             if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
                 _has_finished_job = True
-            # Track if an APPROVAL_GATE was just approved (job submission in-flight)
             if btype == "APPROVAL_GATE" and bstatus == "APPROVED":
                 _has_pending_submission = True
+
+        # Render visible blocks
+        for blk in visible_blocks:
+            render_block(blk, expected_project_id=active_id)
+
         # If approval was given but no EXECUTION_JOB block exists yet,
         # the async job submission is still in-flight — keep refreshing.
-        # But skip if a finished job block already exists (job is done).
         if _has_pending_submission and not _has_running_job and not _has_finished_job:
             _has_running_job = True
+
+        # When a job just finished, keep refreshing for 30s to catch
+        # auto-analysis blocks that Server 1 creates after completion.
+        if _has_finished_job and not _has_running_job:
+            last_finish = st.session_state.get("_job_finished_at")
+            if last_finish is None:
+                st.session_state["_job_finished_at"] = time.time()
+                _has_running_job = True   # keep refreshing
+            elif time.time() - last_finish < 30:
+                _has_running_job = True   # still within grace window
+            # else: grace window expired, stop refreshing
+        elif _has_running_job:
+            # Job is still running — clear any stale finish timestamp
+            st.session_state.pop("_job_finished_at", None)
+
         # Persist to session_state for reliable access in the auto-refresh section
         st.session_state["_has_running_job"] = _has_running_job
 
@@ -1006,16 +1038,34 @@ if prompt := st.chat_input("Ask Agoutic to do something..."):
             st.rerun()
 
 # 4. Auto-Refresh
-# Suppress auto-refresh for a few cycles after a project switch so
-# Streamlit's frontend can settle and old DOM nodes are fully discarded.
 _suppress = st.session_state.get("_suppress_auto_refresh", 0)
 _has_running = st.session_state.get("_has_running_job", False)
+
+# Always decrement suppress counter, but NEVER let it block refresh
+# when a job is actively running.
 if _suppress > 0:
     st.session_state["_suppress_auto_refresh"] = _suppress - 1
-elif _has_running:
-    # Force fast refresh while a Nextflow job is running (regardless of toggle)
-    time.sleep(min(poll_seconds, 2))
+
+if _has_running:
+    _wait = min(poll_seconds, 2)
+    _wait_ms = int(_wait * 1000)
+    st.caption(
+        f"🔄 Auto-refreshing every {_wait}s "
+        f"(last: {datetime.datetime.now().strftime('%H:%M:%S')})"
+    )
+    # --- JavaScript fallback: reload page if st.rerun() somehow fails ---
+    # The timer fires after 2× the expected interval; if st.rerun() works
+    # normally, the iframe is destroyed on rerun so the timer never fires.
+    _st_components.html(
+        f"""<script>
+        setTimeout(function() {{ window.parent.location.reload(); }},
+                   {_wait_ms * 3});
+        </script>""",
+        height=0,
+    )
+    # --- Primary: Streamlit-native rerun ---
+    time.sleep(_wait)
     st.rerun()
-elif auto_refresh:
+elif auto_refresh and _suppress <= 0:
     time.sleep(poll_seconds)
     st.rerun()

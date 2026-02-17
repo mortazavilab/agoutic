@@ -5,6 +5,7 @@ Receives job submissions from Server 1 and manages pipeline execution.
 import asyncio
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Path as FastAPIPath, Query, Request
@@ -389,7 +390,8 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         
         # Get detailed status including tasks from check_status
         executor = NextflowExecutor()
-        work_dir = executor.work_dir / run_uuid
+        # Use the actual work directory stored in DB (may be jailed path)
+        work_dir = Path(job.nextflow_work_dir) if job.nextflow_work_dir else executor.work_dir / run_uuid
         status_data = await executor.check_status(run_uuid, work_dir)
         
         return {

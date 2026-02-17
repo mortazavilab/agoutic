@@ -665,6 +665,37 @@ async def get_available_skills():
         "count": len(SKILLS_REGISTRY)
     }
 
+@app.get("/jobs/{run_uuid}/status")
+async def get_job_status_proxy(run_uuid: str, request: Request):
+    """
+    Proxy endpoint for Server 3 job status via direct REST call.
+    Bypasses MCP for reliability — the UI calls this for live job progress.
+    """
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
+
+    from server1.config import INTERNAL_API_SECRET
+    server3_rest = SERVICE_REGISTRY.get("server3", {}).get(
+        "rest_url", os.getenv("SERVER3_REST_URL", "http://localhost:8003")
+    )
+    headers = {}
+    if INTERNAL_API_SECRET:
+        headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{server3_rest}/jobs/{run_uuid}/status",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.warning("Failed to proxy job status from Server 3",
+                       run_uuid=run_uuid, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Server 3 unreachable: {e}")
+
+
 @app.get("/jobs/{run_uuid}/debug")
 async def get_job_debug_info(run_uuid: str, request: Request):
     """

@@ -71,6 +71,7 @@ _default_encodelib = AGOUTIC_CODE / "ENCODELIB"
 SERVICE_REGISTRY = {
     "server3": {
         "url": os.getenv("SERVER3_MCP_URL", "http://localhost:8002"),
+        "rest_url": os.getenv("SERVER3_REST_URL", "http://localhost:8003"),
         "display_name": "Job Execution (Nextflow/Dogme)",
         "emoji": "\U0001f680",
         "table_columns": [],

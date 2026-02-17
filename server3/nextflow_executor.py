@@ -266,18 +266,17 @@ class NextflowExecutor:
         Returns:
             Tuple of (run_uuid, work_directory)
         """
-        work_dir = self.work_dir / run_uuid
-        work_dir.mkdir(parents=True, exist_ok=True)
-        
         # If user_id and project_id are available, use jailed directory structure
         # New jobs: AGOUTIC_DATA/users/{user_id}/{project_id}/{run_uuid}/
         # Legacy fallback: SERVER3_WORK_DIR/{run_uuid}/
         if user_id and project_id:
-            jailed_dir = AGOUTIC_DATA / "users" / user_id / project_id / run_uuid
-            jailed_dir.mkdir(parents=True, exist_ok=True)
-            work_dir = jailed_dir
+            work_dir = AGOUTIC_DATA / "users" / user_id / project_id / run_uuid
+            work_dir.mkdir(parents=True, exist_ok=True)
             logger.info("Using jailed work directory", work_dir=str(work_dir),
                        user_id=user_id, project_id=project_id)
+        else:
+            work_dir = self.work_dir / run_uuid
+            work_dir.mkdir(parents=True, exist_ok=True)
         
         # Setup input files based on entry point and input type
         if entry_point == "basecall":
