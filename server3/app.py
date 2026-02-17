@@ -272,6 +272,7 @@ async def submit_job(req: SubmitJobRequest):
             reference_genome=req.reference_genome,
             modifications=req.modifications,
             parent_block_id=req.parent_block_id,
+            user_id=req.user_id,
         )
         
         # Log submission
@@ -298,6 +299,8 @@ async def submit_job(req: SubmitJobRequest):
                 min_cov=req.min_cov,
                 per_mod=req.per_mod,
                 accuracy=req.accuracy,
+                user_id=req.user_id,
+                project_id=req.project_id,
             )
             
             # Update job with work directory info

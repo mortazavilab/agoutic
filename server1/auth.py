@@ -24,6 +24,7 @@ from server1.config import (
     SUPER_ADMIN_EMAIL,
     FRONTEND_URL,
     SESSION_EXPIRES_HOURS,
+    ENVIRONMENT,
 )
 from server1.db import SessionLocal
 from server1.models import User, Session as SessionModel
@@ -166,14 +167,15 @@ async def callback(request: Request, code: str, response: Response):
         session.add(session_obj)
         session.commit()
         
-        # Set cookie
+        # Set cookie — secure flags based on environment
+        is_prod = ENVIRONMENT != "development"
         response = RedirectResponse(url=FRONTEND_URL)
         response.set_cookie(
             key="session",
             value=session_id,
             httponly=True,
-            secure=False,  # Set True in production with HTTPS
-            samesite="lax",  # Critical for cross-port cookie sharing
+            secure=is_prod,           # True in production (HTTPS only)
+            samesite="lax",           # Prevents CSRF while allowing top-level navigations
             max_age=SESSION_EXPIRES_HOURS * 3600,
             path="/",
         )

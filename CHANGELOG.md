@@ -2,7 +2,48 @@
 
 ## [Unreleased] - 2026-02-17
 
+### Added — Security Hardening Sprint
+
+- **Role-Based Authorization Gates on All Endpoints**
+  - Added `require_project_access(project_id, user, min_role)` dependency that enforces viewer/editor/owner hierarchy on every project-scoped endpoint
+  - Added `require_run_uuid_access(run_uuid, user)` for job-scoped endpoints (debug, analysis)
+  - Admin users bypass all project-level checks; public projects allow viewer-level access
+  - Wired into ~15 endpoints: `/blocks`, `/chat`, `/conversations`, `/jobs`, `/analysis/*`, `/projects/*/access`
+  - Applied to: [server1/dependencies.py](server1/dependencies.py), [server1/app.py](server1/app.py)
+
+- **Server-Side Project Creation (UUID)**
+  - `POST /projects` — creates project with `uuid4()` server-side, mkdir-before-DB pattern (orphan empty dir is harmless, zombie DB row is not)
+  - `GET /projects` — lists user's projects (owned + shared), supports `include_archived` param
+  - `PATCH /projects/{project_id}` — rename or archive (owner role required)
+  - UI updated to call server endpoints instead of generating UUIDs client-side
+  - Applied to: [server1/app.py](server1/app.py), [ui/app.py](ui/app.py)
+
+- **Job Ownership Binding (`user_id` on `dogme_jobs`)**
+  - Added `user_id` column to DogmeJob in both Server 3 and Server 4 models (nullable for legacy jobs)
+  - Server 1 passes `user_id` through MCP submit flow → Server 3 REST → DB
+  - `require_run_uuid_access()` checks `user_id` for direct ownership, falls back to project access
+  - Applied to: [server3/models.py](server3/models.py), [server3/schemas.py](server3/schemas.py), [server3/db.py](server3/db.py), [server3/app.py](server3/app.py), [server3/mcp_server.py](server3/mcp_server.py), [server3/mcp_tools.py](server3/mcp_tools.py), [server4/models.py](server4/models.py)
+
+- **User-Jailed File Paths for Nextflow Jobs**
+  - Hardened `user_jail.py` with `_validate_id()` (rejects `/`, `\`, `.`, null bytes) and `_ensure_within_jail()` defense-in-depth
+  - Nextflow executor now creates jailed work dirs at `AGOUTIC_DATA/users/{user_id}/{project_id}/{run_uuid}/` when `user_id` is present, falls back to flat legacy path
+  - Analysis engine resolves jailed paths when looking up job work directories
+  - Applied to: [server1/user_jail.py](server1/user_jail.py), [server3/nextflow_executor.py](server3/nextflow_executor.py), [server4/analysis_engine.py](server4/analysis_engine.py)
+
+- **Cookie Hardening**
+  - `Secure` flag is now environment-gated: `secure=True` when `ENVIRONMENT != "development"`
+  - `httponly` and `samesite=lax` were already set
+  - Added `ENVIRONMENT` config variable (defaults to `"development"`)
+  - Applied to: [server1/auth.py](server1/auth.py), [server1/config.py](server1/config.py)
+
+- **Database Migration Script**
+  - `migrate_hardening.py` — adds `dogme_jobs.user_id`, `projects.is_archived`, `project_access.role` to existing databases
+  - Idempotent (checks `PRAGMA table_info` before altering), safe to run multiple times
+  - `init_db.py` updated for fresh installs: includes all new columns, `project_access` table, `conversations`, `conversation_messages`, `job_results` tables
+  - Applied to: [server1/migrate_hardening.py](server1/migrate_hardening.py), [server1/init_db.py](server1/init_db.py)
+
 ### Fixed
+
 - **CSV/TSV File Parsing Returns Path Only, No Contents**
   - Problem: When user asks "parse jamshid.mm39_final_stats.csv", the system calls `find_file` (returns the relative path) but never follows up with `parse_csv_file` to read the actual data
   - Root cause (v1): `_auto_generate_data_calls()` only generated a `find_file` call with no chaining
@@ -468,31 +509,96 @@
   - Better server stopping mechanisms
   - Improved log rotation and rollover
 
-## Summary
+## Summary – What Changed
 
-February 2026 saw significant architectural improvements and feature additions to the Agoutic platform:
+**1. Make file requests actually return file contents (not just paths)**
+Fixed the "parse X.csv" flow so `find_file` automatically chains into the correct reader (`parse_csv_file` / `parse_bed_file` / `read_file_content`) based on extension — regardless of whether the `find_file` call came from auto-calls or LLM DATA_CALL tags.
 
-### Major Features
-- **Two New Servers**: Server2 (ENCODE search) and Server4 (Analysis/QC) were fully implemented and integrated
-- **MCP Standardization**: All servers now use a unified Model Context Protocol interface through common code
-- **Enhanced Multi-user Support**: Better authentication, authorization, and user isolation
-- **Advanced LLM Processing**: Second-round LLM processing for improved tool output handling
+**2. Fix live job progress so it updates without manual refresh**
+Reworked Streamlit auto-refresh so running Nextflow jobs reliably trigger reruns using `st.session_state` instead of fragile `locals()`, and stop polling when jobs finish.
 
-### Infrastructure Improvements
-- Centralized logging system with automatic rotation
-- Better server lifecycle management
-- Unified MCP client architecture
-- Comprehensive test coverage for new servers
+**3. Add richer job progress UX**
+Added runtime ("Running for…") and "last updated" timestamps. Added real-time chat progress feedback via backend status events and a polling UI widget, so long local-LLM waits show staged feedback: Thinking → Switching skill → Querying → Analyzing → Done.
 
-### Workflow Enhancements
-- Unified ENCODE and local sample intake processes
-- Improved Nextflow job submission from UI
-- Dogme pipeline options for multiple data types
-- Enhanced analysis and QC capabilities
+**4. Prevent wasted LLM calls by switching skills before calling the model**
+Added `_auto_detect_skill_switch()` to detect strong signals (local sample paths, ENCODE searches, job-result analysis) and switch skills before the LLM runs.
 
-### Files Changed: 80+
-### Commits: 15
-### Lines Changed: Thousands across the codebase
+**5. Fix analysis summary being empty or misread**
+Updated Server4 analysis tools to return both human-friendly markdown and structured fields (`all_file_counts`, `file_summary`, `key_results`). Updated Server1 auto-analysis logic to read the correct fields and compute totals accurately.
+
+**6. Stop the agent from re-querying data it already has**
+Added an "Answer from existing data first" rule to skills. Injected `[PREVIOUS QUERY DATA:]` for follow-ups that don't introduce a new subject, with guards to prevent auto-generation from conflicting with correct answer-from-context behavior.
+
+**7. Harden tool calling against LLM mistakes**
+Added `tool_aliases` to fix hallucinated tool names inside valid DATA_CALL tags. Added robust routing correction for ENCODE file-vs-experiment accessions (ENCFF vs ENCSR), including finding missing parent experiments from conversation history, restoring mangled prefixes, and returning a clear error for cold ENCFF queries with no prior context.
+
+**8. Preserve context across multi-turn ENCODE conversations**
+Improved biosample carryover so "list them" / "give me accessions" retains the previous biosample filter (e.g., C2C12) instead of searching globally. Expanded auto-generation to recognize biosample context from history, not just ENCSR accessions.
+
+**9. Make UI project switching stable (no ghost messages)**
+Added multi-rerun grace handling, widget-key cleanup, render-time filtering by `project_id`, and container replacement to prevent old project messages from flashing after a project switch.
+
+**10. Fix MCP protocol and serialization issues**
+Returned native dicts from MCP tools (not JSON strings) to prevent FastMCP truncation. Flattened `find_file` responses by removing nested `matches` objects. Fixed `datetime` serialization and made UI field access defensive to prevent crashes and "N/A everywhere" results pages.
+
+**11. Consolidate documentation so skills stay consistent**
+Moved duplicated Dogme workflow steps into one shared guide (`DOGME_QUICK_WORKFLOW_GUIDE.md`). Added routing/scope pattern templates and corrected tool names in skill docs. Strengthened UUID handling guidance to cover both truncation and character-level corruption.
+
+**12. Centralize backend security and routing**
+Refactored the UI to route all analysis requests through a Server 1 proxy layer rather than contacting Server 4 directly. This hides backend URLs and unifies authentication and logging at the gateway.
+
+**13. Security hardening sprint**
+Added role-based authorization gates (`require_project_access`, `require_run_uuid_access`) on every project- and job-scoped endpoint. Hardened `user_jail.py` with path traversal guards. Bound job ownership via `user_id` column on `dogme_jobs`. Moved project creation server-side with `uuid4()`. Environment-gated cookie `Secure` flag. Created idempotent migration script (`migrate_hardening.py`).
+
+### Message Processing Pipeline (Points 1, 4, 6, 7)
+
+```
+User Message
+     │
+     ▼
+┌─────────────────────────────────────┐
+│         _sanitize_user_message()    │  ← normalize accessions, biosamples
+└─────────────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────────────┐
+│      _auto_detect_skill_switch()    │  ← switch skill BEFORE LLM call (#4)
+└─────────────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────────────┐
+│        _inject_job_context()        │  ← inject UUID, biosample, prev data (#6, #8)
+└─────────────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────────────┐
+│           LLM (engine.think())      │
+└─────────────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────────────┐
+│  Parse DATA_CALL tags from response │
+│  → resolve_tool_name()  (#7)        │  ← alias map → fuzzy match
+│  → _correct_tool_routing()  (#7)    │  ← ENCFF vs ENCSR correction
+└─────────────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────────────┐
+│         Execute MCP Tool Call       │
+│  find_file → _pick_file_tool() (#1) │  ← auto-chain to correct parser
+└─────────────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────────────┐
+│    Server 1 Proxy (gateway) (#12)   │  ← all backends hidden behind here
+│    ├── Server 2 (ENCODE)            │
+│    ├── Server 3 (jobs/Nextflow)     │
+│    └── Server 4 (analysis/files)    │
+└─────────────────────────────────────┘
+     │
+     ▼
+  Response to User
+```
 
 ---
-*Generated on February 14, 2026*
+*Updated on February 17, 2026*

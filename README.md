@@ -14,6 +14,17 @@ The system is composed of:
 - **Server 4**: Analysis Engine - Results analysis and QC reporting
 - **UI**: Web interface for monitoring and control
 
+## 🔒 Security & Multi-User Isolation
+
+AGOUTIC enforces access control at every layer:
+
+- **Authentication**: Google OAuth 2.0 with session cookies (`httponly`, `samesite=lax`, `secure` in production)
+- **Authorization**: Role-based access (owner / editor / viewer) checked on every endpoint via `require_project_access()`. Admins bypass all project-level checks; public projects allow viewer access.
+- **Job ownership**: Each job records the submitting `user_id`. `require_run_uuid_access()` verifies ownership before exposing debug info or analysis results.
+- **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{user_id}/{project_id}/`) with input sanitization and jail-escape guards.
+- **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
+- **Migration**: Run `python -m server1.migrate_hardening` to add new columns to existing databases.
+
 ## 🚀 Quick Start
 
 ### Installation
@@ -100,6 +111,8 @@ python server1/server2_mcp_client.py
   - Block-based project timeline
   - Background job monitoring
   - User authentication
+  - Role-based authorization gates on all endpoints
+  - Server-side project CRUD (`POST/GET/PATCH /projects`)
 
 ### Server 2: ENCODELIB (Port 8080)
 - **Role:** ENCODE Portal data retrieval
@@ -118,7 +131,7 @@ python server1/server2_mcp_client.py
   - Submit Dogme DNA/RNA/cDNA pipelines
   - Real-time job monitoring
   - Log streaming
-  - Working directory management
+  - User-jailed working directories
 - **Docs:** [server3/README.md](server3/README.md)
 
 ### Server 4: Analysis Engine (Port 8002)
@@ -146,13 +159,15 @@ agoutic/
 │   ├── README.md                # Server 1 documentation
 │   ├── app.py                   # FastAPI application
 │   ├── agent_engine.py          # AI agent orchestration
-│   ├── mcp_client.py            # MCP client for Server 3
-│   ├── server2_mcp_client.py   # ✨ NEW: MCP client for Server 2
-│   ├── server4_mcp_client.py   # MCP client for Server 4
+│   ├── dependencies.py          # Auth gates (require_project_access, require_run_uuid_access)
+│   ├── user_jail.py             # Path traversal guards & file isolation
+│   ├── auth.py                  # Google OAuth 2.0 + cookie hardening
 │   ├── models.py                # Database models
 │   ├── schemas.py               # Request/response schemas
-│   ├── config.py                # Configuration (updated for Server 2)
+│   ├── config.py                # Configuration
 │   ├── db.py                    # Database connection
+│   ├── init_db.py               # Full schema creation (fresh install)
+│   ├── migrate_hardening.py     # Migration for hardening sprint columns
 │   └── test_chat.py             # Tests
 │
 ├── server3/                      # Execution Engine
@@ -185,9 +200,10 @@ agoutic/
 │
 └── data/                        # Data & Database (created at runtime)
     ├── database/
-    │   └── agoutic_v23.sqlite
+    │   └── agoutic_v24.sqlite
     ├── server3_work/            # Job execution directories
-    └── server3_logs/            # Server logs
+    ├── server3_logs/            # Server logs
+    └── users/                   # Per-user jailed project dirs
 ```
 
 ## 🔑 Key Concepts
@@ -508,7 +524,7 @@ pylint server1 server3
 
 ## 📦 Version Information
 
-- **Release**: Week 3 Prototype
+- **Release**: Security Hardening Sprint
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

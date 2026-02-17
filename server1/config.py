@@ -31,6 +31,10 @@ SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "")
 SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", os.urandom(32).hex())
 SESSION_EXPIRES_HOURS = int(os.getenv("SESSION_EXPIRES_HOURS", "24"))
 
+# Environment: "development" or "production"
+# Controls security flags like cookie secure attribute
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+
 # Internal API secret for Server 1 <-> Server 3 communication
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 

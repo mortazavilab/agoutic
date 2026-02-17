@@ -8,6 +8,7 @@ from datetime import datetime
 class SubmitJobRequest(BaseModel):
     """Request to submit a Dogme job."""
     project_id: str = Field(..., min_length=1)
+    user_id: Optional[str] = None  # Owner user ID (passed by Server 1)
     sample_name: str = Field(..., min_length=1)
     mode: str = Field(..., min_length=1)  # DNA, RNA, CDNA
     input_type: Literal["pod5", "bam", "fastq"] = "pod5"  # Type of input files

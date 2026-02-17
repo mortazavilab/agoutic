@@ -28,6 +28,7 @@ class DogmeJob(Base):
     
     # Job metadata
     project_id: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # Owner; nullable for legacy jobs
     sample_name: Mapped[str] = mapped_column(String, nullable=False)
     mode: Mapped[str] = mapped_column(String, nullable=False)  # DNA, RNA, CDNA
     
@@ -58,7 +59,6 @@ class DogmeJob(Base):
     # Logging
     log_file: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     stderr_log: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class AnalysisCache(Base):

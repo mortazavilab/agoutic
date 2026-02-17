@@ -45,6 +45,7 @@ async def create_job(
     reference_genome: str | list | None = None,
     modifications: str | None = None,
     parent_block_id: str | None = None,
+    user_id: str | None = None,
 ) -> DogmeJob:
     """Create a new job record."""
     import json
@@ -58,6 +59,7 @@ async def create_job(
     job = DogmeJob(
         run_uuid=run_uuid,
         project_id=project_id,
+        user_id=user_id,
         sample_name=sample_name,
         mode=mode,
         input_directory=input_directory,

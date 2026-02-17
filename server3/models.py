@@ -17,6 +17,7 @@ class DogmeJob(Base):
     
     # Job metadata
     project_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)  # Owner; nullable for legacy jobs
     sample_name: Mapped[str] = mapped_column(String, nullable=False)
     mode: Mapped[str] = mapped_column(String, nullable=False)  # DNA, RNA, CDNA
     

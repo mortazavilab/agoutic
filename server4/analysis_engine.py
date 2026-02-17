@@ -11,6 +11,7 @@ from datetime import datetime
 
 from server4.config import (
     AGOUTIC_WORK_DIR,
+    AGOUTIC_DATA,
     MAX_PREVIEW_LINES,
     MAX_FILE_SIZE_BYTES,
     SUPPORTED_TEXT_EXTENSIONS,
@@ -33,7 +34,15 @@ from server4.db import get_db
 # ==================== File Discovery ====================
 
 def get_job_work_dir(run_uuid: str) -> Optional[Path]:
-    """Get work directory path for a job."""
+    """
+    Get work directory path for a job.
+    
+    Resolves in order:
+      1. nextflow_work_dir from the job record (may be a jailed path)
+      2. output_directory from the job record
+      3. Jailed path: AGOUTIC_DATA/users/{user_id}/{project_id}/{run_uuid}/
+      4. Legacy flat path: AGOUTIC_WORK_DIR/{run_uuid}/
+    """
     with get_db() as db:
         job = db.query(DogmeJob).filter(DogmeJob.run_uuid == run_uuid).first()
         if not job:
@@ -42,7 +51,13 @@ def get_job_work_dir(run_uuid: str) -> Optional[Path]:
         work_dir = job.nextflow_work_dir or job.output_directory
         if work_dir:
             return Path(work_dir)
-        # Fallback: construct from config
+        # Try jailed path if user_id is available
+        user_id = getattr(job, 'user_id', None)
+        if user_id and job.project_id:
+            jailed = AGOUTIC_DATA / "users" / user_id / job.project_id / run_uuid
+            if jailed.exists():
+                return jailed
+        # Fallback: construct from config (legacy flat layout)
         return AGOUTIC_WORK_DIR / run_uuid
 
 

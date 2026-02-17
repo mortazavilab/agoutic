@@ -44,6 +44,7 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     owner_id: Mapped[str] = mapped_column(String, nullable=False)
     is_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[str] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -56,13 +57,14 @@ class Project(Base):
     )
 
 class ProjectAccess(Base):
-    """Track user's project access history"""
+    """Track user's project access and role (owner/editor/viewer)"""
     __tablename__ = "project_access"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     project_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     project_name: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False, default="owner")  # 'owner', 'editor', 'viewer'
     last_accessed: Mapped[str] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

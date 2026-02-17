@@ -18,10 +18,28 @@ st.set_page_config(page_title="AGOUTIC v3.0", layout="wide")
 user = require_auth(API_URL)
 
 # --- 1. STATE MANAGEMENT ---
+def _create_project_server_side(name: str = None) -> str:
+    """Create a project via POST /projects and return the server-generated UUID."""
+    project_name = name or f"Project {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    try:
+        resp = make_authenticated_request(
+            "POST",
+            f"{API_URL}/projects",
+            json={"name": project_name},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            return resp.json()["id"]
+    except Exception:
+        pass
+    # Fallback: if server is unreachable, generate a local UUID (will be registered on first chat)
+    import uuid as _uuid
+    return str(_uuid.uuid4())
+
 # Check if we're creating a new project (flag set by New Project button)
 if st.session_state.get("_create_new_project", False):
-    # Generate new project ID
-    new_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    # Create project via server-side endpoint (server generates UUID)
+    new_id = _create_project_server_side()
     st.session_state.active_project_id = new_id
     st.session_state.blocks = []
     # Clear project-related data
@@ -56,14 +74,12 @@ if "active_project_id" not in st.session_state:
             if last_project:
                 st.session_state.active_project_id = last_project
             else:
-                # No previous project, create new one
-                st.session_state.active_project_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                # No previous project — create one via server
+                st.session_state.active_project_id = _create_project_server_side()
         else:
-            # Fallback to new project
-            st.session_state.active_project_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            st.session_state.active_project_id = _create_project_server_side()
     except:
-        # Error fetching, create new project
-        st.session_state.active_project_id = f"project_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        st.session_state.active_project_id = _create_project_server_side()
     
 # Initialize other state variables
 if "blocks" not in st.session_state:
@@ -150,10 +166,10 @@ with st.sidebar:
     # [D] PROJECT SWITCHER
     st.subheader("📁 Projects")
     try:
-        # Get user's projects
+        # Get user's projects (server-side CRUD endpoint)
         proj_resp = make_authenticated_request(
             "GET",
-            f"{API_URL}/user/projects",
+            f"{API_URL}/projects",
             timeout=3
         )
         if proj_resp.status_code == 200:

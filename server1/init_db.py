@@ -80,6 +80,7 @@ def create_tables(db_path: Path):
             name TEXT NOT NULL,
             owner_id TEXT NOT NULL,
             is_public BOOLEAN DEFAULT 0,
+            is_archived BOOLEAN DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(owner_id) REFERENCES users(id)
@@ -90,6 +91,22 @@ def create_tables(db_path: Path):
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON projects(owner_id)
     """)
+
+    # 3b. Project access table (role-based access: owner/editor/viewer)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS project_access (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            role TEXT DEFAULT 'owner',
+            last_accessed DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(project_id) REFERENCES projects(id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pa_user ON project_access(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pa_project ON project_access(project_id)")
     
     # 4. Project blocks table (updated with owner_id)
     cursor.execute("""
@@ -119,12 +136,13 @@ def create_tables(db_path: Path):
         ON project_blocks(owner_id)
     """)
     
-    # 5. Dogme jobs table (updated with owner_id)
+    # 5. Dogme jobs table (updated with owner_id + user_id)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dogme_jobs (
             run_uuid TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
             owner_id TEXT NOT NULL,
+            user_id TEXT,
             sample_name TEXT NOT NULL,
             mode TEXT NOT NULL,
             input_directory TEXT NOT NULL,
@@ -158,6 +176,10 @@ def create_tables(db_path: Path):
     """)
     
     cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON dogme_jobs(user_id)
+    """)
+    
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON dogme_jobs(status)
     """)
     
@@ -177,7 +199,54 @@ def create_tables(db_path: Path):
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_logs_job_id ON job_logs(job_id)
     """)
-    
+
+    # 7. Conversations table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            title TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(project_id) REFERENCES projects(id),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_conv_project ON conversations(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id)")
+
+    # 8. Conversation messages table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS conversation_messages (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_msg_conv ON conversation_messages(conversation_id)")
+
+    # 9. Job results table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS job_results (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            run_uuid TEXT NOT NULL,
+            sample_name TEXT NOT NULL,
+            workflow_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+            FOREIGN KEY(run_uuid) REFERENCES dogme_jobs(run_uuid)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_jr_conv ON job_results(conversation_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_jr_uuid ON job_results(run_uuid)")
+
     conn.commit()
     conn.close()
     print("✅ Created all tables")

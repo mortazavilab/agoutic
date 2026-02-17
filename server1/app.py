@@ -18,10 +18,11 @@ from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from server1.agent_engine import AgentEngine
 from server1.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES
 from server1.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
-from server1.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess
+from server1.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess, Project
 from server1.middleware import AuthMiddleware
 from server1.auth import router as auth_router
 from server1.admin import router as admin_router
+from server1.dependencies import require_project_access, require_run_uuid_access
 from common import MCPHttpClient
 from common.logging_config import setup_logging, get_logger
 from common.logging_middleware import RequestLoggingMiddleware
@@ -665,17 +666,20 @@ async def get_available_skills():
     }
 
 @app.get("/jobs/{run_uuid}/debug")
-async def get_job_debug_info(run_uuid: str):
+async def get_job_debug_info(run_uuid: str, request: Request):
     """
     Proxy endpoint for Server 3 job debug info via MCP.
     This allows the UI to get debug info without calling Server 3 directly.
     """
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
     return await _call_server3_tool("get_job_debug", run_uuid=run_uuid)
 
 @app.post("/block", response_model=BlockOut)
 async def create_block(block_in: BlockCreate, request: Request):
     # Get current user from middleware
     user = request.state.user
+    require_project_access(block_in.project_id, user, min_role="editor")
     
     session = SessionLocal()
     try:
@@ -692,7 +696,9 @@ async def create_block(block_in: BlockCreate, request: Request):
         session.close()
 
 @app.get("/blocks", response_model=BlockStreamOut)
-async def get_blocks(project_id: str, since_seq: int = 0, limit: int = 100):
+async def get_blocks(project_id: str, request: Request, since_seq: int = 0, limit: int = 100):
+    user = request.state.user
+    require_project_access(project_id, user, min_role="viewer")
     session = SessionLocal()
     try:
         query = select(ProjectBlock)\
@@ -717,15 +723,20 @@ async def get_blocks(project_id: str, since_seq: int = 0, limit: int = 100):
 
 @app.patch("/block/{block_id}", response_model=BlockOut)
 async def update_block(
+    request: Request,
     block_id: str = Path(..., min_length=1),
     body: BlockUpdate = ...
 ):
+    user = request.state.user
     session = SessionLocal()
     try:
         result = session.execute(select(ProjectBlock).where(ProjectBlock.id == block_id))
         block = result.scalar_one_or_none()
         if not block:
             raise HTTPException(status_code=404, detail="Block not found")
+
+        # Verify user has editor access to this block's project
+        require_project_access(block.project_id, user, min_role="editor")
             
         old_status = block.status
         
@@ -757,6 +768,7 @@ async def clear_project_blocks(project_id: str, request: Request):
     Conversation records are preserved separately.
     """
     user = request.state.user
+    require_project_access(project_id, user, min_role="owner")
     session = SessionLocal()
     try:
         result = session.execute(
@@ -1220,6 +1232,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         
         job_data = {
             "project_id": project_id,
+            "user_id": owner_id,  # Pass owner for jailed file paths and job ownership
             "sample_name": job_params.get("sample_name", f"sample_{project_id.split('_')[-1]}"),
             "mode": job_params.get("mode", "DNA"),
             "input_directory": job_params.get("input_directory", "/data/samples/test"),
@@ -1545,6 +1558,7 @@ async def chat_with_agent(req: ChatRequest, request: Request):
     """
     # Get current user from middleware
     user = request.state.user
+    require_project_access(req.project_id, user, min_role="editor")
     
     session = SessionLocal()
     try:
@@ -2220,12 +2234,12 @@ async def save_conversation_message(session, project_id: str, user_id: str, role
 async def get_project_conversations(project_id: str, request: Request):
     """Get all conversations for a project."""
     user = request.state.user
+    require_project_access(project_id, user, min_role="viewer")
     
     session = SessionLocal()
     try:
         query = select(Conversation)\
             .where(Conversation.project_id == project_id)\
-            .where(Conversation.user_id == user.id)\
             .order_by(desc(Conversation.updated_at))
         
         result = session.execute(query)
@@ -2294,13 +2308,13 @@ async def get_conversation_messages(conversation_id: str, request: Request):
 async def get_project_jobs(project_id: str, request: Request):
     """Get all jobs linked to a project."""
     user = request.state.user
+    require_project_access(project_id, user, min_role="viewer")
     
     session = SessionLocal()
     try:
         # Get all conversations for this project
         conv_query = select(Conversation)\
-            .where(Conversation.project_id == project_id)\
-            .where(Conversation.user_id == user.id)
+            .where(Conversation.project_id == project_id)
         
         result = session.execute(conv_query)
         conversations = result.scalars().all()
@@ -2370,8 +2384,8 @@ async def link_job_to_conversation(conversation_id: str, run_uuid: str, request:
 
 # --- PROJECT MANAGEMENT ENDPOINTS ---
 
-async def track_project_access(session, user_id: str, project_id: str, project_name: str = None):
-    """Track when a user accesses a project."""
+async def track_project_access(session, user_id: str, project_id: str, project_name: str = None, role: str = None):
+    """Track when a user accesses a project. Preserves existing role if not specified."""
     # Check if access record exists
     access_query = select(ProjectAccess)\
         .where(ProjectAccess.user_id == user_id)\
@@ -2381,17 +2395,21 @@ async def track_project_access(session, user_id: str, project_id: str, project_n
     access = result.scalar_one_or_none()
     
     if access:
-        # Update last accessed time
+        # Update last accessed time; preserve existing role
         access.last_accessed = datetime.datetime.utcnow()
         if project_name:
             access.project_name = project_name
+        # Only update role if explicitly provided (don't downgrade on re-access)
+        if role:
+            access.role = role
     else:
-        # Create new access record
+        # Create new access record — default to owner if not specified
         access = ProjectAccess(
             id=str(uuid.uuid4()),
             user_id=user_id,
             project_id=project_id,
             project_name=project_name or project_id,
+            role=role or "owner",
             last_accessed=datetime.datetime.utcnow()
         )
         session.add(access)
@@ -2404,6 +2422,162 @@ async def track_project_access(session, user_id: str, project_id: str, project_n
         user_obj.last_project_id = project_id
     
     session.commit()
+
+
+# --- Project Schemas ---
+class ProjectCreateRequest(BaseModel):
+    name: str
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    is_archived: Optional[bool] = None
+
+
+@app.post("/projects")
+async def create_project(req: ProjectCreateRequest, request: Request):
+    """
+    Create a new project with a server-generated UUID.
+    Atomic: mkdir first (idempotent), then DB insert in a single commit.
+    """
+    from server1.user_jail import get_user_project_dir
+
+    user = request.state.user
+    project_id = str(uuid.uuid4())
+
+    # 1. Create filesystem directory first (idempotent — orphan empty dir is harmless)
+    try:
+        get_user_project_dir(user.id, project_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 2. Atomic DB write: project row + owner access row in one commit
+    session = SessionLocal()
+    try:
+        now = datetime.datetime.utcnow()
+        project = Project(
+            id=project_id,
+            name=req.name,
+            owner_id=user.id,
+            is_public=False,
+            is_archived=False,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(project)
+
+        access = ProjectAccess(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            project_id=project_id,
+            project_name=req.name,
+            role="owner",
+            last_accessed=now,
+        )
+        session.add(access)
+
+        # Also set as user's last project
+        user_obj = session.execute(select(User).where(User.id == user.id)).scalar_one_or_none()
+        if user_obj:
+            user_obj.last_project_id = project_id
+
+        session.commit()  # Single commit — both rows or neither
+
+        logger.info("Project created", project_id=project_id, name=req.name, user=user.email)
+        return {
+            "id": project_id,
+            "name": req.name,
+            "created_at": str(now),
+        }
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create project: {str(e)}")
+    finally:
+        session.close()
+
+
+@app.get("/projects")
+async def list_projects(request: Request, include_archived: bool = False):
+    """
+    List all projects the user owns or has been granted access to.
+    Returns metadata: name, created date, last activity, role.
+    """
+    user = request.state.user
+
+    session = SessionLocal()
+    try:
+        # Get all project_access records for this user
+        query = select(ProjectAccess)\
+            .where(ProjectAccess.user_id == user.id)\
+            .order_by(desc(ProjectAccess.last_accessed))
+
+        result = session.execute(query)
+        access_records = result.scalars().all()
+
+        projects = []
+        for acc in access_records:
+            # Try to get the full Project record (may not exist for legacy projects)
+            proj = session.execute(
+                select(Project).where(Project.id == acc.project_id)
+            ).scalar_one_or_none()
+
+            is_archived = proj.is_archived if proj else False
+            if is_archived and not include_archived:
+                continue
+
+            projects.append({
+                "id": acc.project_id,
+                "name": proj.name if proj else acc.project_name,
+                "role": acc.role if hasattr(acc, 'role') else "owner",
+                "is_archived": is_archived,
+                "is_public": proj.is_public if proj else False,
+                "created_at": str(proj.created_at) if proj else None,
+                "last_accessed": str(acc.last_accessed),
+            })
+
+        return {"projects": projects}
+    finally:
+        session.close()
+
+
+@app.patch("/projects/{project_id}")
+async def update_project(project_id: str, req: ProjectUpdateRequest, request: Request):
+    """
+    Update project metadata (rename, archive). Requires owner role.
+    """
+    user = request.state.user
+    require_project_access(project_id, user, min_role="owner")
+
+    session = SessionLocal()
+    try:
+        project = session.execute(
+            select(Project).where(Project.id == project_id)
+        ).scalar_one_or_none()
+
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        if req.name is not None:
+            project.name = req.name
+            # Also update name in project_access for consistency
+            access = session.execute(
+                select(ProjectAccess)
+                .where(ProjectAccess.project_id == project_id)
+                .where(ProjectAccess.user_id == user.id)
+            ).scalar_one_or_none()
+            if access:
+                access.project_name = req.name
+
+        if req.is_archived is not None:
+            project.is_archived = req.is_archived
+
+        project.updated_at = datetime.datetime.utcnow()
+        session.commit()
+
+        logger.info("Project updated", project_id=project_id, user=user.email)
+        return {"status": "ok", "id": project_id}
+    finally:
+        session.close()
 
 
 @app.get("/user/last-project")
@@ -2457,8 +2631,9 @@ async def get_user_projects(request: Request):
 
 @app.post("/projects/{project_id}/access")
 async def record_project_access(project_id: str, request: Request, project_name: str = None):
-    """Record that user accessed a project."""
+    """Record that user accessed a project. Requires existing access."""
     user = request.state.user
+    require_project_access(project_id, user, min_role="viewer")
     
     session = SessionLocal()
     try:
@@ -2480,6 +2655,7 @@ async def get_job_analysis_summary(run_uuid: str, request: Request):
     Proxies to Server 4 analysis engine via MCP.
     """
     user = request.state.user
+    require_run_uuid_access(run_uuid, user)
     return await _call_server4_tool("get_analysis_summary", run_uuid=run_uuid)
 
 @app.get("/analysis/jobs/{run_uuid}/files")
@@ -2490,6 +2666,7 @@ async def list_job_files(run_uuid: str, extensions: Optional[str] = None, reques
       - extensions: Comma-separated list (e.g., ".csv,.txt")
     """
     user = request.state.user
+    require_run_uuid_access(run_uuid, user)
     kwargs = {"run_uuid": run_uuid}
     if extensions:
         kwargs["extensions"] = extensions
@@ -2501,6 +2678,7 @@ async def categorize_job_files(run_uuid: str, request: Request):
     Categorize job files by type (csv, txt, bed, other).
     """
     user = request.state.user
+    require_run_uuid_access(run_uuid, user)
     return await _call_server4_tool("categorize_job_files", run_uuid=run_uuid)
 
 @app.get("/analysis/files/content")
@@ -2514,6 +2692,7 @@ async def read_file_content(
     Read content of a specific file.
     """
     user = request.state.user
+    require_run_uuid_access(run_uuid, user)
     return await _call_server4_tool(
         "read_file_content",
         run_uuid=run_uuid,
@@ -2532,6 +2711,7 @@ async def parse_csv_file(
     Parse CSV/TSV file into structured data.
     """
     user = request.state.user
+    require_run_uuid_access(run_uuid, user)
     return await _call_server4_tool(
         "parse_csv_file",
         run_uuid=run_uuid,
@@ -2550,6 +2730,7 @@ async def parse_bed_file(
     Parse BED genomic file.
     """
     user = request.state.user
+    require_run_uuid_access(run_uuid, user)
     return await _call_server4_tool(
         "parse_bed_file",
         run_uuid=run_uuid,
@@ -2569,6 +2750,7 @@ async def proxy_download_file(
     Streams the file through Server 1 so the UI never contacts Server 4 directly.
     """
     user = request.state.user
+    require_run_uuid_access(run_uuid, user)
     from starlette.responses import StreamingResponse
     try:
         server4_rest = SERVICE_REGISTRY["server4"]["rest_url"]
