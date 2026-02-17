@@ -1,9 +1,11 @@
 import time
+import threading
+import uuid
 import requests
 import datetime
 import os
 import streamlit as st
-from auth import require_auth, logout_button, make_authenticated_request
+from auth import require_auth, logout_button, make_authenticated_request, get_session_cookie
 
 # --- CONFIG ---
 # Use environment variable or default to localhost
@@ -27,6 +29,13 @@ if st.session_state.get("_create_new_project", False):
                 'skill_content', 'selected_skill', 'job_status', 'messages',
                 '_max_visible_blocks', '_welcome_sent_for']:
         if key in st.session_state:
+            del st.session_state[key]
+    # Clear any widget keys left over from old block rendering
+    # (form keys, checkbox keys, rejection state, etc.)
+    stale_prefixes = ('params_form_', 'logs_', 'rejecting_', 'rejection_reason_',
+                      'submit_reject_', 'cancel_reject_')
+    for key in list(st.session_state.keys()):
+        if any(key.startswith(p) for p in stale_prefixes):
             del st.session_state[key]
     # Reset the project ID text input widget so it doesn't hold the old value
     st.session_state["_project_id_input"] = new_id
@@ -65,6 +74,9 @@ if st.session_state.get("_last_rendered_project") != st.session_state.active_pro
     st.session_state.blocks = []
     st.session_state._last_rendered_project = st.session_state.active_project_id
     st.session_state.pop("_welcome_sent_for", None)
+    # Suppress auto-refresh for a few cycles after switching to avoid
+    # Streamlit DOM-reuse artefacts (old messages blinking).
+    st.session_state["_suppress_auto_refresh"] = 3
 
 # --- 2. SIDEBAR ---
 with st.sidebar:
@@ -273,15 +285,22 @@ def get_job_debug_info(run_uuid):
     return None
 
 
-def render_block(block):
-    """Render a single block."""
+def render_block(block, expected_project_id: str = ""):
+    """Render a single block.
+
+    If expected_project_id is provided, silently skip blocks that belong
+    to a different project (last line of defence against ghost content).
+    """
+    b_project = block.get("project_id", "???")
+    if expected_project_id and b_project != expected_project_id:
+        return  # ghost block – do not render
+
     btype = block["type"]
     content = block.get("payload", {})
     status = block.get("status", "NEW")
     block_id = block["id"]
     
     # Metadata
-    b_project = block.get("project_id", "???")
     b_skill = content.get("skill", "N/A")
     b_model = content.get("model", "N/A")
 
@@ -780,50 +799,56 @@ active_id = st.session_state.active_project_id
 
 st.title(f"Project: {active_id}")
 
-# 1. Fetch & Sanitize (only if we need to refresh)
+# 1. Fetch & Sanitize
 blocks = get_sanitized_blocks(active_id)
 # Defensive: drop any block whose project_id drifted (e.g. server cache race)
 blocks = [b for b in blocks if b.get("project_id") == active_id]
 st.session_state.blocks = blocks  # Update session state with fresh blocks
 
-# 2. Render
-if not blocks:
-    # Auto-send welcome prompt for empty projects so the LLM introduces itself
-    if not st.session_state.get("_welcome_sent_for") or st.session_state["_welcome_sent_for"] != active_id:
-        st.session_state["_welcome_sent_for"] = active_id
-        try:
-            resp = make_authenticated_request(
-                "POST",
-                f"{API_URL}/chat",
-                json={
-                    "project_id": active_id,
-                    "message": "Hello, what can you help me with?",
-                    "skill": "welcome",
-                    "model": model_choice
-                }
-            )
-            if resp.status_code == 200:
-                time.sleep(0.5)
-                st.rerun()
-        except Exception:
-            pass  # Fall through to empty state if request fails
-    st.info(f"👋 **Project `{active_id}` is empty.**\n\nAsk Agoutic to start a task!")
-else:
-    all_blocks = st.session_state.blocks
-    # Default: show last 30 blocks. User can load more.
-    max_visible = st.session_state.get("_max_visible_blocks", 30)
-    
-    if len(all_blocks) > max_visible:
-        hidden_count = len(all_blocks) - max_visible
-        if st.button(f"⬆️ Load {min(hidden_count, 30)} older messages ({hidden_count} hidden)"):
-            st.session_state["_max_visible_blocks"] = max_visible + 30
-            st.rerun()
-        visible_blocks = all_blocks[-max_visible:]
+# 2. Render inside st.empty() – this is critical.
+#    st.empty() creates a single-element placeholder whose content is
+#    **replaced** on every rerun.  Unlike st.container (keyed or not),
+#    there is zero DOM-node reuse across reruns, so old chat messages
+#    from a previous project can never linger in the browser.
+chat_area = st.empty()
+with chat_area.container():
+    if not blocks:
+        # Auto-send welcome prompt for empty projects so the LLM introduces itself
+        if not st.session_state.get("_welcome_sent_for") or st.session_state["_welcome_sent_for"] != active_id:
+            st.session_state["_welcome_sent_for"] = active_id
+            try:
+                resp = make_authenticated_request(
+                    "POST",
+                    f"{API_URL}/chat",
+                    json={
+                        "project_id": active_id,
+                        "message": "Hello, what can you help me with?",
+                        "skill": "welcome",
+                        "model": model_choice
+                    }
+                )
+                if resp.status_code == 200:
+                    time.sleep(0.5)
+                    st.rerun()
+            except Exception:
+                pass  # Fall through to empty state if request fails
+        st.info(f"👋 **Project `{active_id}` is empty.**\n\nAsk Agoutic to start a task!")
     else:
-        visible_blocks = all_blocks
-    
-    for blk in visible_blocks:
-        render_block(blk)
+        # Use local 'blocks' variable directly (not session_state) to avoid
+        # any stale reference.
+        max_visible = st.session_state.get("_max_visible_blocks", 30)
+        
+        if len(blocks) > max_visible:
+            hidden_count = len(blocks) - max_visible
+            if st.button(f"⬆️ Load {min(hidden_count, 30)} older messages ({hidden_count} hidden)"):
+                st.session_state["_max_visible_blocks"] = max_visible + 30
+                st.rerun()
+            visible_blocks = blocks[-max_visible:]
+        else:
+            visible_blocks = blocks
+        
+        for blk in visible_blocks:
+            render_block(blk, expected_project_id=active_id)
 
 st.write("---")
 
@@ -831,28 +856,101 @@ st.write("---")
 if prompt := st.chat_input("Ask Agoutic to do something..."):
     with st.chat_message("user"):
         st.write(prompt)
-    
-    try:
-        # Send using the ACTIVE ID
-        resp = make_authenticated_request(
-            "POST",
-            f"{API_URL}/chat",
-            json={
-                "project_id": active_id, 
-                "message": prompt,
-                "skill": "welcome",
-                "model": model_choice
-            }
-        )
-        if resp.status_code != 200:
-            st.error(f"Chat request failed: {resp.status_code} - {resp.text}")
+
+    # --- Threaded request with real-time progress polling ---
+    request_id = str(uuid.uuid4())
+    session_token = get_session_cookie()
+    _result_holder = {"response": None, "error": None}
+
+    def _send_chat_request():
+        try:
+            cookies = {"session": session_token} if session_token else {}
+            _result_holder["response"] = requests.post(
+                f"{API_URL}/chat",
+                json={
+                    "project_id": active_id,
+                    "message": prompt,
+                    "skill": "welcome",
+                    "model": model_choice,
+                    "request_id": request_id,
+                },
+                cookies=cookies,
+                timeout=300,
+            )
+        except Exception as exc:
+            _result_holder["error"] = exc
+
+    thread = threading.Thread(target=_send_chat_request, daemon=True)
+    thread.start()
+
+    # Stage emoji map for nice display
+    _stage_icons = {
+        "waiting": "⏳",
+        "thinking": "🧠",
+        "switching": "🔄",
+        "tools": "🔌",
+        "analyzing": "📊",
+        "done": "✅",
+    }
+
+    with st.chat_message("assistant"):
+        status_box = st.status("🧠 Thinking...", expanded=True)
+        status_text = status_box.empty()
+        start_time = time.time()
+        last_detail = ""
+
+        while thread.is_alive():
+            elapsed = time.time() - start_time
+            # Poll the backend for current processing stage
+            try:
+                cookies = {"session": session_token} if session_token else {}
+                sr = requests.get(
+                    f"{API_URL}/chat/status/{request_id}",
+                    cookies=cookies,
+                    timeout=3,
+                )
+                if sr.status_code == 200:
+                    info = sr.json()
+                    stage = info.get("stage", "thinking")
+                    detail = info.get("detail", "")
+                    icon = _stage_icons.get(stage, "⏳")
+                    display = detail or "Processing..."
+                    if detail != last_detail:
+                        last_detail = detail
+                    status_box.update(label=f"{icon} {display}")
+                    status_text.caption(f"⏱️ {elapsed:.0f}s elapsed")
+            except Exception:
+                status_text.caption(f"⏱️ {elapsed:.0f}s elapsed")
+
+            thread.join(timeout=1.5)
+
+        thread.join()
+        elapsed = time.time() - start_time
+
+        if _result_holder["error"]:
+            status_box.update(label="❌ Error", state="error", expanded=True)
+            st.error(f"Failed to send message: {_result_holder['error']}")
+        elif _result_holder["response"] is not None and _result_holder["response"].status_code != 200:
+            status_box.update(label="❌ Error", state="error", expanded=True)
+            st.error(
+                f"Chat request failed: {_result_holder['response'].status_code} "
+                f"- {_result_holder['response'].text}"
+            )
         else:
-            time.sleep(0.5) 
+            status_box.update(
+                label=f"✅ Done ({elapsed:.0f}s)",
+                state="complete",
+                expanded=False,
+            )
+            time.sleep(0.3)
             st.rerun()
-    except Exception as e:
-        st.error(f"Failed to send message: {e}")
 
 # 4. Auto-Refresh
-if auto_refresh:
+# Suppress auto-refresh for a few cycles after a project switch so
+# Streamlit's frontend can settle and old DOM nodes are fully discarded.
+_suppress = st.session_state.get("_suppress_auto_refresh", 0)
+if _suppress > 0:
+    st.session_state["_suppress_auto_refresh"] = _suppress - 1
+elif auto_refresh:
     time.sleep(poll_seconds)
     st.rerun()

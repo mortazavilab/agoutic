@@ -99,6 +99,9 @@ The Dogme DNA pipeline performs:
 
 ## Quick Workflow: Parse a File
 
+**When asked to parse a file, check for `[CONTEXT: run_uuid=...]` in the user message first.**
+The system injects the UUID automatically — use it directly in your DATA_CALL, don't search for it.
+
 Follow the comprehensive workflow in the included guide: `[INCLUDED REFERENCE: DOGME_QUICK_WORKFLOW_GUIDE.md]`
 
 That guide includes:

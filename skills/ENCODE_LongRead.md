@@ -29,8 +29,9 @@ get_experiment(accession="ENCSR123ABC")          # Get experiment metadata
 get_file_types(accession="ENCSR123ABC")          # List available file types
 get_files_summary(accession="ENCSR123ABC")       # File summary with sizes
 get_files_by_type(accession="ENCSR123ABC")       # Files organized by type
+get_file_metadata(accession="ENCSR123ABC", file_accession="ENCFF123ABC")  # Get file metadata (needs BOTH)
 download_files(accession="ENCSR123ABC", file_types=None)  # Download files
-get_file_url(accession="ENCSR123ABC", file_accession="ENCFF123ABC")  # Get URL
+get_file_url(accession="ENCSR123ABC", file_accession="ENCFF123ABC")  # Get file URL (needs BOTH)
 ```
 
 ## Plan Logic

@@ -2,6 +2,108 @@
 
 ## [Unreleased] - 2026-02-16
 
+### Added
+- **Real-Time Chat Progress Feedback**
+  - Problem: With local LLMs, responses can take a long time and the UI showed no indication that anything was happening
+  - Solution: Added a progress tracking system with polling-based status updates
+  - Backend: Added `_emit_progress()` status tracker, `request_id` field on `ChatRequest`, and `/chat/status/{request_id}` polling endpoint. Status events emitted at key stages: "Thinking...", "Switching skill...", "Querying [service]...", "Analyzing results...", "Done"
+  - Frontend: Chat input now uses a background thread + `st.status()` widget that polls the backend every 1.5s for progress updates. Shows animated stage icons, descriptive messages, and elapsed time
+  - Cleanup: stale progress entries auto-purged after 5 minutes
+  - Applied to: [server1/app.py](server1/app.py), [ui/app.py](ui/app.py)
+
+### Fixed
+- **LLM Re-querying Instead of Using Data Already in Conversation**
+  - Problem: After fetching data (file listings, search results), follow-up questions like "which of them are methylated reads?" or "what are the accessions for the long read RNA-seq samples?" cause the LLM to make new API calls instead of reading its own previous response
+  - Root cause (v1): Keyword-based detection (`_filter_words`, `_referential`) was too narrow — only caught phrasings like "which of them", "those", "sort them" but missed "what are the accessions for..." style questions
+  - Root cause (v2): LLM doesn't recognize it already has the data in conversation history `<details>` blocks
+  - Solution (3 parts):
+    1. Added "Answer From Existing Data First" rule to ENCODE_Search.md skill with two examples (file filtering + search subset extraction) — tells LLM to check previous responses and injected `[PREVIOUS QUERY DATA:]` before making new API calls
+    2. Broadened `_inject_job_context()` ENCODE follow-up detection: removed fragile keyword lists entirely; now ANY follow-up without a new explicit subject (no new accession, no new biosample) gets the most recent `<details>` raw data injected with `[PREVIOUS QUERY DATA:]` context. Falls back to biosample context injection if no `<details>` data exists
+    3. Added `_injected_previous_data` guard in auto-generation safety net — when previous data was injected, absence of DATA_CALL tags is correct behavior (LLM is answering from context), so auto-generation is skipped
+  - Applied to: [server1/app.py](server1/app.py), [ENCODE_Search.md](skills/ENCODE_Search.md)
+
+- **LLM Hallucinating Wrong ENCODE Tool Names in DATA_CALL Tags**
+  - Problem: When asking "how many bam files do you have for ENCSR160HKZ?", the LLM generated `tool=get_files_types` instead of the correct `tool=get_files_by_type`, causing "Unknown tool" MCP errors
+  - Root cause: The existing fallback patterns only fix plain-text tool invocations (e.g., `Get Files By Type(...)` → DATA_CALL), but cannot fix wrong tool names *inside* properly-formatted DATA_CALL tags
+  - Solution: Added a `tool_aliases` map in `server2/config.py` that maps ~25 common LLM-hallucinated tool names to their correct equivalents. Applied during DATA_CALL parsing in `server1/app.py` before tool execution
+  - Covers aliases for all ENCODE tools: `get_files_by_type`, `get_file_types`, `get_files_summary`, `get_experiment`, `search_by_biosample`, `search_by_target`, `search_by_organism`, `get_available_output_types`, `get_all_metadata`, `list_experiments`, `get_cache_stats`, `get_server_info`
+  - Also added `get_all_tool_aliases()` helper function to `server2/config.py`
+  - Applied to: [server1/app.py](server1/app.py), [server2/config.py](server2/config.py)
+
+- **LLM Failing to Call File-Level ENCODE Tools Correctly**
+  - Problem: `get_file_metadata` and `get_file_url` require TWO parameters — `accession` (parent experiment ENCSR) + `file_accession` (file ENCFF) — but the LLM consistently gets this wrong in multiple ways:
+    - Uses `get_experiment` instead of `get_file_metadata` for file accessions
+    - Mangles the ENCFF prefix to ENCSR to match `get_experiment`'s expected format
+    - Hallucinated a completely different ENCSR accession while user message has ENCFF
+    - Provides only one parameter when two are required
+  - Root cause: LLM doesn't distinguish experiment vs file accession types, and the tool signatures weren't documented well enough in skill files
+  - Solution (multi-layered):
+    1. **`_correct_tool_routing()`** in `server1/app.py` — comprehensive routing correction function that:
+       - Case 1: Detects `get_experiment` called with ENCFF → reroutes to `get_file_metadata`
+       - Case 2: Detects mangled ENCFF→ENCSR prefix by cross-checking user message → restores correct prefix
+       - Case 3: Detects `get_experiment` with hallucinated ENCSR when user message contains ENCFF → extracts correct ENCFF and reroutes
+       - Detects `get_file_metadata` called without experiment accession → automatically finds it
+    2. **`_find_experiment_for_file()`** helper — scans conversation history to find the parent ENCSR experiment for a given ENCFF file accession (first looks for messages mentioning both, then falls back to most recent ENCSR)
+    3. **Graceful error for cold file queries** — when no parent experiment can be found in history (e.g., user asks about ENCFF with no prior context), the system short-circuits with a clear message ("Please first query the experiment that contains this file") instead of making a doomed MCP call that returns a cryptic Pydantic error
+    4. **Removed incorrect `param_aliases`** in `server2/config.py` — the previous fix wrongly mapped `accession→file_accession` which would remove the required experiment accession parameter
+    4. **Updated skill docs** — ENCODE_Search.md and ENCODE_LongRead.md now show `get_file_metadata` requires both params, with accession type reference table and warning to never change prefixes
+  - Applied to: [server1/app.py](server1/app.py), [server2/config.py](server2/config.py), [ENCODE_Search.md](skills/ENCODE_Search.md), [ENCODE_LongRead.md](skills/ENCODE_LongRead.md)
+
+- **ENCODE Follow-Up Questions Losing Biosample Context**
+  - Problem: After asking "how many C2C12 experiments?" then "give me the accession for the long read RNA-seq samples", the LLM searched ALL long-read RNA-seq across ENCODE instead of filtering to C2C12
+  - Root cause: The LLM generated its own DATA_CALL tags (so auto-generation didn't trigger), but searched without the C2C12 filter because the current message had no explicit biosample mention
+  - Solution: Extended `_inject_job_context()` to also handle ENCODE skills — when the user's message has no explicit biosample or accession, the function scans conversation history for the previous search subject and injects `[CONTEXT: previous search was about C2C12, organism=Mus musculus]` so the LLM generates the correct filtered search
+  - Also handles follow-ups referencing ENCSR accessions from previous results
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Conversational References Losing Context for Biosample Queries**
+  - Problem: When user asked "how many C2C12 experiments?" then "give me a list of them", the LLM asked for clarification instead of re-running the C2C12 search
+  - Root cause: The auto-generation safety net only scanned conversation history for ENCSR accessions, not biosample terms. "list of them" has no biosample keyword in the current message, so the biosample detection path never triggered
+  - Solution: Extended `_auto_generate_data_calls()` to scan conversation history for previous biosample search terms when referential words ("them", "those", "list", etc.) are detected
+  - Also added "list" to the referential words list (previously missing)
+  - Refactored biosamples dict to function scope so it's reusable across detection paths
+  - Result: "give me a list of them" after a biosample search now re-emits the same search automatically
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Added
+- **Job Context Injection for Dogme Skills**
+  - System now automatically injects UUID and work directory context into user messages for Dogme analysis skills
+  - Added `_inject_job_context()` function that prepends `[CONTEXT: run_uuid=..., work_dir=...]` to messages
+  - Added `_extract_job_context_from_history()` to scan conversation history for most recent job context
+  - Context injection happens before both initial `engine.think()` call and skill-switch re-run
+  - Eliminates LLM wasting time searching conversation history for known information
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Auto-Generation Safety Net for File Parsing**
+  - Extended `_auto_generate_data_calls()` with Dogme file-parsing patterns
+  - When in a Dogme skill and user says "parse {filename}", auto-generates `find_file` DATA_CALL if LLM fails to
+  - Extracts filename from user message using pattern matching for common verbs (parse, show, read, etc.)
+  - Retrieves UUID from conversation history automatically
+  - Provides failsafe similar to existing ENCODE auto-generation
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Changed
+- **Updated Dogme Skill Instructions for Context Injection**
+  - Updated all Dogme skills (DNA, RNA, cDNA) to check for `[CONTEXT: run_uuid=...]` first
+  - Modified "Retrieving Filename" section in DOGME_QUICK_WORKFLOW_GUIDE.md to emphasize context injection
+  - Changed STEP 2 from "Extract UUID from current conversation" to "Extract UUID from context injection or conversation"
+  - Skills now instruct LLM to use injected context directly instead of searching conversation history
+  - Applied to: [DOGME_QUICK_WORKFLOW_GUIDE.md](skills/DOGME_QUICK_WORKFLOW_GUIDE.md), [Dogme_cDNA.md](skills/Dogme_cDNA.md), [Dogme_DNA.md](skills/Dogme_DNA.md), [Dogme_RNA.md](skills/Dogme_RNA.md)
+
+- **Enhanced UI Project Switch Cleanup**
+  - Added cleanup of stale widget keys (form keys, checkbox keys, rejection state) on new project creation
+  - Clears all keys with prefixes: `params_form_`, `logs_`, `rejecting_`, `rejection_reason_`, `submit_reject_`, `cancel_reject_`
+  - Prevents form widget state from previous projects leaking into new projects
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Improved UI Render Defense Against Ghost Messages**
+  - Modified `render_block()` to accept `expected_project_id` parameter
+  - Silently skips rendering blocks that don't match the expected project ID (last line of defense)
+  - Wrapped chat rendering in `st.empty()` container which is fully replaced on every rerun (no DOM reuse)
+  - Added `_suppress_auto_refresh` counter (3 cycles) after project switch to allow frontend to settle
+  - Prevents Streamlit DOM-reuse artifacts where old messages briefly appear after project switch
+  - Applied to: [ui/app.py](ui/app.py)
+
 ### Fixed
 - **UI Project Switching Race Condition**
   - Problem: When creating a new project, old chat messages from previous project would briefly appear below welcome message

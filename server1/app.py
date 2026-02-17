@@ -28,7 +28,8 @@ from common.logging_middleware import RequestLoggingMiddleware
 from server2 import format_results
 from server2.config import (
     CONSORTIUM_REGISTRY,
-    get_consortium_entry, get_all_fallback_patterns,
+    get_consortium_entry, get_all_fallback_patterns, get_all_tool_aliases,
+    get_all_param_aliases,
 )
 from server1.config import SERVICE_REGISTRY, get_service_url
 
@@ -75,11 +76,165 @@ class ChatRequest(BaseModel):
     message: str
     skill: str = "welcome" # Default skill
     model: str = "default"         # Default model (devstral-2)
+    request_id: str = ""           # Optional: for progress tracking via /chat/status
+
+# --- CHAT PROGRESS TRACKING ---
+# Tracks processing stages for active chat requests so the UI can poll for updates.
+# Entries are cleaned up after 5 minutes.
+import time as _time
+_chat_progress: dict[str, dict] = {}  # request_id -> {"stage": str, "detail": str, "ts": float}
+
+def _emit_progress(request_id: str, stage: str, detail: str = ""):
+    """Record a processing stage for a chat request."""
+    if not request_id:
+        return
+    _chat_progress[request_id] = {
+        "stage": stage,
+        "detail": detail,
+        "ts": _time.time(),
+    }
+    # Housekeeping: remove entries older than 5 minutes
+    cutoff = _time.time() - 300
+    stale = [k for k, v in _chat_progress.items() if v["ts"] < cutoff]
+    for k in stale:
+        del _chat_progress[k]
 
 # --- HELPERS ---
 def get_block_payload(block: ProjectBlock) -> dict:
     """Helper to get payload as dict from payload_json"""
     return json.loads(block.payload_json) if block.payload_json else {}
+
+
+def _correct_tool_routing(tool: str, params: dict, user_message: str,
+                          conversation_history: list | None = None) -> tuple[str, dict]:
+    """
+    Fix cases where the LLM uses the wrong tool for a given accession type.
+
+    Common mistakes:
+    - Using get_experiment for ENCFF (file) accessions instead of get_file_metadata
+    - Mangling ENCFF → ENCSR (changing the prefix to match the tool it chose)
+    - Calling get_file_metadata without the required experiment accession
+
+    get_file_metadata and get_file_url both require two params:
+      accession (experiment ENCSR) + file_accession (file ENCFF)
+    """
+    accession = params.get("accession", "")
+    msg_upper = user_message.upper()
+
+    if tool == "get_experiment" and accession:
+        acc_upper = accession.upper()
+        file_acc = None
+
+        # Case 1: LLM passed an ENCFF accession to get_experiment directly
+        if acc_upper.startswith("ENCFF"):
+            file_acc = accession
+
+        # Case 2: LLM mangled ENCFF → ENCSR (changed prefix to match tool)
+        # ENCODE accessions: 5-char prefix (ENC + 2-letter type) + 6 alphanumeric
+        elif acc_upper.startswith("ENCSR"):
+            suffix = acc_upper[5:]  # e.g. "921XAH" (skip 5-char prefix)
+            candidate = f"ENCFF{suffix}"
+            if candidate in msg_upper:
+                file_acc = candidate
+
+        # Case 3: User message mentions an ENCFF accession but the LLM
+        # hallucinated a completely different ENCSR accession for get_experiment.
+        # Extract the ENCFF from the user message directly.
+        if not file_acc:
+            encff_in_msg = re.findall(r'(ENCFF[A-Z0-9]{6})', msg_upper)
+            if encff_in_msg:
+                file_acc = encff_in_msg[0]
+                logger.warning(
+                    "LLM hallucinated accession for get_experiment, "
+                    "user message has ENCFF — rerouting",
+                    hallucinated=accession, file_accession=file_acc)
+
+        if file_acc:
+            # Find parent experiment accession from conversation history
+            exp_acc = _find_experiment_for_file(file_acc, conversation_history)
+            if exp_acc:
+                logger.warning("Rerouting get_experiment → get_file_metadata",
+                              file_accession=file_acc, experiment=exp_acc)
+                return "get_file_metadata", {
+                    "accession": exp_acc, "file_accession": file_acc}
+            else:
+                # No experiment found — can't call get_file_metadata without it.
+                # Return a routing error so the caller skips the MCP call.
+                logger.warning(
+                    "Cannot find parent experiment for file accession",
+                    file_accession=file_acc)
+                return "get_file_metadata", {
+                    "file_accession": file_acc,
+                    "__routing_error__": (
+                        f"Cannot look up file metadata for {file_acc} without "
+                        f"knowing its parent experiment (ENCSR...). "
+                        f"Please first query the experiment that contains this "
+                        f"file, then ask about the file."
+                    ),
+                }
+
+    # Also fix get_file_metadata called without experiment accession
+    if tool == "get_file_metadata":
+        file_acc = params.get("file_accession", params.get("accession", ""))
+        exp_acc = params.get("accession", "")
+        # If accession looks like a file accession, it's misplaced
+        if exp_acc.upper().startswith("ENCFF"):
+            file_acc = exp_acc
+            exp_acc = ""
+        # If we don't have experiment accession, find it from history
+        if not exp_acc or not exp_acc.upper().startswith("ENCSR"):
+            found_exp = _find_experiment_for_file(file_acc, conversation_history)
+            if found_exp:
+                logger.warning("Added missing experiment accession for get_file_metadata",
+                              file_accession=file_acc, experiment=found_exp)
+                return "get_file_metadata", {
+                    "accession": found_exp, "file_accession": file_acc}
+            else:
+                # No experiment found — return routing error
+                return "get_file_metadata", {
+                    "file_accession": file_acc,
+                    "__routing_error__": (
+                        f"Cannot look up file metadata for {file_acc} without "
+                        f"knowing its parent experiment (ENCSR...). "
+                        f"Please first query the experiment that contains this "
+                        f"file, then ask about the file."
+                    ),
+                }
+
+    return tool, params
+
+
+def _find_experiment_for_file(file_accession: str,
+                              conversation_history: list | None) -> str | None:
+    """
+    Scan conversation history to find the ENCSR experiment accession
+    that was queried when the given ENCFF file accession appeared.
+
+    Strategy: look for assistant messages that mention the ENCFF accession
+    and also contain an ENCSR accession (the parent experiment).
+    """
+    if not conversation_history or not file_accession:
+        return None
+
+    file_acc_upper = file_accession.upper()
+
+    for msg in reversed(conversation_history):
+        content = msg.get("content", "")
+        if file_acc_upper not in content.upper():
+            continue
+        # This message mentions our file — find ENCSR accessions in it
+        experiments = re.findall(r'(ENCSR[A-Z0-9]{6})', content, re.IGNORECASE)
+        if experiments:
+            return experiments[0].upper()
+
+    # Fallback: find the most recent ENCSR in any message
+    for msg in reversed(conversation_history):
+        content = msg.get("content", "")
+        experiments = re.findall(r'(ENCSR[A-Z0-9]{6})', content, re.IGNORECASE)
+        if experiments:
+            return experiments[0].upper()
+
+    return None
 
 
 def _parse_tag_params(params_str: str | None) -> dict:
@@ -105,12 +260,24 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     patterns in the user's message and auto-generate the appropriate tool calls.
 
     Also resolves conversational references ("them", "each of them", "these")
-    by scanning recent conversation history for accessions.
+    by scanning recent conversation history for accessions or biosample terms.
 
     Returns a list of dicts: [{"source_type": str, "source_key": str, "tool": str, "params": dict}]
     """
     calls = []
     msg_lower = user_message.lower()
+
+    # Common cell lines and tissues (shared across detection paths)
+    biosamples = {
+        "k562": ("K562", "Homo sapiens"),
+        "gm12878": ("GM12878", "Homo sapiens"),
+        "hela": ("HeLa-S3", "Homo sapiens"),
+        "hepg2": ("HepG2", "Homo sapiens"),
+        "c2c12": ("C2C12", "Mus musculus"),
+        "liver": ("liver", None),
+        "brain": ("brain", None),
+        "heart": ("heart", None),
+    }
 
     # --- ENCODE patterns ---
     # Detect ENCODE accession numbers (ENCSR, ENCFF, ENCLB, etc.)
@@ -121,8 +288,10 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     # ("them", "these", "each", "all of them", "for those", etc.)
     referential_words = ["them", "these", "those", "each", "all of them",
                          "each of them", "for those", "the experiments",
-                         "the accessions", "same"]
-    if not accessions and any(w in msg_lower for w in referential_words):
+                         "the accessions", "same", "list"]
+    _has_referential = any(w in msg_lower for w in referential_words)
+
+    if not accessions and _has_referential:
         # Scan recent conversation history (last 4 messages) for accessions.
         # IMPORTANT: Strip <details>...</details> blocks first so we only
         # pick up accessions from the clean summary, not from raw query dumps
@@ -174,17 +343,7 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
 
     # Detect biosample searches (no accession but mentions cell lines/tissues)
     elif skill_key in ("ENCODE_Search", "ENCODE_LongRead") and not accessions:
-        # Common cell lines and tissues
-        biosamples = {
-            "k562": ("K562", "Homo sapiens"),
-            "gm12878": ("GM12878", "Homo sapiens"),
-            "hela": ("HeLa-S3", "Homo sapiens"),
-            "hepg2": ("HepG2", "Homo sapiens"),
-            "c2c12": ("C2C12", "Mus musculus"),
-            "liver": ("liver", None),
-            "brain": ("brain", None),
-            "heart": ("heart", None),
-        }
+        # Check current message first for explicit biosample mentions
         for keyword, (term, organism) in biosamples.items():
             if keyword in msg_lower:
                 params = {"search_term": term}
@@ -196,7 +355,213 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 })
                 break
 
+        # If no biosample in current message but user used referential words
+        # ("list of them", "show me those", etc.), scan conversation history
+        # for previous biosample terms so we can re-emit the same search.
+        if not calls and _has_referential and conversation_history:
+            for hist_msg in reversed(conversation_history[-6:]):
+                content_lower = hist_msg.get("content", "").lower()
+                for keyword, (term, organism) in biosamples.items():
+                    if keyword in content_lower:
+                        params = {"search_term": term}
+                        if organism:
+                            params["organism"] = organism
+                        calls.append({
+                            "source_type": "consortium", "source_key": "encode",
+                            "tool": "search_by_biosample", "params": params,
+                        })
+                        break
+                if calls:
+                    break
+
+    # --- Dogme / Server4 file-parsing patterns ---
+    # When in a Dogme analysis skill and user asks to parse/show a file,
+    # auto-generate the find_file call so the LLM doesn't just describe it.
+    dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
+                    "analyze_job_results"}
+    if not calls and skill_key in dogme_skills:
+        parse_keywords = ["parse", "show me", "read", "open", "display",
+                          "view", "get", "what's in", "contents of"]
+        if any(kw in msg_lower for kw in parse_keywords):
+            # Extract filename from user message
+            # Patterns: "parse filename.csv", "show me filename.txt", etc.
+            file_pattern = r'(?:parse|show\s+me|read|open|display|view|get)\s+(?:the\s+)?(?:file\s+)?(\S+\.(?:csv|tsv|bed|txt|log|html))'
+            file_match = re.search(file_pattern, msg_lower)
+            if file_match:
+                filename = file_match.group(1)
+                # Also try to grab the original-case version from the raw message
+                file_match_orig = re.search(file_pattern, user_message, re.IGNORECASE)
+                if file_match_orig:
+                    filename = file_match_orig.group(1)
+
+                # Get UUID from conversation history
+                job_context = _extract_job_context_from_history(conversation_history)
+                run_uuid = job_context.get("run_uuid")
+                if run_uuid:
+                    # First call: find_file to locate the full path
+                    calls.append({
+                        "source_type": "service", "source_key": "server4",
+                        "tool": "find_file",
+                        "params": {"run_uuid": run_uuid, "file_name": filename},
+                    })
+
     return calls
+
+
+def _extract_job_context_from_history(conversation_history: list | None) -> dict:
+    """
+    Scan conversation history for the most recent job UUID and work directory.
+    Returns a dict with 'run_uuid' and optionally 'work_dir' keys.
+    """
+    context = {}
+    if not conversation_history:
+        return context
+
+    uuid_pattern = r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
+
+    # Scan from most recent to oldest
+    for msg in reversed(conversation_history):
+        content = msg.get("content", "")
+        if not content:
+            continue
+
+        # Look for UUID — prefer explicit "UUID:" or "run_uuid" references
+        if "run_uuid" not in context:
+            # Priority patterns (most specific first)
+            explicit_match = re.search(
+                r'(?:use UUID|Run UUID|run_uuid|UUID)[:\s=]+\s*(' + uuid_pattern + r')',
+                content, re.IGNORECASE
+            )
+            if explicit_match:
+                context["run_uuid"] = explicit_match.group(1).lower()
+
+        if "work_dir" not in context:
+            work_dir_match = re.search(r'Work Directory:\s*(\S+)', content)
+            if work_dir_match:
+                context["work_dir"] = work_dir_match.group(1).strip()
+
+        if "run_uuid" in context and "work_dir" in context:
+            break
+
+    # Fallback: if no explicit UUID match, grab the most recent UUID from history
+    if "run_uuid" not in context:
+        for msg in reversed(conversation_history):
+            content = msg.get("content", "")
+            uuid_matches = re.findall(uuid_pattern, content, re.IGNORECASE)
+            if uuid_matches:
+                context["run_uuid"] = uuid_matches[-1].lower()
+                break
+
+    return context
+
+
+def _inject_job_context(user_message: str, active_skill: str,
+                        conversation_history: list | None) -> str:
+    """
+    Inject relevant conversational context into the user message so the LLM
+    can maintain continuity without having to parse conversation history itself.
+
+    Covers:
+    - Dogme skills: inject UUID and work directory
+    - ENCODE skills: inject previous biosample/search context for follow-ups
+    """
+    if not conversation_history:
+        return user_message
+
+    # --- Dogme skills: inject UUID and work directory ---
+    dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
+                    "analyze_job_results"}
+    if active_skill in dogme_skills:
+        context = _extract_job_context_from_history(conversation_history)
+        if context.get("run_uuid"):
+            parts = [f"run_uuid={context['run_uuid']}"]
+            if context.get("work_dir"):
+                parts.append(f"work_dir={context['work_dir']}")
+            context_line = f"[CONTEXT: {', '.join(parts)}]"
+            return f"{context_line}\n{user_message}"
+        return user_message
+
+    # --- ENCODE skills: inject previous search context for follow-ups ---
+    encode_skills = {"ENCODE_Search", "ENCODE_LongRead"}
+    if active_skill in encode_skills:
+        msg_lower = user_message.lower()
+
+        # Check if current message already has an explicit biosample or accession
+        has_accession = bool(re.findall(r'ENC[A-Z]{2}\d{3}[A-Z]{3}', user_message, re.IGNORECASE))
+        biosample_keywords = {
+            "k562", "gm12878", "hela", "hepg2", "c2c12",
+            "liver", "brain", "heart", "kidney", "lung",
+        }
+        has_biosample = any(bs in msg_lower for bs in biosample_keywords)
+
+        if not has_accession and not has_biosample:
+            # No new subject in message — this is a follow-up question.
+            # Strategy: always inject the most recent <details> data so the
+            # LLM can answer from it (e.g. "what are the accessions for the
+            # long read RNA-seq samples?" after a C2C12 search).
+            # If no <details> data found, fall back to biosample context.
+            for hist_msg in reversed(conversation_history[-6:]):
+                content = hist_msg.get("content", "")
+                if hist_msg.get("role") != "assistant":
+                    continue
+                # Find <details> blocks with raw query results
+                details_match = re.search(
+                    r'<details>.*?<summary>.*?</summary>\s*(.*?)\s*</details>',
+                    content, re.DOTALL
+                )
+                if details_match:
+                    raw_data = details_match.group(1).strip()
+                    # Truncate if excessively large (keep first 4000 chars)
+                    if len(raw_data) > 4000:
+                        raw_data = raw_data[:4000] + "\n... (truncated)"
+                    context_line = (
+                        "[CONTEXT: This is a follow-up question. The answer "
+                        "may be in your previous query data below. Check this "
+                        "data FIRST and answer directly if it contains the "
+                        "answer. Only make a new DATA_CALL if this data does "
+                        "NOT have what the user needs.]\n"
+                        "[PREVIOUS QUERY DATA:]\n"
+                        f"{raw_data}"
+                    )
+                    return f"{context_line}\n{user_message}"
+
+            # No <details> data found — fall back to biosample context injection
+            biosample_map = {
+                "k562": ("K562", "Homo sapiens"),
+                "gm12878": ("GM12878", "Homo sapiens"),
+                "hela": ("HeLa-S3", "Homo sapiens"),
+                "hepg2": ("HepG2", "Homo sapiens"),
+                "c2c12": ("C2C12", "Mus musculus"),
+                "liver": ("liver", None),
+                "brain": ("brain", None),
+                "heart": ("heart", None),
+                "kidney": ("kidney", None),
+                "lung": ("lung", None),
+            }
+            for hist_msg in reversed(conversation_history[-8:]):
+                content_lower = hist_msg.get("content", "").lower()
+                for keyword, (display_name, organism) in biosample_map.items():
+                    if keyword in content_lower:
+                        org_str = f", organism={organism}" if organism else ""
+                        context_line = (
+                            f"[CONTEXT: The user's previous search was about "
+                            f"{display_name}{org_str}. This is a follow-up question "
+                            f"about those same {display_name} results. Filter or "
+                            f"refine accordingly — do NOT search all of ENCODE.]"
+                        )
+                        return f"{context_line}\n{user_message}"
+                # Also check for ENCSR accessions in history for follow-ups
+                accessions_in_hist = re.findall(r'(ENCSR\w{6})', hist_msg.get("content", ""))
+                if accessions_in_hist:
+                    context_line = (
+                        f"[CONTEXT: The conversation involves these experiments: "
+                        f"{', '.join(dict.fromkeys(a.upper() for a in accessions_in_hist[:10]))}. "
+                        f"This is a follow-up question about those results.]"
+                    )
+                    return f"{context_line}\n{user_message}"
+
+    return user_message
+
 
 
 def _create_block_internal(session, project_id, block_type, payload, status="NEW", owner_id=None):
@@ -1092,6 +1457,16 @@ async def _auto_trigger_analysis(
         session.close()
 
 
+# --- CHAT PROGRESS STATUS ---
+@app.get("/chat/status/{request_id}")
+async def chat_status(request_id: str):
+    """Return the current processing stage for a chat request (used by UI polling)."""
+    entry = _chat_progress.get(request_id)
+    if entry:
+        return {"stage": entry["stage"], "detail": entry["detail"]}
+    return {"stage": "waiting", "detail": ""}
+
+
 # --- CHAT & AGENT LOGIC ---
 @app.post("/chat")
 async def chat_with_agent(req: ChatRequest, request: Request):
@@ -1260,11 +1635,18 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # 2. Run the Brain (in a thread so it doesn't block the server)
         # Initialize engine with the selected model (from UI request)
         engine = AgentEngine(model_key=req.model)
+        _emit_progress(req.request_id, "thinking", f"Thinking using {engine.model_name}...")
+        
+        # Inject job context (UUID, work_dir) for Dogme skills so the LLM
+        # doesn't waste time searching conversation history for known info.
+        augmented_message = _inject_job_context(
+            req.message, active_skill, conversation_history
+        )
         
         # 'think' talks to Ollama using the active skill and conversation history
         raw_response = await run_in_threadpool(
             engine.think, 
-            req.message, 
+            augmented_message, 
             active_skill,
             conversation_history
         )
@@ -1276,15 +1658,20 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             new_skill = skill_switch_match.group(1)
             if new_skill in SKILLS_REGISTRY:
                 logger.info("Agent switching skill", from_skill=active_skill, to_skill=new_skill)
-                # Re-run with the new skill
+                _emit_progress(req.request_id, "switching", f"Switching to {new_skill} skill...")
+                # Re-run with the new skill, injecting context for the new skill
                 engine = AgentEngine(model_key=req.model)
+                augmented_message = _inject_job_context(
+                    req.message, new_skill, conversation_history
+                )
                 raw_response = await run_in_threadpool(
                     engine.think, 
-                    req.message, 
+                    augmented_message, 
                     new_skill,
                     conversation_history
                 )
                 active_skill = new_skill  # Update the skill for the response
+
         
         # 4. Parse the "Approval Gate Tag"
         trigger_tag = "[[APPROVAL_NEEDED]]"
@@ -1334,8 +1721,11 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         #     detect patterns in the user message and auto-generate appropriate calls.
         #     ALSO validates accessions when the user uses referential words ("them",
         #     "each of them", etc.) to catch LLM-hallucinated accession numbers.
+        #     SKIP auto-generation if we injected previous query data (the LLM was
+        #     told to answer from existing data, so no tags is correct behaviour).
         has_any_tags = bool(data_call_matches or legacy_encode_matches or legacy_analysis_matches)
         auto_calls = []
+        _injected_previous_data = "[PREVIOUS QUERY DATA:]" in augmented_message
 
         # Check for conversational references in the user's message
         _ref_words = ["them", "these", "those", "each", "all of them",
@@ -1344,7 +1734,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         _msg_lower = req.message.lower()
         _has_referential = any(w in _msg_lower for w in _ref_words)
 
-        if not has_any_tags:
+        if not has_any_tags and not _injected_previous_data:
             # Case 1: LLM produced no tags at all — auto-generate
             auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history)
             if auto_calls:
@@ -1393,6 +1783,10 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # Structure: {source_key: [{"tool": str, "params": dict}, ...]}
         calls_by_source = {}
         
+        # Load aliases for correcting LLM-hallucinated tool/param names
+        _tool_aliases = get_all_tool_aliases()
+        _param_aliases = get_all_param_aliases()
+        
         # From auto-generated tags (safety net)
         if not has_any_tags and auto_calls:
             for ac in auto_calls:
@@ -1408,10 +1802,25 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             tool_name = match.group(3)
             params_str = match.group(4)
             
-            params = _parse_tag_params(params_str)
+            # Fix hallucinated tool names using alias map
+            corrected_tool = _tool_aliases.get(tool_name, tool_name)
+            if corrected_tool != tool_name:
+                logger.warning("Corrected hallucinated tool name",
+                              original=tool_name, corrected=corrected_tool)
             
+            params = _parse_tag_params(params_str)
+
+            # Fix hallucinated parameter names using param alias map
+            _p_aliases = _param_aliases.get(corrected_tool, {})
+            if _p_aliases:
+                params = {_p_aliases.get(k, k): v for k, v in params.items()}
+
+            # Fix wrong tool for accession type (e.g. get_experiment for ENCFF)
+            corrected_tool, params = _correct_tool_routing(
+                corrected_tool, params, req.message, conversation_history)
+
             calls_by_source.setdefault(source_key, []).append({
-                "tool": tool_name,
+                "tool": corrected_tool,
                 "params": params,
             })
         
@@ -1421,8 +1830,23 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             params_str = match.group(2)
             params = _parse_tag_params(params_str)
             
+            # Fix hallucinated tool names using alias map
+            corrected_tool = _tool_aliases.get(tool_name, tool_name)
+            if corrected_tool != tool_name:
+                logger.warning("Corrected hallucinated tool name (legacy)",
+                              original=tool_name, corrected=corrected_tool)
+
+            # Fix hallucinated parameter names using param alias map
+            _p_aliases = _param_aliases.get(corrected_tool, {})
+            if _p_aliases:
+                params = {_p_aliases.get(k, k): v for k, v in params.items()}
+
+            # Fix wrong tool for accession type (e.g. get_experiment for ENCFF)
+            corrected_tool, params = _correct_tool_routing(
+                corrected_tool, params, req.message, conversation_history)
+
             calls_by_source.setdefault("encode", []).append({
-                "tool": tool_name,
+                "tool": corrected_tool,
                 "params": params,
             })
         
@@ -1449,6 +1873,9 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         
         for source_key, calls in calls_by_source.items():
             logger.info("Executing tool calls", source=source_key, count=len(calls))
+            _source_label = CONSORTIUM_REGISTRY.get(source_key, {}).get("display_name") \
+                or SERVICE_REGISTRY.get(source_key, {}).get("display_name", source_key)
+            _emit_progress(req.request_id, "tools", f"Querying {_source_label}...")
             
             try:
                 url = get_service_url(source_key)
@@ -1470,6 +1897,18 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 for call in calls:
                     tool_name = call["tool"]
                     params = call["params"]
+
+                    # Check for routing errors (e.g. missing parent experiment)
+                    if "__routing_error__" in params:
+                        error_msg = params.pop("__routing_error__")
+                        logger.warning("Skipping tool call due to routing error",
+                                      tool=tool_name, error=error_msg)
+                        source_results.append({
+                            "tool": tool_name,
+                            "params": params,
+                            "error": error_msg,
+                        })
+                        continue
                     
                     logger.info("Calling tool", source=source_key, tool=tool_name, params=params)
                     
@@ -1531,6 +1970,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
 
                 # Second-pass: send data to LLM for analysis/filtering/summarization
                 logger.info("Running second-pass LLM analysis", data_size=len(formatted_data))
+                _emit_progress(req.request_id, "analyzing", "Analyzing results...")
                 analyzed_response = await run_in_threadpool(
                     engine.analyze_results,
                     req.message,
@@ -1551,6 +1991,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # 7. Save AGENT_PLAN (The Text)
         # Status is DONE because the text itself is just informational. 
         # The flow control happens in the gate block below.
+        _emit_progress(req.request_id, "done", "Complete")
         agent_block = _create_block_internal(
             session,
             req.project_id,

@@ -48,6 +48,45 @@ CONSORTIUM_REGISTRY = {
         # Skills that belong to this consortium
         "skills": ["ENCODE_Search", "ENCODE_LongRead"],
 
+        # Tool name aliases: fix LLM-hallucinated tool names inside DATA_CALL tags
+        # Maps wrong_name -> correct_name
+        "tool_aliases": {
+            "get_files_types": "get_files_by_type",
+            "get_file_by_type": "get_files_by_type",
+            "get_files_type": "get_files_by_type",
+            "files_by_type": "get_files_by_type",
+            "get_file_types_by_type": "get_files_by_type",
+            "file_types": "get_file_types",
+            "get_filetypes": "get_file_types",
+            "file_summary": "get_files_summary",
+            "get_file_summary": "get_files_summary",
+            "files_summary": "get_files_summary",
+            "experiment": "get_experiment",
+            "get_experiments": "get_experiment",
+            "search_biosample": "search_by_biosample",
+            "biosample_search": "search_by_biosample",
+            "search_target": "search_by_target",
+            "target_search": "search_by_target",
+            "search_organism": "search_by_organism",
+            "organism_search": "search_by_organism",
+            "available_output_types": "get_available_output_types",
+            "output_types": "get_available_output_types",
+            "all_metadata": "get_all_metadata",
+            "metadata": "get_all_metadata",
+            "experiments": "list_experiments",
+            "cache_stats": "get_cache_stats",
+            "server_info": "get_server_info",
+            "file_metadata": "get_file_metadata",
+        },
+
+        # Parameter name aliases: fix LLM-hallucinated parameter names
+        # Maps {tool_name: {wrong_param: correct_param}}
+        # NOTE: get_file_metadata and get_file_url both need TWO params:
+        #   accession (experiment ENCSR) + file_accession (file ENCFF)
+        #   Don't alias accession→file_accession here; routing is handled
+        #   by _correct_tool_routing() in server1/app.py
+        "param_aliases": {},
+
         # Fallback patterns: fix common LLM mistakes
         # Maps plain-text tool patterns to proper DATA_CALL tags
         "fallback_patterns": {
@@ -108,3 +147,28 @@ def get_all_fallback_patterns() -> dict[str, str]:
     for entry in CONSORTIUM_REGISTRY.values():
         patterns.update(entry.get("fallback_patterns", {}))
     return patterns
+
+
+def get_all_tool_aliases() -> dict[str, str]:
+    """
+    Collect all tool name aliases from all registered consortia.
+    Returns a merged dict of wrong_name -> correct_name.
+    Used to fix LLM-hallucinated tool names inside DATA_CALL tags.
+    """
+    aliases = {}
+    for entry in CONSORTIUM_REGISTRY.values():
+        aliases.update(entry.get("tool_aliases", {}))
+    return aliases
+
+
+def get_all_param_aliases() -> dict[str, dict[str, str]]:
+    """
+    Collect all parameter name aliases from all registered consortia.
+    Returns a merged dict of {tool_name: {wrong_param: correct_param}}.
+    Used to fix LLM-hallucinated parameter names in DATA_CALL tags.
+    """
+    aliases: dict[str, dict[str, str]] = {}
+    for entry in CONSORTIUM_REGISTRY.values():
+        for tool_name, mappings in entry.get("param_aliases", {}).items():
+            aliases.setdefault(tool_name, {}).update(mappings)
+    return aliases

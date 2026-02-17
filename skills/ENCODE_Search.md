@@ -41,6 +41,48 @@ Get Files By Type (accession=ENCSR123ABC)     ❌ NO! Missing [[brackets]]
 
 ---
 
+## 🧠 CRITICAL: Answer From Existing Data First
+
+**Before making ANY new API call, check your previous responses AND any [PREVIOUS QUERY DATA:] injected into the current message.**
+
+If you already fetched detailed data (file listings, experiment lists, search results), and the user asks a follow-up about that same data — **answer from what you already have.** Do NOT re-query.
+
+### When to use existing data (NO new DATA_CALL):
+- "Which of them are [output type]?" → Filter your previous file listing
+- "Sort them by size" → Sort your previous results
+- "Show me only the BAM files" → Extract from previous response
+- "Which ones are released?" → Filter your previous results
+- "What are the accessions for [subset]?" → Extract from previous search results
+- "What are the long read RNA-seq accessions?" → Find them in the previous search table
+- Any question that can be answered by reading your own previous response
+
+### When to make a NEW DATA_CALL:
+- User asks about a **different** accession or biosample not in previous data
+- User asks for data you haven't fetched yet (e.g., detailed files after only doing a biosample search)
+- User explicitly asks to refresh or re-query
+
+### Example 1 — Filtering files:
+```
+Previous response showed 12 BAM files with columns: Accession, Output Type, Size, Status
+User asks: "which of them are methylated reads?"
+
+❌ WRONG: Make a new [[DATA_CALL:...]] — you already have the data!
+✅ RIGHT: Read your previous response, filter for output_type="methylated reads", present those rows
+```
+
+### Example 2 — Extracting a subset from search results:
+```
+Previous response showed 58 C2C12 experiments with Accession, Assay, Biosample, Target columns
+User asks: "what are the accessions for the long read RNA-seq samples?"
+
+❌ WRONG: Make new API calls — you already have the complete list!
+✅ RIGHT: Scan the previous table for rows where Assay="long read RNA-seq", list their accessions
+```
+
+**If [PREVIOUS QUERY DATA:] is injected at the start of your message, the answer is almost certainly in there. READ IT FIRST.**
+
+---
+
 ## Description
 
 This skill provides **DIRECT ACCESS** to the ENCODE Portal via Server 2 (ENCODELIB).
@@ -172,19 +214,38 @@ Parameters:
 - `target` (optional): Target filter
 - `exclude_revoked` (optional): default True
 
+### ⚠️ ENCODE Accession Types — Use the Right Tool!
+
+| Prefix | Type | Example | Tool to use |
+|--------|------|---------|-------------|
+| ENCSR | Experiment | ENCSR160HKZ | `get_experiment` or `get_all_metadata` (param: `accession`) |
+| ENCFF | File | ENCFF921XAH | `get_file_metadata` (param: `file_accession`) |
+
+**NEVER change an accession prefix.** If the user says ENCFF921XAH, use ENCFF921XAH — do NOT change it to ENCSR921XAH.
+
 ### Metadata Tools
 
-**get_experiment:**
+**get_experiment** (for ENCSR experiment accessions ONLY):
 ```
 [[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]
 ```
-Gets single experiment details.
+Gets single experiment details. Parameter: `accession` (ENCSR...).
 
-**get_all_metadata:**
+**get_all_metadata** (for ENCSR experiment accessions ONLY):
 ```
 [[DATA_CALL: consortium=encode, tool=get_all_metadata, accession=ENCSR123ABC]]
 ```
-Gets complete raw metadata.
+Gets complete raw metadata for an experiment. Parameter: `accession` (ENCSR...).
+
+**get_file_metadata** (for ENCFF file accessions — requires BOTH experiment and file accession):
+```
+[[DATA_CALL: consortium=encode, tool=get_file_metadata, accession=ENCSR123ABC, file_accession=ENCFF123ABC]]
+```
+Gets metadata for a specific file. Requires TWO parameters:
+- `accession` — the parent experiment (ENCSR...)
+- `file_accession` — the file itself (ENCFF...)
+
+Find the experiment accession from the conversation history where the file was listed.
 
 **get_file_types:**
 ```

@@ -38,9 +38,12 @@ What tool might receive: b954620b-a274-4474-9249-f31d8d55856f (WRONG - a2c7→a2
 3. If they differ (especially in the middle segments), UUID was corrupted
 4. Re-read the original user input and use THAT UUID
 
-**STEP 2: Extract UUID from current conversation**
+**STEP 2: Extract UUID from context injection or conversation**
 
-Before making ANY tool calls, look at the conversation for the MOST RECENT "use UUID:" message or "Analysis Ready" message. Extract the UUID from that message.
+**PREFERRED: Check for `[CONTEXT: run_uuid=...]` at the start of the user message.**
+The system automatically injects the most recent job UUID. If present, use it directly — no need to search conversation history.
+
+**FALLBACK:** If no `[CONTEXT: ...]` line, look at the conversation for the MOST RECENT "use UUID:" message or "Analysis Ready" message. Extract the UUID from that message.
 
 **WRONG:** Using a UUID from an earlier section of the conversation
 - ❌ `6a8613d4-832c-4420-927e-6265b614c8b2` (from analysis of a different job earlier)
@@ -108,20 +111,18 @@ Total result files: 26 (vs 502 total including work files)
 
 If you were switched from `analyze_job_results` with a "parse {filename}" request:
 
-**The user provided a filename but analyze_job_results doesn't forward it to your skill.** You must retrieve it yourself:
+**The system automatically injects job context into your message.** Look for a line like:
+```
+[CONTEXT: run_uuid=b954620b-a2c7-4474-9249-f31d8d55856f, work_dir=/media/backup_disk/...]
+```
 
-1. **Look back at conversation history** for what filename the user requested
-   - Search for: "parse {filename}" in recent messages
-   - Example: "parse jamshid.mm39_final_stats.csv"
-   
-2. **Extract the exact filename** the user mentioned
-   - `jamshid.mm39_final_stats.csv` or
-   - `gene_counts` or
-   - `mapping_stats`
+**USE THAT run_uuid DIRECTLY in your DATA_CALL tags. Do NOT search for it.**
 
-3. **Use that filename in find_file call**
+1. **Read the `[CONTEXT: ...]` line** — it has the run_uuid you need
+2. **Extract the filename** from the user's message (e.g., "parse jamshid.mm39_final_stats.csv")  
+3. **Execute find_file IMMEDIATELY** with no explanation:
    ```
-   [[DATA_CALL: service=server4, tool=find_file, run_uuid={uuid}, file_name=jamshid.mm39_final_stats.csv]]
+   [[DATA_CALL: service=server4, tool=find_file, run_uuid={uuid_from_context}, file_name=jamshid.mm39_final_stats.csv]]
    ```
 
 4. **Continue with STEP 1-5 below** to find and parse the file
