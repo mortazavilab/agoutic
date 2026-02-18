@@ -17,3 +17,4 @@ mcp>=0.9.0
 # Optional: Additional utilities
 python-multipart>=0.0.6  # For file uploads if needed
 aiofiles>=23.0.0         # For async file operations
+pandas>=2.0.0            # For CSV/TSV DataFrame parsing and analysis

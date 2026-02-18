@@ -2189,19 +2189,40 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 # All errors or empty — show errors directly, no second pass
                 clean_markdown += formatted_data
         
-        # 7. Save AGENT_PLAN (The Text)
+        # 7. Extract any parsed DataFrames from tool results so the UI
+        #    can render them interactively with st.dataframe.
+        _embedded_dataframes = {}
+        for _src_key, _src_results in all_results.items():
+            for _r in _src_results:
+                if _r.get("tool") in ("parse_csv_file", "parse_bed_file") and "data" in _r:
+                    _rd = _r["data"]
+                    if isinstance(_rd, dict) and _rd.get("data"):
+                        _fname = _rd.get("file_path") or _r["params"].get("file_path", "unknown")
+                        # Keep only the basename for display
+                        _fname = _fname.rsplit("/", 1)[-1] if "/" in _fname else _fname
+                        _embedded_dataframes[_fname] = {
+                            "columns": _rd.get("columns", []),
+                            "data": _rd["data"],          # list of row-dicts
+                            "row_count": _rd.get("row_count", len(_rd["data"])),
+                            "metadata": _rd.get("metadata", {}),
+                        }
+
+        # 8. Save AGENT_PLAN (The Text)
         # Status is DONE because the text itself is just informational. 
         # The flow control happens in the gate block below.
         _emit_progress(req.request_id, "done", "Complete")
+        _plan_payload = {
+            "markdown": clean_markdown, 
+            "skill": active_skill,
+            "model": engine.model_name,
+        }
+        if _embedded_dataframes:
+            _plan_payload["_dataframes"] = _embedded_dataframes
         agent_block = _create_block_internal(
             session,
             req.project_id,
             "AGENT_PLAN",
-            {
-                "markdown": clean_markdown, 
-                "skill": active_skill,  # Store the active skill
-                "model": engine.model_name
-            },
+            _plan_payload,
             status="DONE",
             owner_id=user.id
         )
@@ -3148,6 +3169,7 @@ async def parse_csv_file(
 ):
     """
     Parse CSV/TSV file into structured data.
+    Returns column stats, dtypes, and row data.
     """
     user = request.state.user
     require_run_uuid_access(run_uuid, user)
@@ -3157,6 +3179,7 @@ async def parse_csv_file(
         file_path=file_path,
         max_rows=max_rows,
     )
+
 
 @app.get("/analysis/files/parse/bed")
 async def parse_bed_file(
