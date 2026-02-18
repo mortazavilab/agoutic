@@ -71,10 +71,28 @@ def _format_data(
     """Format a single data result based on its type and column config."""
 
     if isinstance(data, list):
-        result = f"Found {len(data)} result(s):\n\n"
+        total = len(data)
+        result = f"Found {total} result(s):\n\n"
 
         if data and isinstance(data[0], dict) and table_columns:
-            # Render as a table using configured columns
+            # ── Summary first so the LLM always sees the totals even when the
+            #    row table is truncated by MAX_DATA_CHARS downstream. ──────────
+            if count_field:
+                counts = Counter()
+                for item in data:
+                    val = item.get(count_field, "Unknown")
+                    if val:
+                        counts[val] += 1
+
+                if counts:
+                    result += f"**📊 Summary: {total} total, {len(counts)} unique {count_label}(s)**\n\n"
+                    result += f"| {count_label.title()} | Count |\n"
+                    result += "|---|---|\n"
+                    for val, count in counts.most_common():
+                        result += f"| {val} | {count} |\n"
+                    result += f"\n**Total: {total} results**\n\n"
+
+            # ── Full row table (may be truncated downstream) ─────────────────
             headers = [col[0] for col in table_columns]
             result += "| " + " | ".join(headers) + " |\n"
             result += "|" + "|".join(["---"] * len(headers)) + "|\n"
@@ -89,21 +107,6 @@ def _format_data(
                     row_values.append(str(value))
                 result += "| " + " | ".join(row_values) + " |\n"
 
-            # Auto-generate summary by count_field
-            if count_field:
-                counts = Counter()
-                for item in data:
-                    val = item.get(count_field, "Unknown")
-                    if val:
-                        counts[val] += 1
-
-                if counts:
-                    result += f"\n**📊 Summary: {len(counts)} unique {count_label}(s)**\n\n"
-                    result += f"| {count_label.title()} | Count |\n"
-                    result += "|---|---|\n"
-                    for val, count in counts.most_common():
-                        result += f"| {val} | {count} |\n"
-                    result += f"\n**Total: {len(data)} results**\n"
         elif data:
             # No table columns configured or items are not dicts — render as list
             for item in data:

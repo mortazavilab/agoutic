@@ -106,6 +106,36 @@ def get_block_payload(block: ProjectBlock) -> dict:
     """Helper to get payload as dict from payload_json"""
     return json.loads(block.payload_json) if block.payload_json else {}
 
+# Mapping from user-message fragments to canonical ENCODE assay_title values.
+# Used both for auto-generating filtered DATA_CALLs and for server-side
+# dataframe filtering when the previous result set is injected as context.
+_ENCODE_ASSAY_ALIASES: dict[str, str] = {
+    "long read rna": "long read RNA-seq",
+    "long-read rna": "long read RNA-seq",
+    "long read rna-seq": "long read RNA-seq",
+    "chip-seq": "TF ChIP-seq",
+    "chipseq": "TF ChIP-seq",
+    "tf chip": "TF ChIP-seq",
+    "histone chip": "Histone ChIP-seq",
+    "atac-seq": "ATAC-seq",
+    "atacseq": "ATAC-seq",
+    "atac seq": "ATAC-seq",
+    "dnase-seq": "DNase-seq",
+    "dnase seq": "DNase-seq",
+    "rna-seq": "total RNA-seq",
+    "rnaseq": "total RNA-seq",
+    "polya plus rna": "polyA plus RNA-seq",
+    "polya rna": "polyA plus RNA-seq",
+    "shrna rna": "shRNA RNA-seq",
+    "crispr rna": "CRISPR RNA-seq",
+    "eclip": "eCLIP",
+    "clip-seq": "eCLIP",
+    "hi-c": "in situ Hi-C",
+    "hic": "in situ Hi-C",
+    "wgbs": "WGBS",
+    "rrbs": "RRBS",
+}
+
 
 def _correct_tool_routing(tool: str, params: dict, user_message: str,
                           conversation_history: list | None = None) -> tuple[str, dict]:
@@ -364,8 +394,9 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     if accessions and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
         # Determine which tool based on what the user is asking
         file_keywords = ["bam", "fastq", "file", "files", "pod5", "tar", "bigwig",
-                         "download", "available", "methylated", "accessions",
-                         "alignments"]
+                         "download", "available", "accessions", "alignments"]
+        # Note: "methylated" removed from file_keywords — it's a follow-up filter
+        # handled by _inject_job_context, not a new fetch trigger.
         summary_keywords = ["summary", "how many files", "file size"]
         metadata_keywords = ["detail", "metadata", "info", "what is", "tell me about",
                             "describe", "experiment"]
@@ -395,12 +426,21 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
 
     # Detect biosample searches (no accession but mentions cell lines/tissues)
     elif skill_key in ("ENCODE_Search", "ENCODE_LongRead") and not accessions:
+        # Detect assay-type filter in user message using the module-level map.
+        detected_assay: str | None = None
+        for alias, canonical in _ENCODE_ASSAY_ALIASES.items():
+            if alias in msg_lower:
+                detected_assay = canonical
+                break
+
         # Check current message first for explicit biosample mentions
         for keyword, (term, organism) in biosamples.items():
             if keyword in msg_lower:
                 params = {"search_term": term}
                 if organism:
                     params["organism"] = organism
+                if detected_assay:
+                    params["assay_title"] = detected_assay
                 calls.append({
                     "source_type": "consortium", "source_key": "encode",
                     "tool": "search_by_biosample", "params": params,
@@ -408,9 +448,11 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 break
 
         # If no biosample in current message but user used referential words
-        # ("list of them", "show me those", etc.), scan conversation history
-        # for previous biosample terms so we can re-emit the same search.
-        if not calls and _has_referential and conversation_history:
+        # ("list of them", "show me those", assay-filter follow-ups, etc.),
+        # scan conversation history for previous biosample term and re-query.
+        # This handles: "how many long read RNA-seq?" or "give me their accessions"
+        # after a prior K562 search.
+        if not calls and (_has_referential or detected_assay) and conversation_history:
             for hist_msg in reversed(conversation_history[-6:]):
                 content_lower = hist_msg.get("content", "").lower()
                 for keyword, (term, organism) in biosamples.items():
@@ -418,6 +460,8 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                         params = {"search_term": term}
                         if organism:
                             params["organism"] = organism
+                        if detected_assay:
+                            params["assay_title"] = detected_assay
                         calls.append({
                             "source_type": "consortium", "source_key": "encode",
                             "tool": "search_by_biosample", "params": params,
@@ -520,14 +564,15 @@ def _extract_job_context_from_history(conversation_history: list | None) -> dict
 
 
 def _inject_job_context(user_message: str, active_skill: str,
-                        conversation_history: list | None) -> str:
+                        conversation_history: list | None,
+                        history_blocks: list | None = None) -> str:
     """
     Inject relevant conversational context into the user message so the LLM
     can maintain continuity without having to parse conversation history itself.
 
     Covers:
     - Dogme skills: inject UUID and work directory
-    - ENCODE skills: inject previous biosample/search context for follow-ups
+    - ENCODE skills: inject previous dataframe rows for follow-up filter questions
     """
     if not conversation_history:
         return user_message
@@ -560,24 +605,171 @@ def _inject_job_context(user_message: str, active_skill: str,
 
         if not has_accession and not has_biosample:
             # No new subject in message — this is a follow-up question.
-            # Strategy: always inject the most recent <details> data so the
-            # LLM can answer from it (e.g. "what are the accessions for the
-            # long read RNA-seq samples?" after a C2C12 search).
-            # If no <details> data found, fall back to biosample context.
+            # PREFERRED: inject dataframe rows from the most recent AGENT_PLAN
+            # block that has _dataframes — this gives the LLM the full, accurate
+            # tabular data rather than the potentially truncated <details> text.
+            # Detect assay filter in the current message so we can
+            # pre-filter dataframe rows server-side (reliable) instead of
+            # asking the LLM to filter a large table (unreliable).
+            _msg_lower_enc = user_message.lower()
+            _assay_filter: str | None = None
+            for _alias, _canonical in _ENCODE_ASSAY_ALIASES.items():
+                if _alias in _msg_lower_enc:
+                    _assay_filter = _canonical
+                    break
+
+            # Detect output_type filter (for file follow-ups like
+            # "which are methylated reads?", "show me unfiltered alignments")
+            _output_type_filter: str | None = None
+            _output_type_aliases: dict[str, str] = {
+                "methylated reads": "methylated reads",
+                "unfiltered alignments": "unfiltered alignments",
+                "filtered alignments": "filtered alignments",
+                "alignments": "alignments",
+                "signal p-value": "signal p-value",
+                "fold change over control": "fold change over control",
+                "peaks": "peaks",
+                "conservative idr thresholded peaks": "conservative IDR thresholded peaks",
+                "optimal idr thresholded peaks": "optimal IDR thresholded peaks",
+                "transcriptome alignments": "transcriptome alignments",
+                "gene quantifications": "gene quantifications",
+                "transcript quantifications": "transcript quantifications",
+                "reads": "reads",
+            }
+            if not _assay_filter:  # only look for output_type if no assay matched
+                for _ot_alias, _ot_canonical in _output_type_aliases.items():
+                    if _ot_alias in _msg_lower_enc:
+                        _output_type_filter = _ot_canonical
+                        break
+
+            # Detect file-type context from current message AND recent user history.
+            # Used to select which per-file-type dataframe to inject.
+            # e.g. "how many bam files?" → "which are methylated reads?" → inject bam df only.
+            _known_file_types = {"bam", "fastq", "fastq.gz", "bed", "bigwig", "bigbed",
+                                 "tsv", "csv", "gtf", "txt", "hic"}
+            _file_type_filter: str | None = None
+            for _ft in _known_file_types:
+                if _ft in _msg_lower_enc:
+                    _file_type_filter = _ft
+                    break
+            if not _file_type_filter and conversation_history:
+                for _hist in reversed(conversation_history[-6:]):
+                    if _hist.get("role") != "user":
+                        continue
+                    _hist_lower = _hist.get("content", "").lower()
+                    for _ft in _known_file_types:
+                        if _ft in _hist_lower:
+                            _file_type_filter = _ft
+                            break
+                    if _file_type_filter:
+                        break
+
+            if history_blocks:
+                for blk in reversed(history_blocks):
+                    if blk.type != "AGENT_PLAN":
+                        continue
+                    blk_payload = get_block_payload(blk)
+                    dfs = blk_payload.get("_dataframes")
+                    if not dfs:
+                        continue
+                    table_sections: list[str] = []
+                    for df_name, df_data in dfs.items():
+                        rows = df_data.get("data", [])
+                        cols = df_data.get("columns", [])
+                        if not rows or not cols:
+                            continue
+
+                        # If a file-type context is known (e.g. "bam"), skip dataframes
+                        # that belong to a different file type.  Per-type df names are
+                        # like "ENCSR160HKZ bam files (12)" — check metadata first, then name.
+                        _df_file_type = df_data.get("metadata", {}).get("file_type", "")
+                        if _file_type_filter and _df_file_type:
+                            if _df_file_type.lower() != _file_type_filter.lower():
+                                continue  # skip non-matching file-type dataframes
+                        elif _file_type_filter and not _df_file_type:
+                            # No metadata tag — check df label contains the file type
+                            if _file_type_filter not in df_name.lower():
+                                continue
+
+                        # Determine filter columns
+                        _assay_col = next(
+                            (c for c in cols if c.lower() in ("assay", "assay type", "assay_type")),
+                            None
+                        )
+                        _output_type_col = next(
+                            (c for c in cols if c.lower() in ("output type", "output_type")),
+                            None
+                        )
+
+                        filtered_rows = rows
+                        filter_desc = ""
+                        if _assay_filter and _assay_col:
+                            filtered_rows = [
+                                r for r in rows
+                                if _assay_filter.lower() in str(r.get(_assay_col, "")).lower()
+                            ]
+                            filter_desc = f" filtered to assay='{_assay_filter}'"
+                            if not filtered_rows:
+                                continue
+                        elif _output_type_filter and _output_type_col:
+                            filtered_rows = [
+                                r for r in rows
+                                if _output_type_filter.lower() in str(r.get(_output_type_col, "")).lower()
+                            ]
+                            filter_desc = f" filtered to output_type='{_output_type_filter}'"
+                            if not filtered_rows:
+                                # No exact match — inject all rows from this (already
+                                # file-type-scoped) dataframe so the LLM can reason
+                                # accurately rather than falling through to hallucination.
+                                filtered_rows = rows
+                                filter_desc = f" (user asked for output_type='{_output_type_filter}', answer from this data)"
+                                logger.info(
+                                    "output_type filter matched 0 rows; injecting full file-type df",
+                                    df=df_name, output_type_filter=_output_type_filter,
+                                )
+
+                        # Cap at 500 rows for large unfiltered datasets
+                        MAX_DF_ROWS = 500
+                        shown = filtered_rows[:MAX_DF_ROWS]
+                        capped = len(filtered_rows) > MAX_DF_ROWS
+                        header = "| " + " | ".join(cols) + " |"
+                        sep = "|" + "|".join(["---"] * len(cols)) + "|"
+                        body_lines = [
+                            "| " + " | ".join(str(row.get(c, "")) for c in cols) + " |"
+                            for row in shown
+                        ]
+                        suffix = f"\n*({len(filtered_rows)} total rows)*" if capped else ""
+                        table_sections.append(
+                            f"**{df_name}** ({len(filtered_rows)} rows{filter_desc}):\n"
+                            + header + "\n" + sep + "\n"
+                            + "\n".join(body_lines)
+                            + suffix
+                        )
+                    if table_sections:
+                        context_line = (
+                            "[CONTEXT: This is a follow-up question. The answer "
+                            "is likely in your previous query data below. "
+                            "READ THIS DATA FIRST and answer directly from it. "
+                            "Do NOT make a new DATA_CALL — the data is already provided. "
+                            "Only make a new DATA_CALL if the data below is completely empty.]\n"
+                            "[PREVIOUS QUERY DATA:]\n"
+                            + "\n\n".join(table_sections)
+                        )
+                        return f"{context_line}\n\n{user_message}"
+
+            # FALLBACK: extract from <details> text in conversation history
             for hist_msg in reversed(conversation_history[-6:]):
                 content = hist_msg.get("content", "")
                 if hist_msg.get("role") != "assistant":
                     continue
-                # Find <details> blocks with raw query results
                 details_match = re.search(
                     r'<details>.*?<summary>.*?</summary>\s*(.*?)\s*</details>',
                     content, re.DOTALL
                 )
                 if details_match:
                     raw_data = details_match.group(1).strip()
-                    # Truncate if excessively large (keep first 4000 chars)
-                    if len(raw_data) > 4000:
-                        raw_data = raw_data[:4000] + "\n... (truncated)"
+                    if len(raw_data) > 6000:
+                        raw_data = raw_data[:6000] + "\n... (truncated)"
                     context_line = (
                         "[CONTEXT: This is a follow-up question. The answer "
                         "may be in your previous query data below. Check this "
@@ -586,41 +778,6 @@ def _inject_job_context(user_message: str, active_skill: str,
                         "NOT have what the user needs.]\n"
                         "[PREVIOUS QUERY DATA:]\n"
                         f"{raw_data}"
-                    )
-                    return f"{context_line}\n{user_message}"
-
-            # No <details> data found — fall back to biosample context injection
-            biosample_map = {
-                "k562": ("K562", "Homo sapiens"),
-                "gm12878": ("GM12878", "Homo sapiens"),
-                "hela": ("HeLa-S3", "Homo sapiens"),
-                "hepg2": ("HepG2", "Homo sapiens"),
-                "c2c12": ("C2C12", "Mus musculus"),
-                "liver": ("liver", None),
-                "brain": ("brain", None),
-                "heart": ("heart", None),
-                "kidney": ("kidney", None),
-                "lung": ("lung", None),
-            }
-            for hist_msg in reversed(conversation_history[-8:]):
-                content_lower = hist_msg.get("content", "").lower()
-                for keyword, (display_name, organism) in biosample_map.items():
-                    if keyword in content_lower:
-                        org_str = f", organism={organism}" if organism else ""
-                        context_line = (
-                            f"[CONTEXT: The user's previous search was about "
-                            f"{display_name}{org_str}. This is a follow-up question "
-                            f"about those same {display_name} results. Filter or "
-                            f"refine accordingly — do NOT search all of ENCODE.]"
-                        )
-                        return f"{context_line}\n{user_message}"
-                # Also check for ENCSR accessions in history for follow-ups
-                accessions_in_hist = re.findall(r'(ENCSR\w{6})', hist_msg.get("content", ""))
-                if accessions_in_hist:
-                    context_line = (
-                        f"[CONTEXT: The conversation involves these experiments: "
-                        f"{', '.join(dict.fromkeys(a.upper() for a in accessions_in_hist[:10]))}. "
-                        f"This is a follow-up question about those results.]"
                     )
                     return f"{context_line}\n{user_message}"
 
@@ -1802,8 +1959,10 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
 
         # Inject job context (UUID, work_dir) for Dogme skills so the LLM
         # doesn't waste time searching conversation history for known info.
+        # For ENCODE skills, inject full dataframe rows from the previous block.
         augmented_message = _inject_job_context(
-            req.message, active_skill, conversation_history
+            req.message, active_skill, conversation_history,
+            history_blocks=history_blocks
         )
         
         # 'think' talks to Ollama using the active skill and conversation history
@@ -1825,7 +1984,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 # Re-run with the new skill, injecting context for the new skill
                 engine = AgentEngine(model_key=req.model)
                 augmented_message = _inject_job_context(
-                    req.message, new_skill, conversation_history
+                    req.message, new_skill, conversation_history,
+                    history_blocks=history_blocks
                 )
                 raw_response = await run_in_threadpool(
                     engine.think, 
@@ -1889,6 +2049,32 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         has_any_tags = bool(data_call_matches or legacy_encode_matches or legacy_analysis_matches)
         auto_calls = []
         _injected_previous_data = "[PREVIOUS QUERY DATA:]" in augmented_message
+        # If the injected data was row-capped (large dataset), we still want to
+        # allow auto-generation for assay-filter follow-ups (e.g. K562 → long read RNA-seq).
+        # Detect this by checking if the injected data contained a truncation note.
+        _injected_was_capped = _injected_previous_data and "total rows)*" in augmented_message
+
+        # When we injected previous file/search data (not capped), suppress any
+        # get_files_by_type DATA_CALL tags the LLM may have emitted anyway.
+        # This prevents a fresh API call from overwriting the server-side filtered
+        # injected context (e.g. "which bam files are methylated reads?" would
+        # otherwise re-fetch all 69 files and ignore our pre-filtered injection).
+        if _injected_previous_data and not _injected_was_capped and data_call_matches:
+            _suppressed = []
+            _kept = []
+            for _m in data_call_matches:
+                _tool_name = _m.group(3)
+                if _tool_name in ("get_files_by_type", "get_experiment"):
+                    _suppressed.append(_tool_name)
+                else:
+                    _kept.append(_m)
+            if _suppressed:
+                logger.info(
+                    "Suppressed redundant DATA_CALL tags (injected data already present)",
+                    suppressed_tools=_suppressed,
+                )
+                data_call_matches = _kept
+                has_any_tags = bool(data_call_matches or legacy_encode_matches or legacy_analysis_matches)
 
         # Check for conversational references in the user's message
         _ref_words = ["them", "these", "those", "each", "all of them",
@@ -1897,7 +2083,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         _msg_lower = req.message.lower()
         _has_referential = any(w in _msg_lower for w in _ref_words)
 
-        if not has_any_tags and not _injected_previous_data:
+        if not has_any_tags and (not _injected_previous_data or _injected_was_capped):
             # Case 1: LLM produced no tags at all — auto-generate
             auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history)
             if auto_calls:
@@ -2162,12 +2348,31 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                        preview=formatted_data[:500])
 
             if has_real_data and formatted_data.strip():
-                # Cap data size to avoid overwhelming the LLM context window
+                # Cap data size to avoid overwhelming the LLM context window.
+                # For large list results, keep only the header block (tool name,
+                # found-count, and the 📊 Summary table) and drop the individual
+                # rows — the full table is already stored as an embedded dataframe
+                # and will be shown interactively in the UI.
                 MAX_DATA_CHARS = 12000
                 if len(formatted_data) > MAX_DATA_CHARS:
                     logger.warning("Truncating tool results for LLM",
                                   original_size=len(formatted_data), max_size=MAX_DATA_CHARS)
-                    formatted_data = formatted_data[:MAX_DATA_CHARS] + "\n\n... (results truncated for brevity)"
+                    # Try to keep everything up to and including the 📊 Summary block
+                    _summary_end = formatted_data.find("\n**Total:")
+                    if _summary_end != -1:
+                        # Include the Total line itself
+                        _nl = formatted_data.find("\n", _summary_end + 1)
+                        _cut = _nl if _nl != -1 else _summary_end + 200
+                        formatted_data = (
+                            formatted_data[:_cut]
+                            + "\n\n*(The full result set is shown as an interactive "
+                            "dataframe above — only the summary is shown here.)*"
+                        )
+                    else:
+                        formatted_data = (
+                            formatted_data[:MAX_DATA_CHARS]
+                            + "\n\n*(Results truncated — full data in interactive dataframe above.)*"
+                        )
 
                 # Second-pass: send data to LLM for analysis/filtering/summarization
                 logger.info("Running second-pass LLM analysis", data_size=len(formatted_data))
@@ -2191,20 +2396,98 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         
         # 7. Extract any parsed DataFrames from tool results so the UI
         #    can render them interactively with st.dataframe.
+        #    This covers:
+        #      a) File-parsing tools (parse_csv_file, parse_bed_file)
+        #      b) Search/list tools that return a plain list of dicts
+        #         (search_by_biosample, search_by_target, search_by_organism,
+        #          list_experiments) — stored BEFORE markdown truncation so the
+        #         full result set is always available in the UI regardless of
+        #         how many rows the LLM saw.
+        _SEARCH_TOOLS = {
+            "search_by_biosample", "search_by_target",
+            "search_by_organism", "list_experiments",
+        }
+        _FILE_TOOLS = {"get_files_by_type"}
         _embedded_dataframes = {}
         for _src_key, _src_results in all_results.items():
+            _reg_entry = SERVICE_REGISTRY.get(_src_key) or {}
+            _table_cols = _reg_entry.get("table_columns", [])  # [(header, field_key), ...]
             for _r in _src_results:
-                if _r.get("tool") in ("parse_csv_file", "parse_bed_file") and "data" in _r:
+                _tool = _r.get("tool", "")
+                if _tool in ("parse_csv_file", "parse_bed_file") and "data" in _r:
                     _rd = _r["data"]
                     if isinstance(_rd, dict) and _rd.get("data"):
                         _fname = _rd.get("file_path") or _r["params"].get("file_path", "unknown")
-                        # Keep only the basename for display
                         _fname = _fname.rsplit("/", 1)[-1] if "/" in _fname else _fname
                         _embedded_dataframes[_fname] = {
                             "columns": _rd.get("columns", []),
-                            "data": _rd["data"],          # list of row-dicts
+                            "data": _rd["data"],
                             "row_count": _rd.get("row_count", len(_rd["data"])),
                             "metadata": _rd.get("metadata", {}),
+                        }
+                elif _tool in _FILE_TOOLS and "data" in _r:
+                    # get_files_by_type returns {"bam": [...], "fastq": [...], ...}
+                    # Store ONE dataframe per file type so follow-up queries like
+                    # "which bam files are methylated reads?" inject ONLY the bam
+                    # rows — not a merged table of all 69+ files.
+                    _rd = _r["data"]
+                    if isinstance(_rd, dict):
+                        _exp_acc = _r.get("params", {}).get("accession", "files")
+                        _cols = ["Accession", "Output Type", "Replicate", "Size", "Status"]
+                        for _ftype, _flist in _rd.items():
+                            if not isinstance(_flist, list) or not _flist:
+                                continue
+                            _rows = []
+                            for _fobj in _flist:
+                                if isinstance(_fobj, dict):
+                                    _rows.append({
+                                        "Accession": _fobj.get("accession", ""),
+                                        "Output Type": _fobj.get("output_type", ""),
+                                        "Replicate": _fobj.get("biological_replicates_formatted")
+                                                     or ", ".join(
+                                                         f"Rep {x}" for x in
+                                                         _fobj.get("biological_replicates", [])
+                                                     ),
+                                        "Size": _fobj.get("file_size", ""),
+                                        "Status": _fobj.get("status", ""),
+                                    })
+                            if _rows:
+                                _df_label = f"{_exp_acc} {_ftype} files ({len(_rows)})"
+                                _embedded_dataframes[_df_label] = {
+                                    "columns": _cols,
+                                    "data": _rows,
+                                    "row_count": len(_rows),
+                                    "metadata": {"file_type": _ftype, "accession": _exp_acc},
+                                }
+                elif _tool in _SEARCH_TOOLS and "data" in _r:
+                    _rd = _r["data"]
+                    if isinstance(_rd, list) and _rd and isinstance(_rd[0], dict):
+                        # Derive column list from registry table_columns or first row keys
+                        if _table_cols:
+                            _cols = [h for h, _ in _table_cols]
+                            _rows = [
+                                {h: (item.get(k) if not isinstance(item.get(k), list)
+                                     else ", ".join(str(v) for v in item.get(k, [])))
+                                 for h, k in _table_cols}
+                                for item in _rd
+                            ]
+                        else:
+                            _cols = list(_rd[0].keys())
+                            _rows = _rd
+                        _params = _r.get("params", {})
+                        _label = _tool.replace("_", " ").title()
+                        if _params.get("search_term"):
+                            _label = _params["search_term"]
+                        elif _params.get("target"):
+                            _label = _params["target"]
+                        elif _params.get("organism"):
+                            _label = _params["organism"]
+                        _fname = f"{_label} ({len(_rd)} results)"
+                        _embedded_dataframes[_fname] = {
+                            "columns": _cols,
+                            "data": _rows,
+                            "row_count": len(_rd),
+                            "metadata": {},
                         }
 
         # 8. Save AGENT_PLAN (The Text)

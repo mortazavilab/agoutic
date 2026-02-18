@@ -1,5 +1,48 @@
 # Changelog - February 2026
 
+## [Unreleased] - 2026-02-18
+
+### Fixed — ENCODE File Query & Follow-up Filter Accuracy
+
+- **`get_file_types` aliased to `get_files_by_type`**
+  - Problem: LLM occasionally called `get_file_types` (returns only `["bam", "bed bed3+", "tar"]` — type names only) instead of `get_files_by_type` (returns full file metadata per type). This caused counts like "1 BAM file" instead of "12 BAM files" and no dataframe.
+  - Fix: Added `get_file_types` → `get_files_by_type` alias in the tool alias map so any call to the wrong tool is silently corrected before execution.
+  - Applied to: [server2/config.py](server2/config.py)
+
+- **Per-file-type dataframes instead of one merged table**
+  - Problem: All file types (bam, bed, tar, fastq, etc.) were flattened into a single 69-row table with a "File Type" column. Follow-up queries like "which BAM files are methylated reads?" injected all 69 rows and the LLM returned results from every file type.
+  - Fix: `get_files_by_type` results are now stored as **one dataframe per file type** (e.g. `"ENCSR160HKZ bam files (12)"`, `"ENCSR160HKZ bed bed3+ files (54)"`), each tagged with `metadata.file_type`. The UI renders them as separate expandable tables.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **File-type-scoped context injection for follow-up queries**
+  - Problem: "which of the BAM files are methylated reads?" injected all file-type dataframes, so the LLM received 69 rows across BED/tar/etc. and hallucinated or mixed results from bed files.
+  - Fix: `_inject_job_context` now detects the file-type context from the current message or recent conversation history (e.g. "bam" from "how many bam files?") and skips dataframes whose `metadata.file_type` does not match. The LLM receives **only the 12 BAM rows**.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Suppression of redundant `get_files_by_type` DATA_CALL tags**
+  - Problem: Even after correct context injection, the LLM still emitted `[[DATA_CALL: ... get_files_by_type]]` for follow-up filter queries (because words like "bam" and "accessions" appear in the message), triggering a fresh API fetch that overwrote the injected filtered data.
+  - Fix: When `_injected_previous_data` is true and not row-capped, any `get_files_by_type` or `get_experiment` DATA_CALL tags emitted by the LLM are dropped before execution.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Removed "methylated" from `_auto_generate_data_calls` file keywords**
+  - "methylated" was in the keyword list that triggers auto-generation of `get_files_by_type` calls, causing the system to re-fetch all files on any follow-up that mentioned methylation, ignoring injected context.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **ENCODE search answer quality — LLM response accuracy**
+  - Problem: LLM gave wrong counts (e.g. "3 experiments" instead of 2503), showed markdown pipe-tables instead of interactive dataframes, reproduced thousands of rows from memory causing timeouts, and answered follow-up assay/output-type filter questions by hallucinating accessions from truncated `<details>` text.
+  - Fixes applied across multiple iterations:
+    - `analyze_results` prompt rewritten: prose-only for counts, aggregation-only tables allowed, ≤200 word limit, explicit "do NOT reproduce rows"
+    - Summary table now written **before** raw rows in `result_formatter.py` so LLM always sees totals even when the row table is truncated by `MAX_DATA_CHARS`
+    - Full search results stored in `_embedded_dataframes` before truncation; UI renders them as `st.dataframe` with column filter, row cap, and download button
+    - UI rendering order: LLM answer → dataframe (expanded) → raw details (collapsed)
+    - Streamlit widget key sanitization via `re.sub(r"[^a-zA-Z0-9_]", "_", ...)` to prevent silent widget skipping
+    - `_inject_job_context` reads `_dataframes` directly from the most recent AGENT_PLAN block payload instead of extracting from `<details>` text (which was capped at 4000–6000 chars)
+    - Server-side assay-type row filtering using `_ENCODE_ASSAY_ALIASES` (module-level map) so "how many long read RNA-seq?" after a K562 search injects only matching rows
+    - `_auto_generate_data_calls` uses `_ENCODE_ASSAY_ALIASES` to re-query with `assay_title=` when the dataset is too large to filter in-memory
+  - Applied to: [server1/app.py](server1/app.py), [server1/agent_engine.py](server1/agent_engine.py), [server2/result_formatter.py](server2/result_formatter.py), [ui/app.py](ui/app.py), [skills/ENCODE_Search.md](skills/ENCODE_Search.md)
+
+---
+
 ## [Unreleased] - 2026-02-17
 
 ### Fixed — 403 "You do not have access to this project" on Chat

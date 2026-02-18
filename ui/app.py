@@ -344,6 +344,153 @@ def get_job_debug_info(run_uuid):
     return None
 
 
+def _render_md_with_dataframes(md: str, block_id: str, section: str):
+    """Render a markdown string, replacing any pipe tables with st.dataframe.
+
+    The function splits the markdown on table blocks (contiguous lines that
+    start with '|') and renders non-table text via st.markdown while each
+    table block becomes an interactive dataframe.
+    """
+    import re as _re
+
+    lines = md.splitlines(keepends=True)
+    buf_text: list[str] = []
+    buf_table: list[str] = []
+    table_index = [0]
+
+    def flush_text():
+        chunk = "".join(buf_text).strip()
+        if chunk:
+            st.markdown(chunk)
+        buf_text.clear()
+
+    def flush_table():
+        raw = "".join(buf_table)
+        rows = [l for l in buf_table if l.strip() and not _re.match(r"^\s*\|[-| :]+\|\s*$", l)]
+        if not rows:
+            buf_table.clear()
+            return
+        try:
+            import io
+            import pandas as _pd
+            # Parse header and data rows
+            all_rows = [l.strip() for l in buf_table if l.strip()]
+            # Header is first row, separator is second, rest are data
+            header_row = all_rows[0]
+            data_rows = [r for r in all_rows[2:] if r.startswith("|")]
+            parse_row = lambda r: [c.strip() for c in r.strip("|").split("|")]
+            headers = parse_row(header_row)
+            records = [parse_row(r) for r in data_rows]
+            # Pad short rows
+            records = [r + [""] * (len(headers) - len(r)) for r in records]
+            df = _pd.DataFrame(records, columns=headers)
+            idx = table_index[0]
+            table_index[0] += 1
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                height=min(400, 35 * len(df) + 38),
+                key=f"_mdtbl_{block_id}_{section}_{idx}",
+            )
+        except Exception:
+            # Fallback to plain markdown if parsing fails
+            st.markdown(raw)
+        buf_table.clear()
+
+    in_code_block = False
+    for line in lines:
+        stripped = line.strip()
+        # Track fenced code blocks — don't parse tables inside them
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            if buf_table:
+                flush_table()
+            buf_text.append(line)
+            continue
+
+        if in_code_block:
+            buf_text.append(line)
+            continue
+
+        is_table_line = stripped.startswith("|")
+        if is_table_line:
+            if buf_text:
+                flush_text()
+            buf_table.append(line)
+        else:
+            if buf_table:
+                flush_table()
+            buf_text.append(line)
+
+    if buf_table:
+        flush_table()
+    if buf_text:
+        flush_text()
+
+
+def _render_embedded_dataframes(dfs: dict, block_id: str):
+    """Render embedded dataframes (search results, CSV/BED files) from a block's _dataframes dict."""
+    import re as _re
+    for _df_idx, (_fname, _fdata) in enumerate(dfs.items()):
+        _rows = _fdata.get("data", [])
+        _cols = _fdata.get("columns", [])
+        _total = _fdata.get("row_count", len(_rows))
+        _meta = _fdata.get("metadata", {})
+        _df = pd.DataFrame(_rows)
+        if _df.empty:
+            st.info(f"📊 **{_fname}** — empty table")
+            continue
+        # Sanitize key: strip non-alphanumeric chars to avoid Streamlit widget key issues
+        _safe_key = _re.sub(r"[^a-zA-Z0-9_]", "_", f"{block_id}_{_df_idx}")
+        with st.expander(f"📊 **{_fname}** — {_total:,} rows × {len(_cols)} columns", expanded=True):
+            # Column statistics popover
+            _col_stats = _meta.get("column_stats", {})
+            if _col_stats:
+                with st.popover("📈 Column statistics"):
+                    for _cn, _ci in _col_stats.items():
+                        _dt = _ci.get("dtype", "")
+                        _nl = _ci.get("nulls", 0)
+                        _ln = f"**{_cn}** ({_dt})"
+                        if _nl:
+                            _ln += f" — {_nl} nulls"
+                        if "mean" in _ci and _ci["mean"] is not None:
+                            _ln += (
+                                f"  \nmin={_ci.get('min')}  max={_ci.get('max')}  "
+                                f"mean={_ci.get('mean'):.4g}  median={_ci.get('median'):.4g}"
+                            )
+                        elif "unique" in _ci:
+                            _ln += f"  \n{_ci['unique']} unique values"
+                        st.markdown(_ln)
+            # Column filter
+            if len(_cols) > 4:
+                _sel_cols = st.multiselect(
+                    "Columns to display",
+                    _cols,
+                    default=_cols,
+                    key=f"dfchat_{_safe_key}",
+                )
+            else:
+                _sel_cols = _cols
+            _disp = _df[_sel_cols] if _sel_cols else _df
+            st.dataframe(
+                _disp,
+                use_container_width=True,
+                hide_index=True,
+                height=min(400, 35 * len(_disp) + 38),
+            )
+            if _meta.get("is_truncated"):
+                st.caption(f"Showing {len(_rows):,} of {_total:,} rows")
+            _csv = _disp.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                f"⬇️ Download {_fname}",
+                data=_csv,
+                file_name=_fname,
+                mime="text/csv",
+                key=f"dldfc_{_safe_key}",
+            )
+
+
 def render_block(block, expected_project_id: str = ""):
     """Render a single block.
 
@@ -390,72 +537,24 @@ def render_block(block, expected_project_id: str = ""):
                     if details_match:
                         summary_text = details_match.group(1).strip()
                         details_body = details_match.group(2).strip()
-                        st.markdown(main_part)
+                        _render_md_with_dataframes(main_part, block_id, "main")
+                        # ── Render embedded DataFrames between answer and raw details ──
+                        _dfs = content.get("_dataframes")
+                        if _dfs and isinstance(_dfs, dict):
+                            _render_embedded_dataframes(_dfs, block_id)
                         with st.expander(summary_text, expanded=False):
-                            st.markdown(details_body)
+                            _render_md_with_dataframes(details_body, block_id, "det")
                     else:
-                        st.markdown(md)
+                        _render_md_with_dataframes(md, block_id, "main")
+                        _dfs = content.get("_dataframes")
+                        if _dfs and isinstance(_dfs, dict):
+                            _render_embedded_dataframes(_dfs, block_id)
                 else:
-                    st.markdown(md)
-
-            # ── Render embedded DataFrames (from "display filename" in chat) ──
-            _dfs = content.get("_dataframes")
-            if _dfs and isinstance(_dfs, dict):
-                for _fname, _fdata in _dfs.items():
-                    _rows = _fdata.get("data", [])
-                    _cols = _fdata.get("columns", [])
-                    _total = _fdata.get("row_count", len(_rows))
-                    _meta = _fdata.get("metadata", {})
-                    _df = pd.DataFrame(_rows)
-                    if _df.empty:
-                        st.info(f"📊 **{_fname}** — empty table")
-                        continue
-                    with st.expander(f"📊 **{_fname}** — {_total:,} rows × {len(_cols)} columns", expanded=True):
-                        # Column statistics popover
-                        _col_stats = _meta.get("column_stats", {})
-                        if _col_stats:
-                            with st.popover("📈 Column statistics"):
-                                for _cn, _ci in _col_stats.items():
-                                    _dt = _ci.get("dtype", "")
-                                    _nl = _ci.get("nulls", 0)
-                                    _ln = f"**{_cn}** ({_dt})"
-                                    if _nl:
-                                        _ln += f" — {_nl} nulls"
-                                    if "mean" in _ci and _ci["mean"] is not None:
-                                        _ln += (
-                                            f"  \nmin={_ci.get('min')}  max={_ci.get('max')}  "
-                                            f"mean={_ci.get('mean'):.4g}  median={_ci.get('median'):.4g}"
-                                        )
-                                    elif "unique" in _ci:
-                                        _ln += f"  \n{_ci['unique']} unique values"
-                                    st.markdown(_ln)
-                        # Column filter
-                        if len(_cols) > 4:
-                            _sel_cols = st.multiselect(
-                                "Columns to display",
-                                _cols,
-                                default=_cols,
-                                key=f"dfchat_{block_id}_{_fname}",
-                            )
-                        else:
-                            _sel_cols = _cols
-                        _disp = _df[_sel_cols] if _sel_cols else _df
-                        st.dataframe(
-                            _disp,
-                            use_container_width=True,
-                            hide_index=True,
-                            height=min(400, 35 * len(_disp) + 38),
-                        )
-                        if _meta.get("is_truncated"):
-                            st.caption(f"Showing {len(_rows):,} of {_total:,} rows")
-                        _csv = _disp.to_csv(index=False).encode("utf-8")
-                        st.download_button(
-                            f"⬇️ Download {_fname}",
-                            data=_csv,
-                            file_name=_fname,
-                            mime="text/csv",
-                            key=f"dldfc_{block_id}_{_fname}",
-                        )
+                    _render_md_with_dataframes(md, block_id, "main")
+                    # ── Render embedded DataFrames after plain markdown ──
+                    _dfs = content.get("_dataframes")
+                    if _dfs and isinstance(_dfs, dict):
+                        _render_embedded_dataframes(_dfs, block_id)
 
     elif btype == "APPROVAL_GATE":
         with st.chat_message("assistant", avatar="🚦"):

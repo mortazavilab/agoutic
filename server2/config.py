@@ -56,8 +56,11 @@ CONSORTIUM_REGISTRY = {
             "get_files_type": "get_files_by_type",
             "files_by_type": "get_files_by_type",
             "get_file_types_by_type": "get_files_by_type",
-            "file_types": "get_file_types",
-            "get_filetypes": "get_file_types",
+            # get_file_types only returns type-name strings, not file objects.
+            # Redirect to get_files_by_type which returns full metadata.
+            "get_file_types": "get_files_by_type",
+            "file_types": "get_files_by_type",
+            "get_filetypes": "get_files_by_type",
             "file_summary": "get_files_summary",
             "get_file_summary": "get_files_summary",
             "files_summary": "get_files_summary",
