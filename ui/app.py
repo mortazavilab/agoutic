@@ -5,6 +5,7 @@ import requests
 import datetime
 import os
 from datetime import timedelta
+import pandas as pd
 import streamlit as st
 from auth import require_auth, logout_button, make_authenticated_request, get_session_cookie
 
@@ -395,6 +396,65 @@ def render_block(block, expected_project_id: str = ""):
                         st.markdown(md)
                 else:
                     st.markdown(md)
+
+            # ── Render embedded DataFrames (from "display filename" in chat) ──
+            _dfs = content.get("_dataframes")
+            if _dfs and isinstance(_dfs, dict):
+                for _fname, _fdata in _dfs.items():
+                    _rows = _fdata.get("data", [])
+                    _cols = _fdata.get("columns", [])
+                    _total = _fdata.get("row_count", len(_rows))
+                    _meta = _fdata.get("metadata", {})
+                    _df = pd.DataFrame(_rows)
+                    if _df.empty:
+                        st.info(f"📊 **{_fname}** — empty table")
+                        continue
+                    with st.expander(f"📊 **{_fname}** — {_total:,} rows × {len(_cols)} columns", expanded=True):
+                        # Column statistics popover
+                        _col_stats = _meta.get("column_stats", {})
+                        if _col_stats:
+                            with st.popover("📈 Column statistics"):
+                                for _cn, _ci in _col_stats.items():
+                                    _dt = _ci.get("dtype", "")
+                                    _nl = _ci.get("nulls", 0)
+                                    _ln = f"**{_cn}** ({_dt})"
+                                    if _nl:
+                                        _ln += f" — {_nl} nulls"
+                                    if "mean" in _ci and _ci["mean"] is not None:
+                                        _ln += (
+                                            f"  \nmin={_ci.get('min')}  max={_ci.get('max')}  "
+                                            f"mean={_ci.get('mean'):.4g}  median={_ci.get('median'):.4g}"
+                                        )
+                                    elif "unique" in _ci:
+                                        _ln += f"  \n{_ci['unique']} unique values"
+                                    st.markdown(_ln)
+                        # Column filter
+                        if len(_cols) > 4:
+                            _sel_cols = st.multiselect(
+                                "Columns to display",
+                                _cols,
+                                default=_cols,
+                                key=f"dfchat_{block_id}_{_fname}",
+                            )
+                        else:
+                            _sel_cols = _cols
+                        _disp = _df[_sel_cols] if _sel_cols else _df
+                        st.dataframe(
+                            _disp,
+                            use_container_width=True,
+                            hide_index=True,
+                            height=min(400, 35 * len(_disp) + 38),
+                        )
+                        if _meta.get("is_truncated"):
+                            st.caption(f"Showing {len(_rows):,} of {_total:,} rows")
+                        _csv = _disp.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            f"⬇️ Download {_fname}",
+                            data=_csv,
+                            file_name=_fname,
+                            mime="text/csv",
+                            key=f"dldfc_{block_id}_{_fname}",
+                        )
 
     elif btype == "APPROVAL_GATE":
         with st.chat_message("assistant", avatar="🚦"):

@@ -5,6 +5,8 @@ Handles file discovery, parsing, and analysis of Dogme job results.
 
 import csv
 import json
+import pandas as pd
+import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
@@ -235,7 +237,7 @@ def parse_csv_file(
     max_rows: Optional[int] = None
 ) -> ParsedTableData:
     """
-    Parse CSV/TSV file.
+    Parse CSV/TSV file using pandas for proper type detection.
     
     Args:
         run_uuid: Job UUID
@@ -258,35 +260,48 @@ def parse_csv_file(
     if not full_path.exists():
         raise FileNotFoundError(f"File not found: {file_path} (absolute path: {full_path})")
     
-    # Determine delimiter
-    delimiter = '\t' if file_path.endswith('.tsv') else ','
-    
-    # Parse CSV
-    rows = []
-    columns = []
-    total_rows = 0
+    # Determine separator
+    sep = '\t' if file_path.endswith('.tsv') else ','
     
     try:
-        with open(full_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f, delimiter=delimiter)
-            columns = reader.fieldnames or []
-            
-            for i, row in enumerate(reader):
-                total_rows += 1
-                if max_rows is None or i < max_rows:
-                    rows.append(dict(row))
-                elif i == max_rows:
-                    # Continue counting but don't store rows
-                    continue
+        df = pd.read_csv(full_path, sep=sep, low_memory=False)
     except Exception as e:
         raise ValueError(f"Error parsing CSV file: {str(e)}")
     
-    # Generate metadata
+    total_rows = len(df)
+    columns = list(df.columns)
+    
+    # Build column statistics
+    col_stats = {}
+    for col in columns:
+        info: Dict[str, Any] = {"dtype": str(df[col].dtype), "nulls": int(df[col].isna().sum())}
+        if pd.api.types.is_numeric_dtype(df[col]):
+            desc = df[col].describe()
+            info.update({
+                "min": _safe_scalar(desc.get("min")),
+                "max": _safe_scalar(desc.get("max")),
+                "mean": _safe_scalar(desc.get("mean")),
+                "median": _safe_scalar(df[col].median()),
+                "std": _safe_scalar(desc.get("std")),
+            })
+        else:
+            info["unique"] = int(df[col].nunique())
+            top = df[col].value_counts().head(5)
+            info["top_values"] = {str(k): int(v) for k, v in top.items()}
+        col_stats[col] = info
+    
+    # Truncate for preview if needed
+    preview_df = df.head(max_rows) if max_rows else df
+    # Convert to list of dicts, handling NaN/Inf
+    rows = json.loads(preview_df.to_json(orient="records", default_handler=str))
+    
     metadata = {
-        "delimiter": delimiter,
+        "separator": sep,
         "column_count": len(columns),
         "total_rows": total_rows,
-        "is_truncated": max_rows is not None and total_rows > max_rows
+        "is_truncated": max_rows is not None and total_rows > max_rows,
+        "column_stats": col_stats,
+        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
     }
     
     return ParsedTableData(
@@ -298,6 +313,15 @@ def parse_csv_file(
         preview_rows=len(rows),
         metadata=metadata
     )
+
+
+def _safe_scalar(val) -> Any:
+    """Convert numpy scalar to Python native for JSON serialisation."""
+    if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
+        return None
+    if hasattr(val, "item"):
+        return val.item()
+    return val
 
 
 # ==================== BED File Parsing ====================
