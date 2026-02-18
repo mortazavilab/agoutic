@@ -122,6 +122,11 @@ _ENCODE_ASSAY_ALIASES: dict[str, str] = {
     "atac seq": "ATAC-seq",
     "dnase-seq": "DNase-seq",
     "dnase seq": "DNase-seq",
+    "microrna-seq": "microRNA-seq",
+    "microrna seq": "microRNA-seq",
+    "mirna-seq": "microRNA-seq",
+    "mirna seq": "microRNA-seq",
+    "micro rna-seq": "microRNA-seq",
     "rna-seq": "total RNA-seq",
     "rnaseq": "total RNA-seq",
     "polya plus rna": "polyA plus RNA-seq",
@@ -565,17 +570,23 @@ def _extract_job_context_from_history(conversation_history: list | None) -> dict
 
 def _inject_job_context(user_message: str, active_skill: str,
                         conversation_history: list | None,
-                        history_blocks: list | None = None) -> str:
+                        history_blocks: list | None = None) -> tuple[str, dict, dict]:
     """
     Inject relevant conversational context into the user message so the LLM
     can maintain continuity without having to parse conversation history itself.
+
+    Returns:
+        (augmented_message, injected_dataframes, debug_info)
+        injected_dataframes is a dict suitable for merging into _embedded_dataframes.
+        It contains the server-side filtered subset so the UI can render it.
+        debug_info is a dict of diagnostic data for the UI debug panel.
 
     Covers:
     - Dogme skills: inject UUID and work directory
     - ENCODE skills: inject previous dataframe rows for follow-up filter questions
     """
     if not conversation_history:
-        return user_message
+        return user_message, {}, {}
 
     # --- Dogme skills: inject UUID and work directory ---
     dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
@@ -587,8 +598,8 @@ def _inject_job_context(user_message: str, active_skill: str,
             if context.get("work_dir"):
                 parts.append(f"work_dir={context['work_dir']}")
             context_line = f"[CONTEXT: {', '.join(parts)}]"
-            return f"{context_line}\n{user_message}"
-        return user_message
+            return f"{context_line}\n{user_message}", {}, {"skill": active_skill, "context": "dogme"}
+        return user_message, {}, {}
 
     # --- ENCODE skills: inject previous search context for follow-ups ---
     encode_skills = {"ENCODE_Search", "ENCODE_LongRead"}
@@ -614,7 +625,7 @@ def _inject_job_context(user_message: str, active_skill: str,
             _msg_lower_enc = user_message.lower()
             _assay_filter: str | None = None
             for _alias, _canonical in _ENCODE_ASSAY_ALIASES.items():
-                if _alias in _msg_lower_enc:
+                if re.search(r'\b' + re.escape(_alias) + r'\b', _msg_lower_enc):
                     _assay_filter = _canonical
                     break
 
@@ -638,33 +649,76 @@ def _inject_job_context(user_message: str, active_skill: str,
             }
             if not _assay_filter:  # only look for output_type if no assay matched
                 for _ot_alias, _ot_canonical in _output_type_aliases.items():
-                    if _ot_alias in _msg_lower_enc:
+                    if re.search(r'\b' + re.escape(_ot_alias) + r'\b', _msg_lower_enc):
                         _output_type_filter = _ot_canonical
                         break
 
-            # Detect file-type context from current message AND recent user history.
-            # Used to select which per-file-type dataframe to inject.
-            # e.g. "how many bam files?" → "which are methylated reads?" → inject bam df only.
+            # Detect file-type context from CURRENT message only.
+            # e.g. "show me the bed files" → inject bed df only.
+            # For follow-ups like "which of them are methylated reads?"
+            # (no file type in message), the last-visible-DF logic below
+            # selects the right dataframe automatically.
             _known_file_types = {"bam", "fastq", "fastq.gz", "bed", "bigwig", "bigbed",
                                  "tsv", "csv", "gtf", "txt", "hic"}
             _file_type_filter: str | None = None
             for _ft in _known_file_types:
-                if _ft in _msg_lower_enc:
+                if re.search(r'\b' + re.escape(_ft) + r'\b', _msg_lower_enc):
                     _file_type_filter = _ft
                     break
-            if not _file_type_filter and conversation_history:
-                for _hist in reversed(conversation_history[-6:]):
-                    if _hist.get("role") != "user":
+
+            # Check for explicit DF reference (e.g. "DF3", "df 3").
+            # If found, use that specific dataframe instead of guessing.
+            _target_df_id: int | None = None
+            _df_ref_match = re.search(r'\bDF\s*(\d+)\b', user_message, re.IGNORECASE)
+            if _df_ref_match:
+                _target_df_id = int(_df_ref_match.group(1))
+
+            # If no explicit DF reference and no file-type keyword in the
+            # CURRENT message, default to the most recent *visible* DF.
+            # "them" / "those" / "which of them" refers to the last table
+            # the user actually saw.
+            if _target_df_id is None and not _file_type_filter and history_blocks:
+                _best_visible_id: int | None = None
+                for _hblk in reversed(history_blocks):
+                    if _hblk.type != "AGENT_PLAN":
                         continue
-                    _hist_lower = _hist.get("content", "").lower()
-                    for _ft in _known_file_types:
-                        if _ft in _hist_lower:
-                            _file_type_filter = _ft
-                            break
-                    if _file_type_filter:
-                        break
+                    _hblk_dfs = get_block_payload(_hblk).get("_dataframes", {})
+                    for _dfd in _hblk_dfs.values():
+                        _m = _dfd.get("metadata", {})
+                        _did = _m.get("df_id")
+                        if _did is not None and _m.get("visible", False):
+                            if _best_visible_id is None or _did > _best_visible_id:
+                                _best_visible_id = _did
+                    if _best_visible_id is not None:
+                        break  # only check the most recent block with dfs
+                if _best_visible_id is not None:
+                    _target_df_id = _best_visible_id
+                    logger.info(
+                        "Auto-selected last visible DF for follow-up",
+                        df_id=_target_df_id,
+                    )
+                else:
+                    logger.info(
+                        "No visible DF found in history for auto-selection",
+                        blocks_checked=sum(1 for b in history_blocks if b.type == "AGENT_PLAN"),
+                    )
+
+            logger.info(
+                "_inject_job_context ENCODE follow-up",
+                target_df_id=_target_df_id,
+                file_type_filter=_file_type_filter,
+                assay_filter=_assay_filter,
+                output_type_filter=_output_type_filter,
+            )
 
             if history_blocks:
+                # Scan ALL history blocks (not just recent ones) for DF data.
+                # When user references "DF1" explicitly, that DF may be from
+                # much earlier in the conversation.
+                # For heuristic (no explicit DF ref), we stop at the first
+                # block with matching dataframes (most recent).
+                table_sections: list[str] = []
+                _injected_dfs: dict = {}
                 for blk in reversed(history_blocks):
                     if blk.type != "AGENT_PLAN":
                         continue
@@ -672,24 +726,31 @@ def _inject_job_context(user_message: str, active_skill: str,
                     dfs = blk_payload.get("_dataframes")
                     if not dfs:
                         continue
-                    table_sections: list[str] = []
+                    _found_in_block = False
                     for df_name, df_data in dfs.items():
                         rows = df_data.get("data", [])
                         cols = df_data.get("columns", [])
                         if not rows or not cols:
                             continue
 
-                        # If a file-type context is known (e.g. "bam"), skip dataframes
-                        # that belong to a different file type.  Per-type df names are
-                        # like "ENCSR160HKZ bam files (12)" — check metadata first, then name.
-                        _df_file_type = df_data.get("metadata", {}).get("file_type", "")
-                        if _file_type_filter and _df_file_type:
-                            if _df_file_type.lower() != _file_type_filter.lower():
-                                continue  # skip non-matching file-type dataframes
-                        elif _file_type_filter and not _df_file_type:
-                            # No metadata tag — check df label contains the file type
-                            if _file_type_filter not in df_name.lower():
+                        # DataFrame selection: by explicit DF reference OR
+                        # by file-type filter heuristic.
+                        _df_meta = df_data.get("metadata", {})
+                        _df_id = _df_meta.get("df_id")
+
+                        if _target_df_id is not None:
+                            # User referenced a specific DF — skip all others.
+                            if _df_id != _target_df_id:
                                 continue
+                        else:
+                            # Heuristic: file-type context from message/history.
+                            _df_file_type = _df_meta.get("file_type", "")
+                            if _file_type_filter and _df_file_type:
+                                if _df_file_type.lower() != _file_type_filter.lower():
+                                    continue
+                            elif _file_type_filter and not _df_file_type:
+                                if _file_type_filter not in df_name.lower():
+                                    continue
 
                         # Determine filter columns
                         _assay_col = next(
@@ -710,7 +771,17 @@ def _inject_job_context(user_message: str, active_skill: str,
                             ]
                             filter_desc = f" filtered to assay='{_assay_filter}'"
                             if not filtered_rows:
-                                continue
+                                if _target_df_id is not None:
+                                    # User explicitly referenced this DF — inject
+                                    # the full data so the LLM can confirm 0 matches
+                                    # rather than falling through to API calls.
+                                    filtered_rows = rows
+                                    filter_desc = (
+                                        f" (0 rows match assay='{_assay_filter}'"
+                                        f" — showing all {len(rows)} rows)"
+                                    )
+                                else:
+                                    continue
                         elif _output_type_filter and _output_type_col:
                             filtered_rows = [
                                 r for r in rows
@@ -739,13 +810,50 @@ def _inject_job_context(user_message: str, active_skill: str,
                             for row in shown
                         ]
                         suffix = f"\n*({len(filtered_rows)} total rows)*" if capped else ""
+                        _df_id_str = f"DF{_df_id}: " if _df_id else ""
                         table_sections.append(
-                            f"**{df_name}** ({len(filtered_rows)} rows{filter_desc}):\n"
+                            f"**{_df_id_str}{df_name}** ({len(filtered_rows)} rows{filter_desc}):\n"
                             + header + "\n" + sep + "\n"
                             + "\n".join(body_lines)
                             + suffix
                         )
-                    if table_sections:
+                        # Build an injected dataframe for the UI to render.
+                        # If we applied a filter, use a descriptive label;
+                        # otherwise reuse the original name.
+                        if filter_desc:
+                            _inj_label = f"{df_name}{filter_desc}"
+                        else:
+                            _inj_label = df_name
+                        _injected_dfs[_inj_label] = {
+                            "columns": cols,
+                            "data": filtered_rows,
+                            "row_count": len(filtered_rows),
+                            "metadata": {
+                                # Copy source metadata but drop df_id so the
+                                # injected (filtered) df gets a fresh sequential ID.
+                                **{k: v for k, v in _df_meta.items() if k != "df_id"},
+                                "visible": True,
+                                "source_df_id": _df_id,  # for progress notification
+                            },
+                        }
+                        _found_in_block = True
+
+                    # For explicit DF ref: keep scanning older blocks (the
+                    # target DF may be anywhere in history).
+                    # For heuristic (no explicit ref): stop at the first
+                    # block that had matching data — it's the most recent.
+                    if _found_in_block and _target_df_id is None:
+                        break  # heuristic: most recent match is enough
+                    if _found_in_block and _target_df_id is not None:
+                        break  # explicit ref found — no need to keep scanning
+
+                if table_sections:
+                        logger.info(
+                            "_inject_job_context: injecting data",
+                            table_count=len(table_sections),
+                            injected_df_count=len(_injected_dfs),
+                            target_df_id=_target_df_id,
+                        )
                         context_line = (
                             "[CONTEXT: This is a follow-up question. The answer "
                             "is likely in your previous query data below. "
@@ -755,7 +863,27 @@ def _inject_job_context(user_message: str, active_skill: str,
                             "[PREVIOUS QUERY DATA:]\n"
                             + "\n\n".join(table_sections)
                         )
-                        return f"{context_line}\n\n{user_message}"
+                        _inject_debug = {
+                            "source": "encode_df_injection",
+                            "target_df_id": _target_df_id,
+                            "file_type_filter": _file_type_filter,
+                            "assay_filter": _assay_filter,
+                            "output_type_filter": _output_type_filter,
+                            "injected_df_names": list(_injected_dfs.keys()),
+                            "injected_row_counts": {
+                                k: v.get("row_count", len(v.get("data", [])))
+                                for k, v in _injected_dfs.items()
+                            },
+                            "table_sections_count": len(table_sections),
+                            "augmented_message_preview": context_line[:500],
+                        }
+                        return f"{context_line}\n\n{user_message}", _injected_dfs, _inject_debug
+                else:
+                    logger.info(
+                        "_inject_job_context: no matching data found in history blocks",
+                        target_df_id=_target_df_id,
+                        file_type_filter=_file_type_filter,
+                    )
 
             # FALLBACK: extract from <details> text in conversation history
             for hist_msg in reversed(conversation_history[-6:]):
@@ -779,9 +907,9 @@ def _inject_job_context(user_message: str, active_skill: str,
                         "[PREVIOUS QUERY DATA:]\n"
                         f"{raw_data}"
                     )
-                    return f"{context_line}\n{user_message}"
+                    return f"{context_line}\n{user_message}", {}, {"source": "fallback_details"}
 
-    return user_message
+    return user_message, {}, {}
 
 
 
@@ -1054,7 +1182,6 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         params["input_type"] = "fastq"
     
     # Detect genome from keywords - support multiple genomes
-    import re
     genome_keywords = ["human", "mouse", "hg38", "mm39", "mm10", "grch38"]
     found_genomes = set()
     
@@ -1927,7 +2054,16 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         history_result = session.execute(history_query)
         history_blocks = history_result.scalars().all()
         
-        # Build conversation history in OpenAI format
+        # Build conversation history in OpenAI format.
+        # IMPORTANT: Strip <details>…</details> blocks from assistant messages.
+        # These contain raw tool output (e.g. all 69 file rows) shown to the
+        # user via a collapsible widget.  If we leave them in conversation
+        # history, the LLM sees the FULL unfiltered data from a previous turn
+        # and ignores the server-side filtered [PREVIOUS QUERY DATA:] injected
+        # by _inject_job_context — causing wrong follow-up answers.
+        _DETAILS_RE = re.compile(
+            r'\s*---\s*\n\s*<details>.*?</details>', re.DOTALL
+        )
         conversation_history = []
         for block in history_blocks[:-1]:  # Exclude the message we just added
             block_payload = get_block_payload(block)
@@ -1937,9 +2073,13 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     "content": block_payload.get("text", "")
                 })
             elif block.type == "AGENT_PLAN":
+                _md = block_payload.get("markdown", "")
+                # Remove raw data <details> blocks — the filtered data
+                # will be injected by _inject_job_context when needed.
+                _md = _DETAILS_RE.sub("", _md)
                 conversation_history.append({
                     "role": "assistant",
-                    "content": block_payload.get("markdown", "")
+                    "content": _md
                 })
         
         # 2. Run the Brain (in a thread so it doesn't block the server)
@@ -1950,6 +2090,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # 2a. Pre-LLM skill switch detection — catch obvious mismatches
         # before wasting time on an LLM call with the wrong skill.
         auto_skill = _auto_detect_skill_switch(req.message, active_skill)
+        _pre_llm_skill = active_skill  # Track for debug
         if auto_skill and auto_skill in SKILLS_REGISTRY:
             logger.info("Auto-detected skill switch before LLM call",
                        from_skill=active_skill, to_skill=auto_skill)
@@ -1960,10 +2101,32 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # Inject job context (UUID, work_dir) for Dogme skills so the LLM
         # doesn't waste time searching conversation history for known info.
         # For ENCODE skills, inject full dataframe rows from the previous block.
-        augmented_message = _inject_job_context(
+        augmented_message, _injected_dfs, _inject_debug = _inject_job_context(
             req.message, active_skill, conversation_history,
             history_blocks=history_blocks
         )
+
+        # Notify user when answering from a previously fetched dataframe
+        if _injected_dfs:
+            # Show the SOURCE DF IDs (from original dataframes), not the
+            # injected copy IDs (which don't have IDs yet).
+            _df_ref_match_notify = re.search(r'\bDF\s*(\d+)\b', req.message, re.IGNORECASE)
+            if _df_ref_match_notify:
+                _notify_ids = [f"DF{_df_ref_match_notify.group(1)}"]
+            else:
+                # Try to find source df_id from the injected metadata's
+                # original context (we stored source_df_id for this purpose)
+                _notify_ids = []
+                for _d in _injected_dfs.values():
+                    _src_id = _d.get("metadata", {}).get("source_df_id")
+                    if _src_id:
+                        _notify_ids.append(f"DF{_src_id}")
+                if not _notify_ids:
+                    _notify_ids = list(_injected_dfs.keys())[:2]
+            _emit_progress(
+                req.request_id, "context",
+                f"Answering from previous data ({', '.join(_notify_ids)})..."
+            )
         
         # 'think' talks to Ollama using the active skill and conversation history
         raw_response = await run_in_threadpool(
@@ -1972,18 +2135,24 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             active_skill,
             conversation_history
         )
+        _pre_switch_skill = active_skill  # Track for debug
         
         # 3. Parse for Skill Switch Tag
-        import re
         skill_switch_match = re.search(r'\[\[SKILL_SWITCH_TO:\s*(\w+)\]\]', raw_response)
+        _skill_switch_debug = {
+            "tag_found": bool(skill_switch_match),
+            "pre_switch_skill": _pre_switch_skill,
+        }
         if skill_switch_match:
             new_skill = skill_switch_match.group(1)
+            _skill_switch_debug["requested_skill"] = new_skill
+            _skill_switch_debug["in_registry"] = new_skill in SKILLS_REGISTRY
             if new_skill in SKILLS_REGISTRY:
                 logger.info("Agent switching skill", from_skill=active_skill, to_skill=new_skill)
                 _emit_progress(req.request_id, "switching", f"Switching to {new_skill} skill...")
                 # Re-run with the new skill, injecting context for the new skill
                 engine = AgentEngine(model_key=req.model)
-                augmented_message = _inject_job_context(
+                augmented_message, _injected_dfs, _inject_debug = _inject_job_context(
                     req.message, new_skill, conversation_history,
                     history_blocks=history_blocks
                 )
@@ -1994,6 +2163,10 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     conversation_history
                 )
                 active_skill = new_skill  # Update the skill for the response
+                _skill_switch_debug["switched"] = True
+                _skill_switch_debug["new_response_preview"] = raw_response[:200]
+        _skill_switch_debug["post_switch_skill"] = active_skill
+        _inject_debug["skill_switch"] = _skill_switch_debug
 
         
         # 4. Parse the "Approval Gate Tag"
@@ -2054,27 +2227,30 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # Detect this by checking if the injected data contained a truncation note.
         _injected_was_capped = _injected_previous_data and "total rows)*" in augmented_message
 
-        # When we injected previous file/search data (not capped), suppress any
-        # get_files_by_type DATA_CALL tags the LLM may have emitted anyway.
-        # This prevents a fresh API call from overwriting the server-side filtered
-        # injected context (e.g. "which bam files are methylated reads?" would
-        # otherwise re-fetch all 69 files and ignore our pre-filtered injection).
-        if _injected_previous_data and not _injected_was_capped and data_call_matches:
+        # When we actually injected data into context (not capped), suppress
+        # ALL DATA_CALL / legacy ENCODE_CALL tags the LLM may have emitted.
+        # The injected context already contains the answer — any API call is
+        # redundant and often wrong (e.g. the LLM passes "DF1" as a literal
+        # search term).  Only suppress when _injected_dfs is non-empty, meaning
+        # we found a matching DF.  If the user referenced a DF that doesn't
+        # exist (e.g. DF55), _injected_dfs will be empty and we should let the
+        # DATA_CALL proceed normally.
+        if _injected_dfs and not _injected_was_capped:
             _suppressed = []
-            _kept = []
-            for _m in data_call_matches:
-                _tool_name = _m.group(3)
-                if _tool_name in ("get_files_by_type", "get_experiment"):
-                    _suppressed.append(_tool_name)
-                else:
-                    _kept.append(_m)
+            if data_call_matches:
+                _suppressed.extend(m.group(3) for m in data_call_matches)
+                data_call_matches = []
+            if legacy_encode_matches:
+                _suppressed.extend(f"legacy:{m.group(1)}" for m in legacy_encode_matches)
+                legacy_encode_matches = []
             if _suppressed:
                 logger.info(
-                    "Suppressed redundant DATA_CALL tags (injected data already present)",
+                    "Suppressed ALL DATA_CALL tags (injected data already present)",
                     suppressed_tools=_suppressed,
                 )
-                data_call_matches = _kept
                 has_any_tags = bool(data_call_matches or legacy_encode_matches or legacy_analysis_matches)
+                _inject_debug["suppressed_calls"] = _suppressed
+            _inject_debug["injected_was_capped"] = _injected_was_capped
 
         # Check for conversational references in the user's message
         _ref_words = ["them", "these", "those", "each", "all of them",
@@ -2434,6 +2610,14 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     if isinstance(_rd, dict):
                         _exp_acc = _r.get("params", {}).get("accession", "files")
                         _cols = ["Accession", "Output Type", "Replicate", "Size", "Status"]
+                        # Detect which file type(s) the user asked about so we
+                        # only show those tables prominently in the UI.  All
+                        # tables are still stored for follow-up queries.
+                        _msg_lower_ft = req.message.lower()
+                        _asked_file_types: set[str] = set()
+                        for _candidate_ft in _rd.keys():
+                            if _candidate_ft.lower().split()[0] in _msg_lower_ft:
+                                _asked_file_types.add(_candidate_ft)
                         for _ftype, _flist in _rd.items():
                             if not isinstance(_flist, list) or not _flist:
                                 continue
@@ -2453,11 +2637,19 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                                     })
                             if _rows:
                                 _df_label = f"{_exp_acc} {_ftype} files ({len(_rows)})"
+                                # Mark as visible if user asked about this type
+                                # (or all visible if no specific type mentioned).
+                                _is_visible = (not _asked_file_types
+                                               or _ftype in _asked_file_types)
                                 _embedded_dataframes[_df_label] = {
                                     "columns": _cols,
                                     "data": _rows,
                                     "row_count": len(_rows),
-                                    "metadata": {"file_type": _ftype, "accession": _exp_acc},
+                                    "metadata": {
+                                        "file_type": _ftype,
+                                        "accession": _exp_acc,
+                                        "visible": _is_visible,
+                                    },
                                 }
                 elif _tool in _SEARCH_TOOLS and "data" in _r:
                     _rd = _r["data"]
@@ -2494,6 +2686,33 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # Status is DONE because the text itself is just informational. 
         # The flow control happens in the gate block below.
         _emit_progress(req.request_id, "done", "Complete")
+        # Merge any dataframes produced by _inject_job_context (server-side
+        # filtered follow-up results) into the embedded dataframes dict so
+        # the UI renders them as interactive tables.
+        if _injected_dfs:
+            _embedded_dataframes.update(_injected_dfs)
+
+        # Assign sequential DF IDs (DF1, DF2, ...) to VISIBLE dataframes only.
+        # Non-visible DFs (e.g. tar/bed when user asked about bam) don't get
+        # numbered IDs — they appear collapsed inside raw query details.
+        # Scan history to find the highest existing ID, then continue from there.
+        _next_df_id = 1
+        for _hblk in history_blocks[:-1]:  # exclude the current USER_MESSAGE
+            if _hblk.type == "AGENT_PLAN":
+                _hblk_dfs = get_block_payload(_hblk).get("_dataframes", {})
+                for _dfd in _hblk_dfs.values():
+                    _existing_id = _dfd.get("metadata", {}).get("df_id")
+                    if isinstance(_existing_id, int):
+                        _next_df_id = max(_next_df_id, _existing_id + 1)
+        for _df_data in _embedded_dataframes.values():
+            _meta = _df_data.setdefault("metadata", {})
+            if _meta.get("df_id"):
+                continue  # already has an ID (e.g. injected df)
+            if _meta.get("visible", True):  # default True for DFs without flag
+                _meta["df_id"] = _next_df_id
+                _next_df_id += 1
+            # Non-visible DFs intentionally get no df_id
+
         _plan_payload = {
             "markdown": clean_markdown, 
             "skill": active_skill,
@@ -2501,6 +2720,26 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         }
         if _embedded_dataframes:
             _plan_payload["_dataframes"] = _embedded_dataframes
+        # Attach debug info for the UI debug panel
+        _debug_payload = dict(_inject_debug)  # copy the injection debug info
+        _debug_payload["has_injected_dfs"] = bool(_injected_dfs)
+        _debug_payload["injected_previous_data"] = _injected_previous_data
+        _debug_payload["auto_calls_count"] = len(auto_calls)
+        if auto_calls:
+            _debug_payload["auto_calls"] = [str(c) for c in auto_calls[:10]]
+        _debug_payload["llm_tags_remaining"] = {
+            "data_call": len(data_call_matches),
+            "legacy_encode": len(legacy_encode_matches),
+            "legacy_analysis": len(legacy_analysis_matches),
+        }
+        _debug_payload["referential_words_detected"] = _has_referential
+        _debug_payload["embedded_df_count"] = len(_embedded_dataframes)
+        _debug_payload["active_skill"] = active_skill
+        _debug_payload["pre_llm_skill"] = _pre_llm_skill
+        _debug_payload["auto_skill_detected"] = auto_skill
+        _debug_payload["requested_skill"] = req.skill
+        _debug_payload["llm_raw_response_preview"] = raw_response[:800] if raw_response else ""
+        _plan_payload["_debug"] = _debug_payload
         agent_block = _create_block_internal(
             session,
             req.project_id,

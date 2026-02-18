@@ -293,6 +293,8 @@ with st.sidebar:
     model_choice = st.selectbox("Brain Model", ["default", "fast", "smart"], index=0)
     auto_refresh = st.toggle("Live Stream", value=True)
     poll_seconds = st.slider("Poll interval (sec)", 1, 5, 2)
+    debug_mode = st.toggle("🐛 Debug", value=False)
+    st.session_state["_debug_mode"] = debug_mode
     
     # DEBUG DISPLAY: Show exactly what ID the UI thinks it is using
     st.caption(f"**System ID:** `{st.session_state.active_project_id}`")
@@ -429,10 +431,25 @@ def _render_md_with_dataframes(md: str, block_id: str, section: str):
         flush_text()
 
 
-def _render_embedded_dataframes(dfs: dict, block_id: str):
-    """Render embedded dataframes (search results, CSV/BED files) from a block's _dataframes dict."""
+def _render_embedded_dataframes(dfs: dict, block_id: str, *, only_visible: bool = True):
+    """Render embedded dataframes (search results, CSV/BED files) from a block's _dataframes dict.
+
+    If ``only_visible=True`` (default), only renders dataframes that are
+    visible (have a ``df_id``).  Call with ``only_visible=False`` to render
+    the non-visible (supplementary) dataframes inside the details section.
+    """
     import re as _re
     for _df_idx, (_fname, _fdata) in enumerate(dfs.items()):
+        _meta = _fdata.get("metadata", {})
+        _df_id = _meta.get("df_id")
+        _has_id = _df_id is not None
+        # Filter: visible mode shows only DFs with IDs;
+        # non-visible mode shows only DFs without IDs.
+        if only_visible and not _has_id:
+            continue
+        if not only_visible and _has_id:
+            continue
+        _is_visible = _has_id
         _rows = _fdata.get("data", [])
         _cols = _fdata.get("columns", [])
         _total = _fdata.get("row_count", len(_rows))
@@ -443,7 +460,9 @@ def _render_embedded_dataframes(dfs: dict, block_id: str):
             continue
         # Sanitize key: strip non-alphanumeric chars to avoid Streamlit widget key issues
         _safe_key = _re.sub(r"[^a-zA-Z0-9_]", "_", f"{block_id}_{_df_idx}")
-        with st.expander(f"📊 **{_fname}** — {_total:,} rows × {len(_cols)} columns", expanded=True):
+        _df_id = _meta.get("df_id")
+        _df_prefix = f"DF{_df_id}: " if _df_id else ""
+        with st.expander(f"📊 {_df_prefix}**{_fname}** — {_total:,} rows × {len(_cols)} columns", expanded=_is_visible):
             # Column statistics popover
             _col_stats = _meta.get("column_stats", {})
             if _col_stats:
@@ -538,11 +557,14 @@ def render_block(block, expected_project_id: str = ""):
                         summary_text = details_match.group(1).strip()
                         details_body = details_match.group(2).strip()
                         _render_md_with_dataframes(main_part, block_id, "main")
-                        # ── Render embedded DataFrames between answer and raw details ──
+                        # ── Render visible DataFrames (with DF IDs) between answer and raw details ──
                         _dfs = content.get("_dataframes")
                         if _dfs and isinstance(_dfs, dict):
-                            _render_embedded_dataframes(_dfs, block_id)
+                            _render_embedded_dataframes(_dfs, block_id, only_visible=True)
                         with st.expander(summary_text, expanded=False):
+                            # Non-visible (supplementary) DFs go inside raw details
+                            if _dfs and isinstance(_dfs, dict):
+                                _render_embedded_dataframes(_dfs, block_id, only_visible=False)
                             _render_md_with_dataframes(details_body, block_id, "det")
                     else:
                         _render_md_with_dataframes(md, block_id, "main")
@@ -555,6 +577,13 @@ def render_block(block, expected_project_id: str = ""):
                     _dfs = content.get("_dataframes")
                     if _dfs and isinstance(_dfs, dict):
                         _render_embedded_dataframes(_dfs, block_id)
+
+            # ── Debug panel (only when debug toggle is on) ──
+            _debug_info = content.get("_debug")
+            if _debug_info and st.session_state.get("_debug_mode"):
+                with st.expander("🐛 Debug Info", expanded=False):
+                    import json as _json
+                    st.code(_json.dumps(_debug_info, indent=2, default=str), language="json")
 
     elif btype == "APPROVAL_GATE":
         with st.chat_message("assistant", avatar="🚦"):
@@ -1205,6 +1234,7 @@ if prompt := st.chat_input("Ask Agoutic to do something..."):
         "waiting": "⏳",
         "thinking": "🧠",
         "switching": "🔄",
+        "context": "📋",
         "tools": "🔌",
         "analyzing": "📊",
         "done": "✅",

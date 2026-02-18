@@ -2,6 +2,51 @@
 
 ## [Unreleased] - 2026-02-18
 
+### Fixed — CSV/BED File Display: LLM Gets Readable Table, DF Widget Visible
+
+- **Parsed CSV/BED data formatted as markdown table for LLM**
+  - Previously, parsed CSV data was sent to the second-pass LLM as a massive JSON blob (with `column_stats`, `dtypes`, nested metadata) causing it to respond "The query did not return the expected data." Now `_format_data` in result_formatter.py detects structured CSV/BED results (has `columns` + `data` list) and renders them as a clean markdown table — the same format the LLM can actually analyze and summarize.
+  - Applied to: [server2/result_formatter.py](server2/result_formatter.py)
+
+- **CSV/BED dataframes kept visible (reverted `visible: False`)**
+  - The previous fix of hiding CSV DFs caused the interactive widget to be buried in the details section. Since the DF widget is the primary way to display parsed file data (with column selection, sorting, download), it's now visible again. The LLM text summary and the DF widget complement each other.
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Added — Debug UI Panel
+
+- **Debug toggle in sidebar**
+  - New 🐛 Debug toggle in the sidebar enables per-response debug info display without needing server logs.
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Debug info section per AGENT_PLAN block**
+  - When debug mode is on, each assistant response shows a collapsed "🐛 Debug Info" expander with JSON diagnostic data including: target_df_id, detected filters (assay, output_type, file_type), injected DF names/row counts, suppressed API calls, LLM raw response preview, auto-generated calls, and more.
+  - Applied to: [server1/app.py](server1/app.py), [ui/app.py](ui/app.py)
+
+- **`_inject_job_context` returns 3-tuple**
+  - Now returns `(augmented_message, injected_dataframes, debug_info)` to pass diagnostic data from the injection logic through to the UI payload.
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Fixed — False Positive Filter Matching ("hic" in "which")
+
+- **Word-boundary matching for assay, output_type, and file_type filters**
+  - All three filter detection loops in `_inject_job_context` now use `re.search(r'\b...\b')` instead of plain `if alias in message` substring check. This prevents false positives like `"hic"` matching inside `"which"`, which was causing the assay filter to fire as `"in situ Hi-C"` and the file_type filter as `"hic"` on queries like "which of them are the output type methylated reads?" — completely blocking the correct `output_type_filter = "methylated reads"` from being detected.
+  - Root cause of the persistent "methylated reads" follow-up failure.
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Added — Named Dataframes (DF1, DF2, ...)
+
+- **Sequential DF IDs assigned to every dataframe**
+  - Each dataframe produced (from API calls or follow-up filters) gets a sequential ID: DF1, DF2, DF3, etc., scoped to the conversation. IDs are stored in `metadata.df_id` and persist across the session.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Explicit DF references in follow-up queries**
+  - Users can now reference a specific dataframe by ID: e.g. "filter DF3 by methylated reads" or "show me DF1". `_inject_job_context` parses `DF\d+` patterns and uses exactly that dataframe, bypassing the file-type/assay heuristic guessing that previously caused wrong dataframe selection.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **DF IDs shown in UI expander headers**
+  - Dataframe expanders now display their ID: `📊 DF3: ENCSR160HKZ bam files (12) — 12 rows × 5 columns` so users know which ID to reference.
+  - Applied to: [ui/app.py](ui/app.py)
+
 ### Fixed — ENCODE File Query & Follow-up Filter Accuracy
 
 - **`get_file_types` aliased to `get_files_by_type`**
@@ -26,6 +71,26 @@
 
 - **Removed "methylated" from `_auto_generate_data_calls` file keywords**
   - "methylated" was in the keyword list that triggers auto-generation of `get_files_by_type` calls, causing the system to re-fetch all files on any follow-up that mentioned methylation, ignoring injected context.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Stripped `<details>` raw data from conversation history sent to LLM**
+  - Problem: Even with per-file-type dataframe injection working correctly (only 12 BAM rows injected), the LLM's conversation history still contained the **full** `<details>` block from the previous turn — all 69 file rows (bam + bed + tar). The LLM read the unfiltered history instead of the filtered `[PREVIOUS QUERY DATA:]`, returning 54 BED accessions for a BAM follow-up.
+  - Fix: When building `conversation_history` from AGENT_PLAN blocks, `<details>...</details>` sections (and their preceding `---` separator) are stripped via regex. The raw data remains in the stored block payload for the UI's collapsible widget; the LLM only sees the filtered data injected by `_inject_job_context`.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Only show relevant file-type tables in the UI**
+  - Problem: "How many BAM files for ENCSR160HKZ?" showed all three file-type tables (tar, bam, bed) prominently, even though the user only asked about BAM.
+  - Fix: When storing per-file-type dataframes, the server detects which file type(s) the user asked about and tags matching dataframes with `metadata.visible = True`. The UI checks for this flag: if any dataframe is marked visible, only those are rendered; otherwise all are shown. Non-visible dataframes are still stored for follow-up queries.
+  - Applied to: [server1/app.py](server1/app.py), [ui/app.py](ui/app.py)
+
+- **Follow-up filter queries now show interactive dataframe of matching rows**
+  - Problem: "Which of them are methylated reads?" correctly filtered to 2 rows but only showed the LLM's text answer — no interactive table. The user had no way to verify the accessions.
+  - Fix: `_inject_job_context` now returns filtered dataframes alongside the augmented message. These are merged into `_embedded_dataframes` so the UI renders them as interactive `st.dataframe` tables with download button.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **DATA_CALL suppression now covers legacy `[[ENCODE_CALL:]]` tags**
+  - Problem: The LLM emitted `[[ENCODE_CALL: get_experiment, accession=ENCSR160HKZ]]` (legacy format) which bypassed the suppression block that only checked unified `[[DATA_CALL:]]` format. This caused a redundant `get_experiment` API call on follow-up questions.
+  - Fix: Suppression now filters both `data_call_matches` and `legacy_encode_matches` for tools in `{"get_files_by_type", "get_experiment"}`.
   - Applied to: [server1/app.py](server1/app.py)
 
 - **ENCODE search answer quality — LLM response accuracy**

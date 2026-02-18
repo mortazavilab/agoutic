@@ -136,9 +136,29 @@ def _format_data(
                 if first_items and "accession" in first_items[0]:
                     return _format_files_by_type(unwrapped)
 
+        # Parsed CSV/BED results — render as readable markdown table
+        # instead of JSON so the second-pass LLM can produce useful summaries.
+        if "columns" in data and "data" in data and isinstance(data["data"], list):
+            cols = data["columns"]
+            rows = data["data"]
+            fname = data.get("file_path", "")
+            row_count = data.get("row_count", len(rows))
+            result = f"**Parsed file: {fname}** ({row_count} rows × {len(cols)} columns)\n\n"
+            # Render as markdown table (cap columns for readability)
+            MAX_DISPLAY_COLS = 12
+            display_cols = cols[:MAX_DISPLAY_COLS]
+            result += "| " + " | ".join(display_cols) + " |\n"
+            result += "|" + "|".join(["---"] * len(display_cols)) + "|\n"
+            for row in rows:
+                vals = [str(row.get(c, "")) for c in display_cols]
+                result += "| " + " | ".join(vals) + " |\n"
+            if len(cols) > MAX_DISPLAY_COLS:
+                result += f"\n*({len(cols) - MAX_DISPLAY_COLS} more columns not shown)*\n"
+            return result
+
         # Generic dict — show as compact JSON (strip deeply nested objects)
         # For analysis/parsing results (Server 4), allow deeper nesting so row data is visible
-        is_analysis_data = "columns" in data or "records" in data or "preview_rows" in data
+        is_analysis_data = "records" in data or "preview_rows" in data
         depth_limit = 4 if is_analysis_data else 2
         compact = _compact_dict(data, max_depth=depth_limit)
         json_str = json.dumps(compact, indent=2)
