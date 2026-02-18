@@ -7,11 +7,12 @@ import re
 import httpx
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Path, Request
+from fastapi import FastAPI, HTTPException, Path as FastAPIPath, Request
+from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool  # To run LLM without blocking
 from pydantic import BaseModel
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func, text
 
 # ✅ Import from your package
 from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
@@ -755,7 +756,7 @@ async def get_blocks(project_id: str, request: Request, since_seq: int = 0, limi
 @app.patch("/block/{block_id}", response_model=BlockOut)
 async def update_block(
     request: Request,
-    block_id: str = Path(..., min_length=1),
+    block_id: str = FastAPIPath(..., min_length=1),
     body: BlockUpdate = ...
 ):
     user = request.state.user
@@ -2556,6 +2557,15 @@ async def list_projects(request: Request, include_archived: bool = False):
             if is_archived and not include_archived:
                 continue
 
+            # Lightweight job count from dogme_jobs table
+            try:
+                jcount = session.execute(
+                    text("SELECT COUNT(*) FROM dogme_jobs WHERE project_id = :pid"),
+                    {"pid": acc.project_id}
+                ).scalar() or 0
+            except Exception:
+                jcount = None
+
             projects.append({
                 "id": acc.project_id,
                 "name": proj.name if proj else acc.project_name,
@@ -2564,6 +2574,7 @@ async def list_projects(request: Request, include_archived: bool = False):
                 "is_public": proj.is_public if proj else False,
                 "created_at": str(proj.created_at) if proj else None,
                 "last_accessed": str(acc.last_accessed),
+                "job_count": jcount,
             })
 
         return {"projects": projects}
@@ -2672,6 +2683,362 @@ async def record_project_access(project_id: str, request: Request, project_name:
         return {"status": "ok"}
     finally:
         session.close()
+
+# =============================================================================
+# PROJECT DASHBOARD ENDPOINTS
+# =============================================================================
+
+@app.get("/projects/{project_id}/stats")
+async def get_project_stats(project_id: str, request: Request):
+    """Get detailed stats for a project: job count, file count, disk usage."""
+    user = request.state.user
+    require_project_access(project_id, user, min_role="viewer")
+
+    session = SessionLocal()
+    try:
+        from server1.config import AGOUTIC_DATA
+
+        # Get project info
+        project = session.execute(
+            select(Project).where(Project.id == project_id)
+        ).scalar_one_or_none()
+
+        # Count blocks (messages)
+        block_count = session.execute(
+            select(func.count(ProjectBlock.id)).where(ProjectBlock.project_id == project_id)
+        ).scalar() or 0
+
+        # Count conversations
+        conv_count = session.execute(
+            select(func.count(Conversation.id)).where(Conversation.project_id == project_id)
+        ).scalar() or 0
+
+        # Query dogme_jobs for this project (shared DB, raw SQL)
+        jobs_result = session.execute(text(
+            "SELECT run_uuid, sample_name, mode, status, submitted_at, "
+            "completed_at, nextflow_work_dir, user_id "
+            "FROM dogme_jobs WHERE project_id = :pid ORDER BY submitted_at DESC"
+        ), {"pid": project_id}).fetchall()
+
+        jobs = []
+        total_completed = 0
+        total_failed = 0
+        total_running = 0
+        for row in jobs_result:
+            status = row[3] or "UNKNOWN"
+            if status == "COMPLETED":
+                total_completed += 1
+            elif status == "FAILED":
+                total_failed += 1
+            elif status == "RUNNING":
+                total_running += 1
+            jobs.append({
+                "run_uuid": row[0],
+                "sample_name": row[1],
+                "mode": row[2],
+                "status": status,
+                "submitted_at": str(row[4]) if row[4] else None,
+                "completed_at": str(row[5]) if row[5] else None,
+                "work_dir": row[6],
+            })
+
+        # Calculate disk usage — scan actual work directories from dogme_jobs
+        # (handles both jailed paths and legacy server3_work paths)
+        disk_bytes = 0
+        file_count = 0
+        scanned_dirs = set()
+
+        # 1. Check jailed user project directory
+        project_dir = AGOUTIC_DATA / "users" / user.id / project_id
+        if project_dir.exists():
+            scanned_dirs.add(str(project_dir))
+            for f in project_dir.rglob("*"):
+                if f.is_file():
+                    try:
+                        disk_bytes += f.stat().st_size
+                        file_count += 1
+                    except OSError:
+                        pass
+
+        # 2. Also scan work directories recorded in dogme_jobs (covers legacy paths)
+        for job in jobs:
+            wdir = job.get("work_dir")
+            if wdir and wdir not in scanned_dirs:
+                wpath = Path(wdir)
+                if wpath.exists():
+                    scanned_dirs.add(wdir)
+                    for f in wpath.rglob("*"):
+                        if f.is_file():
+                            try:
+                                disk_bytes += f.stat().st_size
+                                file_count += 1
+                            except OSError:
+                                pass
+
+        return {
+            "project_id": project_id,
+            "name": project.name if project else project_id,
+            "is_archived": project.is_archived if project else False,
+            "created_at": str(project.created_at) if project else None,
+            "message_count": block_count,
+            "conversation_count": conv_count,
+            "jobs": jobs,
+            "job_count": len(jobs),
+            "completed_count": total_completed,
+            "failed_count": total_failed,
+            "running_count": total_running,
+            "disk_usage_bytes": disk_bytes,
+            "disk_usage_mb": round(disk_bytes / (1024 * 1024), 2),
+            "file_count": file_count,
+        }
+    finally:
+        session.close()
+
+
+@app.get("/projects/{project_id}/files")
+async def list_project_files(project_id: str, request: Request):
+    """List all files in a project — checks both jailed dir and legacy work dirs."""
+    user = request.state.user
+    require_project_access(project_id, user, min_role="viewer")
+
+    from server1.config import AGOUTIC_DATA
+
+    files = []
+    total_size = 0
+    scanned_dirs = set()
+
+    def _scan_dir(base_dir: Path, label: str = ""):
+        nonlocal total_size
+        if not base_dir.exists() or str(base_dir) in scanned_dirs:
+            return
+        scanned_dirs.add(str(base_dir))
+        for f in sorted(base_dir.rglob("*")):
+            if f.is_file():
+                try:
+                    size = f.stat().st_size
+                    total_size += size
+                    files.append({
+                        "path": str(f.relative_to(base_dir)),
+                        "name": f.name,
+                        "size_bytes": size,
+                        "extension": f.suffix,
+                        "modified": str(datetime.datetime.fromtimestamp(f.stat().st_mtime)),
+                        "source": label,
+                    })
+                except OSError:
+                    pass
+
+    # 1. Jailed user project directory
+    project_dir = AGOUTIC_DATA / "users" / user.id / project_id
+    _scan_dir(project_dir, "project")
+
+    # 2. Legacy work directories from dogme_jobs
+    session = SessionLocal()
+    try:
+        rows = session.execute(
+            text("SELECT run_uuid, nextflow_work_dir FROM dogme_jobs WHERE project_id = :pid"),
+            {"pid": project_id}
+        ).fetchall()
+        for row in rows:
+            wdir = row[1]
+            if wdir:
+                _scan_dir(Path(wdir), f"job:{row[0][:8]}")
+    except Exception:
+        pass
+    finally:
+        session.close()
+
+    return {
+        "files": files,
+        "total_size_bytes": total_size,
+        "total_size_mb": round(total_size / (1024 * 1024), 2),
+        "file_count": len(files),
+    }
+
+
+@app.get("/user/disk-usage")
+async def get_user_disk_usage(request: Request):
+    """Get total disk usage for the current user across all projects.
+    Scans both jailed user directories and legacy job work directories."""
+    user = request.state.user
+
+    from server1.config import AGOUTIC_DATA
+
+    session = SessionLocal()
+    try:
+        # Get all project IDs for this user
+        access_rows = session.execute(
+            select(ProjectAccess.project_id)
+            .where(ProjectAccess.user_id == user.id)
+        ).all()
+        project_ids = [r[0] for r in access_rows]
+
+        project_usage = []
+        total_bytes = 0
+
+        for pid in project_ids:
+            proj_bytes = 0
+            file_count = 0
+            scanned_dirs = set()
+
+            # 1. Jailed user directory
+            project_dir = AGOUTIC_DATA / "users" / user.id / pid
+            if project_dir.exists():
+                scanned_dirs.add(str(project_dir))
+                for f in project_dir.rglob("*"):
+                    if f.is_file():
+                        try:
+                            proj_bytes += f.stat().st_size
+                            file_count += 1
+                        except OSError:
+                            pass
+
+            # 2. Legacy work dirs from dogme_jobs
+            try:
+                job_rows = session.execute(
+                    text("SELECT nextflow_work_dir FROM dogme_jobs WHERE project_id = :pid"),
+                    {"pid": pid}
+                ).fetchall()
+                for row in job_rows:
+                    wdir = row[0]
+                    if wdir and wdir not in scanned_dirs:
+                        wpath = Path(wdir)
+                        if wpath.exists():
+                            scanned_dirs.add(wdir)
+                            for f in wpath.rglob("*"):
+                                if f.is_file():
+                                    try:
+                                        proj_bytes += f.stat().st_size
+                                        file_count += 1
+                                    except OSError:
+                                        pass
+            except Exception:
+                pass
+
+            total_bytes += proj_bytes
+            project_usage.append({
+                "project_id": pid,
+                "size_bytes": proj_bytes,
+                "size_mb": round(proj_bytes / (1024 * 1024), 2),
+                "file_count": file_count,
+            })
+
+        return {
+            "total_bytes": total_bytes,
+            "total_mb": round(total_bytes / (1024 * 1024), 2),
+            "projects": project_usage,
+        }
+    finally:
+        session.close()
+
+
+@app.delete("/projects/{project_id}")
+async def delete_project(project_id: str, request: Request):
+    """
+    Soft-delete a project (archives it). Only the owner can delete.
+    Does NOT remove files — use archive to hide from listing.
+    """
+    user = request.state.user
+    require_project_access(project_id, user, min_role="owner")
+
+    session = SessionLocal()
+    try:
+        project = session.execute(
+            select(Project).where(Project.id == project_id)
+        ).scalar_one_or_none()
+
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        project.is_archived = True
+        project.updated_at = datetime.datetime.utcnow()
+        session.commit()
+
+        logger.info("Project archived", project_id=project_id, user=user.email)
+        return {"status": "archived", "id": project_id}
+    finally:
+        session.close()
+
+
+@app.delete("/projects/{project_id}/permanent")
+async def delete_project_permanent(project_id: str, request: Request):
+    """
+    Permanently delete a project and all associated data:
+    conversations, messages, blocks, job_results, project_access,
+    dogme_jobs rows, and the on-disk directory.
+    Requires owner role.
+    """
+    user = request.state.user
+    require_project_access(project_id, user, min_role="owner")
+
+    session = SessionLocal()
+    try:
+        # 1. Delete conversation messages (via conversation ids)
+        conv_ids = [r[0] for r in session.execute(
+            select(Conversation.id).where(Conversation.project_id == project_id)
+        ).all()]
+        if conv_ids:
+            session.execute(
+                ConversationMessage.__table__.delete().where(
+                    ConversationMessage.conversation_id.in_(conv_ids)
+                )
+            )
+            # Delete job_results linked to those conversations
+            session.execute(
+                JobResult.__table__.delete().where(
+                    JobResult.conversation_id.in_(conv_ids)
+                )
+            )
+
+        # 2. Delete conversations
+        session.execute(
+            Conversation.__table__.delete().where(Conversation.project_id == project_id)
+        )
+
+        # 3. Delete project blocks
+        session.execute(
+            ProjectBlock.__table__.delete().where(ProjectBlock.project_id == project_id)
+        )
+
+        # 4. Delete dogme_jobs rows (cross-server table)
+        try:
+            session.execute(
+                text("DELETE FROM dogme_jobs WHERE project_id = :pid"),
+                {"pid": project_id}
+            )
+        except Exception:
+            pass  # Table may not exist yet
+
+        # 5. Delete project_access records
+        session.execute(
+            ProjectAccess.__table__.delete().where(ProjectAccess.project_id == project_id)
+        )
+
+        # 6. Delete the project record itself
+        session.execute(
+            Project.__table__.delete().where(Project.id == project_id)
+        )
+
+        session.commit()
+
+        # 7. Remove on-disk directory (best-effort)
+        import shutil
+        from server1.config import AGOUTIC_DATA
+        user_dir = AGOUTIC_DATA / "users" / str(user.id) / project_id
+        if user_dir.exists():
+            shutil.rmtree(user_dir, ignore_errors=True)
+
+        logger.info("Project permanently deleted", project_id=project_id, user=user.email)
+        return {"status": "deleted", "id": project_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        logger.error("Failed to delete project", project_id=project_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+    finally:
+        session.close()
+
 
 # =============================================================================
 # SERVER 4 ANALYSIS PROXY ENDPOINTS

@@ -2,6 +2,66 @@
 
 ## [Unreleased] - 2026-02-17
 
+### Added — Project Management & Dashboard
+
+- **Projects Dashboard Page (`ui/pages/projects.py`)**
+  - New Streamlit page with full project management UI
+  - Editable data table with checkbox columns for bulk Archive and Delete operations
+  - Columns: Name, Jobs, Size (MB), Messages, Files, Created, Last Active, Status
+  - Bulk actions: archive selected, permanently delete selected (with confirmation)
+  - Per-project detail view with 4 tabs: Stats, Jobs, Files, Conversations
+  - Inline project rename, disk usage summary at page top
+  - Applied to: [ui/pages/projects.py](ui/pages/projects.py)
+
+- **Backend Project Management Endpoints**
+  - `GET /projects/{id}/stats` — job count, disk usage, message count, conversation count, file count, full job list with details
+  - `GET /projects/{id}/files` — lists all files across jailed dirs and legacy `nextflow_work_dir` paths with size, extension, modified date
+  - `GET /user/disk-usage` — total disk usage across all projects with per-project breakdown, scans actual job work directories
+  - `DELETE /projects/{id}` — soft-delete (archive, sets `is_archived=True`)
+  - `DELETE /projects/{id}/permanent` — permanent delete: cascades through conversation_messages, job_results, conversations, project_blocks, dogme_jobs, project_access, project record, and removes on-disk directory
+  - `GET /projects` now includes `job_count` per project (lightweight query from `dogme_jobs` table)
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Enhanced Sidebar Project Switcher**
+  - Shows all projects (was limited to 5) with job count per project
+  - Search/filter box when >4 projects
+  - Archive button per project (inline, non-current projects)
+  - Current project shown in bold with pin icon
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Project Name in Chat Title**
+  - Title shows `🧬 Project Name` instead of raw UUID
+  - Falls back to truncated UUID if name lookup fails
+  - Projects cached in session state for instant title display
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Results Page Auto-Lists Jobs**
+  - Job dropdown auto-populated from current project's jobs (via `/projects/{id}/stats`)
+  - Shows status emoji, sample name, and UUID prefix per job
+  - Manual UUID input preserved as fallback
+  - Removed hardcoded example UUIDs
+  - Applied to: [ui/pages/results.py](ui/pages/results.py)
+
+### Fixed — Flicker-Free Auto-Refresh
+
+- **Page Flicker During Job Monitoring**
+  - Problem: Page visibly refreshed/flashed every 2 seconds during job monitoring — JS `window.parent.location.reload()`, `st.empty()` DOM destruction, and `time.sleep(2) + st.rerun()` all caused full-page re-execution
+  - Solution: Complete rewrite using `@st.fragment(run_every=timedelta(seconds=2))` — Streamlit's native partial-rerun that only re-executes the chat rendering function while sidebar, title, and input stay stable
+  - Removed: `st.empty()` container, JS `window.parent.location.reload()` hack, `import streamlit.components.v1`, blocking `time.sleep() + st.rerun()` loop
+  - Added: Bootstrap logic for one-time full rerun when running job first detected (to register fragment), 30-second grace window after job completion
+  - Applied to: [ui/app.py](ui/app.py)
+
+### Fixed — Disk Usage Reporting
+
+- **Disk Usage Showing 0 for All Projects**
+  - Problem: `/projects/{id}/stats`, `/projects/{id}/files`, and `/user/disk-usage` only scanned jailed path `AGOUTIC_DATA/users/{user_id}/{project_id}/` which is empty for legacy jobs
+  - Solution: All three endpoints now also scan actual `nextflow_work_dir` paths stored in `dogme_jobs` table, covering both jailed and legacy `server3_work/` directories
+  - Fixed key mismatch: files endpoint returns `size_bytes` consistently, UI handles both `size_bytes` and `size` as fallback
+  - Fixed `pathlib.Path` vs FastAPI `Path` import collision (`from fastapi import Path as FastAPIPath`)
+  - Applied to: [server1/app.py](server1/app.py), [ui/pages/projects.py](ui/pages/projects.py)
+
+## [Unreleased] - 2026-02-17
+
 ### Added — Security Hardening Sprint
 
 - **Role-Based Authorization Gates on All Endpoints**

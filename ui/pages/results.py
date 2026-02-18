@@ -29,12 +29,42 @@ st.markdown("Analyze completed Dogme job results")
 # Main interface
 st.header("Select Job")
 
-# Job UUID input
-run_uuid = st.text_input(
-    "Job UUID",
+# Auto-list jobs from the user's active project (if available)
+run_uuid = None
+_active_pid = st.session_state.get("active_project_id")
+
+try:
+    if _active_pid:
+        _stats = make_authenticated_request(
+            "GET", f"{API_URL}/projects/{_active_pid}/stats", timeout=5
+        )
+        if _stats.status_code == 200:
+            _jobs = _stats.json().get("jobs", [])
+            if _jobs:
+                _options = {}
+                for j in _jobs:
+                    _uuid = j.get("run_uuid", "")
+                    _status = j.get("status", "?")
+                    _emoji = {"COMPLETED": "✅", "RUNNING": "⏳", "FAILED": "❌"}.get(_status, "❓")
+                    _sample = j.get("sample_name", "Unknown")
+                    _label = f"{_emoji} {_sample} — {_status} ({_uuid[:8]}…)"
+                    _options[_label] = _uuid
+                if _options:
+                    st.caption(f"Jobs in current project ({len(_options)})")
+                    _sel = st.selectbox("Pick a job", list(_options.keys()), key="job_pick")
+                    run_uuid = _options[_sel]
+except Exception:
+    pass
+
+# Fallback: manual UUID input
+manual_uuid = st.text_input(
+    "Or enter Job UUID manually",
+    value=run_uuid or "",
     placeholder="e.g., 167fd6ce-d1b4-43a0-a267-c5d8d01b5f38",
-    help="Enter the UUID of a completed job"
+    help="Enter the UUID of a completed job",
 )
+if manual_uuid:
+    run_uuid = manual_uuid
 
 if run_uuid:
     try:
@@ -267,15 +297,7 @@ if run_uuid:
         st.error(f"Cannot connect to AGOUTIC API at {API_URL}. Make sure the servers are running.\n\nError: {e}")
 
 else:
-    st.info("👆 Enter a job UUID above to view results")
-    
-    # Show example UUIDs
-    st.markdown("### Example Job UUIDs")
-    st.code("""
-167fd6ce-d1b4-43a0-a267-c5d8d01b5f38
-23178151-3126-43b7-9831-b9d6c23c2acf
-39bc92fa-b592-413d-ac2d-898d1a187d00
-""")
+    st.info("👆 Select a job above or enter a UUID to view results")
 
 # Footer
 st.divider()

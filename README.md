@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 2.4  
+**Version:** 2.5  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -23,6 +23,7 @@ AGOUTIC enforces access control at every layer:
 - **Job ownership**: Each job records the submitting `user_id`. `require_run_uuid_access()` verifies ownership before exposing debug info or analysis results.
 - **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{user_id}/{project_id}/`) with input sanitization and jail-escape guards.
 - **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
+- **Project management**: Full dashboard for browsing projects, viewing stats/files/jobs, renaming, archiving, and permanent deletion with cascading cleanup.
 - **Migration**: Run `python -m server1.migrate_hardening` to add new columns to existing databases.
 
 ## 🚀 Quick Start
@@ -72,7 +73,7 @@ python server1/server2_mcp_client.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                       AGOUTIC System v2.4                    │
+│                       AGOUTIC System v2.5                    │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -189,7 +190,11 @@ agoutic/
 │
 ├── ui/                          # Web Interface
 │   ├── README.md               # UI documentation
-│   ├── app.py                  # Streamlit/Flask app
+│   ├── app.py                  # Streamlit main app (chat, sidebar, auto-refresh)
+│   └── pages/
+│       ├── projects.py         # Projects dashboard (stats, files, bulk actions)
+│       ├── results.py          # Job results analysis (auto-lists project jobs)
+│       └── admin.py            # Admin user management
 │
 ├── skills/                      # Workflow Definitions
 │   ├── Dogme_DNA.md            # DNA pipeline definition

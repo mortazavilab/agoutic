@@ -175,25 +175,63 @@ with st.sidebar:
         )
         if proj_resp.status_code == 200:
             user_projects = proj_resp.json().get("projects", [])
-            if user_projects and len(user_projects) > 1:
+            # Cache for title display
+            st.session_state["_cached_projects"] = user_projects
+            if user_projects:
                 st.caption(f"{len(user_projects)} project(s)")
-                for proj in user_projects[:5]:  # Show last 5 projects
+
+                # Search/filter when many projects
+                if len(user_projects) > 4:
+                    _proj_filter = st.text_input(
+                        "🔍 Filter", key="_proj_filter", placeholder="Search projects…",
+                        label_visibility="collapsed",
+                    )
+                else:
+                    _proj_filter = ""
+
+                filtered = user_projects
+                if _proj_filter:
+                    _pf = _proj_filter.lower()
+                    filtered = [p for p in user_projects if _pf in p.get("name", "").lower()]
+
+                for proj in filtered:
                     proj_id = proj.get("id", "")
                     proj_name = proj.get("name", proj_id)[:30]
                     is_current = proj_id == st.session_state.active_project_id
-                    
+
+                    # Build label with job count if available
+                    job_count = proj.get("job_count")
+                    label_extra = f" · {job_count} job{'s' if job_count != 1 else ''}" if job_count else ""
+
                     if is_current:
-                        st.info(f"📌 {proj_name}")
+                        st.info(f"📌 **{proj_name}**{label_extra}")
                     else:
-                        if st.button(f"📂 {proj_name}", key=f"proj_{proj_id}", use_container_width=True):
-                            # Switch to this project
-                            st.session_state.active_project_id = proj_id
-                            st.session_state.blocks = []
-                            st.session_state._last_rendered_project = proj_id
-                            st.session_state["_project_id_input"] = proj_id
-                            st.session_state["_switch_grace_reruns"] = 3
-                            st.session_state.pop("_welcome_sent_for", None)
-                            st.rerun()
+                        col_name, col_archive = st.columns([5, 1])
+                        with col_name:
+                            if st.button(f"📂 {proj_name}{label_extra}", key=f"proj_{proj_id}", use_container_width=True):
+                                # Switch to this project
+                                st.session_state.active_project_id = proj_id
+                                st.session_state.blocks = []
+                                st.session_state._last_rendered_project = proj_id
+                                st.session_state["_project_id_input"] = proj_id
+                                st.session_state["_switch_grace_reruns"] = 3
+                                st.session_state.pop("_welcome_sent_for", None)
+                                st.rerun()
+                        with col_archive:
+                            if st.button("🗑", key=f"arch_{proj_id}", help=f"Archive '{proj_name}'"):
+                                try:
+                                    del_resp = make_authenticated_request(
+                                        "DELETE",
+                                        f"{API_URL}/projects/{proj_id}",
+                                        timeout=5,
+                                    )
+                                    if del_resp.status_code == 200:
+                                        st.toast(f"Archived: {proj_name}")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Archive failed: {del_resp.status_code}")
+                                except Exception as e:
+                                    st.error(f"Error: {e}")
     except Exception:
         pass  # Silently fail if projects not available
     
@@ -851,7 +889,13 @@ def render_block(block, expected_project_id: str = ""):
 # Capture the ID once for this entire run
 active_id = st.session_state.active_project_id
 
-st.title(f"Project: {active_id}")
+# Show project name in title (fall back to truncated UUID)
+_active_project_name = active_id[:12] + "…"
+for _p in st.session_state.get("_cached_projects", []):
+    if _p.get("id") == active_id:
+        _active_project_name = _p.get("name", _active_project_name)
+        break
+st.title(f"🧬 {_active_project_name}")
 
 # Determine if the chat area needs periodic auto-refresh.
 # This is evaluated ONCE per full script run; the fragment uses it.
