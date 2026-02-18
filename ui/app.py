@@ -4,8 +4,8 @@ import uuid
 import requests
 import datetime
 import os
+from datetime import timedelta
 import streamlit as st
-import streamlit.components.v1 as _st_components
 from auth import require_auth, logout_button, make_authenticated_request, get_session_cookie
 
 # --- CONFIG ---
@@ -853,30 +853,38 @@ active_id = st.session_state.active_project_id
 
 st.title(f"Project: {active_id}")
 
-# 1. Fetch & Sanitize
-blocks = get_sanitized_blocks(active_id)
-# Defensive: drop any block whose project_id drifted (e.g. server cache race)
-blocks = [b for b in blocks if b.get("project_id") == active_id]
-st.session_state.blocks = blocks  # Update session state with fresh blocks
+# Determine if the chat area needs periodic auto-refresh.
+# This is evaluated ONCE per full script run; the fragment uses it.
+_needs_auto_refresh = st.session_state.get("_has_running_job", False)
+_refresh_interval = timedelta(seconds=min(poll_seconds, 2)) if _needs_auto_refresh else None
 
-# 2. Render inside st.empty() – this is critical.
-#    st.empty() creates a single-element placeholder whose content is
-#    **replaced** on every rerun.  Unlike st.container (keyed or not),
-#    there is zero DOM-node reuse across reruns, so old chat messages
-#    from a previous project can never linger in the browser.
-chat_area = st.empty()
-with chat_area.container():
+
+@st.fragment(run_every=_refresh_interval)
+def _render_chat():
+    """Fragment that renders all chat blocks.
+
+    When ``run_every`` is set (job is running), Streamlit re-executes
+    ONLY this function on a timer — the sidebar, title, and chat-input
+    all stay stable so there is no visible page flash.
+    """
+    _active_id = st.session_state.active_project_id
+
+    # 1. Fetch & Sanitize
+    blocks = get_sanitized_blocks(_active_id)
+    blocks = [b for b in blocks if b.get("project_id") == _active_id]
+    st.session_state.blocks = blocks
+
     if not blocks:
-        st.session_state["_has_running_job"] = False  # No blocks = no running job
-        # Auto-send welcome prompt for empty projects so the LLM introduces itself
-        if not st.session_state.get("_welcome_sent_for") or st.session_state["_welcome_sent_for"] != active_id:
-            st.session_state["_welcome_sent_for"] = active_id
+        st.session_state["_has_running_job"] = False
+        # Auto-send welcome prompt for empty projects
+        if not st.session_state.get("_welcome_sent_for") or st.session_state["_welcome_sent_for"] != _active_id:
+            st.session_state["_welcome_sent_for"] = _active_id
             try:
                 resp = make_authenticated_request(
                     "POST",
                     f"{API_URL}/chat",
                     json={
-                        "project_id": active_id,
+                        "project_id": _active_id,
                         "message": "Hello, what can you help me with?",
                         "skill": "welcome",
                         "model": model_choice
@@ -886,61 +894,74 @@ with chat_area.container():
                     time.sleep(0.5)
                     st.rerun()
             except Exception:
-                pass  # Fall through to empty state if request fails
-        st.info(f"👋 **Project `{active_id}` is empty.**\n\nAsk Agoutic to start a task!")
+                pass
+        st.info(f"👋 **Project `{_active_id}` is empty.**\n\nAsk Agoutic to start a task!")
+        return
+
+    # 2. Pagination
+    max_visible = st.session_state.get("_max_visible_blocks", 30)
+    if len(blocks) > max_visible:
+        hidden_count = len(blocks) - max_visible
+        if st.button(f"⬆️ Load {min(hidden_count, 30)} older messages ({hidden_count} hidden)"):
+            st.session_state["_max_visible_blocks"] = max_visible + 30
+            st.rerun()
+        visible_blocks = blocks[-max_visible:]
     else:
-        # Use local 'blocks' variable directly (not session_state) to avoid
-        # any stale reference.
-        max_visible = st.session_state.get("_max_visible_blocks", 30)
-        
-        if len(blocks) > max_visible:
-            hidden_count = len(blocks) - max_visible
-            if st.button(f"⬆️ Load {min(hidden_count, 30)} older messages ({hidden_count} hidden)"):
-                st.session_state["_max_visible_blocks"] = max_visible + 30
-                st.rerun()
-            visible_blocks = blocks[-max_visible:]
-        else:
-            visible_blocks = blocks
-        
-        # --- Scan ALL blocks (not just visible) for running jobs ---
-        _has_running_job = False
-        _has_pending_submission = False
-        _has_finished_job = False
-        for blk in blocks:
-            btype = blk.get("type")
-            bstatus = blk.get("status")
-            if btype == "EXECUTION_JOB" and bstatus == "RUNNING":
-                _has_running_job = True
-            if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
-                _has_finished_job = True
-            if btype == "APPROVAL_GATE" and bstatus == "APPROVED":
-                _has_pending_submission = True
+        visible_blocks = blocks
 
-        # Render visible blocks
-        for blk in visible_blocks:
-            render_block(blk, expected_project_id=active_id)
-
-        # If approval was given but no EXECUTION_JOB block exists yet,
-        # the async job submission is still in-flight — keep refreshing.
-        if _has_pending_submission and not _has_running_job and not _has_finished_job:
+    # 3. Scan ALL blocks for running jobs
+    _has_running_job = False
+    _has_pending_submission = False
+    _has_finished_job = False
+    for blk in blocks:
+        btype = blk.get("type")
+        bstatus = blk.get("status")
+        if btype == "EXECUTION_JOB" and bstatus == "RUNNING":
             _has_running_job = True
+        if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
+            _has_finished_job = True
+        if btype == "APPROVAL_GATE" and bstatus == "APPROVED":
+            _has_pending_submission = True
 
-        # When a job just finished, keep refreshing for 30s to catch
-        # auto-analysis blocks that Server 1 creates after completion.
-        if _has_finished_job and not _has_running_job:
-            last_finish = st.session_state.get("_job_finished_at")
-            if last_finish is None:
-                st.session_state["_job_finished_at"] = time.time()
-                _has_running_job = True   # keep refreshing
-            elif time.time() - last_finish < 30:
-                _has_running_job = True   # still within grace window
-            # else: grace window expired, stop refreshing
-        elif _has_running_job:
-            # Job is still running — clear any stale finish timestamp
-            st.session_state.pop("_job_finished_at", None)
+    # 4. Render visible blocks
+    for blk in visible_blocks:
+        render_block(blk, expected_project_id=_active_id)
 
-        # Persist to session_state for reliable access in the auto-refresh section
-        st.session_state["_has_running_job"] = _has_running_job
+    # 5. Determine if auto-refresh should stay active
+    if _has_pending_submission and not _has_running_job and not _has_finished_job:
+        _has_running_job = True
+
+    # Grace window: keep refreshing 30s after completion to catch auto-analysis
+    if _has_finished_job and not _has_running_job:
+        last_finish = st.session_state.get("_job_finished_at")
+        if last_finish is None:
+            st.session_state["_job_finished_at"] = time.time()
+            _has_running_job = True
+        elif time.time() - last_finish < 30:
+            _has_running_job = True
+    elif _has_running_job:
+        st.session_state.pop("_job_finished_at", None)
+
+    st.session_state["_has_running_job"] = _has_running_job
+
+    # Show refresh indicator inside the fragment
+    if _needs_auto_refresh:
+        st.caption(
+            f"🔄 Live updating "
+            f"(last: {datetime.datetime.now().strftime('%H:%M:%S')})"
+        )
+
+
+_render_chat()
+
+# Bootstrap: if a running job was just detected but the fragment was NOT
+# started with run_every (because _has_running_job was False before the
+# fragment ran), trigger ONE full rerun so the fragment gets re-registered
+# with auto-refresh enabled.  Likewise when auto-refresh should stop.
+_running_now = st.session_state.get("_has_running_job", False)
+if _running_now != _needs_auto_refresh:
+    time.sleep(0.3)
+    st.rerun()
 
 st.write("---")
 
@@ -1037,35 +1058,14 @@ if prompt := st.chat_input("Ask Agoutic to do something..."):
             time.sleep(0.3)
             st.rerun()
 
-# 4. Auto-Refresh
+# 4. Auto-Refresh (only for general "Live Stream" toggle, NOT for job monitoring)
+# Job monitoring is handled by the @st.fragment(run_every=...) above — no
+# full-page rerun needed.
 _suppress = st.session_state.get("_suppress_auto_refresh", 0)
-_has_running = st.session_state.get("_has_running_job", False)
-
-# Always decrement suppress counter, but NEVER let it block refresh
-# when a job is actively running.
 if _suppress > 0:
     st.session_state["_suppress_auto_refresh"] = _suppress - 1
-
-if _has_running:
-    _wait = min(poll_seconds, 2)
-    _wait_ms = int(_wait * 1000)
-    st.caption(
-        f"🔄 Auto-refreshing every {_wait}s "
-        f"(last: {datetime.datetime.now().strftime('%H:%M:%S')})"
-    )
-    # --- JavaScript fallback: reload page if st.rerun() somehow fails ---
-    # The timer fires after 2× the expected interval; if st.rerun() works
-    # normally, the iframe is destroyed on rerun so the timer never fires.
-    _st_components.html(
-        f"""<script>
-        setTimeout(function() {{ window.parent.location.reload(); }},
-                   {_wait_ms * 3});
-        </script>""",
-        height=0,
-    )
-    # --- Primary: Streamlit-native rerun ---
-    time.sleep(_wait)
-    st.rerun()
-elif auto_refresh and _suppress <= 0:
+elif auto_refresh and not st.session_state.get("_has_running_job", False):
+    # General background refresh when Live Stream is on and no job is running.
+    # (When a job IS running, the fragment handles its own refresh.)
     time.sleep(poll_seconds)
     st.rerun()
