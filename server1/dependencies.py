@@ -2,6 +2,9 @@
 FastAPI dependencies for authentication and authorization.
 """
 
+import uuid
+import datetime
+
 from fastapi import Request, HTTPException
 from sqlalchemy import select
 
@@ -54,7 +57,8 @@ def require_project_access(project_id: str, user: User, min_role: str = "viewer"
     Checks in order:
       1. Is the user an admin? → always allowed (returns synthetic access).
       2. Does the user have a project_access row with role >= min_role?
-      3. Is the project public and min_role is viewer?
+      3. Is the user the project's owner (auto-heals missing access row)?
+      4. Is the project public and min_role is viewer?
 
     Raises HTTPException 403 if none of the above pass.
     """
@@ -84,15 +88,30 @@ def require_project_access(project_id: str, user: User, min_role: str = "viewer"
                 detail=f"Requires at least '{min_role}' access to this project."
             )
 
+        # No explicit access row — check if user owns the project and auto-heal
+        project = session.execute(
+            select(Project).where(Project.id == project_id)
+        ).scalar_one_or_none()
+
+        if project and project.owner_id == user.id:
+            # Owner's access row is missing — recreate it
+            new_access = ProjectAccess(
+                id=str(uuid.uuid4()),
+                user_id=user.id,
+                project_id=project_id,
+                project_name=project.name,
+                role="owner",
+                last_accessed=datetime.datetime.utcnow(),
+            )
+            session.add(new_access)
+            session.commit()
+            return new_access
+
         # Fallback: public project allows viewer-level access
-        if min_rank <= _ROLE_RANK["viewer"]:
-            project = session.execute(
-                select(Project).where(Project.id == project_id)
-            ).scalar_one_or_none()
-            if project and project.is_public:
-                class _PublicAccess:
-                    role = "viewer"
-                return _PublicAccess()
+        if project and project.is_public and min_rank <= _ROLE_RANK["viewer"]:
+            class _PublicAccess:
+                role = "viewer"
+            return _PublicAccess()
 
         raise HTTPException(
             status_code=403,

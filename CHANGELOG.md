@@ -2,6 +2,26 @@
 
 ## [Unreleased] - 2026-02-17
 
+### Fixed — 403 "You do not have access to this project" on Chat
+
+- **Root cause 1: Missing ownership fallback in `require_project_access`**
+  - If a user's `project_access` row was missing (e.g. after a failed project creation), they received a 403 even on their own project because the check only looked at the `project_access` table and not `projects.owner_id`
+  - Fix: added a third check — if no access row exists but `Project.owner_id == user.id`, the missing row is automatically recreated and the request proceeds
+  - Applied to: [server1/dependencies.py](server1/dependencies.py)
+
+- **Root cause 2: Projects created only client-side never registered in DB**
+  - When `POST /projects` timed out or failed, the UI silently fell back to a locally-generated UUID. Any subsequent `/chat` call then hit 403 because no `Project` or `ProjectAccess` row existed for that UUID
+  - Fix: `/chat` endpoint now auto-registers the project (creates both `Project` and `ProjectAccess` rows as owner) if the project ID is not found in the DB, before running the access check
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Improved project creation timeout**
+  - Raised `POST /projects` timeout in the UI from 5 s to 10 s to reduce the likelihood of the fallback UUID path being taken on slow startup
+  - Applied to: [ui/app.py](ui/app.py)
+
+---
+
+## [Unreleased] - 2026-02-17
+
 ### Added — Project Management & Dashboard
 
 - **Projects Dashboard Page (`ui/pages/projects.py`)**

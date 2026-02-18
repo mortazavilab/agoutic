@@ -27,13 +27,14 @@ def _create_project_server_side(name: str = None) -> str:
             "POST",
             f"{API_URL}/projects",
             json={"name": project_name},
-            timeout=5,
+            timeout=10,
         )
         if resp.status_code == 200:
             return resp.json()["id"]
     except Exception:
         pass
-    # Fallback: if server is unreachable, generate a local UUID (will be registered on first chat)
+    # Fallback: if server is unreachable, generate a local UUID.
+    # The /chat endpoint will auto-register it on first message.
     import uuid as _uuid
     return str(_uuid.uuid4())
 

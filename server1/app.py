@@ -1590,6 +1590,47 @@ async def chat_with_agent(req: ChatRequest, request: Request):
     """
     # Get current user from middleware
     user = request.state.user
+
+    # Auto-register the project if it doesn't exist yet (handles UI fallback UUIDs
+    # created when the POST /projects call timed out or failed).
+    _ensure_session = SessionLocal()
+    try:
+        _proj = _ensure_session.execute(
+            select(Project).where(Project.id == req.project_id)
+        ).scalar_one_or_none()
+        if not _proj:
+            from server1.user_jail import get_user_project_dir
+            try:
+                get_user_project_dir(user.id, req.project_id)
+            except PermissionError:
+                pass  # directory creation failed; DB rows still useful
+            now = datetime.datetime.utcnow()
+            _proj = Project(
+                id=req.project_id,
+                name=f"Project {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                owner_id=user.id,
+                is_public=False,
+                is_archived=False,
+                created_at=now,
+                updated_at=now,
+            )
+            _ensure_session.add(_proj)
+            _acc = ProjectAccess(
+                id=str(uuid.uuid4()),
+                user_id=user.id,
+                project_id=req.project_id,
+                project_name=_proj.name,
+                role="owner",
+                last_accessed=now,
+            )
+            _ensure_session.add(_acc)
+            _ensure_session.commit()
+            logger.info("Auto-registered project from chat", project_id=req.project_id, user=user.email)
+    except Exception:
+        _ensure_session.rollback()
+    finally:
+        _ensure_session.close()
+
     require_project_access(req.project_id, user, min_role="editor")
     
     session = SessionLocal()
