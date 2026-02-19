@@ -435,6 +435,21 @@ Project (proj_001)
 - `job_completion` - Final results
 - `approval_request` - Request for user approval
 - `error` - Error or exception
+- `AGENT_PLOT` - Plotly chart specification generated when the agent uses a `[[PLOT:...]]` tag
+
+### `[[PLOT:...]]` Tag System
+
+The LLM instructs Server 1 to create a chart by embedding a structured tag in its response:
+
+```
+[[PLOT: type=histogram df=DF1 x=mapq_score title=MAPQ Distribution]]
+[[PLOT: type=scatter df=DF2 x=read_length y=alignment_score color=sample_id]]
+[[PLOT: type=bar df=DF1 x=assay_title agg=count title=Experiment Types]]
+```
+
+Supported chart types: `histogram`, `scatter`, `bar`, `box`, `heatmap`, `pie`
+
+Server 1 parses these tags, looks up the referenced DataFrame from the conversation history, and creates an `AGENT_PLOT` block that the UI renders via `st.plotly_chart()`.
 
 ## Troubleshooting
 

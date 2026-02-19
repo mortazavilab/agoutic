@@ -7,6 +7,8 @@ import os
 from datetime import timedelta
 import pandas as pd
 import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
 from auth import require_auth, logout_button, make_authenticated_request, get_session_cookie
 
 # --- CONFIG ---
@@ -508,6 +510,207 @@ def _render_embedded_dataframes(dfs: dict, block_id: str, *, only_visible: bool 
                 mime="text/csv",
                 key=f"dldfc_{_safe_key}",
             )
+
+
+def _resolve_df_by_id(df_id: int, all_blocks: list):
+    """Look up an embedded dataframe by its DF ID across all blocks.
+
+    Scans all AGENT_PLAN blocks in ``all_blocks`` for a dataframe whose
+    ``metadata.df_id`` matches *df_id*.
+
+    Returns a tuple ``(pd.DataFrame, label_str)`` or ``(None, None)`` if
+    not found.
+    """
+    for blk in reversed(all_blocks):
+        if blk.get("type") != "AGENT_PLAN":
+            continue
+        dfs = blk.get("payload", {}).get("_dataframes", {})
+        for fname, fdata in dfs.items():
+            meta = fdata.get("metadata", {})
+            if meta.get("df_id") == df_id:
+                rows = fdata.get("data", [])
+                df = pd.DataFrame(rows)
+                return df, fname
+    return None, None
+
+
+def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
+    """Build a single Plotly figure from a chart spec and dataframe.
+
+    Returns a plotly Figure or None on error.
+    """
+    chart_type = chart_spec.get("type", "histogram")
+    x_col = chart_spec.get("x")
+    y_col = chart_spec.get("y")
+    color_col = chart_spec.get("color")
+    title = chart_spec.get("title", "")
+    agg = chart_spec.get("agg")
+
+    # Validate columns exist
+    available = list(df.columns)
+    if x_col and x_col not in available:
+        # Try case-insensitive match
+        match = [c for c in available if c.lower() == x_col.lower()]
+        x_col = match[0] if match else None
+    if y_col and y_col not in available:
+        match = [c for c in available if c.lower() == y_col.lower()]
+        y_col = match[0] if match else None
+    if color_col and color_col not in available:
+        match = [c for c in available if c.lower() == color_col.lower()]
+        color_col = match[0] if match else None
+
+    try:
+        # Convert numeric-looking columns to numeric for plotting
+        df_plot = df.copy()
+        for col in [x_col, y_col]:
+            if col and col in df_plot.columns:
+                df_plot[col] = pd.to_numeric(df_plot[col], errors="ignore")
+
+        if chart_type == "histogram":
+            if not x_col:
+                # Auto-pick first numeric column
+                num_cols = df_plot.select_dtypes(include="number").columns
+                x_col = num_cols[0] if len(num_cols) > 0 else available[0]
+            fig = px.histogram(df_plot, x=x_col, color=color_col,
+                               title=title or f"Distribution of {x_col}")
+
+        elif chart_type == "scatter":
+            if not x_col or not y_col:
+                num_cols = df_plot.select_dtypes(include="number").columns
+                if len(num_cols) >= 2:
+                    x_col = x_col or num_cols[0]
+                    y_col = y_col or num_cols[1]
+                else:
+                    return None
+            fig = px.scatter(df_plot, x=x_col, y=y_col, color=color_col,
+                             title=title or f"{x_col} vs {y_col}")
+
+        elif chart_type == "bar":
+            if not x_col:
+                # Auto-pick first non-numeric column
+                cat_cols = df_plot.select_dtypes(exclude="number").columns
+                x_col = cat_cols[0] if len(cat_cols) > 0 else available[0]
+            if agg == "count" or not y_col:
+                # Count occurrences of each x value
+                counts = df_plot[x_col].value_counts().reset_index()
+                counts.columns = [x_col, "Count"]
+                fig = px.bar(counts, x=x_col, y="Count", color=color_col,
+                             title=title or f"Count by {x_col}")
+            else:
+                if agg == "mean":
+                    agg_df = df_plot.groupby(x_col, as_index=False)[y_col].mean()
+                elif agg == "sum":
+                    agg_df = df_plot.groupby(x_col, as_index=False)[y_col].sum()
+                else:
+                    agg_df = df_plot
+                fig = px.bar(agg_df, x=x_col, y=y_col, color=color_col,
+                             title=title or f"{y_col} by {x_col}")
+
+        elif chart_type == "box":
+            if not y_col:
+                num_cols = df_plot.select_dtypes(include="number").columns
+                y_col = num_cols[0] if len(num_cols) > 0 else None
+            if not y_col:
+                return None
+            fig = px.box(df_plot, x=x_col, y=y_col, color=color_col,
+                         title=title or f"Distribution of {y_col}" + (f" by {x_col}" if x_col else ""))
+
+        elif chart_type == "heatmap":
+            num_df = df_plot.select_dtypes(include="number")
+            if num_df.shape[1] < 2:
+                return None
+            corr = num_df.corr()
+            fig = px.imshow(corr, text_auto=".2f",
+                            title=title or "Correlation Matrix",
+                            color_continuous_scale="RdBu_r",
+                            zmin=-1, zmax=1)
+
+        elif chart_type == "pie":
+            if not x_col:
+                cat_cols = df_plot.select_dtypes(exclude="number").columns
+                x_col = cat_cols[0] if len(cat_cols) > 0 else available[0]
+            if y_col:
+                fig = px.pie(df_plot, names=x_col, values=y_col,
+                             title=title or f"{x_col} Proportions")
+            else:
+                counts = df_plot[x_col].value_counts().reset_index()
+                counts.columns = [x_col, "Count"]
+                fig = px.pie(counts, names=x_col, values="Count",
+                             title=title or f"{x_col} Distribution")
+
+        else:
+            return None
+
+        fig.update_layout(template="plotly_white")
+        return fig
+
+    except Exception:
+        return None
+
+
+def _render_plot_block(payload: dict, all_blocks: list, block_id: str):
+    """Render an AGENT_PLOT block's charts using Plotly.
+
+    ``payload["charts"]`` is a list of chart specs each with:
+      type, df_id, x, y, color, title, agg
+
+    DataFrames are resolved from prior AGENT_PLAN blocks via ``_resolve_df_by_id``.
+    """
+    import re as _re
+    charts = payload.get("charts", [])
+    if not charts:
+        st.info("No chart specifications found in this plot block.")
+        return
+
+    # Check if multiple charts target the same df and type (multi-trace overlay)
+    # Group by (df_id, type) for overlay rendering
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for chart in charts:
+        key = (chart.get("df_id"), chart.get("type"))
+        groups[key].append(chart)
+
+    chart_idx = 0
+    for (df_id, chart_type), chart_group in groups.items():
+        if df_id is None:
+            st.warning("Chart missing DataFrame reference (df=DFN).")
+            continue
+
+        df, df_label = _resolve_df_by_id(df_id, all_blocks)
+        if df is None or df.empty:
+            st.warning(f"DataFrame DF{df_id} not found in conversation history.")
+            continue
+
+        if len(chart_group) == 1:
+            # Single chart
+            fig = _build_plotly_figure(chart_group[0], df, df_label)
+            if fig:
+                _safe_key = _re.sub(r"[^a-zA-Z0-9_]", "_", f"plot_{block_id}_{chart_idx}")
+                st.plotly_chart(fig, use_container_width=True, key=_safe_key)
+            else:
+                st.warning(f"Could not render {chart_type} chart for DF{df_id}. "
+                           "Check that the specified columns exist.")
+        else:
+            # Multi-trace overlay: build a combined figure
+            combined = go.Figure()
+            title_parts = []
+            for spec in chart_group:
+                fig = _build_plotly_figure(spec, df, df_label)
+                if fig:
+                    for trace in fig.data:
+                        combined.add_trace(trace)
+                    if spec.get("title"):
+                        title_parts.append(spec["title"])
+            if combined.data:
+                combined.update_layout(
+                    template="plotly_white",
+                    title=" / ".join(title_parts) if title_parts else f"DF{df_id} — {chart_type}",
+                )
+                _safe_key = _re.sub(r"[^a-zA-Z0-9_]", "_", f"plot_{block_id}_{chart_idx}")
+                st.plotly_chart(combined, use_container_width=True, key=_safe_key)
+            else:
+                st.warning(f"Could not render multi-trace {chart_type} chart for DF{df_id}.")
+        chart_idx += 1
 
 
 def render_block(block, expected_project_id: str = ""):
@@ -1067,6 +1270,14 @@ def render_block(block, expected_project_id: str = ""):
                                 st.warning(f"[{timestamp}] {msg}")
                             else:
                                 st.text(f"[{timestamp}] {msg}")
+    
+    elif btype == "AGENT_PLOT":
+        with st.chat_message("assistant", avatar="📊"):
+            show_metadata()
+            # Render interactive Plotly charts
+            # Pass all currently loaded blocks so the renderer can look up DFs by ID
+            all_blocks = st.session_state.get("blocks", [])
+            _render_plot_block(content, all_blocks, block_id)
     
     else:
         with st.chat_message("system", avatar="⚙️"):

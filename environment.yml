@@ -36,6 +36,9 @@ dependencies:
     - openai                   # Compatible with OpenAI and local vLLM
     - tiktoken
     
+    # --- Visualization ---
+    - plotly>=5.18.0           # Interactive charts (st.plotly_chart)
+
     # --- Testing ---
     - pytest>=7.0
     - pytest-asyncio>=0.21.0   # Async test support

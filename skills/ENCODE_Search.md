@@ -441,6 +441,25 @@ If a tool returns `{}` or `[]`, it means no matches. Tell the user and suggest a
 
 ---
 
+## 📊 Visualization Hints
+
+When presenting search results, you MAY suggest a plot if it would help the user understand the data. Only suggest when the DataFrame has more than 3 rows.
+
+**After a biosample or target search with many results:**
+- Suggest a bar chart of Assay distribution:
+  `[[PLOT: type=bar, df=DFN, x=Assay, agg=count, title=Experiments by Assay Type]]`
+- Suggest a pie chart of Status distribution:
+  `[[PLOT: type=pie, df=DFN, x=Status, title=Experiment Status Distribution]]`
+
+**After a file listing (get_files_by_type):**
+- Suggest a bar chart of Output Type counts:
+  `[[PLOT: type=bar, df=DFN, x=Output Type, agg=count, title=Files by Output Type]]`
+
+Replace `DFN` with the actual DF number (e.g., DF1, DF5).
+Only include these tags if the user asks for a visualization or if you think a chart would be informative.
+
+---
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🚨 FINAL CHECKLIST - BEFORE SUBMITTING YOUR RESPONSE 🚨
 # ═══════════════════════════════════════════════════════════════════════════════

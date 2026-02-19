@@ -114,6 +114,7 @@ python server1/server2_mcp_client.py
   - User authentication
   - Role-based authorization gates on all endpoints
   - Server-side project CRUD (`POST/GET/PATCH /projects`)
+  - `[[PLOT:...]]` tag parsing → `AGENT_PLOT` blocks for inline Plotly charts (histogram, scatter, bar, box, heatmap, pie)
 
 ### Server 2: ENCODELIB (Port 8080)
 - **Role:** ENCODE Portal data retrieval

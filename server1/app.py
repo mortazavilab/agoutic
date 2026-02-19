@@ -2201,13 +2201,116 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         legacy_analysis_pattern = r'\[\[ANALYSIS_CALL:\s*(\w+),\s*run_uuid=([a-f0-9-]+)\]\]'
         legacy_encode_matches = list(re.finditer(legacy_encode_pattern, corrected_response))
         legacy_analysis_matches = list(re.finditer(legacy_analysis_pattern, corrected_response))
-        
+
+        # 5a. Parse [[PLOT:...]] tags for interactive chart generation
+        # Format: [[PLOT: type=scatter, df=DF5, x=score, y=enrichment, color=biosample_type, title=My Title]]
+        plot_tag_pattern = r'\[\[PLOT:\s*([^\]]+)\]\]'
+        plot_tag_matches = list(re.finditer(plot_tag_pattern, corrected_response))
+        plot_specs = []
+        for _pm in plot_tag_matches:
+            _plot_params = _parse_tag_params(_pm.group(1))
+            # Normalize: extract df_id integer from "DF5" or "5"
+            _df_ref = _plot_params.get("df", "")
+            _df_id_match = re.match(r'(?:DF)?\s*(\d+)', _df_ref, re.IGNORECASE)
+            if _df_id_match:
+                _plot_params["df_id"] = int(_df_id_match.group(1))
+            else:
+                _plot_params["df_id"] = None
+            # Default chart type to histogram if missing
+            if "type" not in _plot_params:
+                _plot_params["type"] = "histogram"
+            plot_specs.append(_plot_params)
+        if plot_specs:
+            logger.info("Parsed PLOT tags", count=len(plot_specs),
+                       specs=[{"type": s.get("type"), "df_id": s.get("df_id")} for s in plot_specs])
+
+        # 5a-b. FALLBACK: If LLM wrote Python code for plotting instead of [[PLOT:...]] tags,
+        #        auto-generate the tag from context clues (user message + DF references).
+        _plot_keywords = {"plot", "chart", "pie", "histogram", "scatter", "bar chart",
+                          "box plot", "heatmap", "visualize", "graph", "distribution"}
+        _user_wants_plot = any(kw in req.message.lower() for kw in _plot_keywords)
+        _has_code_plot = bool(re.search(
+            r'```python.*?(?:matplotlib|plt\.|plotly|px\.|fig\.|\.pie|\.bar|\.hist|\.scatter)',
+            corrected_response, re.DOTALL | re.IGNORECASE
+        ))
+        if _user_wants_plot and _has_code_plot and not plot_specs:
+            logger.warning("LLM wrote Python plot code instead of [[PLOT:...]] tag — auto-generating")
+            # Detect which DF the user or LLM referenced
+            _auto_df_id = None
+            _df_ref_in_msg = re.search(r'\bDF\s*(\d+)\b', req.message, re.IGNORECASE)
+            if _df_ref_in_msg:
+                _auto_df_id = int(_df_ref_in_msg.group(1))
+            else:
+                _df_ref_in_resp = re.search(r'\bDF\s*(\d+)\b', corrected_response, re.IGNORECASE)
+                if _df_ref_in_resp:
+                    _auto_df_id = int(_df_ref_in_resp.group(1))
+                elif _injected_dfs:
+                    # Use the first injected DF's ID
+                    for _ij_data in _injected_dfs.values():
+                        _ij_id = _ij_data.get("metadata", {}).get("df_id")
+                        if _ij_id is not None:
+                            _auto_df_id = _ij_id
+                            break
+            # Detect chart type from user message
+            _msg_l = req.message.lower()
+            if "pie" in _msg_l:
+                _auto_type = "pie"
+            elif "scatter" in _msg_l:
+                _auto_type = "scatter"
+            elif "bar" in _msg_l:
+                _auto_type = "bar"
+            elif "box" in _msg_l:
+                _auto_type = "box"
+            elif "heatmap" in _msg_l or "correlation" in _msg_l:
+                _auto_type = "heatmap"
+            elif "histogram" in _msg_l or "distribution" in _msg_l:
+                _auto_type = "histogram"
+            else:
+                _auto_type = "bar"
+            # Detect x column from user message (look for "by <column>", "of <column>")
+            # Prefer "by" matches over "of/for" since "by" usually indicates the grouping column.
+            # Skip DF references (e.g., "for DF1") — those aren't column names.
+            _auto_x = None
+            _by_match = re.search(r'\bby\s+(\w+)', req.message, re.IGNORECASE)
+            if _by_match and not re.match(r'DF\d+', _by_match.group(1), re.IGNORECASE):
+                _auto_x = _by_match.group(1)
+            if not _auto_x:
+                _of_match = re.search(r'\b(?:of|for)\s+(\w+)', req.message, re.IGNORECASE)
+                if _of_match and not re.match(r'DF\d+', _of_match.group(1), re.IGNORECASE):
+                    _auto_x = _of_match.group(1)
+            if _auto_df_id is not None:
+                _auto_spec = {
+                    "type": _auto_type,
+                    "df_id": _auto_df_id,
+                    "df": f"DF{_auto_df_id}",
+                }
+                if _auto_x:
+                    _auto_spec["x"] = _auto_x
+                if _auto_type == "bar" and not _auto_spec.get("y"):
+                    _auto_spec["agg"] = "count"
+                if _auto_type == "pie" and not _auto_spec.get("y"):
+                    # Pie charts with only x column count occurrences
+                    pass  # UI handles this automatically
+                plot_specs.append(_auto_spec)
+                logger.info("Auto-generated PLOT spec from code fallback",
+                           spec=_auto_spec)
+            # Strip the code block from the markdown so user doesn't see code
+            corrected_response = re.sub(
+                r'```python.*?```', '', corrected_response, flags=re.DOTALL
+            ).strip()
+            # Also strip any "Explanation:" boilerplate that follows code blocks
+            corrected_response = re.sub(
+                r'\n*(?:Explanation|Output|Note|Here is|The (?:pie|bar|scatter|histogram|box) chart).*$',
+                '', corrected_response, flags=re.DOTALL | re.IGNORECASE
+            ).strip()
+
         # Clean all tags from user-visible text
         clean_markdown = corrected_response.replace(trigger_tag, "").strip()
         clean_markdown = re.sub(r'\[\[SKILL_SWITCH_TO:\s*\w+\]\]', '', clean_markdown).strip()
         clean_markdown = re.sub(data_call_pattern, '', clean_markdown).strip()
         clean_markdown = re.sub(legacy_encode_pattern, '', clean_markdown).strip()
         clean_markdown = re.sub(legacy_analysis_pattern, '', clean_markdown).strip()
+        clean_markdown = re.sub(plot_tag_pattern, '', clean_markdown).strip()
         
         # Also remove any remaining plain text patterns that might not have been converted
         for pattern in all_fallback_patterns.keys():
@@ -2751,7 +2854,70 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         
         # Save assistant's response to conversation history
         await save_conversation_message(session, req.project_id, user.id, "assistant", clean_markdown)
-        
+
+        # 8b. Insert AGENT_PLOT blocks for any [[PLOT:...]] tags
+        plot_blocks = []
+        if plot_specs:
+            # Validate plot specs against available dataframes.
+            # Build a map of df_id → {columns, data, metadata} from all
+            # history blocks AND the current block's embedded dataframes.
+            _all_df_map = {}  # df_id → {columns, data, metadata, label}
+            for _hblk in history_blocks:
+                if _hblk.type == "AGENT_PLAN":
+                    _hblk_dfs = get_block_payload(_hblk).get("_dataframes", {})
+                    for _hfname, _hfdata in _hblk_dfs.items():
+                        _hid = _hfdata.get("metadata", {}).get("df_id")
+                        if _hid is not None:
+                            _all_df_map[_hid] = {**_hfdata, "label": _hfname}
+            # Also include DFs from the block we just created
+            for _efname, _efdata in _embedded_dataframes.items():
+                _eid = _efdata.get("metadata", {}).get("df_id")
+                if _eid is not None:
+                    _all_df_map[_eid] = {**_efdata, "label": _efname}
+
+            # Group plot specs by df_id for multi-trace support
+            from collections import defaultdict
+            _plots_by_df = defaultdict(list)
+            for _ps in plot_specs:
+                _key = _ps.get("df_id") or "no_df"
+                _plots_by_df[_key].append(_ps)
+
+            for _df_key, _chart_group in _plots_by_df.items():
+                _charts = []
+                _df_info = _all_df_map.get(_df_key)
+                for _cs in _chart_group:
+                    _chart_entry = {
+                        "type": _cs.get("type", "histogram"),
+                        "df_id": _cs.get("df_id"),
+                        "x": _cs.get("x"),
+                        "y": _cs.get("y"),
+                        "color": _cs.get("color"),
+                        "title": _cs.get("title"),
+                        "agg": _cs.get("agg"),
+                    }
+                    # Remove None values for cleaner payload
+                    _chart_entry = {k: v for k, v in _chart_entry.items() if v is not None}
+                    _charts.append(_chart_entry)
+
+                _plot_payload = {
+                    "charts": _charts,
+                    "skill": active_skill,
+                    "model": engine.model_name,
+                }
+                _plot_block = _create_block_internal(
+                    session,
+                    req.project_id,
+                    "AGENT_PLOT",
+                    _plot_payload,
+                    status="DONE",
+                    owner_id=user.id
+                )
+                plot_blocks.append(_plot_block)
+                logger.info("Created AGENT_PLOT block",
+                           block_id=_plot_block.id,
+                           chart_count=len(_charts),
+                           df_key=_df_key)
+
         # 5. Insert APPROVAL_GATE (The Buttons) if requested
         gate_block = None
         if needs_approval:
@@ -2781,7 +2947,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             "status": "ok", 
             "user_block": row_to_dict(user_block),
             "agent_block": row_to_dict(agent_block),
-            "gate_block": row_to_dict(gate_block) if gate_block else None
+            "gate_block": row_to_dict(gate_block) if gate_block else None,
+            "plot_blocks": [row_to_dict(pb) for pb in plot_blocks] if plot_blocks else None
         }
         
     except Exception as e:
@@ -3002,13 +3169,20 @@ async def link_job_to_conversation(conversation_id: str, run_uuid: str, request:
 
 async def track_project_access(session, user_id: str, project_id: str, project_name: str = None, role: str = None):
     """Track when a user accesses a project. Preserves existing role if not specified."""
-    # Check if access record exists
+    # Check if access record exists (use scalars().all() to handle duplicates
+    # gracefully — older DBs may have duplicate (user_id, project_id) rows)
     access_query = select(ProjectAccess)\
         .where(ProjectAccess.user_id == user_id)\
         .where(ProjectAccess.project_id == project_id)
     
     result = session.execute(access_query)
-    access = result.scalar_one_or_none()
+    all_matches = result.scalars().all()
+    access = all_matches[0] if all_matches else None
+
+    # Clean up duplicates if any exist
+    if len(all_matches) > 1:
+        for dup in all_matches[1:]:
+            session.delete(dup)
     
     if access:
         # Update last accessed time; preserve existing role

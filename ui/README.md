@@ -16,6 +16,7 @@ The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUT
 - 📊 **Results analysis** page for browsing, parsing, and downloading job outputs
 - 📁 **Project management** with history, switching, and conversation recall
 - 🔑 **Admin panel** for user approval and role management
+- 📈 **Interactive Plotly charts** — the agent can generate histogram, scatter, bar, box, heatmap, and pie charts from any DataFrame in the conversation; rendered inline as `AGENT_PLOT` blocks
 
 ## Getting Started
 
@@ -64,6 +65,7 @@ The UI follows a strict **single-gateway** pattern: every request goes through S
 - Live Nextflow job progress with task-level detail
 - Project switching, conversation history
 - Model selection (default / fast / smart)
+- `AGENT_PLOT` blocks: inline Plotly charts triggered by the agent using `[[PLOT:...]]` tags; supports histogram, scatter, bar, box, heatmap, and pie chart types
 
 ### Results ([pages/results.py](pages/results.py))
 - Browse completed job files (CSV, BED, text)

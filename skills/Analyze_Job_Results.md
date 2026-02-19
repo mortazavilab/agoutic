@@ -476,3 +476,29 @@ All analysis endpoints are available on Server 1 at http://localhost:8000:
 - CSV parsing handles both comma and tab-separated files
 - BED parsing supports standard genomic coordinate formats
 - Always present results in user-friendly format, not raw JSON
+
+## 📊 Visualization Hints
+
+When presenting parsed CSV/TSV data with QC metrics, you MAY suggest plots to help the user understand the data. Only suggest when the DataFrame has more than 3 rows.
+
+**For QC metric tables (numeric values):**
+- Suggest a histogram of key numeric columns:
+  `[[PLOT: type=histogram, df=DFN, x=<metric_column>, title=Distribution of <metric>]]`
+- Suggest a scatter plot to explore correlations between two metrics:
+  `[[PLOT: type=scatter, df=DFN, x=<metric1>, y=<metric2>, title=<metric1> vs <metric2>]]`
+
+**For file inventories or categorized results:**
+- Suggest a bar chart of file types:
+  `[[PLOT: type=bar, df=DFN, x=Extension, agg=count, title=Files by Type]]`
+
+**For BED genomic data:**
+- Suggest a histogram of region scores:
+  `[[PLOT: type=histogram, df=DFN, x=score, title=Score Distribution]]`
+- Suggest a bar chart of chromosome distribution:
+  `[[PLOT: type=bar, df=DFN, x=chrom, agg=count, title=Regions per Chromosome]]`
+
+**For correlation analysis (multiple numeric columns):**
+- Suggest a heatmap:
+  `[[PLOT: type=heatmap, df=DFN, title=Metric Correlation Matrix]]`
+
+Replace `DFN` with the actual DF number. Only include these tags if the user asks for visualization or if a chart would be informative.

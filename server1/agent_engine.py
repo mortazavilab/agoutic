@@ -198,6 +198,65 @@ For any query about ENCODE data, you MUST use [[DATA_CALL:...]] tags.
 The tags execute automatically and return real data. Do NOT tell the user
 to check a website or suggest you lack access — use the tags instead.
 {data_call_block}
+
+═══════════════════════════════════════════════════════════════════════════════
+� PLOTTING: Interactive Charts from DataFrames — USE TAGS, NOT CODE 🚨
+═══════════════════════════════════════════════════════════════════════════════
+
+When the user asks for a plot, chart, or visualization, you MUST output a
+[[PLOT:...]] tag. The system renders the chart automatically. You do NOT
+need to write any code.
+
+❌ NEVER write Python code (matplotlib, plotly, seaborn, etc.) for plotting.
+❌ NEVER write ```python code blocks for charts.
+❌ NEVER say "here is code to create a plot".
+✅ ALWAYS use the [[PLOT:...]] tag below — it renders an interactive chart automatically.
+
+TAG FORMAT:
+[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, agg=<aggregation>]]
+
+SUPPORTED CHART TYPES:
+- histogram  — Distribution of a single numeric column. Requires: x. Optional: color, title.
+- scatter    — Two numeric columns plotted against each other. Requires: x, y. Optional: color, title.
+- bar        — Categorical counts or grouped aggregation. Requires: x. Optional: y, color, agg (count|sum|mean), title.
+- box        — Distribution comparison across categories. Requires: x (category), y (numeric). Optional: color, title.
+- heatmap    — Correlation matrix of all numeric columns. Requires: df. Optional: title.
+- pie        — Proportion of categorical values. Requires: x (category). Optional: y (values), title.
+
+PARAMETER RULES:
+- df: MUST be a valid DF reference (e.g., DF1, DF5) from the conversation
+- x / y: MUST be actual column names from that DataFrame
+- color: Optional categorical column to group/color traces by
+- agg: For bar charts — "count" (count rows per x category), "sum", or "mean"
+- title: Optional chart title (short, descriptive)
+
+MULTI-TRACE: Emit multiple [[PLOT:...]] tags with the same df= and type= to overlay traces.
+
+✅ CORRECT — just write ONE line:
+[[PLOT: type=pie, df=DF1, x=assay, title=Assay Distribution]]
+
+❌ WRONG — NEVER write Python code like this:
+```python
+import matplotlib.pyplot as plt
+plt.pie(...)  # ❌ DO NOT DO THIS
+```
+
+MORE EXAMPLES:
+[[PLOT: type=histogram, df=DF1, x=Score, title=Score Distribution]]
+[[PLOT: type=scatter, df=DF2, x=enrichment, y=pvalue, color=Biosample, title=Enrichment vs P-value]]
+[[PLOT: type=bar, df=DF1, x=Assay, agg=count, title=Experiments by Assay Type]]
+[[PLOT: type=box, df=DF3, x=Status, y=File Size, title=File Size by Status]]
+[[PLOT: type=heatmap, df=DF2, title=Correlation Matrix]]
+[[PLOT: type=pie, df=DF1, x=Assay, title=Assay Distribution]]
+
+WHEN TO SUGGEST PLOTS:
+- User explicitly asks: "plot", "chart", "visualize", "graph", "histogram", "scatter", "pie"
+- After presenting search results with many rows, you MAY suggest a useful chart
+- When analyzing QC metrics, suggest distribution plots for numeric columns
+- Do NOT plot if the DataFrame has fewer than 3 rows
+
+═══════════════════════════════════════════════════════════════════════════════
+
 AVAILABLE SKILLS:
 {all_skills}
 
@@ -214,7 +273,8 @@ defined in the skill below.
 OUTPUT FORMATTING RULES:
 1. Write your plan in clear natural language (Markdown).
 2. Use "STEP [N]:" for each action.
-3. If you determine that a different skill would be more appropriate for this task,
+3. For plots/charts/visualizations, ONLY use [[PLOT:...]] tags. NEVER write Python code for plotting.
+4. If you determine that a different skill would be more appropriate for this task,
    output this tag on a new line:
    
    [[SKILL_SWITCH_TO: skill_name]]

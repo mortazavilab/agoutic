@@ -68,6 +68,8 @@ CONSORTIUM_REGISTRY = {
             "get_experiments": "get_experiment",
             "search_biosample": "search_by_biosample",
             "biosample_search": "search_by_biosample",
+            "search_experiments": "search_by_biosample",
+            "search_experiment": "search_by_biosample",
             "search_target": "search_by_target",
             "target_search": "search_by_target",
             "search_organism": "search_by_organism",
@@ -88,7 +90,20 @@ CONSORTIUM_REGISTRY = {
         #   accession (experiment ENCSR) + file_accession (file ENCFF)
         #   Don't alias accession→file_accession here; routing is handled
         #   by _correct_tool_routing() in server1/app.py
-        "param_aliases": {},
+        "param_aliases": {
+            "search_by_biosample": {
+                "biosample": "search_term",
+                "biosample_name": "search_term",
+                "cell_line": "search_term",
+                "sample": "search_term",
+                "biosample_term_name": "search_term",
+                "cell_type": "search_term",
+                "tissue": "search_term",
+            },
+            "search_by_target": {
+                "target_name": "target",
+            },
+        },
 
         # Fallback patterns: fix common LLM mistakes
         # Maps plain-text tool patterns to proper DATA_CALL tags
