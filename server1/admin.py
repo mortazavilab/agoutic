@@ -12,10 +12,10 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from server1.db import SessionLocal
-from server1.models import User
+from server1.models import User, Conversation, ConversationMessage
 from server1.dependencies import require_admin
 
 
@@ -208,6 +208,179 @@ async def promote_to_admin(user_id: str, admin: User = Depends(require_admin)):
             "email": user.email,
             "role": "admin",
             "message": "User promoted to admin"
+        }
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# Token Usage
+# ---------------------------------------------------------------------------
+
+@router.get("/token-usage/summary")
+async def admin_token_usage_summary(admin: User = Depends(require_admin)):
+    """Leaderboard of token usage across all users.
+
+    Returns a list of users sorted by total tokens consumed (descending),
+    plus a global daily time-series.
+    """
+    session = SessionLocal()
+    try:
+        # Per-user lifetime totals
+        user_rows = session.execute(
+            text("""
+                SELECT
+                    u.id                                        AS user_id,
+                    u.email,
+                    u.display_name,
+                    COALESCE(SUM(cm.prompt_tokens), 0)          AS prompt_tokens,
+                    COALESCE(SUM(cm.completion_tokens), 0)      AS completion_tokens,
+                    COALESCE(SUM(cm.total_tokens), 0)           AS total_tokens,
+                    COUNT(DISTINCT cm.id)                       AS message_count
+                FROM users u
+                LEFT JOIN conversations c ON c.user_id = u.id
+                LEFT JOIN conversation_messages cm
+                    ON cm.conversation_id = c.id
+                    AND cm.role = 'assistant'
+                    AND cm.total_tokens IS NOT NULL
+                GROUP BY u.id, u.email, u.display_name
+                ORDER BY total_tokens DESC
+            """)
+        ).fetchall()
+
+        # Global daily time-series
+        daily_rows = session.execute(
+            text("""
+                SELECT
+                    DATE(cm.created_at)                         AS date,
+                    COALESCE(SUM(cm.prompt_tokens), 0)          AS prompt_tokens,
+                    COALESCE(SUM(cm.completion_tokens), 0)      AS completion_tokens,
+                    COALESCE(SUM(cm.total_tokens), 0)           AS total_tokens
+                FROM conversation_messages cm
+                WHERE cm.role = 'assistant'
+                  AND cm.total_tokens IS NOT NULL
+                GROUP BY DATE(cm.created_at)
+                ORDER BY DATE(cm.created_at) ASC
+            """)
+        ).fetchall()
+
+        return {
+            "users": [
+                {
+                    "user_id": r[0],
+                    "email": r[1],
+                    "display_name": r[2],
+                    "prompt_tokens": r[3],
+                    "completion_tokens": r[4],
+                    "total_tokens": r[5],
+                    "message_count": r[6],
+                }
+                for r in user_rows
+            ],
+            "daily": [
+                {
+                    "date": str(r[0]),
+                    "prompt_tokens": r[1],
+                    "completion_tokens": r[2],
+                    "total_tokens": r[3],
+                }
+                for r in daily_rows
+            ],
+        }
+    finally:
+        session.close()
+
+
+@router.get("/token-usage")
+async def admin_token_usage(
+    user_id: str | None = None,
+    project_id: str | None = None,
+    admin: User = Depends(require_admin),
+):
+    """Detailed token usage with optional filters.
+
+    Query params:
+      ?user_id=<id>      — filter to a single user
+      ?project_id=<id>   — filter to a single project
+
+    Returns per-conversation breakdown and daily time-series.
+    """
+    session = SessionLocal()
+    try:
+        # Build WHERE clause dynamically
+        filters = ["cm.role = 'assistant'", "cm.total_tokens IS NOT NULL"]
+        params: dict = {}
+        if user_id:
+            filters.append("c.user_id = :user_id")
+            params["user_id"] = user_id
+        if project_id:
+            filters.append("c.project_id = :project_id")
+            params["project_id"] = project_id
+        where = " AND ".join(filters)
+
+        conv_rows = session.execute(
+            text(f"""
+                SELECT
+                    c.id                                        AS conversation_id,
+                    c.project_id,
+                    c.title,
+                    u.email,
+                    u.display_name,
+                    COALESCE(SUM(cm.prompt_tokens), 0)          AS prompt_tokens,
+                    COALESCE(SUM(cm.completion_tokens), 0)      AS completion_tokens,
+                    COALESCE(SUM(cm.total_tokens), 0)           AS total_tokens,
+                    MAX(cm.created_at)                          AS last_message_at
+                FROM conversations c
+                JOIN users u ON u.id = c.user_id
+                JOIN conversation_messages cm ON cm.conversation_id = c.id
+                WHERE {where}
+                GROUP BY c.id, c.project_id, c.title, u.email, u.display_name
+                ORDER BY last_message_at DESC
+            """),
+            params
+        ).fetchall()
+
+        daily_rows = session.execute(
+            text(f"""
+                SELECT
+                    DATE(cm.created_at)                         AS date,
+                    COALESCE(SUM(cm.prompt_tokens), 0)          AS prompt_tokens,
+                    COALESCE(SUM(cm.completion_tokens), 0)      AS completion_tokens,
+                    COALESCE(SUM(cm.total_tokens), 0)           AS total_tokens
+                FROM conversation_messages cm
+                JOIN conversations c ON cm.conversation_id = c.id
+                WHERE {where}
+                GROUP BY DATE(cm.created_at)
+                ORDER BY DATE(cm.created_at) ASC
+            """),
+            params
+        ).fetchall()
+
+        return {
+            "filters": {"user_id": user_id, "project_id": project_id},
+            "by_conversation": [
+                {
+                    "conversation_id": r[0],
+                    "project_id": r[1],
+                    "title": r[2],
+                    "email": r[3],
+                    "display_name": r[4],
+                    "prompt_tokens": r[5],
+                    "completion_tokens": r[6],
+                    "total_tokens": r[7],
+                    "last_message_at": str(r[8]) if r[8] else None,
+                }
+                for r in conv_rows
+            ],
+            "daily": [
+                {
+                    "date": str(r[0]),
+                    "prompt_tokens": r[1],
+                    "completion_tokens": r[2],
+                    "total_tokens": r[3],
+                }
+                for r in daily_rows
+            ],
         }
     finally:
         session.close()

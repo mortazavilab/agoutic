@@ -3,6 +3,7 @@ Admin page for user management.
 """
 
 import streamlit as st
+import pandas as pd
 import sys
 from pathlib import Path
 
@@ -35,7 +36,7 @@ try:
         st.metric("Total Users", len(users))
         
         # Filter users
-        tab1, tab2, tab3 = st.tabs(["Pending Approval", "Active Users", "All Users"])
+        tab1, tab2, tab3, tab4 = st.tabs(["Pending Approval", "Active Users", "All Users", "🪙 Token Usage"])
         
         with tab1:
             st.subheader("Users Pending Approval")
@@ -127,6 +128,108 @@ try:
                 hide_index=True,
                 use_container_width=True
             )
+
+        with tab4:
+            st.subheader("🪙 Token Usage")
+
+            try:
+                tok_resp = make_authenticated_request("GET", f"{API_URL}/admin/token-usage/summary")
+                if tok_resp.status_code == 200:
+                    tok_data = tok_resp.json()
+
+                    # ── Global daily chart ─────────────────────────────
+                    daily = tok_data.get("daily", [])
+                    if daily:
+                        st.markdown("#### Global Daily Token Usage")
+                        df_daily = pd.DataFrame(daily)
+                        df_daily["date"] = pd.to_datetime(df_daily["date"])
+                        df_daily = df_daily.set_index("date")
+                        st.line_chart(
+                            df_daily[["prompt_tokens", "completion_tokens", "total_tokens"]],
+                            use_container_width=True,
+                        )
+                    else:
+                        st.info("No token data recorded yet. Token tracking starts with the next LLM call.")
+
+                    # ── Per-user leaderboard ───────────────────────────
+                    st.markdown("#### Per-User Token Leaderboard")
+                    user_tok = tok_data.get("users", [])
+                    if user_tok:
+                        df_users = pd.DataFrame(user_tok)
+                        df_users = df_users[df_users["total_tokens"] > 0].reset_index(drop=True)
+                        if not df_users.empty:
+                            st.dataframe(
+                                df_users[["email", "display_name", "total_tokens",
+                                          "prompt_tokens", "completion_tokens", "message_count"]],
+                                column_config={
+                                    "email": st.column_config.TextColumn("Email"),
+                                    "display_name": st.column_config.TextColumn("Name"),
+                                    "total_tokens": st.column_config.NumberColumn("Total Tokens", format="%d"),
+                                    "prompt_tokens": st.column_config.NumberColumn("Prompt", format="%d"),
+                                    "completion_tokens": st.column_config.NumberColumn("Completion", format="%d"),
+                                    "message_count": st.column_config.NumberColumn("Messages", format="%d"),
+                                },
+                                hide_index=True,
+                                use_container_width=True,
+                            )
+
+                            # ── Per-user drill-down ────────────────────────────────
+                            st.markdown("#### Drill Down by User")
+                            drill_email = st.selectbox(
+                                "Select a user to see per-conversation breakdown",
+                                options=[r["email"] for r in user_tok if r["total_tokens"] > 0],
+                                key="_admin_tok_drill",
+                            )
+                            if drill_email:
+                                # Find user_id for the selected email
+                                selected_user = next(
+                                    (u for u in users if u["email"] == drill_email), None
+                                )
+                                if selected_user:
+                                    detail_resp = make_authenticated_request(
+                                        "GET",
+                                        f"{API_URL}/admin/token-usage",
+                                        params={"user_id": selected_user["id"]},
+                                    )
+                                    if detail_resp.status_code == 200:
+                                        detail = detail_resp.json()
+                                        convs = detail.get("by_conversation", [])
+                                        if convs:
+                                            st.dataframe(
+                                                pd.DataFrame(convs)[
+                                                    ["title", "project_id", "total_tokens",
+                                                     "prompt_tokens", "completion_tokens",
+                                                     "last_message_at"]
+                                                ],
+                                                column_config={
+                                                    "title": st.column_config.TextColumn("Conversation"),
+                                                    "project_id": st.column_config.TextColumn("Project"),
+                                                    "total_tokens": st.column_config.NumberColumn("Total"),
+                                                    "prompt_tokens": st.column_config.NumberColumn("Prompt"),
+                                                    "completion_tokens": st.column_config.NumberColumn("Completion"),
+                                                    "last_message_at": st.column_config.TextColumn("Last Active"),
+                                                },
+                                                hide_index=True,
+                                                use_container_width=True,
+                                            )
+                                        # Per-user daily chart
+                                        user_daily = detail.get("daily", [])
+                                        if user_daily:
+                                            df_ud = pd.DataFrame(user_daily)
+                                            df_ud["date"] = pd.to_datetime(df_ud["date"])
+                                            df_ud = df_ud.set_index("date")
+                                            st.line_chart(
+                                                df_ud[["prompt_tokens", "completion_tokens"]],
+                                                use_container_width=True,
+                                            )
+                        else:
+                            st.info("No token data recorded yet.")
+                else:
+                    st.error(f"Failed to fetch token usage: {tok_resp.status_code}")
+                    st.code(tok_resp.text)
+            except Exception as e:
+                st.error(f"Error fetching token usage: {e}")
+
     else:
         st.error(f"Failed to fetch users: {resp.status_code}")
         st.code(resp.text)

@@ -105,6 +105,11 @@ class ConversationMessage(Base):
         server_default=func.now(),
         nullable=False,
     )
+    # Token usage — populated on assistant messages only; NULL for pre-tracking messages
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String, nullable=True)
 
 class JobResult(Base):
     """Links jobs to conversations for easy access"""

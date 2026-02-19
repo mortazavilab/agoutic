@@ -28,13 +28,14 @@ st.title("📁 Projects Dashboard")
 # ── Disk Usage Summary ───────────────────────────────────────────────
 try:
     disk_resp = make_authenticated_request("GET", f"{API_URL}/user/disk-usage", timeout=5)
+    token_resp = make_authenticated_request("GET", f"{API_URL}/user/token-usage", timeout=5)
+    col_a, col_b, col_c = st.columns([1, 1, 3])
     if disk_resp.status_code == 200:
         disk = disk_resp.json()
         total_mb = disk.get("total_bytes", 0) / (1024 * 1024)
-        col_a, col_b = st.columns([1, 3])
         with col_a:
             st.metric("Total Disk Usage", f"{total_mb:.1f} MB")
-        with col_b:
+        with col_c:
             breakdown = disk.get("projects", [])
             if breakdown:
                 labels = []
@@ -42,6 +43,11 @@ try:
                     mb = bp.get("size_bytes", 0) / (1024 * 1024)
                     labels.append(f"**{bp.get('project_id','?')[:8]}…** {mb:.1f} MB")
                 st.caption("Per-project: " + " · ".join(labels))
+    if token_resp.status_code == 200:
+        tok = token_resp.json()
+        lifetime = tok.get("lifetime", {})
+        with col_b:
+            st.metric("Lifetime Tokens Used", f"{lifetime.get('total_tokens', 0):,}")
 except Exception:
     pass
 
@@ -91,8 +97,8 @@ for p in filtered:
             pass
     last_active = (p.get("last_accessed") or "")[:16]
 
-    # Fetch stats for this project (disk, messages, files)
-    disk_mb, msg_count, file_count = 0.0, 0, 0
+    # Fetch stats for this project (disk, messages, files, tokens)
+    disk_mb, msg_count, file_count, total_tokens = 0.0, 0, 0, 0
     try:
         sr = make_authenticated_request(
             "GET", f"{API_URL}/projects/{pid}/stats", timeout=5
@@ -102,6 +108,7 @@ for p in filtered:
             disk_mb = round(sd.get("disk_usage_bytes", 0) / (1024 * 1024), 2)
             msg_count = sd.get("message_count", 0)
             file_count = sd.get("file_count", 0)
+            total_tokens = sd.get("token_usage", {}).get("total_tokens", 0)
     except Exception:
         pass
 
@@ -113,6 +120,7 @@ for p in filtered:
         "Size (MB)": disk_mb,
         "Messages": msg_count,
         "Files": file_count,
+        "Tokens": total_tokens,
         "Created": created or "—",
         "Last Active": last_active or "—",
         "Status": "🗄️ Archived" if p.get("is_archived") else "Active",
@@ -137,6 +145,7 @@ if rows:
             "Size (MB)": st.column_config.NumberColumn("Size (MB)", format="%.2f", disabled=True),
             "Messages": st.column_config.NumberColumn("Messages", disabled=True),
             "Files": st.column_config.NumberColumn("Files", disabled=True),
+            "Tokens": st.column_config.NumberColumn("🪙 Tokens", disabled=True),
             "Created": st.column_config.TextColumn("Created", disabled=True),
             "Last Active": st.column_config.TextColumn("Last Active", disabled=True),
             "Status": st.column_config.TextColumn("Status", disabled=True),

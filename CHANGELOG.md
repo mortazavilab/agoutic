@@ -1,5 +1,61 @@
 # Changelog - February 2026
 
+## [Unreleased] - 2026-02-19
+
+### Added — Per-Message & Per-Conversation Token Tracking
+
+- **`AgentEngine` now captures `response.usage` from every LLM call**
+  - `think()` and `analyze_results()` both return `(content, usage_dict)` tuples instead of plain strings. A `_usage_to_dict()` helper normalises `prompt_tokens`, `completion_tokens`, `total_tokens` from the OpenAI usage object and returns zeros gracefully on errors or `None` usage objects.
+  - Applied to: [server1/agent_engine.py](server1/agent_engine.py)
+
+- **Token counts stored in two places per assistant turn**
+  - Chat endpoint (`POST /chat`) unpacks both LLM passes (think + analyze_results), sums their usage into `_total_usage`, and:
+    1. Embeds a `"tokens": {prompt_tokens, completion_tokens, total_tokens, model}` key in every `AGENT_PLAN` block's `payload_json` — so each block is self-describing with no join needed.
+    2. Persists the same counts on the `ConversationMessage` row via updated `save_conversation_message()` signature (new optional `token_data` and `model_name` kwargs).
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Four new nullable columns on `ConversationMessage`**
+  - `prompt_tokens INTEGER`, `completion_tokens INTEGER`, `total_tokens INTEGER`, `model_name TEXT` — all nullable so pre-migration rows are unaffected.
+  - Applied to: [server1/models.py](server1/models.py)
+
+- **Idempotent migration script**
+  - `server1/migrate_token_tracking.py` adds the four columns with `PRAGMA table_info` guards (safe to re-run). Respects the `$AGOUTIC_DATA` environment variable identically to `server1/config.py`, so it works on Watson and local dev without modification. Accepts an optional path argument.
+  - Applied to: [server1/migrate_token_tracking.py](server1/migrate_token_tracking.py)
+
+- **`GET /user/token-usage` endpoint (authenticated, own data)**
+  - Returns: `lifetime` totals, `by_conversation` list (project_id, title, token breakdown, last_message_at), `daily` time-series, and `tracking_since` (ISO date of earliest tracked message).
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **`GET /admin/token-usage/summary` endpoint (admin-only)**
+  - Returns per-user leaderboard sorted by total tokens consumed, plus a global daily time-series. Aggregates across all users via JOIN on `conversations → conversation_messages`.
+  - Applied to: [server1/admin.py](server1/admin.py)
+
+- **`GET /admin/token-usage` endpoint (admin-only, filterable)**
+  - Optional `?user_id=` and `?project_id=` query params. Returns per-conversation breakdown and daily time-series for the matching scope.
+  - Applied to: [server1/admin.py](server1/admin.py)
+
+- **`GET /projects/{id}/stats` — `token_usage` field added**
+  - Response now includes `token_usage: {prompt_tokens, completion_tokens, total_tokens}` aggregated from all conversations in the project.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Per-message token caption in chat UI**
+  - Each `AGENT_PLAN` block renders a caption under the message content: `🪙 1,234 tokens  (↑ 890 prompt · ↓ 344 completion)  ·  llama3.2`. Reads from the `tokens` key in block payload. Pre-migration messages silently show nothing.
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Live token counter in sidebar**
+  - `🪙 Tokens: 12,345` expander updates on every page rerun (API call moved outside the expander widget so it fetches unconditionally). Expander label shows the live total. Inside: Total + Completion metrics, daily line chart (when >1 day of data), and tracking-since date.
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Lifetime tokens metric in Projects dashboard**
+  - Summary row alongside Disk Usage now shows "Lifetime Tokens Used". Per-project table gains a "🪙 Tokens" column populated from `/projects/{id}/stats`.
+  - Applied to: [ui/pages/projects.py](ui/pages/projects.py)
+
+- **"🪙 Token Usage" admin tab**
+  - New fourth tab in the Admin page. Shows: global daily line chart, per-user leaderboard `st.dataframe`, user drill-down selector with per-conversation table and per-user daily chart.
+  - Applied to: [ui/pages/admin.py](ui/pages/admin.py)
+
+---
+
 ## [Unreleased] - 2026-02-18
 
 ### Added — Interactive Plotly Charts (`AGENT_PLOT` blocks)

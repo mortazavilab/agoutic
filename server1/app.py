@@ -2160,7 +2160,9 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             )
         
         # 'think' talks to Ollama using the active skill and conversation history
-        raw_response = await run_in_threadpool(
+        # Returns (content, usage_dict) — capture tokens for this turn
+        _think_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        raw_response, _think_usage = await run_in_threadpool(
             engine.think, 
             augmented_message, 
             active_skill,
@@ -2187,7 +2189,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     req.message, new_skill, conversation_history,
                     history_blocks=history_blocks
                 )
-                raw_response = await run_in_threadpool(
+                raw_response, _think_usage = await run_in_threadpool(
                     engine.think, 
                     augmented_message, 
                     new_skill,
@@ -2679,6 +2681,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             all_results[source_key] = source_results
         
         # 6c. Format results and run second-pass LLM analysis
+        _analyze_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if all_results:
             # Check if all results are errors (skip second pass if so)
             has_real_data = any(
@@ -2729,7 +2732,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 # Second-pass: send data to LLM for analysis/filtering/summarization
                 logger.info("Running second-pass LLM analysis", data_size=len(formatted_data))
                 _emit_progress(req.request_id, "analyzing", "Analyzing results...")
-                analyzed_response = await run_in_threadpool(
+                analyzed_response, _analyze_usage = await run_in_threadpool(
                     engine.analyze_results,
                     req.message,
                     clean_markdown,
@@ -2889,10 +2892,19 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 _next_df_id += 1
             # Non-visible DFs intentionally get no df_id
 
+        # Consolidate token usage from both LLM passes (think + analyze_results)
+        _total_usage = {
+            "prompt_tokens": _think_usage["prompt_tokens"] + _analyze_usage["prompt_tokens"],
+            "completion_tokens": _think_usage["completion_tokens"] + _analyze_usage["completion_tokens"],
+            "total_tokens": _think_usage["total_tokens"] + _analyze_usage["total_tokens"],
+            "model": engine.model_name,
+        }
+
         _plan_payload = {
             "markdown": clean_markdown, 
             "skill": active_skill,
             "model": engine.model_name,
+            "tokens": _total_usage,
         }
         if _embedded_dataframes:
             _plan_payload["_dataframes"] = _embedded_dataframes
@@ -2925,8 +2937,11 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             owner_id=user.id
         )
         
-        # Save assistant's response to conversation history
-        await save_conversation_message(session, req.project_id, user.id, "assistant", clean_markdown)
+        # Save assistant's response to conversation history (with token counts)
+        await save_conversation_message(
+            session, req.project_id, user.id, "assistant", clean_markdown,
+            token_data=_total_usage, model_name=engine.model_name
+        )
 
         # 8b. Insert AGENT_PLOT blocks for any [[PLOT:...]] tags
         plot_blocks = []
@@ -3039,8 +3054,16 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
 
 # --- CONVERSATION HISTORY ENDPOINTS ---
 
-async def save_conversation_message(session, project_id: str, user_id: str, role: str, content: str):
-    """Helper to save conversation messages."""
+async def save_conversation_message(
+    session,
+    project_id: str,
+    user_id: str,
+    role: str,
+    content: str,
+    token_data: dict | None = None,
+    model_name: str | None = None,
+):
+    """Helper to save conversation messages, optionally with token usage."""
     # Get or create conversation for this project
     conv_query = select(Conversation)\
         .where(Conversation.project_id == project_id)\
@@ -3080,7 +3103,11 @@ async def save_conversation_message(session, project_id: str, user_id: str, role
         role=role,
         content=content,
         seq=next_seq,
-        created_at=datetime.datetime.utcnow()
+        created_at=datetime.datetime.utcnow(),
+        prompt_tokens=token_data.get("prompt_tokens") if token_data else None,
+        completion_tokens=token_data.get("completion_tokens") if token_data else None,
+        total_tokens=token_data.get("total_tokens") if token_data else None,
+        model_name=model_name,
     )
     session.add(message)
     
@@ -3610,6 +3637,22 @@ async def get_project_stats(project_id: str, request: Request):
                             except OSError:
                                 pass
 
+        # Token usage for this project
+        token_row = session.execute(
+            text("""
+                SELECT
+                    COALESCE(SUM(cm.prompt_tokens), 0)     AS prompt_tokens,
+                    COALESCE(SUM(cm.completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(cm.total_tokens), 0)      AS total_tokens
+                FROM conversation_messages cm
+                JOIN conversations c ON cm.conversation_id = c.id
+                WHERE c.project_id = :pid
+                  AND cm.role = 'assistant'
+                  AND cm.total_tokens IS NOT NULL
+            """),
+            {"pid": project_id}
+        ).fetchone()
+
         return {
             "project_id": project_id,
             "name": project.name if project else project_id,
@@ -3625,6 +3668,11 @@ async def get_project_stats(project_id: str, request: Request):
             "disk_usage_bytes": disk_bytes,
             "disk_usage_mb": round(disk_bytes / (1024 * 1024), 2),
             "file_count": file_count,
+            "token_usage": {
+                "prompt_tokens": token_row[0] if token_row else 0,
+                "completion_tokens": token_row[1] if token_row else 0,
+                "total_tokens": token_row[2] if token_row else 0,
+            },
         }
     finally:
         session.close()
@@ -3689,6 +3737,125 @@ async def list_project_files(project_id: str, request: Request):
         "total_size_mb": round(total_size / (1024 * 1024), 2),
         "file_count": len(files),
     }
+
+
+@app.get("/user/token-usage")
+async def get_user_token_usage(request: Request):
+    """Return token usage for the authenticated user.
+
+    Response shape:
+      {
+        "lifetime": {prompt_tokens, completion_tokens, total_tokens},
+        "by_conversation": [ {conversation_id, project_id, title, prompt_tokens,
+                               completion_tokens, total_tokens, last_message_at} ],
+        "daily": [ {date, prompt_tokens, completion_tokens, total_tokens} ],
+        "tracking_since": ISO string of earliest tracked message (or null)
+      }
+    """
+    user = request.state.user
+    session = SessionLocal()
+    try:
+        # Lifetime totals
+        lifetime_row = session.execute(
+            text("""
+                SELECT
+                    COALESCE(SUM(cm.prompt_tokens), 0)     AS prompt_tokens,
+                    COALESCE(SUM(cm.completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(cm.total_tokens), 0)      AS total_tokens
+                FROM conversation_messages cm
+                JOIN conversations c ON cm.conversation_id = c.id
+                WHERE c.user_id = :uid
+                  AND cm.role = 'assistant'
+                  AND cm.total_tokens IS NOT NULL
+            """),
+            {"uid": user.id}
+        ).fetchone()
+
+        # Per-conversation totals
+        conv_rows = session.execute(
+            text("""
+                SELECT
+                    c.id                                        AS conversation_id,
+                    c.project_id,
+                    c.title,
+                    COALESCE(SUM(cm.prompt_tokens), 0)          AS prompt_tokens,
+                    COALESCE(SUM(cm.completion_tokens), 0)      AS completion_tokens,
+                    COALESCE(SUM(cm.total_tokens), 0)           AS total_tokens,
+                    MAX(cm.created_at)                          AS last_message_at
+                FROM conversations c
+                JOIN conversation_messages cm ON cm.conversation_id = c.id
+                WHERE c.user_id = :uid
+                  AND cm.role = 'assistant'
+                  AND cm.total_tokens IS NOT NULL
+                GROUP BY c.id, c.project_id, c.title
+                ORDER BY last_message_at DESC
+            """),
+            {"uid": user.id}
+        ).fetchall()
+
+        # Daily time-series (SQLite date() function)
+        daily_rows = session.execute(
+            text("""
+                SELECT
+                    DATE(cm.created_at)                         AS date,
+                    COALESCE(SUM(cm.prompt_tokens), 0)          AS prompt_tokens,
+                    COALESCE(SUM(cm.completion_tokens), 0)      AS completion_tokens,
+                    COALESCE(SUM(cm.total_tokens), 0)           AS total_tokens
+                FROM conversation_messages cm
+                JOIN conversations c ON cm.conversation_id = c.id
+                WHERE c.user_id = :uid
+                  AND cm.role = 'assistant'
+                  AND cm.total_tokens IS NOT NULL
+                GROUP BY DATE(cm.created_at)
+                ORDER BY DATE(cm.created_at) ASC
+            """),
+            {"uid": user.id}
+        ).fetchall()
+
+        # Earliest tracked message
+        tracking_since_row = session.execute(
+            text("""
+                SELECT MIN(cm.created_at)
+                FROM conversation_messages cm
+                JOIN conversations c ON cm.conversation_id = c.id
+                WHERE c.user_id = :uid
+                  AND cm.role = 'assistant'
+                  AND cm.total_tokens IS NOT NULL
+            """),
+            {"uid": user.id}
+        ).fetchone()
+
+        return {
+            "lifetime": {
+                "prompt_tokens": lifetime_row[0] if lifetime_row else 0,
+                "completion_tokens": lifetime_row[1] if lifetime_row else 0,
+                "total_tokens": lifetime_row[2] if lifetime_row else 0,
+            },
+            "by_conversation": [
+                {
+                    "conversation_id": r[0],
+                    "project_id": r[1],
+                    "title": r[2],
+                    "prompt_tokens": r[3],
+                    "completion_tokens": r[4],
+                    "total_tokens": r[5],
+                    "last_message_at": str(r[6]) if r[6] else None,
+                }
+                for r in conv_rows
+            ],
+            "daily": [
+                {
+                    "date": str(r[0]),
+                    "prompt_tokens": r[1],
+                    "completion_tokens": r[2],
+                    "total_tokens": r[3],
+                }
+                for r in daily_rows
+            ],
+            "tracking_since": str(tracking_since_row[0]) if tracking_since_row and tracking_since_row[0] else None,
+        }
+    finally:
+        session.close()
 
 
 @app.get("/user/disk-usage")

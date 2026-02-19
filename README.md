@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 2.5  
+**Version:** 2.6  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -24,7 +24,7 @@ AGOUTIC enforces access control at every layer:
 - **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{user_id}/{project_id}/`) with input sanitization and jail-escape guards.
 - **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
 - **Project management**: Full dashboard for browsing projects, viewing stats/files/jobs, renaming, archiving, and permanent deletion with cascading cleanup.
-- **Migration**: Run `python -m server1.migrate_hardening` to add new columns to existing databases.
+- **Migration**: Run `python server1/migrate_hardening.py` to add hardening columns. Run `python server1/migrate_token_tracking.py` to add token tracking columns. Both scripts respect `$AGOUTIC_DATA` and are safe to re-run.
 
 ## 🚀 Quick Start
 
@@ -115,6 +115,7 @@ python server1/server2_mcp_client.py
   - Role-based authorization gates on all endpoints
   - Server-side project CRUD (`POST/GET/PATCH /projects`)
   - `[[PLOT:...]]` tag parsing → `AGENT_PLOT` blocks for inline Plotly charts (histogram, scatter, bar, box, heatmap, pie)
+  - **Per-message and per-conversation token tracking** — every LLM response records `prompt_tokens`, `completion_tokens`, `total_tokens`, and `model_name` in the database; exposed via `GET /user/token-usage` (own data) and `GET /admin/token-usage` (all users)
 
 ### Server 2: ENCODELIB (Port 8080)
 - **Role:** ENCODE Portal data retrieval

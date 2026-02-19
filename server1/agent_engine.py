@@ -15,6 +15,17 @@ client = OpenAI(
     api_key="ollama",  # Required by the library, but ignored by Ollama
 )
 
+
+def _usage_to_dict(usage_obj) -> dict:
+    """Convert an OpenAI UsageObject to a plain dict, handling None gracefully."""
+    if usage_obj is None:
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    return {
+        "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
+        "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
+        "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
+    }
+
 class AgentEngine:
     def __init__(self, model_key="default"):
         """
@@ -319,11 +330,11 @@ OUTPUT FORMATTING RULES:
                 messages=messages,
                 temperature=0.1  # Low temp = more obedient to instructions
             )
-            
-            return response.choices[0].message.content
-            
+
+            return response.choices[0].message.content, _usage_to_dict(response.usage)
+
         except Exception as e:
-            return f"❌ Brain Freeze (Connection Error): {str(e)}"
+            return f"❌ Brain Freeze (Connection Error): {str(e)}", _usage_to_dict(None)
 
     def analyze_results(self, user_message: str, first_pass_text: str,
                         data_results: str, skill_key: str = "welcome",
@@ -418,11 +429,11 @@ The raw rows are in the interactive dataframe below.
                 messages=messages,
                 temperature=0.1,
             )
-            return response.choices[0].message.content
+            return response.choices[0].message.content, _usage_to_dict(response.usage)
         except Exception as e:
             logger.error("Second-pass analysis failed", error=str(e))
             # Fallback: return the formatted data directly
-            return f"{first_pass_text}\n\n{data_results}"
+            return f"{first_pass_text}\n\n{data_results}", _usage_to_dict(None)
 
 # --- Quick Test Block ---
 if __name__ == "__main__":
@@ -436,7 +447,9 @@ if __name__ == "__main__":
     print(test_query)
     
     print(f"\n--- 🤖 Agent Thinking ---")
-    reply = engine.think(test_query)
-    
+    reply, usage = engine.think(test_query)
+
     print("\n--- 📄 Result ---")
     print(reply)
+    print("\n--- 📊 Token Usage ---")
+    print(usage)

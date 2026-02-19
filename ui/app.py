@@ -291,6 +291,41 @@ with st.sidebar:
         pass  # Silently fail if history not available
     
     st.divider()
+
+    # [E] TOKEN USAGE SUMMARY FOR THIS USER
+    # Fetch OUTSIDE the expander so the data refreshes on every rerun,
+    # regardless of whether the expander is open or closed.
+    _tok_data = None
+    try:
+        _tok_resp = make_authenticated_request("GET", f"{API_URL}/user/token-usage", timeout=5)
+        if _tok_resp.status_code == 200:
+            _tok_data = _tok_resp.json()
+    except Exception:
+        pass
+
+    _lt = (_tok_data or {}).get("lifetime", {})
+    _tok_total = _lt.get("total_tokens", 0)
+    _expander_label = f"🪙 Tokens: {_tok_total:,}" if _tok_total else "🪙 Token Usage"
+
+    with st.expander(_expander_label, expanded=False):
+        if _tok_data and _tok_total:
+            tcol1, tcol2 = st.columns(2)
+            tcol1.metric("Total", f"{_tok_total:,}")
+            tcol2.metric("Completion", f"{_lt.get('completion_tokens', 0):,}")
+            _daily = _tok_data.get("daily", [])
+            if len(_daily) > 1:
+                import pandas as _pd
+                _df_tok = _pd.DataFrame(_daily)
+                _df_tok["date"] = _pd.to_datetime(_df_tok["date"])
+                _df_tok = _df_tok.set_index("date")
+                st.line_chart(_df_tok["total_tokens"], use_container_width=True)
+            _since = _tok_data.get("tracking_since")
+            if _since:
+                st.caption(f"Tracking since {_since[:10]}")
+        else:
+            st.caption("No token data yet — starts with next LLM call.")
+
+    st.divider()
     
     model_choice = st.selectbox("Brain Model", ["default", "fast", "smart"], index=0)
     auto_refresh = st.toggle("Live Stream", value=True)
@@ -818,6 +853,18 @@ def render_block(block, expected_project_id: str = ""):
                     _dfs = content.get("_dataframes")
                     if _dfs and isinstance(_dfs, dict):
                         _render_embedded_dataframes(_dfs, block_id)
+
+            # ── Per-message token count ──
+            _msg_tokens = content.get("tokens")
+            if _msg_tokens and _msg_tokens.get("total_tokens"):
+                _tt = _msg_tokens["total_tokens"]
+                _pt = _msg_tokens.get("prompt_tokens", 0)
+                _ct = _msg_tokens.get("completion_tokens", 0)
+                _mn = _msg_tokens.get("model", "")
+                _tok_label = f"🪙 {_tt:,} tokens  (↑{_pt:,} prompt · ↓{_ct:,} completion)"
+                if _mn:
+                    _tok_label += f"  ·  `{_mn}`"
+                st.caption(_tok_label)
 
             # ── Debug panel (only when debug toggle is on) ──
             _debug_info = content.get("_debug")
