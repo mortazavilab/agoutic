@@ -79,7 +79,7 @@ try:
             
             for u in active_users:
                 with st.container():
-                    col1, col2, col3 = st.columns([3, 1, 1])
+                    col1, col2, col3, col4 = st.columns([3, 1, 1, 2])
                     
                     with col1:
                         st.write(f"**{u['display_name'] or 'No name'}**")
@@ -109,6 +109,31 @@ try:
                                 st.rerun()
                             else:
                                 st.error(f"Failed: {resp.text}")
+
+                    with col4:
+                        _cur_limit = u.get('token_limit')
+                        _limit_label = f"🪙 Limit: {_cur_limit:,}" if _cur_limit else "🪙 Limit: Unlimited"
+                        with st.expander(_limit_label, expanded=False):
+                            with st.form(key=f"limit_form_{u['id']}"):
+                                _new_limit = st.number_input(
+                                    "Token limit (0 = unlimited)",
+                                    min_value=0,
+                                    value=_cur_limit or 0,
+                                    step=50000,
+                                    key=f"limit_input_{u['id']}",
+                                )
+                                if st.form_submit_button("Save"):
+                                    _payload = {"token_limit": int(_new_limit) if _new_limit > 0 else None}
+                                    _lr = make_authenticated_request(
+                                        "PATCH",
+                                        f"{API_URL}/admin/users/{u['id']}/token-limit",
+                                        json=_payload,
+                                    )
+                                    if _lr.status_code == 200:
+                                        st.success("Saved")
+                                        st.rerun()
+                                    else:
+                                        st.error(_lr.text)
                     
                     st.divider()
         
@@ -122,6 +147,7 @@ try:
                     "display_name": st.column_config.TextColumn("Name", width="medium"),
                     "role": st.column_config.TextColumn("Role", width="small"),
                     "is_active": st.column_config.CheckboxColumn("Active", width="small"),
+                    "token_limit": st.column_config.NumberColumn("🪙 Token Limit", width="small", format="%d"),
                     "created_at": st.column_config.DatetimeColumn("Created", width="small"),
                     "last_login": st.column_config.DatetimeColumn("Last Login", width="small"),
                 },
@@ -151,16 +177,29 @@ try:
                     else:
                         st.info("No token data recorded yet. Token tracking starts with the next LLM call.")
 
-                    # ── Per-user leaderboard ───────────────────────────
+                    # ── Per-user leaderboard with limit column ────────
                     st.markdown("#### Per-User Token Leaderboard")
                     user_tok = tok_data.get("users", [])
+
+                    # Enrich with token_limit from the users list
+                    _uid_to_limit = {u["id"]: u.get("token_limit") for u in users}
+
                     if user_tok:
                         df_users = pd.DataFrame(user_tok)
-                        df_users = df_users[df_users["total_tokens"] > 0].reset_index(drop=True)
-                        if not df_users.empty:
+                        df_users["token_limit"] = df_users["user_id"].map(_uid_to_limit)
+                        df_users["% used"] = df_users.apply(
+                            lambda r: round(r["total_tokens"] / r["token_limit"] * 100, 1)
+                            if r["token_limit"] else None,
+                            axis=1,
+                        )
+                        df_show = df_users[df_users["total_tokens"] > 0].reset_index(drop=True)
+                        if not df_show.empty:
                             st.dataframe(
-                                df_users[["email", "display_name", "total_tokens",
-                                          "prompt_tokens", "completion_tokens", "message_count"]],
+                                df_show[[
+                                    "email", "display_name",
+                                    "total_tokens", "prompt_tokens", "completion_tokens",
+                                    "message_count", "token_limit", "% used",
+                                ]],
                                 column_config={
                                     "email": st.column_config.TextColumn("Email"),
                                     "display_name": st.column_config.TextColumn("Name"),
@@ -168,62 +207,97 @@ try:
                                     "prompt_tokens": st.column_config.NumberColumn("Prompt", format="%d"),
                                     "completion_tokens": st.column_config.NumberColumn("Completion", format="%d"),
                                     "message_count": st.column_config.NumberColumn("Messages", format="%d"),
+                                    "token_limit": st.column_config.NumberColumn("🪙 Limit", format="%d"),
+                                    "% used": st.column_config.NumberColumn("% Used", format="%.1f%%"),
                                 },
                                 hide_index=True,
                                 use_container_width=True,
                             )
 
-                            # ── Per-user drill-down ────────────────────────────────
-                            st.markdown("#### Drill Down by User")
-                            drill_email = st.selectbox(
-                                "Select a user to see per-conversation breakdown",
-                                options=[r["email"] for r in user_tok if r["total_tokens"] > 0],
-                                key="_admin_tok_drill",
-                            )
-                            if drill_email:
-                                # Find user_id for the selected email
-                                selected_user = next(
-                                    (u for u in users if u["email"] == drill_email), None
+                        # ── Set token limits ───────────────────────────────────
+                        st.markdown("#### 🪙 Set Token Limits")
+                        st.caption("Set a hard cap on total tokens per user. 0 = unlimited.")
+                        _all_non_admin = [u for u in users if u["role"] != "admin"]
+                        with st.form("_bulk_limit_form"):
+                            _limit_rows = []
+                            for _u in _all_non_admin:
+                                _cur = _u.get("token_limit") or 0
+                                _new = st.number_input(
+                                    f"{_u['display_name'] or _u['email']}",
+                                    min_value=0,
+                                    value=_cur,
+                                    step=50000,
+                                    key=f"_bulk_limit_{_u['id']}",
+                                    help=_u["email"],
                                 )
-                                if selected_user:
-                                    detail_resp = make_authenticated_request(
-                                        "GET",
-                                        f"{API_URL}/admin/token-usage",
-                                        params={"user_id": selected_user["id"]},
+                                _limit_rows.append((_u["id"], _new))
+                            if st.form_submit_button("💾 Save All Limits"):
+                                _ok, _fail = 0, 0
+                                for _uid, _lval in _limit_rows:
+                                    _payload = {"token_limit": int(_lval) if _lval > 0 else None}
+                                    _r = make_authenticated_request(
+                                        "PATCH",
+                                        f"{API_URL}/admin/users/{_uid}/token-limit",
+                                        json=_payload,
                                     )
-                                    if detail_resp.status_code == 200:
-                                        detail = detail_resp.json()
-                                        convs = detail.get("by_conversation", [])
-                                        if convs:
-                                            st.dataframe(
-                                                pd.DataFrame(convs)[
-                                                    ["title", "project_id", "total_tokens",
-                                                     "prompt_tokens", "completion_tokens",
-                                                     "last_message_at"]
-                                                ],
-                                                column_config={
-                                                    "title": st.column_config.TextColumn("Conversation"),
-                                                    "project_id": st.column_config.TextColumn("Project"),
-                                                    "total_tokens": st.column_config.NumberColumn("Total"),
-                                                    "prompt_tokens": st.column_config.NumberColumn("Prompt"),
-                                                    "completion_tokens": st.column_config.NumberColumn("Completion"),
-                                                    "last_message_at": st.column_config.TextColumn("Last Active"),
-                                                },
-                                                hide_index=True,
-                                                use_container_width=True,
-                                            )
-                                        # Per-user daily chart
-                                        user_daily = detail.get("daily", [])
-                                        if user_daily:
-                                            df_ud = pd.DataFrame(user_daily)
-                                            df_ud["date"] = pd.to_datetime(df_ud["date"])
-                                            df_ud = df_ud.set_index("date")
-                                            st.line_chart(
-                                                df_ud[["prompt_tokens", "completion_tokens"]],
-                                                use_container_width=True,
-                                            )
-                        else:
-                            st.info("No token data recorded yet.")
+                                    if _r.status_code == 200:
+                                        _ok += 1
+                                    else:
+                                        _fail += 1
+                                st.toast(f"Saved {_ok} limit(s)" + (f", {_fail} error(s)" if _fail else ""))
+                                st.rerun()
+
+                        # ── Per-user drill-down ────────────────────────────────
+                        st.markdown("#### Drill Down by User")
+                        drill_email = st.selectbox(
+                            "Select a user to see per-conversation breakdown",
+                            options=[r["email"] for r in user_tok if r["total_tokens"] > 0],
+                            key="_admin_tok_drill",
+                        )
+                        if drill_email:
+                            # Find user_id for the selected email
+                            selected_user = next(
+                                (u for u in users if u["email"] == drill_email), None
+                            )
+                            if selected_user:
+                                detail_resp = make_authenticated_request(
+                                    "GET",
+                                    f"{API_URL}/admin/token-usage",
+                                    params={"user_id": selected_user["id"]},
+                                )
+                                if detail_resp.status_code == 200:
+                                    detail = detail_resp.json()
+                                    convs = detail.get("by_conversation", [])
+                                    if convs:
+                                        st.dataframe(
+                                            pd.DataFrame(convs)[
+                                                ["title", "project_id", "total_tokens",
+                                                 "prompt_tokens", "completion_tokens",
+                                                 "last_message_at"]
+                                            ],
+                                            column_config={
+                                                "title": st.column_config.TextColumn("Conversation"),
+                                                "project_id": st.column_config.TextColumn("Project"),
+                                                "total_tokens": st.column_config.NumberColumn("Total"),
+                                                "prompt_tokens": st.column_config.NumberColumn("Prompt"),
+                                                "completion_tokens": st.column_config.NumberColumn("Completion"),
+                                                "last_message_at": st.column_config.TextColumn("Last Active"),
+                                            },
+                                            hide_index=True,
+                                            use_container_width=True,
+                                        )
+                                    # Per-user daily chart
+                                    user_daily = detail.get("daily", [])
+                                    if user_daily:
+                                        df_ud = pd.DataFrame(user_daily)
+                                        df_ud["date"] = pd.to_datetime(df_ud["date"])
+                                        df_ud = df_ud.set_index("date")
+                                        st.line_chart(
+                                            df_ud[["prompt_tokens", "completion_tokens"]],
+                                            use_container_width=True,
+                                        )
+                    else:
+                        st.info("No token data recorded yet.")
                 else:
                     st.error(f"Failed to fetch token usage: {tok_resp.status_code}")
                     st.code(tok_resp.text)

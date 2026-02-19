@@ -1947,7 +1947,40 @@ async def chat_with_agent(req: ChatRequest, request: Request):
         _ensure_session.close()
 
     require_project_access(req.project_id, user, min_role="editor")
-    
+
+    # --- TOKEN LIMIT CHECK ---
+    # Admins are exempt. For regular users, compare lifetime total against their
+    # limit (if set) before spending any compute on the LLM call.
+    if user.role != "admin" and user.token_limit is not None:
+        _limit_session = SessionLocal()
+        try:
+            _used_row = _limit_session.execute(
+                text("""
+                    SELECT COALESCE(SUM(cm.total_tokens), 0)
+                    FROM conversation_messages cm
+                    JOIN conversations c ON cm.conversation_id = c.id
+                    WHERE c.user_id = :uid
+                      AND cm.role = 'assistant'
+                      AND cm.total_tokens IS NOT NULL
+                """),
+                {"uid": user.id}
+            ).fetchone()
+            _tokens_used = _used_row[0] if _used_row else 0
+        finally:
+            _limit_session.close()
+
+        if _tokens_used >= user.token_limit:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "token_limit_exceeded",
+                    "message": f"You have used {_tokens_used:,} of your {user.token_limit:,} token limit. "
+                               "Please contact an admin to increase your quota.",
+                    "tokens_used": _tokens_used,
+                    "token_limit": user.token_limit,
+                }
+            )
+
     session = SessionLocal()
     try:
         # Check if there's an active skill in progress (no approval gate yet)
@@ -3853,6 +3886,7 @@ async def get_user_token_usage(request: Request):
                 for r in daily_rows
             ],
             "tracking_since": str(tracking_since_row[0]) if tracking_since_row and tracking_since_row[0] else None,
+            "token_limit": user.token_limit,
         }
     finally:
         session.close()

@@ -71,6 +71,14 @@ def migrate(db_path: Path) -> None:
     else:
         print("  ⏭  conversation_messages.model_name already exists")
 
+    # 5. users.token_limit
+    if not _column_exists(cursor, "users", "token_limit"):
+        cursor.execute("ALTER TABLE users ADD COLUMN token_limit INTEGER")
+        print("  ✅ Added users.token_limit (NULL = unlimited)")
+        applied += 1
+    else:
+        print("  ⏭  users.token_limit already exists")
+
     conn.commit()
     conn.close()
 

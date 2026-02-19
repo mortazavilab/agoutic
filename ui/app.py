@@ -305,13 +305,24 @@ with st.sidebar:
 
     _lt = (_tok_data or {}).get("lifetime", {})
     _tok_total = _lt.get("total_tokens", 0)
-    _expander_label = f"🪙 Tokens: {_tok_total:,}" if _tok_total else "🪙 Token Usage"
+    _tok_limit = (_tok_data or {}).get("token_limit")
+    if _tok_limit:
+        _pct = min(100, round(_tok_total / _tok_limit * 100))
+        _expander_label = f"🪙 {_tok_total:,} / {_tok_limit:,} tokens ({_pct}%)"
+    else:
+        _expander_label = f"🪙 Tokens: {_tok_total:,}" if _tok_total else "🪙 Token Usage"
 
     with st.expander(_expander_label, expanded=False):
         if _tok_data and _tok_total:
-            tcol1, tcol2 = st.columns(2)
-            tcol1.metric("Total", f"{_tok_total:,}")
-            tcol2.metric("Completion", f"{_lt.get('completion_tokens', 0):,}")
+            if _tok_limit:
+                _pct_val = min(100, round(_tok_total / _tok_limit * 100))
+                st.progress(_pct_val / 100, text=f"{_tok_total:,} / {_tok_limit:,} ({_pct_val}%)")
+                if _pct_val >= 90:
+                    st.warning("⚠️ Approaching token limit — contact an admin.")
+            else:
+                tcol1, tcol2 = st.columns(2)
+                tcol1.metric("Total", f"{_tok_total:,}")
+                tcol2.metric("Completion", f"{_lt.get('completion_tokens', 0):,}")
             _daily = _tok_data.get("daily", [])
             if len(_daily) > 1:
                 import pandas as _pd
@@ -1573,6 +1584,19 @@ if prompt := st.chat_input("Ask Agoutic to do something..."):
         if _result_holder["error"]:
             status_box.update(label="❌ Error", state="error", expanded=True)
             st.error(f"Failed to send message: {_result_holder['error']}")
+        elif _result_holder["response"] is not None and _result_holder["response"].status_code == 429:
+            status_box.update(label="🪙 Token Limit Reached", state="error", expanded=True)
+            try:
+                _detail = _result_holder["response"].json().get("detail", {})
+                _used = _detail.get("tokens_used", 0)
+                _limit = _detail.get("token_limit", 0)
+                st.warning(
+                    f"**🪙 Token quota exceeded.**\n\n"
+                    f"You have used **{_used:,}** of your **{_limit:,}** token limit. "
+                    "Please contact an admin to increase your quota."
+                )
+            except Exception:
+                st.warning("🪙 You have reached your token limit. Please contact an admin.")
         elif _result_holder["response"] is not None and _result_holder["response"].status_code != 200:
             status_box.update(label="❌ Error", state="error", expanded=True)
             st.error(

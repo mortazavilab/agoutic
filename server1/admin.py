@@ -30,6 +30,7 @@ class UserListItem(BaseModel):
     is_active: bool
     created_at: str
     last_login: str | None
+    token_limit: int | None = None
 
 
 class UserUpdateRequest(BaseModel):
@@ -57,6 +58,7 @@ async def list_users(admin: User = Depends(require_admin)):
                 is_active=user.is_active,
                 created_at=user.created_at.isoformat() if user.created_at else None,
                 last_login=user.last_login.isoformat() if user.last_login else None,
+                token_limit=user.token_limit,
             )
             for user in users
         ]
@@ -213,9 +215,42 @@ async def promote_to_admin(user_id: str, admin: User = Depends(require_admin)):
         session.close()
 
 
-# ---------------------------------------------------------------------------
-# Token Usage
-# ---------------------------------------------------------------------------
+@router.patch("/users/{user_id}/token-limit")
+async def set_user_token_limit(
+    user_id: str,
+    body: dict,
+    admin: User = Depends(require_admin),
+):
+    """Set or clear a user's token limit.
+
+    Body: {"token_limit": 500000}  — set a hard cap.
+          {"token_limit": null}    — remove the limit (unlimited).
+    """
+    session = SessionLocal()
+    try:
+        result = session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        limit_val = body.get("token_limit", "__missing__")
+        if limit_val == "__missing__":
+            raise HTTPException(status_code=422, detail="token_limit field required")
+
+        if limit_val is not None and (not isinstance(limit_val, int) or limit_val < 0):
+            raise HTTPException(status_code=422, detail="token_limit must be a positive integer or null")
+
+        user.token_limit = limit_val
+        session.commit()
+
+        return {
+            "id": user.id,
+            "email": user.email,
+            "token_limit": user.token_limit,
+            "message": "Token limit updated" if limit_val is not None else "Token limit removed (unlimited)",
+        }
+    finally:
+        session.close()
 
 @router.get("/token-usage/summary")
 async def admin_token_usage_summary(admin: User = Depends(require_admin)):

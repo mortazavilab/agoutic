@@ -21,6 +21,8 @@ class User(Base):
         nullable=False,
     )
     last_login: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Token quota — NULL means unlimited; set by admins to cap usage
+    token_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 class Session(Base):
     """Session tokens for authentication"""

@@ -54,6 +54,53 @@
   - New fourth tab in the Admin page. Shows: global daily line chart, per-user leaderboard `st.dataframe`, user drill-down selector with per-conversation table and per-user daily chart.
   - Applied to: [ui/pages/admin.py](ui/pages/admin.py)
 
+### Added — Admin Token Limit Controls
+
+- **`token_limit` column on `User` model**
+  - New nullable `INTEGER` column. `NULL` = unlimited (default). When set, enforces a hard cap on the user's lifetime token consumption.
+  - Applied to: [server1/models.py](server1/models.py)
+
+- **Migration extended for `users.token_limit`**
+  - `server1/migrate_token_tracking.py` gains a 5th idempotent migration step adding `users.token_limit`. Re-running the script skips already-present columns.
+  - Applied to: [server1/migrate_token_tracking.py](server1/migrate_token_tracking.py)
+
+- **`PATCH /admin/users/{user_id}/token-limit` endpoint (admin-only)**
+  - Accepts `{"token_limit": <int or null>}`. Validates positive integer or null. Returns updated user record. Allows admins to set or clear a per-user cap without touching other user fields.
+  - Applied to: [server1/admin.py](server1/admin.py)
+
+- **`GET /admin/users` — `token_limit` field included**
+  - `UserListItem` schema updated; list endpoint now surfaces `token_limit` for each user so the admin UI can display and edit it.
+  - Applied to: [server1/admin.py](server1/admin.py)
+
+- **Hard 429 enforcement in chat endpoint**
+  - After `require_project_access()`, the chat endpoint queries the requesting user's lifetime `total_tokens`. If a `token_limit` is set and is exceeded, raises `HTTPException(429)` with structured detail `{error, message, tokens_used, token_limit}`. Admin users are exempt.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **`GET /user/token-usage` — `token_limit` field included**
+  - Response now exposes the user's own `token_limit` (or `null` if unlimited) so the UI can render quota progress without a separate call.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Sidebar quota progress bar**
+  - When a `token_limit` is set, the expander label changes to `🪙 X / Y tokens (Z%)`. Inside: `st.progress()` bar showing consumption ratio. At ≥ 90% a `st.warning("⚠️ Approaching token limit — contact an admin.")` is displayed. Token metrics/chart still shown below.
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Chat UI — friendly 429 quota-exceeded message**
+  - When the server returns HTTP 429, the chat input shows `st.warning()` with the used/limit figures extracted from the error JSON instead of a generic error.
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Admin tab2 (Active Users) — per-user limit editor**
+  - Layout changed to 4-column. Fourth column is an expander `🪙 Limit: X` containing a `st.form` with a number input (step 50,000) and Save button that calls `PATCH /admin/users/{id}/token-limit`.
+  - Applied to: [ui/pages/admin.py](ui/pages/admin.py)
+
+- **Admin tab3 (All Users) — token_limit column**
+  - Users dataframe now includes a `🪙 Token Limit` column via `st.column_config.NumberColumn`.
+  - Applied to: [ui/pages/admin.py](ui/pages/admin.py)
+
+- **Admin tab4 (Token Usage) — leaderboard enriched + bulk set form**
+  - Leaderboard now shows `token_limit` and `% used` computed columns alongside raw totals.
+  - New "🪙 Set Token Limits" `st.form` below the leaderboard: number_input per non-admin user, "💾 Save All Limits" button patches all users in one submit.
+  - Applied to: [ui/pages/admin.py](ui/pages/admin.py)
+
 ---
 
 ## [Unreleased] - 2026-02-18
