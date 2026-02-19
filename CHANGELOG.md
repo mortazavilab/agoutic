@@ -38,6 +38,49 @@
   - `track_project_access()` crashed with `sqlalchemy.exc.MultipleResultsFound` when duplicate `ProjectAccess` rows existed for the same `(user_id, project_id)` pair. Fixed: now fetches all matching rows with `scalars().all()`, keeps the first, deletes duplicates, and returns the surviving row.
   - Applied to: [server1/app.py](server1/app.py)
 
+### Fixed — Dogme skills: DF reference in plot request treated as a file lookup
+
+- **Inject DF metadata into context for dogme skills when a `DF<N>` reference is detected**
+  - When a user said "plot a histogram of DF1" while a dogme skill (e.g. `run_dogme_cdna`) was active, the LLM called `find_file(file_name=DF1)` via a server4 DATA_CALL tag instead of emitting `[[PLOT: df=DF1, ...]]`. Root cause: `_inject_job_context` returned early for dogme skills after injecting run UUID context, so the LLM had no information that DF1 was an in-memory DataFrame.
+  - Fix: The dogme skills branch now also checks for `DF\d+` references in the user message. If found, it searches history blocks for the matching DataFrame, extracts its label, columns, and row count, and appends a `[NOTE: DF<N> is an in-memory DataFrame — NOT a file to look up. Use [[PLOT:...]] tags.]` to the injected context sent to the LLM.
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Fixed — `[[PLOT:...]]` tag with natural-language content produces no chart
+
+- **`[^\]]+` regex breaks on `]` inside tag content (e.g. `Columns: ['A', 'B']`)**
+  - Root cause: `plot_tag_pattern = r'\[\[PLOT:\s*([^\]]+)\]\]'` uses `[^\]]+` which stops at the **first** `]` in the string. When the LLM writes `Columns: ['Category', 'Count']` inside a natural-language tag, the `]` after `'Count'` terminates the character class match early, the trailing `\]\]` can't match, and `re.finditer` returns zero results — `plot_specs` stays empty, no `AGENT_PLOT` block is created.
+  - Fix: Changed to non-greedy `r'\[\[PLOT:\s*(.*?)\]\]'` with `re.DOTALL`. The `.*?` expands until it finds the first `]]`, correctly skipping over any `[` or `]` characters inside the tag body.
+  - Also extended the auto-fallback condition to fire when `_user_wants_plot and not plot_specs` (covers the case where the regex match fails entirely, not just when specs have no `df_id`).
+  - Also added a guard in AGENT_PLOT block creation to skip any spec where `df_id is None` (instead of creating a broken block with key `"no_df"` that the UI renders as "Chart missing DataFrame reference").
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **NL fallback parser for `[[PLOT:...]]` tags**
+  - After the DF-note fix above, when the tag IS matched, the LLM wrote natural language inside: `[[PLOT: histogram of DF1 with Category on the x-axis...]]` instead of `key=value` pairs. `_parse_tag_params` returned an empty dict, `df_id` remained `None`.
+  - Fix: When `_parse_tag_params` yields no `df=` key, a natural-language extraction pass fires on the raw tag text — it regex-extracts the chart type (keyword match), DF reference (`DF\d+`), x column (`<word> on the x-axis`, `x=<word>`), and y column (`<word> on the y-axis`, `y=<word>`).
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Fixed — Histogram of pre-aggregated Category/Count table shows all bars at height 1
+
+- **`px.histogram` on a categorical x column counts rows (each = 1) instead of reading the value column**
+  - `_build_plotly_figure()` called `px.histogram(df, x="Category")` which bins raw values — since each Category appears exactly once, every bar rendered at height 1 regardless of the actual Count column.
+  - Fix: When `chart_type == "histogram"` and the resolved `x_col` is non-numeric (categorical), the code now switches to `px.bar` automatically. It prefers a companion numeric column whose name matches common count/value names (`count`, `value`, `n`, `total`, `freq`, etc.); if none match by name it takes the first numeric column; if there is no numeric column it falls back to `value_counts()`.
+  - Applied to: [ui/app.py](ui/app.py)
+
+### Fixed — Bar/histogram plot of DF shows bars at height 1 due to missing column names and wrong aggregation
+
+- **`_resolve_df_by_id` constructed DataFrame without column names**
+  - `pd.DataFrame(rows)` was called without passing `columns=`, so the DataFrame had integer column names `[0, 1]` instead of `["Category", "Count"]`. All `x_col`/`y_col` lookups failed (case-insensitive match returned nothing), the bar branch fell through to `value_counts()`, and every bar rendered at height 1.
+  - Fix: now passes `columns=fdata.get("columns") or None` to the DataFrame constructor.
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Bar branch fell back to `value_counts()` even for pre-aggregated tables**
+  - When `y_col=None` and `agg` is not `"count"`, the bar branch now checks if `x_col` is categorical and a numeric companion column exists. If so, it selects that column as `y` (preferring names like `count`, `value`, `n`, `total`, `freq`) instead of counting rows. This mirrors the same logic added to the histogram branch.
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Auto-fallback spec incorrectly set `agg="count"` for bar charts**
+  - The code-fallback path that auto-generates a `[[PLOT:...]]` spec was adding `agg="count"` to every bar chart, which bypasses the pre-aggregated column detection and always counts rows. Removed; `_build_plotly_figure` now infers `y` automatically.
+  - Applied to: [server1/app.py](server1/app.py)
+
 ### Fixed — ENCODE Search Tool & Parameter Aliases
 
 - **`search_experiments` / `search_experiment` aliased to `search_by_biosample`**

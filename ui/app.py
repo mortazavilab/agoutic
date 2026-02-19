@@ -529,7 +529,8 @@ def _resolve_df_by_id(df_id: int, all_blocks: list):
             meta = fdata.get("metadata", {})
             if meta.get("df_id") == df_id:
                 rows = fdata.get("data", [])
-                df = pd.DataFrame(rows)
+                cols = fdata.get("columns") or None
+                df = pd.DataFrame(rows, columns=cols)
                 return df, fname
     return None, None
 
@@ -571,8 +572,33 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
                 # Auto-pick first numeric column
                 num_cols = df_plot.select_dtypes(include="number").columns
                 x_col = num_cols[0] if len(num_cols) > 0 else available[0]
-            fig = px.histogram(df_plot, x=x_col, color=color_col,
-                               title=title or f"Distribution of {x_col}")
+            # If x_col is categorical (non-numeric), px.histogram would count
+            # occurrences per category (each row = 1), which is wrong for
+            # pre-aggregated tables like Category/Count.
+            # Detect: x_col is non-numeric AND there is exactly one numeric
+            # column → treat as a bar chart using that numeric column as y.
+            x_is_numeric = pd.api.types.is_numeric_dtype(df_plot[x_col])
+            if not x_is_numeric:
+                num_cols = df_plot.select_dtypes(include="number").columns.tolist()
+                if num_cols:
+                    # Prefer a column named "count", "value", "n", "total", etc.
+                    _count_names = {"count", "counts", "value", "values",
+                                    "n", "total", "freq", "frequency", "amount"}
+                    _y_col = next(
+                        (c for c in num_cols if c.lower() in _count_names),
+                        num_cols[0]
+                    )
+                    fig = px.bar(df_plot, x=x_col, y=_y_col, color=color_col,
+                                 title=title or f"{_y_col} by {x_col}")
+                else:
+                    # Truly categorical with no numeric column — count rows
+                    counts = df_plot[x_col].value_counts().reset_index()
+                    counts.columns = [x_col, "Count"]
+                    fig = px.bar(counts, x=x_col, y="Count", color=color_col,
+                                 title=title or f"Count by {x_col}")
+            else:
+                fig = px.histogram(df_plot, x=x_col, color=color_col,
+                                   title=title or f"Distribution of {x_col}")
 
         elif chart_type == "scatter":
             if not x_col or not y_col:
@@ -590,6 +616,18 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
                 # Auto-pick first non-numeric column
                 cat_cols = df_plot.select_dtypes(exclude="number").columns
                 x_col = cat_cols[0] if len(cat_cols) > 0 else available[0]
+            # If y_col is absent and x is categorical, prefer a numeric companion
+            # column (pre-aggregated table) over counting rows (which gives 1 each).
+            x_is_cat = not pd.api.types.is_numeric_dtype(df_plot[x_col])
+            if not y_col and x_is_cat and agg != "count":
+                num_cols = df_plot.select_dtypes(include="number").columns.tolist()
+                if num_cols:
+                    _count_names = {"count", "counts", "value", "values",
+                                    "n", "total", "freq", "frequency", "amount"}
+                    y_col = next(
+                        (c for c in num_cols if c.lower() in _count_names),
+                        num_cols[0]
+                    )
             if agg == "count" or not y_col:
                 # Count occurrences of each x value
                 counts = df_plot[x_col].value_counts().reset_index()

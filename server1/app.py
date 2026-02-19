@@ -593,13 +593,44 @@ def _inject_job_context(user_message: str, active_skill: str,
                     "analyze_job_results"}
     if active_skill in dogme_skills:
         context = _extract_job_context_from_history(conversation_history)
+        parts = []
         if context.get("run_uuid"):
-            parts = [f"run_uuid={context['run_uuid']}"]
+            parts.append(f"run_uuid={context['run_uuid']}")
             if context.get("work_dir"):
                 parts.append(f"work_dir={context['work_dir']}")
-            context_line = f"[CONTEXT: {', '.join(parts)}]"
-            return f"{context_line}\n{user_message}", {}, {"skill": active_skill, "context": "dogme"}
-        return user_message, {}, {}
+
+        # Check for an explicit DF reference (e.g. "plot a histogram of DF1").
+        # If found, look up the DataFrame from history and inject its metadata so
+        # the LLM knows DF<N> is an in-memory table — NOT a file to look up.
+        _df_ref_match = re.search(r'\bDF\s*(\d+)\b', user_message, re.IGNORECASE)
+        _df_note = ""
+        if _df_ref_match and history_blocks:
+            _tgt_df_id = int(_df_ref_match.group(1))
+            for _hblk in reversed(history_blocks):
+                if _hblk.type != "AGENT_PLAN":
+                    continue
+                _hblk_dfs = get_block_payload(_hblk).get("_dataframes", {})
+                for _dfd in _hblk_dfs.values():
+                    _m = _dfd.get("metadata", {})
+                    if _m.get("df_id") == _tgt_df_id:
+                        _cols = _dfd.get("columns", [])
+                        _nrows = len(_dfd.get("data", []))
+                        _label = _m.get("label", f"DF{_tgt_df_id}")
+                        _df_note = (
+                            f"\n[NOTE: DF{_tgt_df_id} is an in-memory DataFrame from this "
+                            f"conversation — it is NOT a file or run result to look up. "
+                            f"Label: '{_label}'. Columns: {_cols}. Rows: {_nrows}. "
+                            f"To visualize it use [[PLOT:...]] tags. "
+                            f"Do NOT call find_file, list_job_files, or any server4 tool for this.]"
+                        )
+                        break
+                if _df_note:
+                    break
+
+        context_line = f"[CONTEXT: {', '.join(parts)}]" if parts else ""
+        augmented = "\n".join(filter(None, [context_line, user_message])) + _df_note
+        return augmented, {}, {"skill": active_skill, "context": "dogme",
+                               "df_note_injected": bool(_df_note)}
 
     # --- ENCODE skills: inject previous search context for follow-ups ---
     encode_skills = {"ENCODE_Search", "ENCODE_LongRead"}
@@ -2204,11 +2235,44 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
 
         # 5a. Parse [[PLOT:...]] tags for interactive chart generation
         # Format: [[PLOT: type=scatter, df=DF5, x=score, y=enrichment, color=biosample_type, title=My Title]]
-        plot_tag_pattern = r'\[\[PLOT:\s*([^\]]+)\]\]'
-        plot_tag_matches = list(re.finditer(plot_tag_pattern, corrected_response))
+        # NOTE: use non-greedy .*? with DOTALL so that ] characters inside the tag
+        # (e.g. Columns: ['A', 'B']) don't break the match.
+        plot_tag_pattern = r'\[\[PLOT:\s*(.*?)\]\]'
+        plot_tag_matches = list(re.finditer(plot_tag_pattern, corrected_response, re.DOTALL))
         plot_specs = []
         for _pm in plot_tag_matches:
-            _plot_params = _parse_tag_params(_pm.group(1))
+            _raw_inner = _pm.group(1)
+            _plot_params = _parse_tag_params(_raw_inner)
+            # If no key=value pairs were found (LLM wrote natural language inside
+            # the tag, e.g. "histogram of DF1 with Category on the x-axis"),
+            # attempt to extract parameters from the free-form text.
+            if not _plot_params.get("df"):
+                _nl = _raw_inner
+                # Chart type
+                for _ct in ("histogram", "scatter", "bar", "box", "heatmap", "pie"):
+                    if _ct in _nl.lower():
+                        _plot_params.setdefault("type", _ct)
+                        break
+                # DF reference: "DF1", "df 2", etc.
+                _nl_df_m = re.search(r'\bDF\s*(\d+)\b', _nl, re.IGNORECASE)
+                if _nl_df_m:
+                    _plot_params["df"] = f"DF{_nl_df_m.group(1)}"
+                # x column — "Category on the x-axis", "x=Category", "x: Category"
+                _x_m = re.search(
+                    r'\b(\w+)\s+(?:on\s+the\s+)?x[- ]axis', _nl, re.IGNORECASE
+                ) or re.search(
+                    r'\bx\s*[=:]\s*([\w][\w ]*?)(?:,|\.|\band\b|$)', _nl, re.IGNORECASE
+                )
+                if _x_m:
+                    _plot_params.setdefault("x", _x_m.group(1).strip())
+                # y column — "Count on the y-axis", "y=Count"
+                _y_m = re.search(
+                    r'\b(\w+)\s+(?:on\s+the\s+)?y[- ]axis', _nl, re.IGNORECASE
+                ) or re.search(
+                    r'\by\s*[=:]\s*([\w][\w ]*?)(?:,|\.|\band\b|$)', _nl, re.IGNORECASE
+                )
+                if _y_m:
+                    _plot_params.setdefault("y", _y_m.group(1).strip())
             # Normalize: extract df_id integer from "DF5" or "5"
             _df_ref = _plot_params.get("df", "")
             _df_id_match = re.match(r'(?:DF)?\s*(\d+)', _df_ref, re.IGNORECASE)
@@ -2233,7 +2297,15 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             r'```python.*?(?:matplotlib|plt\.|plotly|px\.|fig\.|\.pie|\.bar|\.hist|\.scatter)',
             corrected_response, re.DOTALL | re.IGNORECASE
         ))
-        if _user_wants_plot and _has_code_plot and not plot_specs:
+        # Also trigger the fallback when:
+        # (a) the LLM produced [[PLOT:...]] tags but none resolved to a valid df_id, OR
+        # (b) no plot specs were parsed at all (regex match failed, e.g. ] inside tag
+        #     ate the match before the NL parser could run).
+        _plot_specs_invalid = plot_specs and all(s.get("df_id") is None for s in plot_specs)
+        _plot_specs_missing = _user_wants_plot and not plot_specs
+        if _user_wants_plot and (_has_code_plot or _plot_specs_invalid or _plot_specs_missing) and not (
+            plot_specs and any(s.get("df_id") is not None for s in plot_specs)
+        ):
             logger.warning("LLM wrote Python plot code instead of [[PLOT:...]] tag — auto-generating")
             # Detect which DF the user or LLM referenced
             _auto_df_id = None
@@ -2286,8 +2358,9 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 }
                 if _auto_x:
                     _auto_spec["x"] = _auto_x
-                if _auto_type == "bar" and not _auto_spec.get("y"):
-                    _auto_spec["agg"] = "count"
+                # Do NOT set agg=count for bar by default — if the DF is
+                # pre-aggregated (has a numeric value column), _build_plotly_figure
+                # will use it automatically via the categorical-x companion-column logic.
                 if _auto_type == "pie" and not _auto_spec.get("y"):
                     # Pie charts with only x column count occurrences
                     pass  # UI handles this automatically
@@ -2310,7 +2383,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         clean_markdown = re.sub(data_call_pattern, '', clean_markdown).strip()
         clean_markdown = re.sub(legacy_encode_pattern, '', clean_markdown).strip()
         clean_markdown = re.sub(legacy_analysis_pattern, '', clean_markdown).strip()
-        clean_markdown = re.sub(plot_tag_pattern, '', clean_markdown).strip()
+        clean_markdown = re.sub(plot_tag_pattern, '', clean_markdown, flags=re.DOTALL).strip()
         
         # Also remove any remaining plain text patterns that might not have been converted
         for pattern in all_fallback_patterns.keys():
@@ -2875,12 +2948,16 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 if _eid is not None:
                     _all_df_map[_eid] = {**_efdata, "label": _efname}
 
-            # Group plot specs by df_id for multi-trace support
+            # Group plot specs by df_id for multi-trace support.
+            # Skip any spec where df_id is None — they can't be rendered.
             from collections import defaultdict
             _plots_by_df = defaultdict(list)
             for _ps in plot_specs:
-                _key = _ps.get("df_id") or "no_df"
-                _plots_by_df[_key].append(_ps)
+                _df_id_val = _ps.get("df_id")
+                if _df_id_val is None:
+                    logger.warning("Skipping PLOT spec with no df_id", spec=_ps)
+                    continue
+                _plots_by_df[_df_id_val].append(_ps)
 
             for _df_key, _chart_group in _plots_by_df.items():
                 _charts = []
