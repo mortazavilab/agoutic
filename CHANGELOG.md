@@ -2,6 +2,54 @@
 
 ## [Unreleased] - 2026-02-18
 
+### Added — Interactive Plotly Charts (`AGENT_PLOT` blocks)
+
+- **`[[PLOT:...]]` tag system — LLM-triggered chart generation**
+  - The agent can now request inline charts by embedding structured tags in its response: `[[PLOT: type=histogram df=DF1 x=mapq_score title=MAPQ Distribution]]`. Server 1 parses these tags, resolves the referenced DataFrame from conversation history, and creates an `AGENT_PLOT` block that the UI renders via `st.plotly_chart()`.
+  - Supported chart types: `histogram`, `scatter`, `bar`, `box`, `heatmap`, `pie`
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **`AGENT_PLOT` block rendering in UI**
+  - New block type dispatched in `render_block()`. Renders inside a `st.chat_message("assistant", avatar="📊")` bubble. Calls `_render_plot_block()` which groups specs by `(df_id, type)` for multi-trace overlays and falls back to single-chart rendering via `_build_plotly_figure()`. Shows `st.warning()` if the referenced DF is not found.
+  - Helper functions added: `_resolve_df_by_id()`, `_build_plotly_figure()`, `_render_plot_block()`
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **Plotting instructions in LLM system prompt**
+  - Large PLOTTING section injected into the system prompt (after `{data_call_block}`). Explicitly forbids Python code (❌ markers), shows correct `[[PLOT:...]]` syntax, lists all 6 chart types with required/optional params, and includes working examples.
+  - OUTPUT FORMATTING RULE #3 added: "For plots/charts/visualizations, ONLY use `[[PLOT:...]]` tags. NEVER write Python code for plotting."
+  - Applied to: [server1/agent_engine.py](server1/agent_engine.py)
+
+- **Server-side code-to-plot fallback**
+  - If the LLM writes a Python code block containing `matplotlib`/`plt.`/`plotly`/`px.` instead of a `[[PLOT:...]]` tag, Server 1 detects it, auto-generates a `[[PLOT:...]]` spec from the user's message (infers chart type and column from natural language), and strips the code and any "Here is…"/"Explanation:" boilerplate from the visible response.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Visualization hints in skill files**
+  - `ENCODE_Search.md`: added "📊 Visualization Hints" section with examples for bar chart of assay distribution and pie chart of status breakdown.
+  - `Analyze_Job_Results.md`: added "📊 Visualization Hints" section with examples for QC metric histograms, scatter, file type bar chart, BED score histogram, chromosome distribution, and correlation heatmap.
+  - Applied to: [skills/ENCODE_Search.md](skills/ENCODE_Search.md), [skills/Analyze_Job_Results.md](skills/Analyze_Job_Results.md)
+
+- **`plotly>=5.18.0` added to `environment.yml`**
+  - New `# --- Visualization ---` section added before `# --- Testing ---`.
+  - Applied to: [environment.yml](environment.yml)
+
+### Fixed — `MultipleResultsFound` DB crash in `track_project_access`
+
+- **`scalar_one_or_none()` → `scalars().all()` + dedup**
+  - `track_project_access()` crashed with `sqlalchemy.exc.MultipleResultsFound` when duplicate `ProjectAccess` rows existed for the same `(user_id, project_id)` pair. Fixed: now fetches all matching rows with `scalars().all()`, keeps the first, deletes duplicates, and returns the surviving row.
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Fixed — ENCODE Search Tool & Parameter Aliases
+
+- **`search_experiments` / `search_experiment` aliased to `search_by_biosample`**
+  - LLM occasionally called `search_experiments` (non-existent tool name), returning a tool-not-found error instead of running the search. Added both variants to the tool alias map.
+  - Applied to: [server2/config.py](server2/config.py)
+
+- **Comprehensive biosample parameter aliases for `search_by_biosample`**
+  - LLM used various param names (`biosample`, `biosample_name`, `cell_line`, `sample`, `biosample_term_name`, `cell_type`, `tissue`) when the tool expected `search_term`. All variants now silently map to `search_term`.
+  - Applied to: [server2/config.py](server2/config.py)
+
+---
+
 ### Fixed — CSV/BED File Display: LLM Gets Readable Table, DF Widget Visible
 
 - **Parsed CSV/BED data formatted as markdown table for LLM**
