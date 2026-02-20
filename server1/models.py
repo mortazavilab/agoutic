@@ -12,6 +12,9 @@ class User(Base):
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     google_sub_id: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Unique filesystem-safe username (e.g. "eli-garcia"). Set once at onboarding,
+    # only changeable by admins.  Pattern: ^[a-z0-9][a-z0-9_-]{1,30}$
+    username: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
     role: Mapped[str] = mapped_column(String, nullable=False, default="user")  # 'user' or 'admin'
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     last_project_id: Mapped[str | None] = mapped_column(String, nullable=True)  # Last active project
@@ -44,6 +47,9 @@ class Project(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
+    # Filesystem-safe slug derived from name (e.g. "my-encode-project").
+    # Unique per owner: (owner_id, slug) is unique.
+    slug: Mapped[str | None] = mapped_column(String, nullable=True)
     owner_id: Mapped[str] = mapped_column(String, nullable=False)
     is_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

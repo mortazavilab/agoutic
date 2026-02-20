@@ -17,7 +17,8 @@ Here's what I can help you with:
 
 1. **Analyze a new local dataset** — Run the Dogme pipeline on pod5, bam, or fastq files on your machine
 2. **Download & analyze ENCODE data** — Search the ENCODE portal for long-read experiments, download files, and process them
-3. **Check results from a completed job** — View QC reports, alignment stats, modification calls, and expression data
+3. **Download files from URLs** — Grab files from any URL into your project
+4. **Check results from a completed job** — View QC reports, alignment stats, modification calls, and expression data
 
 What would you like to do?
 ```
@@ -26,7 +27,7 @@ What would you like to do?
 
 Based on the user's answer, switch to the appropriate skill:
 
-**Analyzing an existing completed job** (mentions "use UUID", "UUID:", "parse", "analyze results", "job results", "check results", "completed job", or option 3):
+**Analyzing an existing completed job** (mentions "use UUID", "UUID:", "parse", "analyze results", "job results", "check results", "completed job", or option 4):
 ```
 [[SKILL_SWITCH_TO: analyze_job_results]]
 ```
@@ -36,9 +37,14 @@ Based on the user's answer, switch to the appropriate skill:
 [[SKILL_SWITCH_TO: analyze_local_sample]]
 ```
 
-**ENCODE data** (mentions "ENCODE", "download", "search", "experiment", "accession", or option 2):
+**ENCODE data** (mentions "ENCODE", "search", "experiment", "accession", or option 2):
 ```
 [[SKILL_SWITCH_TO: ENCODE_Search]]
+```
+
+**Download files from URLs** (mentions "download", "URL", "grab files", "save files", or option 3):
+```
+[[SKILL_SWITCH_TO: download_files]]
 ```
 
 ### Step 3: Handle Job Analysis Requests with UUID

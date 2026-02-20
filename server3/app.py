@@ -302,6 +302,8 @@ async def submit_job(req: SubmitJobRequest):
                 accuracy=req.accuracy,
                 user_id=req.user_id,
                 project_id=req.project_id,
+                username=req.username,
+                project_slug=req.project_slug,
             )
             
             # Update job with work directory info

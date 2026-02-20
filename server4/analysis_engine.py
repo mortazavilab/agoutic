@@ -40,20 +40,22 @@ def get_job_work_dir(run_uuid: str) -> Optional[Path]:
     Get work directory path for a job.
     
     Resolves in order:
-      1. nextflow_work_dir from the job record (may be a jailed path)
+      1. nextflow_work_dir from the job record (may be slug-based or UUID-based)
       2. output_directory from the job record
-      3. Jailed path: AGOUTIC_DATA/users/{user_id}/{project_id}/{run_uuid}/
+      3. Legacy jailed path: AGOUTIC_DATA/users/{user_id}/{project_id}/{run_uuid}/
       4. Legacy flat path: AGOUTIC_WORK_DIR/{run_uuid}/
     """
     with get_db() as db:
         job = db.query(DogmeJob).filter(DogmeJob.run_uuid == run_uuid).first()
         if not job:
             return None
-        # Use nextflow_work_dir if available, otherwise use output_directory
+        # Use nextflow_work_dir if available — this is the authoritative source.
+        # New jobs store slug-based paths (e.g. users/eli/my-project/workflow1/),
+        # old jobs store UUID-based paths (e.g. users/{uuid}/{uuid}/{run_uuid}/).
         work_dir = job.nextflow_work_dir or job.output_directory
         if work_dir:
             return Path(work_dir)
-        # Try jailed path if user_id is available
+        # Try jailed path if user_id is available (legacy UUID layout)
         user_id = getattr(job, 'user_id', None)
         if user_id and job.project_id:
             jailed = AGOUTIC_DATA / "users" / user_id / job.project_id / run_uuid

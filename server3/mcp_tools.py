@@ -42,6 +42,8 @@ class Server3MCPTools:
         per_mod: Optional[int] = None,
         accuracy: Optional[str] = None,
         user_id: Optional[str] = None,
+        username: Optional[str] = None,
+        project_slug: Optional[str] = None,
     ) -> dict:
         """
         Submit a Dogme/Nextflow analysis job to Server 3.
@@ -97,6 +99,10 @@ class Server3MCPTools:
             payload["accuracy"] = accuracy
         if user_id is not None:
             payload["user_id"] = user_id
+        if username is not None:
+            payload["username"] = username
+        if project_slug is not None:
+            payload["project_slug"] = project_slug
         
         try:
             async with httpx.AsyncClient() as client:

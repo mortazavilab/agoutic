@@ -232,6 +232,20 @@ class NextflowExecutor:
         self.nextflow_bin = NEXTFLOW_BIN
         self.work_dir = SERVER3_WORK_DIR
         self.logs_dir = SERVER3_LOGS_DIR
+
+    @staticmethod
+    def _next_workflow_number(project_dir: Path) -> int:
+        """Compute the next workflow number by scanning existing workflow* dirs."""
+        max_n = 0
+        if project_dir.exists():
+            for child in project_dir.iterdir():
+                if child.is_dir() and child.name.startswith("workflow"):
+                    try:
+                        n = int(child.name[len("workflow"):])
+                        max_n = max(max_n, n)
+                    except ValueError:
+                        continue
+        return max_n + 1
     
     async def submit_job(
         self,
@@ -249,6 +263,8 @@ class NextflowExecutor:
         accuracy: str = "sup",
         user_id: Optional[str] = None,
         project_id: Optional[str] = None,
+        username: Optional[str] = None,
+        project_slug: Optional[str] = None,
     ) -> tuple[str, Path]:
         """
         Submit a Dogme/Nextflow job.
@@ -262,17 +278,29 @@ class NextflowExecutor:
             reference_genome: List of reference genome versions
             modifications: Modification motifs
             entry_point: Dogme entry point workflow (None for main, or "remap", "basecall", etc.)
+            username: Human-readable username for directory naming
+            project_slug: Human-readable project slug for directory naming
         
         Returns:
             Tuple of (run_uuid, work_directory)
         """
-        # If user_id and project_id are available, use jailed directory structure
-        # New jobs: AGOUTIC_DATA/users/{user_id}/{project_id}/{run_uuid}/
-        # Legacy fallback: SERVER3_WORK_DIR/{run_uuid}/
-        if user_id and project_id:
+        # Determine work directory:
+        #   New: AGOUTIC_DATA/users/{username}/{project_slug}/workflow{N}/
+        #   Fallback (legacy): AGOUTIC_DATA/users/{user_id}/{project_id}/{run_uuid}/
+        #   Fallback (flat):   SERVER3_WORK_DIR/{run_uuid}/
+        if username and project_slug:
+            # Human-readable path — compute next workflow number
+            project_dir = AGOUTIC_DATA / "users" / username / project_slug
+            project_dir.mkdir(parents=True, exist_ok=True)
+            next_n = self._next_workflow_number(project_dir)
+            work_dir = project_dir / f"workflow{next_n}"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Using workflow directory", work_dir=str(work_dir),
+                       username=username, project_slug=project_slug, workflow_n=next_n)
+        elif user_id and project_id:
             work_dir = AGOUTIC_DATA / "users" / user_id / project_id / run_uuid
             work_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Using jailed work directory", work_dir=str(work_dir),
+            logger.info("Using jailed work directory (legacy UUID)", work_dir=str(work_dir),
                        user_id=user_id, project_id=project_id)
         else:
             work_dir = self.work_dir / run_uuid

@@ -52,26 +52,20 @@ def main():
         logger.error("Set ENCODELIB_PATH environment variable to the correct path.")
         sys.exit(1)
 
-    # Add ENCODELIB to Python path so we can import encode_server
+    # Add ENCODELIB to Python path so encode_server can be imported.
+    # This must happen before importing server2.mcp_server, which registers
+    # additional tools (e.g. search_by_assay) onto ENCODELIB's FastMCP instance.
     sys.path.insert(0, str(encodelib_path))
 
-    # Try different possible export names (mcp, server, app)
-    mcp_instance = None
     try:
-        from encode_server import mcp as mcp_instance  # noqa: E402
-        logger.info("Imported 'mcp' from encode_server")
-    except ImportError:
-        try:
-            from encode_server import server as mcp_instance  # noqa: E402
-            logger.info("Imported 'server' from encode_server")
-        except ImportError:
-            try:
-                from encode_server import app as mcp_instance  # noqa: E402
-                logger.info("Imported 'app' from encode_server")
-            except ImportError as e:
-                logger.error("Failed to import encode_server", path=str(encodelib_path), error=str(e))
-                logger.error("Make sure ENCODELIB is installed and encode_server.py exports 'mcp', 'server', or 'app'.")
-                sys.exit(1)
+        from server2.mcp_server import server as mcp_instance  # noqa: E402
+        logger.info("Imported extended MCP server from server2.mcp_server")
+    except ImportError as e:
+        logger.error("Failed to import server2.mcp_server", error=str(e))
+        logger.error(
+            "Make sure ENCODELIB is installed and server2/mcp_server.py is present."
+        )
+        sys.exit(1)
 
     import uvicorn
 

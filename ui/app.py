@@ -21,10 +21,57 @@ st.set_page_config(page_title="AGOUTIC v3.0", layout="wide")
 # Require authentication before showing any UI
 user = require_auth(API_URL)
 
+# --- USERNAME ONBOARDING ---
+# If the user has no username, show a one-time picker
+if not user.get("username"):
+    st.title("🧬 Welcome to AGOUTIC!")
+    st.markdown("Before we get started, please choose a **username**. "
+                "This will be used to organize your files on disk.")
+    st.markdown("Requirements: lowercase letters, numbers, hyphens, underscores. "
+                "2–31 characters. Must start with a letter or number.")
+
+    chosen = st.text_input("Choose a username", key="_onboarding_username",
+                           max_chars=31, placeholder="e.g. jsmith")
+    if chosen:
+        import re as _re
+        if not _re.match(r'^[a-z0-9][a-z0-9_-]{0,30}$', chosen):
+            st.error("Invalid username. Use lowercase letters, numbers, hyphens, or underscores.")
+        else:
+            # Check availability
+            try:
+                check = make_authenticated_request(
+                    "GET", f"{API_URL}/auth/check-username/{chosen}", timeout=5)
+                if check.status_code == 200 and check.json().get("available"):
+                    if st.button("Confirm username", key="_confirm_username"):
+                        resp = make_authenticated_request(
+                            "POST", f"{API_URL}/auth/set-username",
+                            json={"username": chosen}, timeout=5)
+                        if resp.status_code == 200:
+                            st.success(f"Username set to **{chosen}**!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(f"Failed: {resp.text}")
+                else:
+                    st.warning(f"Username **{chosen}** is not available.")
+            except Exception as e:
+                st.error(f"Error checking username: {e}")
+    st.stop()  # Don't render the rest of the UI until username is set
+
 # --- 1. STATE MANAGEMENT ---
+def _slugify_project_name(text: str) -> str:
+    """Convert arbitrary text to a slug-friendly project name."""
+    import re as _re
+    text = text.lower().strip()
+    text = _re.sub(r'[^a-z0-9]+', '-', text)   # replace non-alphanumeric runs with hyphen
+    text = text.strip('-')                       # trim leading/trailing hyphens
+    return text[:40] or 'project'
+
+
 def _create_project_server_side(name: str = None) -> str:
     """Create a project via POST /projects and return the server-generated UUID."""
-    project_name = name or f"Project {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    # Default name is slug-friendly: project-YYYY-MM-DD
+    project_name = name or f"project-{datetime.datetime.now().strftime('%Y-%m-%d')}"
     try:
         resp = make_authenticated_request(
             "POST",
@@ -44,7 +91,9 @@ def _create_project_server_side(name: str = None) -> str:
 # Check if we're creating a new project (flag set by New Project button)
 if st.session_state.get("_create_new_project", False):
     # Create project via server-side endpoint (server generates UUID)
-    new_id = _create_project_server_side()
+    _pending_name = st.session_state["_create_new_project"]
+    _pending_name = _pending_name if isinstance(_pending_name, str) else None
+    new_id = _create_project_server_side(name=_pending_name)
     st.session_state.active_project_id = new_id
     st.session_state.blocks = []
     # Clear project-related data
@@ -111,11 +160,20 @@ with st.sidebar:
     logout_button(API_URL)
     
     st.divider()
-    # [A] NEW PROJECT (Generates Random ID)
-    if st.button("✨ New Project", use_container_width=True):
-        # Set flag to create new project on next rerun
-        st.session_state["_create_new_project"] = True
-        st.rerun()
+    # [A] NEW PROJECT
+    with st.expander("✨ New Project", expanded=False):
+        _default_slug = f"project-{datetime.datetime.now().strftime('%Y-%m-%d')}"
+        _new_name = st.text_input(
+            "Project name",
+            value=_default_slug,
+            key="_new_project_name_input",
+            max_chars=40,
+            help="Lowercase letters, numbers, hyphens. Will be auto-slugified.",
+        )
+        if st.button("Create", key="_create_project_btn", use_container_width=True):
+            _slug = _slugify_project_name(_new_name or _default_slug)
+            st.session_state["_create_new_project"] = _slug
+            st.rerun()
 
     # [B] PROJECT ID INPUT
     # Initialize the widget key if not set
@@ -1374,7 +1432,40 @@ def render_block(block, expected_project_id: str = ""):
             # Pass all currently loaded blocks so the renderer can look up DFs by ID
             all_blocks = st.session_state.get("blocks", [])
             _render_plot_block(content, all_blocks, block_id)
-    
+
+    elif btype == "DOWNLOAD_TASK":
+        with st.chat_message("assistant", avatar="⬇️"):
+            dl_status = content.get("status", "RUNNING")
+            dl_files = content.get("files", [])
+            downloaded = content.get("downloaded", 0)
+            total = content.get("total_files", len(dl_files))
+            total_bytes = content.get("bytes_downloaded", 0)
+            source = content.get("source", "url")
+
+            if dl_status == "RUNNING":
+                cur = content.get("current_file", "")
+                st.info(f"⬇️ **Downloading** ({downloaded}/{total} files) — {cur}")
+                st.progress(downloaded / max(total, 1))
+            elif dl_status == "DONE":
+                mb = round(total_bytes / (1024 * 1024), 2) if total_bytes else 0
+                st.success(f"✅ **Download complete** — {downloaded} file(s), {mb} MB")
+                # List downloaded files
+                for df in content.get("downloaded_files", []):
+                    fname = df.get("filename", "?")
+                    fsize = df.get("size_bytes")
+                    err = df.get("error")
+                    if err:
+                        st.markdown(f"- ❌ `{fname}` — {err}")
+                    elif fsize:
+                        st.markdown(f"- ✅ `{fname}` ({round(fsize / (1024*1024), 2)} MB)")
+                    else:
+                        st.markdown(f"- ✅ `{fname}`")
+            elif dl_status == "FAILED":
+                msg = content.get("message", "Unknown error")
+                st.error(f"❌ **Download failed** — {msg}")
+            elif dl_status == "CANCELLED":
+                st.warning(f"⚠️ **Download cancelled** ({downloaded}/{total} files completed)")
+
     else:
         with st.chat_message("system", avatar="⚙️"):
             st.code(f"[{btype}] {content}")
@@ -1462,6 +1553,8 @@ def _render_chat():
             _has_finished_job = True
         if btype == "APPROVAL_GATE" and bstatus == "APPROVED":
             _has_pending_submission = True
+        if btype == "DOWNLOAD_TASK" and bstatus == "RUNNING":
+            _has_running_job = True
 
     # 4. Render visible blocks
     for blk in visible_blocks:
@@ -1504,6 +1597,36 @@ if _running_now != _needs_auto_refresh:
     st.rerun()
 
 st.write("---")
+
+# 2.5 File Upload (expandable)
+with st.expander("📎 Upload files", expanded=False):
+    uploaded_files = st.file_uploader(
+        "Drop files here to upload to your project's data/ folder",
+        accept_multiple_files=True,
+        key="file_upload_widget",
+    )
+    if uploaded_files and st.button("Upload", key="upload_btn"):
+        session_token = get_session_cookie()
+        cookies = {"session": session_token} if session_token else {}
+        files_payload = [
+            ("files", (uf.name, uf.getvalue(), uf.type or "application/octet-stream"))
+            for uf in uploaded_files
+        ]
+        try:
+            resp = requests.post(
+                f"{API_URL}/projects/{active_id}/upload",
+                files=files_payload,
+                cookies=cookies,
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                st.success(f"✅ Uploaded {result['count']} file(s)")
+                time.sleep(0.5)
+                st.rerun()
+            else:
+                st.error(f"Upload failed: {resp.text}")
+        except Exception as e:
+            st.error(f"Upload error: {e}")
 
 # 3. Chat Input
 if prompt := st.chat_input("Ask Agoutic to do something..."):

@@ -17,7 +17,7 @@ from sqlalchemy import select, desc, func, text
 # ✅ Import from your package
 from server1.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from server1.agent_engine import AgentEngine
-from server1.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES
+from server1.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES, AGOUTIC_DATA
 from server1.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
 from server1.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess, Project
 from server1.middleware import AuthMiddleware
@@ -106,6 +106,26 @@ def get_block_payload(block: ProjectBlock) -> dict:
     """Helper to get payload as dict from payload_json"""
     return json.loads(block.payload_json) if block.payload_json else {}
 
+
+def _resolve_project_dir(session, user, project_id: str) -> Path:
+    """Resolve the on-disk directory for a project.
+
+    Uses slug-based path (AGOUTIC_DATA/users/{username}/{slug}/) if both
+    username and slug are available.  Falls back to legacy UUID-based path.
+    Returns the Path (may or may not exist yet).
+    """
+    project = session.execute(
+        select(Project).where(Project.id == project_id)
+    ).scalar_one_or_none()
+
+    username = getattr(user, "username", None)
+    slug = project.slug if project else None
+
+    if username and slug:
+        return AGOUTIC_DATA / "users" / username / slug
+    # Legacy fallback
+    return AGOUTIC_DATA / "users" / user.id / project_id
+
 # Mapping from user-message fragments to canonical ENCODE assay_title values.
 # Used both for auto-generating filtered DATA_CALLs and for server-side
 # dataframe filtering when the previous result set is injected as context.
@@ -142,21 +162,136 @@ _ENCODE_ASSAY_ALIASES: dict[str, str] = {
 }
 
 
+_SEARCH_STYLE_PARAMS = frozenset(
+    ["search_term", "assay_title", "biosample", "cell_line", "tissue", "target", "organism"]
+)
+# Well-known human cell lines — used only for defaulting organism=Homo sapiens.
+# The misrouting guard itself is structural (any non-ENCSR accession redirects).
+_HUMAN_BIOSAMPLES = frozenset([
+    "k562", "gm12878", "hela", "hela-s3", "hepg2", "hek293", "jurkat",
+    "mcf-7", "mcf7", "a549", "u2os", "imr90", "h1", "h9",
+])
+# Pattern for a valid ENCODE experiment accession: ENCSR + 6 uppercase alphanumeric chars
+_ENCSR_PATTERN = re.compile(r'^ENCSR[A-Z0-9]{6}$', re.IGNORECASE)
+# Pattern for a valid ENCODE file accession (ENCFF...)
+_ENCFF_PATTERN = re.compile(r'^ENCFF[A-Z0-9]{6}$', re.IGNORECASE)
+# Substrings that indicate a string is an assay name rather than a biosample name.
+_ASSAY_INDICATORS = (
+    "-seq", " seq", "chip", "atac", "clip", "wgbs", "rrbs", "hi-c",
+    "rna-seq", "dnase", "crispr", "eclip", "iclip", "rampage",
+    "long read", "long-read",
+)
+
+
+def _looks_like_assay(s: str) -> bool:
+    """Return True if *s* looks like an assay name rather than a biosample."""
+    sl = s.lower()
+    if any(ind in sl for ind in _ASSAY_INDICATORS):
+        return True
+    # Also check against the aliases map (both keys and canonical values)
+    if sl in _ENCODE_ASSAY_ALIASES:
+        return True
+    canon = _ENCODE_ASSAY_ALIASES.get(sl)
+    if canon:
+        return True
+    if any(sl == v.lower() for v in _ENCODE_ASSAY_ALIASES.values()):
+        return True
+    return False
+
+
 def _correct_tool_routing(tool: str, params: dict, user_message: str,
                           conversation_history: list | None = None) -> tuple[str, dict]:
     """
     Fix cases where the LLM uses the wrong tool for a given accession type.
 
     Common mistakes:
+    - Using get_experiment with search-style params or a non-ENCSR value as
+      'accession' (e.g. a biosample name like K562 or MCF-7) instead of
+      using search_by_biosample.
     - Using get_experiment for ENCFF (file) accessions instead of get_file_metadata
     - Mangling ENCFF → ENCSR (changing the prefix to match the tool it chose)
     - Calling get_file_metadata without the required experiment accession
 
-    get_file_metadata and get_file_url both require two params:
-      accession (experiment ENCSR) + file_accession (file ENCFF)
+    get_experiment requires exactly: accession=ENCSR[A-Z0-9]{6}
+    get_file_metadata requires: accession=ENCSR... + file_accession=ENCFF...
     """
     accession = params.get("accession", "")
     msg_upper = user_message.upper()
+
+    # ── Redirect get_experiment → search_by_biosample ──────────────────────
+    # Trigger when: (a) any search-style param was passed, OR (b) the accession
+    # value is not a valid ENCSR accession (catches ALL unknown cell line names,
+    # not just those in a hardcoded list).
+    if tool == "get_experiment":
+        acc_upper = accession.upper()
+        has_search_params = bool(params.keys() & _SEARCH_STYLE_PARAMS)
+        acc_invalid = bool(accession) and not _ENCSR_PATTERN.match(accession) \
+                      and not _ENCFF_PATTERN.match(accession)
+
+        if has_search_params or acc_invalid:
+            # Determine whether this is an assay-only query or a biosample query.
+            # An assay-only query has assay info but no real biosample to anchor to.
+            explicit_assay = params.get("assay_title") or (
+                accession if (acc_invalid and _looks_like_assay(accession)) else None
+            )
+            # Resolve assay name through alias map if needed
+            if explicit_assay:
+                explicit_assay = _ENCODE_ASSAY_ALIASES.get(
+                    explicit_assay.lower(), explicit_assay
+                )
+
+            explicit_biosample = (
+                params.get("search_term")
+                or params.get("biosample")
+                or params.get("cell_line")
+                or (accession if (acc_invalid and not _looks_like_assay(accession)) else None)
+            )
+
+            # ── Case A: assay-only (no biosample) → search_by_assay ──
+            if explicit_assay and not explicit_biosample:
+                new_params: dict = {"assay_title": explicit_assay}
+                if "organism" in params:
+                    new_params["organism"] = params["organism"]
+                if "target" in params:
+                    new_params["target"] = params["target"]
+                logger.warning(
+                    "Rerouted get_experiment → search_by_assay (assay-only)",
+                    original_params=params, new_params=new_params,
+                )
+                return "search_by_assay", new_params
+
+            # ── Case B: biosample (± assay) → search_by_biosample ──
+            search_term = explicit_biosample
+            if not search_term:
+                # Last resort: grab the first capitalised word from the user message
+                candidates = re.findall(
+                    r'\b([A-Z][A-Za-z0-9]{1,10}(?:[-][A-Za-z0-9]+)?)\b', user_message
+                )
+                for c in candidates:
+                    if c.upper() not in ("ENCODE", "WHAT", "HOW", "MANY", "ARE", "DOES", "HAVE"):
+                        search_term = c
+                        break
+
+            new_params = {}
+            if search_term:
+                new_params["search_term"] = search_term
+
+            for key in ("organism", "target", "exclude_revoked"):
+                if key in params:
+                    new_params[key] = params[key]
+            if explicit_assay:
+                new_params["assay_title"] = explicit_assay
+
+            # Default organism=Homo sapiens for well-known human lines
+            if "organism" not in new_params and (search_term or "").lower() in _HUMAN_BIOSAMPLES:
+                new_params["organism"] = "Homo sapiens"
+
+            if new_params.get("search_term"):
+                logger.warning(
+                    "Rerouted get_experiment → search_by_biosample",
+                    original_params=params, new_params=new_params,
+                )
+                return "search_by_biosample", new_params
 
     if tool == "get_experiment" and accession:
         acc_upper = accession.upper()
@@ -474,6 +609,15 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                         break
                 if calls:
                     break
+
+        # Assay-only query: assay detected but no biosample found in message or history.
+        # e.g. "how many RNA-seq experiments are in ENCODE?"
+        if not calls and detected_assay and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+            calls.append({
+                "source_type": "consortium", "source_key": "encode",
+                "tool": "search_by_assay",
+                "params": {"assay_title": detected_assay},
+            })
 
     # --- Dogme / Server4 file-parsing patterns ---
     # When in a Dogme analysis skill and user asks to parse/show a file,
@@ -1096,9 +1240,13 @@ async def update_block(
         session.commit()
         session.refresh(block)
         
-        # If an APPROVAL_GATE was just approved, trigger job submission
+        # If an APPROVAL_GATE was just approved, trigger job submission or download
         if block.type == "APPROVAL_GATE" and old_status == "PENDING" and block.status == "APPROVED":
-            asyncio.create_task(submit_job_after_approval(block.project_id, block_id))
+            gate_payload = get_block_payload(block)
+            if gate_payload.get("gate_action") == "download":
+                asyncio.create_task(download_after_approval(block.project_id, block_id))
+            else:
+                asyncio.create_task(submit_job_after_approval(block.project_id, block_id))
         
         # If an APPROVAL_GATE was rejected, trigger rejection handling
         if block.type == "APPROVAL_GATE" and old_status == "PENDING" and block.status == "REJECTED":
@@ -1524,6 +1672,114 @@ Please use the parameter editing form below to make corrections.""",
     finally:
         session.close()
 
+
+async def download_after_approval(project_id: str, gate_block_id: str):
+    """Background task to start downloading files after approval.
+
+    Scans AGENT_PLAN blocks for download URLs (resolved via get_file_url
+    DATA_CALLs) and HTTP/HTTPS links from the conversation, then initiates
+    the download via the internal download infrastructure.
+    """
+    session = SessionLocal()
+    try:
+        gate_block = session.query(ProjectBlock).filter(ProjectBlock.id == gate_block_id).first()
+        if not gate_block:
+            logger.error("Gate block not found for download", gate_block_id=gate_block_id)
+            return
+
+        owner_id = gate_block.owner_id
+
+        # Scan conversation blocks for URLs
+        query = select(ProjectBlock)\
+            .where(ProjectBlock.project_id == project_id)\
+            .order_by(ProjectBlock.seq.asc())
+        blocks = session.execute(query).scalars().all()
+
+        urls: list[dict] = []
+        url_pattern = re.compile(r'https?://[^\s\)\"\'>\]]+')
+
+        for blk in blocks:
+            if blk.type not in ("AGENT_PLAN", "USER_MESSAGE"):
+                continue
+            payload = get_block_payload(blk)
+            text = payload.get("markdown", "") or payload.get("text", "")
+            for match in url_pattern.finditer(text):
+                url = match.group(0).rstrip(".,;:")
+                # Skip obvious non-file URLs (API endpoints, portal pages)
+                if any(skip in url for skip in ["/api/", "/search/", "portal.encode"]):
+                    continue
+                filename = url.rsplit("/", 1)[-1].split("?")[0] or "file"
+                # Avoid duplicates
+                if not any(u["url"] == url for u in urls):
+                    urls.append({"url": url, "filename": filename})
+
+        if not urls:
+            _create_block_internal(
+                session, project_id, "AGENT_PLAN",
+                {
+                    "markdown": "⚠️ No download URLs found in the conversation. "
+                                "Please provide URLs or ENCODE file accessions and try again.",
+                    "skill": "download_files",
+                    "model": "system",
+                },
+                status="DONE",
+                owner_id=owner_id,
+            )
+            return
+
+        # Resolve project directory
+        owner_user = session.execute(select(User).where(User.id == owner_id)).scalar_one_or_none()
+        project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
+
+        if owner_user and owner_user.username and project_obj and project_obj.slug:
+            project_dir = Path(AGOUTIC_DATA) / "users" / owner_user.username / project_obj.slug
+        else:
+            project_dir = Path(AGOUTIC_DATA) / "users" / owner_id / project_id
+
+        target_dir = project_dir / "data"
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        download_id = str(uuid.uuid4())
+
+        block = _create_block_internal(
+            session, project_id, "DOWNLOAD_TASK",
+            {
+                "download_id": download_id,
+                "source": "conversation",
+                "files": [{"filename": u["filename"], "url": u["url"]} for u in urls],
+                "target_dir": str(target_dir),
+                "downloaded": 0,
+                "total_files": len(urls),
+                "bytes_downloaded": 0,
+                "status": "RUNNING",
+            },
+            status="RUNNING",
+            owner_id=owner_id,
+        )
+
+        _active_downloads[download_id] = {
+            "block_id": block.id,
+            "project_id": project_id,
+            "cancelled": False,
+        }
+
+        asyncio.create_task(
+            _download_files_background(
+                download_id=download_id,
+                project_id=project_id,
+                block_id=block.id,
+                owner_id=owner_id,
+                files=urls,
+                target_dir=target_dir,
+            )
+        )
+
+    except Exception as e:
+        logger.error("download_after_approval failed", error=str(e), exc_info=True)
+    finally:
+        session.close()
+
+
 async def submit_job_after_approval(project_id: str, gate_block_id: str):
     """
     Background task to submit a job to Server3 after approval.
@@ -1576,10 +1832,18 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         ref_genome = job_params.get("reference_genome", ["mm39"])
         if isinstance(ref_genome, str):
             ref_genome = [ref_genome]
+
+        # Look up username and project_slug for human-readable work directories
+        owner_user = session.execute(select(User).where(User.id == owner_id)).scalar_one_or_none()
+        project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
+        _username = owner_user.username if owner_user else None
+        _project_slug = project_obj.slug if project_obj else None
         
         job_data = {
             "project_id": project_id,
             "user_id": owner_id,  # Pass owner for jailed file paths and job ownership
+            "username": _username,  # Human-readable dir name (may be None for legacy users)
+            "project_slug": _project_slug,  # Human-readable dir name (may be None for legacy projects)
             "sample_name": job_params.get("sample_name", f"sample_{project_id.split('_')[-1]}"),
             "mode": job_params.get("mode", "DNA"),
             "input_directory": job_params.get("input_directory", "/data/samples/test"),
@@ -3120,6 +3384,9 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # 5. Insert APPROVAL_GATE (The Buttons) if requested
         gate_block = None
         if needs_approval:
+            # Determine gate action based on active skill
+            gate_action = "download" if active_skill == "download_files" else "job"
+
             # Extract parameters before creating approval gate
             extracted_params = await extract_job_parameters_from_conversation(session, req.project_id)
             
@@ -3130,6 +3397,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 {
                     "label": "Do you authorize the Agent to proceed with this plan?",
                     "extracted_params": extracted_params,
+                    "gate_action": gate_action,
                     "attempt_number": 1,
                     "rejection_history": [],
                     "skill": active_skill,
@@ -3432,7 +3700,29 @@ class ProjectCreateRequest(BaseModel):
 
 class ProjectUpdateRequest(BaseModel):
     name: Optional[str] = None
+    slug: Optional[str] = None
     is_archived: Optional[bool] = None
+
+
+def _slugify(text: str, max_len: int = 40) -> str:
+    """Convert arbitrary text to a filesystem-safe slug."""
+    s = text.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    s = s.strip("-")
+    return s[:max_len] or "project"
+
+
+def _dedup_slug(session, owner_id: str, slug: str, exclude_project_id: str | None = None) -> str:
+    """Ensure slug is unique among this owner's projects."""
+    for i in range(0, 10000):
+        candidate = slug if i == 0 else f"{slug}-{i}"
+        query = select(Project).where(Project.owner_id == owner_id, Project.slug == candidate)
+        if exclude_project_id:
+            query = query.where(Project.id != exclude_project_id)
+        if not session.execute(query).scalar_one_or_none():
+            return candidate
+    raise HTTPException(status_code=500, detail="Could not generate unique slug")
 
 
 @app.post("/projects")
@@ -3441,24 +3731,31 @@ async def create_project(req: ProjectCreateRequest, request: Request):
     Create a new project with a server-generated UUID.
     Atomic: mkdir first (idempotent), then DB insert in a single commit.
     """
-    from server1.user_jail import get_user_project_dir
+    from server1.user_jail import get_user_project_dir, get_user_project_dir_by_uuid
 
     user = request.state.user
     project_id = str(uuid.uuid4())
 
-    # 1. Create filesystem directory first (idempotent — orphan empty dir is harmless)
-    try:
-        get_user_project_dir(user.id, project_id)
-    except PermissionError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
     # 2. Atomic DB write: project row + owner access row in one commit
     session = SessionLocal()
     try:
+        # Generate unique slug
+        slug = _slugify(req.name)
+        slug = _dedup_slug(session, user.id, slug)
+
+        # 1. Create filesystem directory
+        # Use slug-based path if user has a username, otherwise fall back to UUID
+        if user.username:
+            project_dir = get_user_project_dir(user.username, slug)
+            (project_dir / "data").mkdir(exist_ok=True)
+        else:
+            get_user_project_dir_by_uuid(user.id, project_id)
+
         now = datetime.datetime.utcnow()
         project = Project(
             id=project_id,
             name=req.name,
+            slug=slug,
             owner_id=user.id,
             is_public=False,
             is_archived=False,
@@ -3484,10 +3781,11 @@ async def create_project(req: ProjectCreateRequest, request: Request):
 
         session.commit()  # Single commit — both rows or neither
 
-        logger.info("Project created", project_id=project_id, name=req.name, user=user.email)
+        logger.info("Project created", project_id=project_id, name=req.name, slug=slug, user=user.email)
         return {
             "id": project_id,
             "name": req.name,
+            "slug": slug,
             "created_at": str(now),
         }
     except Exception as e:
@@ -3538,6 +3836,7 @@ async def list_projects(request: Request, include_archived: bool = False):
             projects.append({
                 "id": acc.project_id,
                 "name": proj.name if proj else acc.project_name,
+                "slug": proj.slug if proj else None,
                 "role": acc.role if hasattr(acc, 'role') else "owner",
                 "is_archived": is_archived,
                 "is_public": proj.is_public if proj else False,
@@ -3554,8 +3853,11 @@ async def list_projects(request: Request, include_archived: bool = False):
 @app.patch("/projects/{project_id}")
 async def update_project(project_id: str, req: ProjectUpdateRequest, request: Request):
     """
-    Update project metadata (rename, archive). Requires owner role.
+    Update project metadata (rename, archive, change slug). Requires owner role.
+    When name changes, slug auto-updates and directory is renamed on disk.
     """
+    from server1.user_jail import rename_project_dir
+
     user = request.state.user
     require_project_access(project_id, user, min_role="owner")
 
@@ -3568,8 +3870,15 @@ async def update_project(project_id: str, req: ProjectUpdateRequest, request: Re
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
+        old_slug = project.slug
+
         if req.name is not None:
             project.name = req.name
+            # Auto-update slug from name (unless an explicit slug was provided)
+            if req.slug is None:
+                new_slug = _slugify(req.name)
+                new_slug = _dedup_slug(session, user.id, new_slug, exclude_project_id=project_id)
+                project.slug = new_slug
             # Also update name in project_access for consistency
             access = session.execute(
                 select(ProjectAccess)
@@ -3579,14 +3888,47 @@ async def update_project(project_id: str, req: ProjectUpdateRequest, request: Re
             if access:
                 access.project_name = req.name
 
+        if req.slug is not None:
+            # Explicit slug change
+            slug_clean = req.slug.strip().lower()
+            slug_clean = re.sub(r"[^a-z0-9_-]", "-", slug_clean).strip("-")
+            if not slug_clean:
+                raise HTTPException(status_code=422, detail="Invalid slug")
+            slug_clean = _dedup_slug(session, user.id, slug_clean, exclude_project_id=project_id)
+            project.slug = slug_clean
+
         if req.is_archived is not None:
             project.is_archived = req.is_archived
 
         project.updated_at = datetime.datetime.utcnow()
+
+        # Rename directory on disk if slug changed
+        new_slug = project.slug
+        if old_slug and new_slug and old_slug != new_slug and user.username:
+            try:
+                rename_project_dir(user.username, old_slug, new_slug)
+                # Update nextflow_work_dir in dogme_jobs
+                from server1.config import AGOUTIC_DATA
+                old_prefix = str(AGOUTIC_DATA / "users" / user.username / old_slug)
+                new_prefix = str(AGOUTIC_DATA / "users" / user.username / new_slug)
+                try:
+                    session.execute(
+                        text(
+                            "UPDATE dogme_jobs SET nextflow_work_dir = "
+                            "REPLACE(nextflow_work_dir, :old, :new) "
+                            "WHERE nextflow_work_dir LIKE :pattern"
+                        ),
+                        {"old": old_prefix, "new": new_prefix, "pattern": old_prefix + "%"},
+                    )
+                except Exception:
+                    pass  # dogme_jobs may not be in this DB
+            except PermissionError as e:
+                raise HTTPException(status_code=409, detail=str(e))
+
         session.commit()
 
-        logger.info("Project updated", project_id=project_id, user=user.email)
-        return {"status": "ok", "id": project_id}
+        logger.info("Project updated", project_id=project_id, slug=new_slug, user=user.email)
+        return {"status": "ok", "id": project_id, "slug": new_slug}
     finally:
         session.close()
 
@@ -3717,8 +4059,8 @@ async def get_project_stats(project_id: str, request: Request):
         file_count = 0
         scanned_dirs = set()
 
-        # 1. Check jailed user project directory
-        project_dir = AGOUTIC_DATA / "users" / user.id / project_id
+        # 1. Check user project directory (slug-based or legacy UUID)
+        project_dir = _resolve_project_dir(session, user, project_id)
         if project_dir.exists():
             scanned_dirs.add(str(project_dir))
             for f in project_dir.rglob("*"):
@@ -3818,8 +4160,12 @@ async def list_project_files(project_id: str, request: Request):
                 except OSError:
                     pass
 
-    # 1. Jailed user project directory
-    project_dir = AGOUTIC_DATA / "users" / user.id / project_id
+    # 1. User project directory (slug-based or legacy UUID)
+    session_files = SessionLocal()
+    try:
+        project_dir = _resolve_project_dir(session_files, user, project_id)
+    finally:
+        session_files.close()
     _scan_dir(project_dir, "project")
 
     # 2. Legacy work directories from dogme_jobs
@@ -3843,6 +4189,353 @@ async def list_project_files(project_id: str, request: Request):
         "total_size_bytes": total_size,
         "total_size_mb": round(total_size / (1024 * 1024), 2),
         "file_count": len(files),
+    }
+
+
+# =============================================================================
+# FILE DOWNLOAD & UPLOAD
+# =============================================================================
+# Downloads ENCODE files (via get_file_url + httpx), arbitrary URLs,
+# and accepts local file uploads — all into the user's project data/ dir.
+
+# In-memory tracking of active downloads (keyed by download_id)
+_active_downloads: dict[str, dict] = {}
+
+
+class DownloadRequest(BaseModel):
+    """Request to download one or more files into the project."""
+    source: str  # "encode" or "url"
+    files: list[dict]  # [{"url": str, "filename": str, "size_bytes": int | None}]
+    subfolder: Optional[str] = "data"  # relative to project root
+
+
+@app.post("/projects/{project_id}/downloads")
+async def initiate_download(project_id: str, req: DownloadRequest, request: Request):
+    """Start downloading files into the project's data directory.
+
+    Creates a DOWNLOAD_TASK block and kicks off a background download task.
+    """
+    user = request.state.user
+    require_project_access(project_id, user, min_role="editor")
+
+    if not req.files:
+        raise HTTPException(status_code=422, detail="No files to download")
+
+    session = SessionLocal()
+    try:
+        project_dir = _resolve_project_dir(session, user, project_id)
+        target_dir = project_dir / (req.subfolder or "data")
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        download_id = str(uuid.uuid4())
+
+        # Create a DOWNLOAD_TASK block
+        file_summaries = [
+            {"filename": f.get("filename", "unknown"), "url": f["url"],
+             "size_bytes": f.get("size_bytes")}
+            for f in req.files
+        ]
+        block = _create_block_internal(
+            session,
+            project_id,
+            "DOWNLOAD_TASK",
+            {
+                "download_id": download_id,
+                "source": req.source,
+                "files": file_summaries,
+                "target_dir": str(target_dir),
+                "downloaded": 0,
+                "total_files": len(req.files),
+                "bytes_downloaded": 0,
+                "status": "RUNNING",
+            },
+            status="RUNNING",
+            owner_id=user.id,
+        )
+
+        _active_downloads[download_id] = {
+            "block_id": block.id,
+            "project_id": project_id,
+            "cancelled": False,
+        }
+
+        # Fire and forget background download
+        asyncio.create_task(
+            _download_files_background(
+                download_id=download_id,
+                project_id=project_id,
+                block_id=block.id,
+                owner_id=user.id,
+                files=req.files,
+                target_dir=target_dir,
+            )
+        )
+
+        return {
+            "download_id": download_id,
+            "block_id": block.id,
+            "target_dir": str(target_dir),
+            "file_count": len(req.files),
+        }
+    finally:
+        session.close()
+
+
+@app.get("/projects/{project_id}/downloads/{download_id}")
+async def get_download_status(project_id: str, download_id: str, request: Request):
+    """Poll download progress."""
+    user = request.state.user
+    require_project_access(project_id, user, min_role="viewer")
+
+    info = _active_downloads.get(download_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Download not found")
+
+    session = SessionLocal()
+    try:
+        block = session.query(ProjectBlock).filter(ProjectBlock.id == info["block_id"]).first()
+        if not block:
+            raise HTTPException(status_code=404, detail="Download block not found")
+        return get_block_payload(block)
+    finally:
+        session.close()
+
+
+@app.delete("/projects/{project_id}/downloads/{download_id}")
+async def cancel_download(project_id: str, download_id: str, request: Request):
+    """Cancel an in-progress download."""
+    user = request.state.user
+    require_project_access(project_id, user, min_role="editor")
+
+    info = _active_downloads.get(download_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Download not found")
+    info["cancelled"] = True
+    return {"status": "cancelling", "download_id": download_id}
+
+
+async def _download_files_background(
+    download_id: str,
+    project_id: str,
+    block_id: str,
+    owner_id: str,
+    files: list[dict],
+    target_dir: Path,
+):
+    """Background task that streams files from URLs into the target directory."""
+    session = SessionLocal()
+    downloaded_files = []
+    total_bytes = 0
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(300.0)) as client:
+            for i, file_spec in enumerate(files):
+                dl_info = _active_downloads.get(download_id, {})
+                if dl_info.get("cancelled"):
+                    _update_download_block(session, block_id, {
+                        "status": "CANCELLED",
+                        "downloaded": i,
+                        "message": "Download cancelled by user",
+                    }, status="FAILED")
+                    return
+
+                url = file_spec["url"]
+                filename = file_spec.get("filename") or url.rsplit("/", 1)[-1].split("?")[0] or f"file_{i}"
+                dest = target_dir / filename
+
+                try:
+                    async with client.stream("GET", url) as resp:
+                        resp.raise_for_status()
+                        file_bytes = 0
+                        with open(dest, "wb") as f:
+                            async for chunk in resp.aiter_bytes(chunk_size=65536):
+                                f.write(chunk)
+                                file_bytes += len(chunk)
+                                total_bytes += len(chunk)
+
+                    downloaded_files.append({
+                        "filename": filename,
+                        "size_bytes": file_bytes,
+                        "path": str(dest),
+                    })
+
+                    # Update progress
+                    _update_download_block(session, block_id, {
+                        "downloaded": i + 1,
+                        "bytes_downloaded": total_bytes,
+                        "current_file": filename,
+                    })
+
+                except Exception as e:
+                    logger.error("Download failed for file", url=url, error=str(e))
+                    downloaded_files.append({
+                        "filename": filename,
+                        "error": str(e),
+                    })
+
+        # All done — update block to DONE
+        _update_download_block(session, block_id, {
+            "status": "DONE",
+            "downloaded": len(files),
+            "bytes_downloaded": total_bytes,
+            "downloaded_files": downloaded_files,
+        }, status="DONE")
+
+        # Generate post-download suggestions
+        await _post_download_suggestions(session, project_id, owner_id, downloaded_files, target_dir)
+
+    except Exception as e:
+        logger.error("Download background task failed", download_id=download_id, error=str(e))
+        _update_download_block(session, block_id, {
+            "status": "FAILED",
+            "message": str(e),
+            "downloaded_files": downloaded_files,
+        }, status="FAILED")
+    finally:
+        _active_downloads.pop(download_id, None)
+        session.close()
+
+
+def _update_download_block(session, block_id: str, updates: dict, status: str | None = None):
+    """Update a DOWNLOAD_TASK block's payload (and optionally status)."""
+    block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
+    if not block:
+        return
+    payload = get_block_payload(block)
+    payload.update(updates)
+    block.payload_json = json.dumps(payload)
+    if status:
+        block.status = status
+    session.commit()
+
+
+async def _post_download_suggestions(
+    session, project_id: str, owner_id: str,
+    downloaded_files: list[dict], target_dir: Path,
+):
+    """After downloads complete, create an AGENT_PLAN block with smart suggestions."""
+    # Categorize files by extension
+    seq_files = []  # .pod5, .bam, .fastq, .fastq.gz, .fq, .fq.gz
+    table_files = []  # .csv, .tsv, .bed, .bedgraph
+    other_files = []
+
+    seq_exts = {".pod5", ".bam", ".fastq", ".fq", ".fast5"}
+    table_exts = {".csv", ".tsv", ".bed", ".bedgraph", ".txt"}
+
+    for f in downloaded_files:
+        if f.get("error"):
+            continue
+        fname = f.get("filename", "")
+        # Handle .gz extensions
+        ext = Path(fname).suffix.lower()
+        if ext == ".gz":
+            ext = Path(fname).stem
+            ext = Path(ext).suffix.lower()
+
+        if ext in seq_exts:
+            seq_files.append(f)
+        elif ext in table_exts:
+            table_files.append(f)
+        else:
+            other_files.append(f)
+
+    # Build suggestion markdown
+    lines = [f"**Download Complete** — {len(downloaded_files)} file(s) saved to `{target_dir.name}/`\n"]
+
+    if seq_files:
+        fnames = ", ".join(f.get("filename", "?") for f in seq_files)
+        lines.append(f"**Sequencing files detected**: {fnames}")
+        lines.append("These look like sequencing data. I can help you run the **Dogme pipeline** for DNA, RNA, or cDNA analysis.")
+        lines.append("Would you like to set up a pipeline run?\n")
+        lines.append("[[SKILL_SWITCH_TO: analyze_local_sample]]")
+
+    if table_files:
+        fnames = ", ".join(f.get("filename", "?") for f in table_files)
+        lines.append(f"**Tabular files detected**: {fnames}")
+        lines.append("I can load these into a dataframe for exploration and analysis.")
+        lines.append("Would you like me to read and summarize them?\n")
+        lines.append("[[SKILL_SWITCH_TO: analyze_job_results]]")
+
+    if other_files and not seq_files and not table_files:
+        fnames = ", ".join(f.get("filename", "?") for f in other_files)
+        lines.append(f"**Files**: {fnames}")
+        lines.append("Let me know what you'd like to do with these files.")
+
+    suggestion_md = "\n".join(lines)
+
+    _create_block_internal(
+        session,
+        project_id,
+        "AGENT_PLAN",
+        {
+            "markdown": suggestion_md,
+            "skill": "download_files",
+            "model": "system",
+        },
+        status="DONE",
+        owner_id=owner_id,
+    )
+
+
+# --- File Upload ---
+
+@app.post("/projects/{project_id}/upload")
+async def upload_file(project_id: str, request: Request):
+    """Upload files into the project's data/ directory.
+
+    Accepts multipart/form-data with field name 'files'.
+    """
+    from fastapi import UploadFile
+    import aiofiles
+
+    user = request.state.user
+    require_project_access(project_id, user, min_role="editor")
+
+    session = SessionLocal()
+    try:
+        project_dir = _resolve_project_dir(session, user, project_id)
+        data_dir = project_dir / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+    finally:
+        session.close()
+
+    form = await request.form()
+    uploaded = []
+
+    for key in form:
+        file = form[key]
+        if not hasattr(file, "read"):
+            continue  # skip non-file fields
+        filename = getattr(file, "filename", key)
+        # Sanitize filename
+        safe_name = re.sub(r"[^\w.\-]", "_", filename)
+        dest = data_dir / safe_name
+
+        content = await file.read()
+        with open(dest, "wb") as f:
+            f.write(content)
+
+        uploaded.append({
+            "filename": safe_name,
+            "size_bytes": len(content),
+            "path": str(dest),
+        })
+
+    if not uploaded:
+        raise HTTPException(status_code=422, detail="No files uploaded")
+
+    # Create a system message about the upload to trigger agent suggestions
+    session2 = SessionLocal()
+    try:
+        await _post_download_suggestions(
+            session2, project_id, user.id, uploaded, data_dir,
+        )
+    finally:
+        session2.close()
+
+    return {
+        "uploaded": uploaded,
+        "count": len(uploaded),
+        "target_dir": str(data_dir),
     }
 
 
@@ -3991,8 +4684,8 @@ async def get_user_disk_usage(request: Request):
             file_count = 0
             scanned_dirs = set()
 
-            # 1. Jailed user directory
-            project_dir = AGOUTIC_DATA / "users" / user.id / pid
+            # 1. User project directory (slug-based or legacy UUID)
+            project_dir = _resolve_project_dir(session, user, pid)
             if project_dir.exists():
                 scanned_dirs.add(str(project_dir))
                 for f in project_dir.rglob("*"):
@@ -4133,10 +4826,13 @@ async def delete_project_permanent(project_id: str, request: Request):
 
         # 7. Remove on-disk directory (best-effort)
         import shutil
-        from server1.config import AGOUTIC_DATA
-        user_dir = AGOUTIC_DATA / "users" / str(user.id) / project_id
-        if user_dir.exists():
-            shutil.rmtree(user_dir, ignore_errors=True)
+        project_dir = _resolve_project_dir(session, user, project_id)
+        if project_dir.exists():
+            shutil.rmtree(project_dir, ignore_errors=True)
+        # Also try legacy UUID path
+        legacy_dir = AGOUTIC_DATA / "users" / str(user.id) / project_id
+        if legacy_dir.exists():
+            shutil.rmtree(legacy_dir, ignore_errors=True)
 
         logger.info("Project permanently deleted", project_id=project_id, user=user.email)
         return {"status": "deleted", "id": project_id}

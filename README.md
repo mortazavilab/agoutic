@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 2.6  
+**Version:** 2.7  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -24,7 +24,8 @@ AGOUTIC enforces access control at every layer:
 - **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{user_id}/{project_id}/`) with input sanitization and jail-escape guards.
 - **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
 - **Project management**: Full dashboard for browsing projects, viewing stats/files/jobs, renaming, archiving, and permanent deletion with cascading cleanup.
-- **Migration**: Run `python server1/migrate_hardening.py` to add hardening columns. Run `python server1/migrate_token_tracking.py` to add token tracking columns. Both scripts respect `$AGOUTIC_DATA` and are safe to re-run.
+- **Migration**: Run `python server1/migrate_hardening.py` to add hardening columns. Run `python server1/migrate_token_tracking.py` to add token tracking columns. Run `python server1/migrate_usernames.py` to add the `username` column, then `python server1/set_usernames.py auto` to derive usernames from email addresses. All scripts respect `$AGOUTIC_DATA` and are safe to re-run.
+- **Username paths**: User-jailed filesystem paths use `$AGOUTIC_DATA/users/{username}/{project-slug}/` instead of raw IDs, giving human-readable directory trees.
 
 ## 🚀 Quick Start
 
@@ -117,15 +118,19 @@ python server1/server2_mcp_client.py
   - `[[PLOT:...]]` tag parsing → `AGENT_PLOT` blocks for inline Plotly charts (histogram, scatter, bar, box, heatmap, pie)
   - **Per-message and per-conversation token tracking** — every LLM response records `prompt_tokens`, `completion_tokens`, `total_tokens`, and `model_name` in the database; exposed via `GET /user/token-usage` (own data) and `GET /admin/token-usage` (all users)
   - **`find_file` echo recovery** — when a weak model emits a `find_file` JSON result verbatim instead of a `[[DATA_CALL:...]]` tag, the pipeline intercepts the response, auto-chains to `parse_csv_file`/`parse_bed_file`/`read_file_content`, and strips the bad block from conversation history to prevent looping
+  - **ENCODE tool routing guards** — structural checks prevent LLM misrouting (e.g. cell-line names sent to `get_experiment`); assay-only queries are routed to `search_by_assay`
 
 ### Server 2: ENCODELIB (Port 8080)
 - **Role:** ENCODE Portal data retrieval
-- **Tech:** fastmcp + ENCODE API
+- **Tech:** fastmcp + ENCODE API, extended via `server2/mcp_server.py`
 - **Features:**
   - Search experiments by biosample/organism/target
+  - **`search_by_assay`** — assay-first search (e.g. *"how many RNA-seq experiments"*) across both organisms, returning combined counts and per-organism lists
   - Download experiment files
   - Metadata caching
-  - 15 MCP tools for data access
+  - 15+ MCP tools for data access
+  - Agent routing guards in Server 1 prevent structural misrouting (e.g. cell-line names sent to `get_experiment`)
+- **Extension pattern:** `server2/mcp_server.py` imports ENCODELIB's FastMCP `server` instance and registers additional tools on it. `launch_encode.py` imports from this module so extensions are available without modifying ENCODELIB.
 - **Docs:** [SERVER2_IMPLEMENTATION.md](SERVER2_IMPLEMENTATION.md)
 
 ### Server 3: Execution Engine (Port 8001)
@@ -172,6 +177,9 @@ agoutic/
 │   ├── db.py                    # Database connection
 │   ├── init_db.py               # Full schema creation (fresh install)
 │   ├── migrate_hardening.py     # Migration for hardening sprint columns
+│   ├── migrate_token_tracking.py # Migration for token tracking columns
+│   ├── migrate_usernames.py     # Migration for username column
+│   ├── set_usernames.py         # CLI: derive/assign usernames and slugify projects
 │   └── test_chat.py             # Tests
 │
 ├── server3/                      # Execution Engine
@@ -199,11 +207,18 @@ agoutic/
 │       ├── results.py          # Job results analysis (auto-lists project jobs)
 │       └── admin.py            # Admin user management
 │
+├── server2/                      # ENCODE MCP Extension
+│   ├── launch_encode.py        # HTTP launcher (imports mcp_server for extensions)
+│   ├── mcp_server.py           # Extends ENCODELIB FastMCP with search_by_assay
+│   ├── config.py               # Server 2 configuration
+│   └── result_formatter.py     # Result formatting helpers
+│
 ├── skills/                      # Workflow Definitions
 │   ├── Dogme_DNA.md            # DNA pipeline definition
 │   ├── Dogme_RNA.md            # RNA pipeline definition
 │   ├── Dogme_cDNA.md           # cDNA pipeline definition
 │   ├── ENCODE_LongRead.md      # ENCODE pipeline definition
+│   ├── ENCODE_Search.md        # ENCODE search skill + routing rules
 │   ├── Local_Sample_Intake.md  # Sample intake workflow
 │
 └── data/                        # Data & Database (created at runtime)
@@ -302,7 +317,14 @@ AGOUTIC_CODE/
 AGOUTIC_DATA/
 ├── database/         # SQLite database
 ├── server3_work/     # Job working directories
-└── server3_logs/     # Server logs
+├── server3_logs/     # Server logs
+├── logs/             # Structured logs (all servers)
+└── users/            # Per-user jailed project dirs
+    └── {username}/   # e.g. eli/
+        └── {project-slug}/  # e.g. k562-atac-seq/
+            ├── data/
+            ├── results/
+            └── workflow1/
 ```
 
 ## � Logging & Observability
@@ -532,7 +554,7 @@ pylint server1 server3
 
 ## 📦 Version Information
 
-- **Release**: Security Hardening Sprint
+- **Release**: 2.7 — ENCODE routing, username paths, search_by_assay
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

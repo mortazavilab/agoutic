@@ -162,5 +162,8 @@ SKILLS_REGISTRY = {
     "analyze_local_sample": "Local_Sample_Intake.md",
     
     # Job Results Analysis Skill
-    "analyze_job_results": "Analyze_Job_Results.md"
+    "analyze_job_results": "Analyze_Job_Results.md",
+    
+    # Download / File Intake Skill
+    "download_files": "Download_Files.md"
 }

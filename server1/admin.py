@@ -5,8 +5,10 @@ Provides user management functionality:
 - List all users
 - Approve/revoke user access
 - Promote users to admin
+- Set/change usernames (admin only)
 """
 
+import re
 from datetime import datetime
 from typing import List
 
@@ -14,9 +16,11 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
+from server1.config import AGOUTIC_DATA
 from server1.db import SessionLocal
 from server1.models import User, Conversation, ConversationMessage
 from server1.dependencies import require_admin
+from server1.user_jail import rename_user_dir
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -26,6 +30,7 @@ class UserListItem(BaseModel):
     id: str
     email: str
     display_name: str | None
+    username: str | None
     role: str
     is_active: bool
     created_at: str
@@ -54,6 +59,7 @@ async def list_users(admin: User = Depends(require_admin)):
                 id=user.id,
                 email=user.email,
                 display_name=user.display_name,
+                username=user.username,
                 role=user.role,
                 is_active=user.is_active,
                 created_at=user.created_at.isoformat() if user.created_at else None,
@@ -251,6 +257,100 @@ async def set_user_token_limit(
         }
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# Username management (admin-only)
+# ---------------------------------------------------------------------------
+
+_USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
+
+
+class SetUsernameAdminRequest(BaseModel):
+    username: str
+
+
+@router.patch("/users/{user_id}/username")
+async def admin_set_username(
+    user_id: str,
+    body: SetUsernameAdminRequest,
+    admin: User = Depends(require_admin),
+):
+    """Set or change a user's username (admin only).
+
+    Handles the filesystem rename when changing an existing username.
+    Also updates nextflow_work_dir paths in dogme_jobs if the shared DB has that table.
+    """
+    username = body.username.strip().lower()
+
+    if not _USERNAME_RE.match(username):
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid username. Use lowercase letters, numbers, hyphens, underscores. 2-31 chars.",
+        )
+
+    session = SessionLocal()
+    try:
+        user = session.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Check uniqueness
+        clash = session.execute(
+            select(User).where(User.username == username).where(User.id != user_id)
+        ).scalar_one_or_none()
+        if clash:
+            raise HTTPException(status_code=409, detail="Username already taken.")
+
+        old_username = user.username
+        user.username = username
+        session.commit()
+
+        # Filesystem rename
+        if old_username and old_username != username:
+            try:
+                rename_user_dir(old_username, username)
+            except PermissionError as e:
+                # Rollback the DB change if we can't move the dir
+                user.username = old_username
+                session.commit()
+                raise HTTPException(status_code=409, detail=str(e))
+
+            # Update nextflow_work_dir paths in dogme_jobs
+            try:
+                old_prefix = str(AGOUTIC_DATA / "users" / old_username)
+                new_prefix = str(AGOUTIC_DATA / "users" / username)
+                session.execute(
+                    text(
+                        "UPDATE dogme_jobs SET nextflow_work_dir = "
+                        "REPLACE(nextflow_work_dir, :old, :new) "
+                        "WHERE nextflow_work_dir LIKE :pattern"
+                    ),
+                    {"old": old_prefix, "new": new_prefix, "pattern": old_prefix + "%"},
+                )
+                session.commit()
+            except Exception:
+                pass  # dogme_jobs may not be in this DB
+        elif not old_username:
+            # First time setting — create home dir
+            user_home = AGOUTIC_DATA / "users" / username
+            user_home.mkdir(parents=True, exist_ok=True)
+
+        return {
+            "id": user.id,
+            "email": user.email,
+            "username": username,
+            "old_username": old_username,
+            "message": "Username updated successfully.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
 
 @router.get("/token-usage/summary")
 async def admin_token_usage_summary(admin: User = Depends(require_admin)):

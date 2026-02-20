@@ -2,6 +2,70 @@
 
 ## [Unreleased] - 2026-02-19
 
+### Added — `search_by_assay` MCP Tool (Server 2 extension)
+
+- **`server2/mcp_server.py` — extends ENCODELIB without modifying it**
+  - Added `search_by_assay(assay_title, organism=None, target=None, exclude_revoked=True)` as a new `@server.tool()` registered on ENCODELIB's existing FastMCP `server` instance.
+  - When `organism` is omitted, both `Homo sapiens` and `Mus musculus` are queried and results are merged into a single response with `total`, `human_count`, `mouse_count`, `human`, and `mouse` keys.
+  - When `organism` is specified, returns `{total, assay_title, organism, experiments}` for the single organism.
+  - Imports `server` and `get_encode_instance` from ENCODELIB's `encode_server` module; no changes to ENCODELIB itself.
+  - Applied to: [server2/mcp_server.py](server2/mcp_server.py) *(new file)*
+
+- **`server2/launch_encode.py` updated to load extended server**
+  - Previously imported directly from ENCODELIB's `encode_server`. Now imports `server` from `server2.mcp_server` (after ENCODELIB is added to `sys.path`), so all ENCODELIB tools plus `search_by_assay` are registered before the HTTP server starts.
+  - Applied to: [server2/launch_encode.py](server2/launch_encode.py)
+
+### Fixed — ENCODE Agent Tool Misrouting
+
+- **Structural guard: non-ENCSR accessions redirect to correct search tool**
+  - `_correct_tool_routing()` in the chat endpoint now applies a structural check rather than a name-list check: any `accession` parameter passed to `get_experiment` that does not match `^ENCSR[A-Z0-9]{6}$` is redirected to the appropriate search tool. This handles unknown cell lines and biosample terms regardless of naming convention.
+  - Added `_ENCSR_PATTERN` and `_ENCFF_PATTERN` compiled regexes; `_ENCFF_PATTERN` similarly redirects `get_experiment` calls with ENCFF accessions to `get_file_metadata`.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Assay-only queries routed to `search_by_assay`**
+  - Queries such as *"how many RNA-seq experiments are in ENCODE"* previously had no routing path and sometimes triggered wrong tool calls. `_correct_tool_routing()` now has a **Case A** branch: when the apparent search term looks like an assay name (detected via `_looks_like_assay()`) with no biosample context, the tool is redirected to `search_by_assay`.
+  - `_auto_generate_data_calls()` safety net likewise emits `search_by_assay` (not `search_by_organism`) for assay-only fallback.
+  - Added helpers: `_looks_like_assay(s)`, `_ASSAY_INDICATORS` tuple, `_ENCODE_ASSAY_ALIASES` map (`rna-seq` → `total RNA-seq`, etc.).
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **`ENCODE_Search.md` skill updated with anti-pattern guard and new tool docs**
+  - Added `⛔ NEVER` block listing 4 wrong tool-call patterns and 3 correct alternatives.
+  - Decision rule updated: *cell line → `search_by_biosample`; assay only → `search_by_assay`; ENCSR accession → `get_experiment`*.
+  - Quick-reference table gains 3 `search_by_assay` examples.
+  - `search_by_assay` parameter docs added to Available Tools section.
+  - Applied to: [skills/ENCODE_Search.md](skills/ENCODE_Search.md)
+
+### Added — Username & Slug System
+
+- **`username` column on `User` model**
+  - New nullable `TEXT` column with a conditional unique index (`WHERE username IS NOT NULL`). Distinct from `google_id` and `email` — a short, readable handle used for filesystem paths and display.
+  - Applied to: [server1/models.py](server1/models.py)
+
+- **`server1/migrate_usernames.py` — idempotent migration**
+  - Adds `users.username` via `ALTER TABLE` (no UNIQUE constraint on the ALTER, avoiding SQLite limitations) then creates a `CREATE UNIQUE INDEX IF NOT EXISTS ... WHERE username IS NOT NULL` separately.
+  - Applied to: [server1/migrate_usernames.py](server1/migrate_usernames.py) *(new file)*
+
+- **`server1/set_usernames.py` — CLI for username assignment**
+  - `auto` sub-command derives slugified usernames from email prefixes for all users who have none.
+  - `set <user_id> <username>` assigns a specific username.
+  - `slugify-projects` normalises existing project names to URL-safe slugs.
+  - Applied to: [server1/set_usernames.py](server1/set_usernames.py) *(new file)*
+
+- **Filesystem paths use `username/project-slug/` hierarchy**
+  - User-jailed paths now resolve to `$AGOUTIC_DATA/users/{username}/{project_slug}/` (falling back to `user_{id}` if username is not yet set).
+  - Workflow directories use `{username}/{project_slug}/workflow{N}/`.
+  - Applied to: [server1/user_jail.py](server1/user_jail.py), [server3/nextflow_executor.py](server3/nextflow_executor.py), [server4/config.py](server4/config.py)
+
+- **Admin endpoints for username management**
+  - `PATCH /admin/users/{user_id}/username` — set or clear a user's username.
+  - `GET /admin/users` — list now includes `username` field.
+  - Applied to: [server1/admin.py](server1/admin.py)
+
+- **UI — slugified project name default**
+  - New project default name changed from `"Project YYYY-MM-DD HH:MM"` to `"project-YYYY-MM-DD"` (slug-friendly).
+  - New Project button replaced with an expander form; project name is pre-filled with the slug default and run through `_slugify_project_name()` before creation.
+  - Applied to: [ui/app.py](ui/app.py)
+
 ### Fixed — `find_file` JSON Echo Loop (weak-model regression)
 
 - **Fix A — Bare `find_file` JSON blocks stripped from conversation history**

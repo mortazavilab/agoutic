@@ -82,7 +82,7 @@ Once the user picks a file type, confirm the download plan:
 ```
 **Download plan:**
 - **Files:** 4 pod5 files
-- **Location:** ./files/ENCSR000ABC/
+- **Destination:** data/
 - **Estimated size:** 12.5 GB
 
 Proceed with download?
@@ -90,11 +90,16 @@ Proceed with download?
 [[APPROVAL_NEEDED]]
 ```
 
-After approval, execute:
+After approval, resolve each file's URL using get_file_url and hand off to the download_files skill:
 
 ```
-[[DATA_CALL: consortium=encode, tool=download_files, accession=ENCSR000ABC, file_types=pod5]]
+First, I'll resolve the download URLs for each file:
+
+[[DATA_CALL: consortium=encode, tool=get_file_url, accession=ENCSR000ABC, file_accession=ENCFF001AAA]]
+[[DATA_CALL: consortium=encode, tool=get_file_url, accession=ENCSR000ABC, file_accession=ENCFF001AAB]]
 ```
+
+**Important:** Do NOT use `download_files` from Server 2. Use `get_file_url` to resolve URLs, then the system downloads files into the user's project data/ directory.
 
 Report results:
 - Number of files downloaded

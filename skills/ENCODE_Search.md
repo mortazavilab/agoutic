@@ -13,6 +13,26 @@
 [[DATA_CALL: consortium=encode, tool=tool_name, param1=value1, param2=value2]]
 ```
 
+## ⛔ NEVER use `get_experiment` for biosample/count/assay queries
+
+`get_experiment` requires exactly ONE param: `accession=ENCSR...`. It does NOT accept cell line names, assay filters, or any other search parameters.
+
+```
+❌ WRONG: [[DATA_CALL: consortium=encode, tool=get_experiment, assay_title=K562]]
+❌ WRONG: [[DATA_CALL: consortium=encode, tool=get_experiment, accession=K562]]
+❌ WRONG: [[DATA_CALL: consortium=encode, tool=get_experiment, accession=RNA-seq]]
+❌ WRONG: [[DATA_CALL: consortium=encode, tool=get_experiment, assay_title=total RNA-seq]]
+
+✅ Biosample query:       [[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562, organism=Homo sapiens]]
+✅ Assay-only query:      [[DATA_CALL: consortium=encode, tool=search_by_assay, assay_title=total RNA-seq]]
+✅ Specific experiment:   [[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]
+```
+
+**Decision rule:**
+- Has a cell line / tissue name → `search_by_biosample`
+- Has only an assay type, no biosample → `search_by_assay`
+- Has a specific ENCSR accession → `get_experiment`
+
 ## ✅ CORRECT EXAMPLES (COPY THESE):
 
 ```
@@ -167,11 +187,16 @@ Write the tag on its own line. It executes automatically and returns data.
 | "K562 experiments" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562, organism=Homo sapiens]]` |
 | "K562 CTCF ChIP-seq" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562, target=CTCF, assay_title=TF ChIP-seq, organism=Homo sapiens]]` |
 | "All CTCF experiments" | `[[DATA_CALL: consortium=encode, tool=search_by_target, target=CTCF, organism=Homo sapiens]]` |
-| "Liver RNA-seq" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=liver, organism=Homo sapiens, assay_title=RNA-seq]]` |
+| "Liver RNA-seq" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=liver, organism=Homo sapiens, assay_title=total RNA-seq]]` |
+| **"How many RNA-seq experiments"** | `[[DATA_CALL: consortium=encode, tool=search_by_assay, assay_title=total RNA-seq]]` |
+| **"How many ATAC-seq are in ENCODE"** | `[[DATA_CALL: consortium=encode, tool=search_by_assay, assay_title=ATAC-seq]]` |
+| **"How many ChIP-seq experiments"** | `[[DATA_CALL: consortium=encode, tool=search_by_assay, assay_title=TF ChIP-seq]]` |
 | "Details for ENCSR123ABC" | `[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]` |
 | "Files for ENCSR123ABC" | `[[DATA_CALL: consortium=encode, tool=get_file_types, accession=ENCSR123ABC]]` |
 | "BAM files for ENCSR123ABC" | `[[DATA_CALL: consortium=encode, tool=get_files_by_type, accession=ENCSR123ABC]]` (then show result['bam']) |
 | "Browse experiments" | `[[DATA_CALL: consortium=encode, tool=list_experiments, limit=50]]` |
+
+**Key rule: no biosample → `search_by_organism`. Has biosample → `search_by_biosample`.**
 
 ---
 
@@ -217,6 +242,20 @@ Parameters:
 - `assay_title` (optional): Assay type filter
 - `target` (optional): Target filter
 - `exclude_revoked` (optional): default True
+
+**search_by_assay** ← USE THIS for assay-type queries with no specific biosample:
+```
+[[DATA_CALL: consortium=encode, tool=search_by_assay, assay_title=total RNA-seq]]
+[[DATA_CALL: consortium=encode, tool=search_by_assay, assay_title=ATAC-seq, organism=Homo sapiens]]
+[[DATA_CALL: consortium=encode, tool=search_by_assay, assay_title=TF ChIP-seq, target=CTCF]]
+```
+Parameters:
+- `assay_title` (required): Assay type (e.g. 'total RNA-seq', 'ATAC-seq', 'TF ChIP-seq')
+- `organism` (optional): 'Homo sapiens' or 'Mus musculus'. If omitted, both are queried and counts are returned for each.
+- `target` (optional): Target filter
+- `exclude_revoked` (optional): default True
+
+Returns `total`, `human_count`, `mouse_count` (when organism omitted) or `total` + `experiments` list.
 
 ### ⚠️ ENCODE Accession Types — Use the Right Tool!
 

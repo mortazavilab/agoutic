@@ -12,9 +12,12 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional
 
+import re
+
 from fastapi import APIRouter, HTTPException, Response, Request
 from fastapi.responses import RedirectResponse
 from authlib.integrations.httpx_client import AsyncOAuth2Client
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from server1.config import (
@@ -25,6 +28,7 @@ from server1.config import (
     FRONTEND_URL,
     SESSION_EXPIRES_HOURS,
     ENVIRONMENT,
+    AGOUTIC_DATA,
 )
 from server1.db import SessionLocal
 from server1.models import User, Session as SessionModel
@@ -234,6 +238,93 @@ async def get_current_user_info(request: Request):
         "id": user.id,
         "email": user.email,
         "display_name": user.display_name,
+        "username": user.username,
         "role": user.role,
         "is_active": user.is_active,
     }
+
+
+# ---------------------------------------------------------------------------
+# Username management
+# ---------------------------------------------------------------------------
+
+_USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
+
+
+class SetUsernameRequest(BaseModel):
+    username: str
+
+
+@router.get("/check-username/{username}")
+async def check_username_availability(username: str):
+    """Check if a username is available and valid."""
+    if not _USERNAME_RE.match(username):
+        return {"available": False, "reason": "Invalid format. Use lowercase letters, numbers, hyphens, underscores. 2-31 chars."}
+
+    session = SessionLocal()
+    try:
+        existing = session.execute(
+            select(User).where(User.username == username)
+        ).scalar_one_or_none()
+        if existing:
+            return {"available": False, "reason": "Username already taken."}
+        return {"available": True, "reason": None}
+    finally:
+        session.close()
+
+
+@router.post("/set-username")
+async def set_username(req: SetUsernameRequest, request: Request):
+    """Set username for the current user (first-time onboarding only).
+
+    Users can only call this when their username is NULL.
+    After the initial set, only admins can change usernames.
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    username = req.username.strip().lower()
+
+    if not _USERNAME_RE.match(username):
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid username. Use lowercase letters, numbers, hyphens, underscores. 2-31 chars.",
+        )
+
+    session = SessionLocal()
+    try:
+        db_user = session.execute(
+            select(User).where(User.id == user.id)
+        ).scalar_one_or_none()
+        if not db_user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if db_user.username is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Username already set. Contact an admin to change it.",
+            )
+
+        # Check uniqueness
+        clash = session.execute(
+            select(User).where(User.username == username)
+        ).scalar_one_or_none()
+        if clash:
+            raise HTTPException(status_code=409, detail="Username already taken.")
+
+        db_user.username = username
+        session.commit()
+
+        # Create home directory
+        user_home = AGOUTIC_DATA / "users" / username
+        user_home.mkdir(parents=True, exist_ok=True)
+
+        return {"username": username, "message": "Username set successfully."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
