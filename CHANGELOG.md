@@ -94,6 +94,14 @@
   - Injects a `[CONTEXT: Parameters already collected from this conversation: ... Do NOT re-ask for these. Only ask for fields still missing.]` line at the top of the user message so the LLM sees all prior answers without needing to scan full history.
   - Applied to: [server1/app.py](server1/app.py)
 
+### Fixed — Parameter Extraction Leaks Previous Sample Names Into New Submissions
+
+- **`extract_job_parameters_from_conversation()` scoped to the most recent submission cycle**
+  - Previously the function scanned **all** blocks in the project and concatenated every user message into one string. The regex `r'called\s+(\w+)'` did `re.search` which finds the **first** match — so "called Jamshid" from the original submission always won over "called Jamshid2" or "called retest" from later submissions in the same project.
+  - Now the function finds the last `EXECUTION_JOB` or approved `APPROVAL_GATE` block as a **boundary marker** and only considers blocks after that point. This ensures each new submission starts fresh without contamination from prior jobs.
+  - Explicit name extraction patterns (`called X`, `named X`, etc.) now iterate user messages in **reverse order** (most recent first), so the latest submission request always wins.
+  - Applied to: [server1/app.py](server1/app.py)
+
 ### Fixed — New Sample Submission Blocked While on Dogme Analysis Skill
 
 - **`_auto_detect_skill_switch()` now switches to `analyze_local_sample` from Dogme analysis skills**

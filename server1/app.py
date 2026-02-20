@@ -1395,9 +1395,14 @@ async def clear_project_blocks(project_id: str, request: Request):
 
 async def extract_job_parameters_from_conversation(session, project_id: str) -> dict:
     """
-    Extract job parameters from conversation history using LLM.
+    Extract job parameters from conversation history using heuristics.
     
-    Analyzes all USER_MESSAGE and AGENT_PLAN blocks to determine:
+    Scopes to the **most recent submission cycle** — only blocks after the
+    last EXECUTION_JOB or APPROVAL_GATE (approved).  This prevents stale
+    parameters from earlier jobs (e.g. a previous sample name) bleeding
+    into a new submission.
+    
+    Analyzes USER_MESSAGE and AGENT_PLAN blocks to determine:
     - sample_name
     - mode (DNA/RNA/CDNA)
     - input_directory (path to pod5 files)
@@ -1412,10 +1417,22 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     result = session.execute(query)
     blocks = result.scalars().all()
     
-    # Build conversation context
+    # --- Scope to the most recent submission cycle ---
+    # Find the last EXECUTION_JOB or approved APPROVAL_GATE block.
+    # Only consider blocks AFTER that point for parameter extraction.
+    last_boundary_idx = -1
+    for i, block in enumerate(blocks):
+        if block.type == "EXECUTION_JOB":
+            last_boundary_idx = i
+        elif block.type == "APPROVAL_GATE" and block.status == "APPROVED":
+            last_boundary_idx = i
+    
+    recent_blocks = blocks[last_boundary_idx + 1:] if last_boundary_idx >= 0 else blocks
+    
+    # Build conversation context from recent blocks only
     conversation = []
     user_messages = []
-    for block in blocks:
+    for block in recent_blocks:
         if block.type == "USER_MESSAGE":
             text = get_block_payload(block).get('text', '')
             conversation.append(f"User: {text}")
@@ -1515,21 +1532,26 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         params["input_directory"] = "/data/samples/test"
     
     # Extract sample name from context
-    # First check for explicit "X is sample name" or "sample name is X" patterns
+    # Search user messages in REVERSE order (most recent first) so a new
+    # submission request wins over older ones in the same cycle.
     explicit_patterns = [
         r'([a-zA-Z0-9_-]+)\s+is\s+(?:the\s+)?sample\s+name',  # "Jamshid is sample name"
         r'sample\s+name\s+is\s+([a-zA-Z0-9_-]+)',  # "sample name is Jamshid"
         r'named\s+([a-zA-Z0-9_-]+)',  # "named Ali1"
         r'called\s+([a-zA-Z0-9_-]+)',  # "called Ali1"
     ]
-    for pattern in explicit_patterns:
-        match = re.search(pattern, all_user_text, re.IGNORECASE)
-        if match:
-            candidate = match.group(1)
-            # Skip common words and genome names
-            if candidate.lower() not in ['is', 'the', 'a', 'an', 'this', 'that', 'it', 'at', 'in', 'on', 'mm39', 'grch38', 'hg38', 'mm10']:
-                params["sample_name"] = candidate
-                break
+    _skip_words = {'is', 'the', 'a', 'an', 'this', 'that', 'it', 'at', 'in', 'on',
+                   'mm39', 'grch38', 'hg38', 'mm10'}
+    for msg in reversed(user_messages):
+        for pattern in explicit_patterns:
+            match = re.search(pattern, msg, re.IGNORECASE)
+            if match:
+                candidate = match.group(1)
+                if candidate.lower() not in _skip_words:
+                    params["sample_name"] = candidate
+                    break
+        if params["sample_name"]:
+            break
     
     # If not found via explicit pattern, check standalone answers (but filter more carefully)
     if not params["sample_name"]:
