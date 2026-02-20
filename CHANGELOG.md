@@ -2,6 +2,23 @@
 
 ## [Unreleased] - 2026-02-19
 
+### Fixed — `find_file` JSON Echo Loop (weak-model regression)
+
+- **Fix A — Bare `find_file` JSON blocks stripped from conversation history**
+  - When a weaker model (e.g. `devstral-2`) emits a `find_file` result JSON verbatim instead of a `[[DATA_CALL:...]]` tag, that raw JSON was previously saved as an `AGENT_PLAN` block and reloaded into conversation history on the next turn. The LLM would then see it as a "completed action" and echo it again — creating an infinite loop.
+  - The history builder in the `chat_with_agent` endpoint now detects AGENT_PLAN blocks whose entire content (after stripping `<details>` and code fences) parses as `{success: true, primary_path: ...}` JSON. Such blocks are excluded from `conversation_history` via `continue` rather than being appended.
+  - Detection is loose: strips `` ```json `` fences, normalises whitespace, attempts `json.loads()` — only skips on clean parse. Narrative responses that happen to mention `"primary_path"` are not affected.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Fix B — Recovery guard auto-chains `find_file` → `parse_csv_file` at response time**
+  - When `all_results` is empty (no DATA_CALL tags fired) but `clean_markdown` looks like a bare `find_file` JSON echo, the endpoint now intercepts before the AGENT_PLAN block is saved and automatically executes the parse chain:
+    1. Parses `primary_path` and `run_uuid` directly from the echoed JSON (no history scanning needed — the `find_file` response already carries `run_uuid`).
+    2. Calls `_pick_file_tool(primary_path)` to select `parse_csv_file`, `parse_bed_file`, or `read_file_content`.
+    3. Instantiates `MCPHttpClient(name="server4", ...)` and calls the parse tool with appropriate row/record limits.
+    4. Injects the result into `all_results["server4"]` and clears `clean_markdown` — the existing `has_real_data → analyze_results` second-pass flow then runs normally with no code duplication.
+  - If the parse call fails, the guard logs the error and falls through silently — the original (empty) response is preserved rather than crashing.
+  - Applied to: [server1/app.py](server1/app.py)
+
 ### Added — Per-Message & Per-Conversation Token Tracking
 
 - **`AgentEngine` now captures `response.usage` from every LLM call**

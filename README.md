@@ -116,6 +116,7 @@ python server1/server2_mcp_client.py
   - Server-side project CRUD (`POST/GET/PATCH /projects`)
   - `[[PLOT:...]]` tag parsing → `AGENT_PLOT` blocks for inline Plotly charts (histogram, scatter, bar, box, heatmap, pie)
   - **Per-message and per-conversation token tracking** — every LLM response records `prompt_tokens`, `completion_tokens`, `total_tokens`, and `model_name` in the database; exposed via `GET /user/token-usage` (own data) and `GET /admin/token-usage` (all users)
+  - **`find_file` echo recovery** — when a weak model emits a `find_file` JSON result verbatim instead of a `[[DATA_CALL:...]]` tag, the pipeline intercepts the response, auto-chains to `parse_csv_file`/`parse_bed_file`/`read_file_content`, and strips the bad block from conversation history to prevent looping
 
 ### Server 2: ENCODELIB (Port 8080)
 - **Role:** ENCODE Portal data retrieval
