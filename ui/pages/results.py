@@ -190,7 +190,7 @@ if run_uuid:
 
                                 st.dataframe(
                                     display_df,
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                     height=min(400, 35 * len(display_df) + 38),
                                 )
@@ -233,7 +233,7 @@ if run_uuid:
                                         st.success(f"Parsed {parsed_data['record_count']} records")
                                         if parsed_data.get('records'):
                                             bed_df = pd.DataFrame(parsed_data['records'])
-                                            st.dataframe(bed_df, use_container_width=True, hide_index=True)
+                                            st.dataframe(bed_df, width="stretch", hide_index=True)
                                             csv_bytes = bed_df.to_csv(index=False).encode("utf-8")
                                             st.download_button(
                                                 f"⬇️ Download as CSV",
@@ -307,7 +307,7 @@ if run_uuid:
                             'Extension': f['extension']
                         })
                     if files_data:
-                        st.dataframe(pd.DataFrame(files_data), use_container_width=True, hide_index=True)
+                        st.dataframe(pd.DataFrame(files_data), width="stretch", hide_index=True)
                 else:
                     st.error("Could not load file listing")
             

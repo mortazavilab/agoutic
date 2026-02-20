@@ -445,11 +445,27 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
     _data_type_words = ["cdna", "dna", "rna", "fiber-seq", "fiberseq"]
     _has_data_type = any(w in msg_lower for w in _data_type_words)
 
-    if current_skill not in ("analyze_local_sample", "run_dogme_dna",
-                              "run_dogme_rna", "run_dogme_cdna"):
+    if current_skill not in ("analyze_local_sample",):
         # Strong signal: path + (analysis verb OR sample keyword OR data type)
-        if _has_local_path and (_has_analysis or _has_sample or _has_data_type):
-            return "analyze_local_sample"
+        # Even from Dogme analysis skills (run_dogme_*), a message like
+        # "Analyze the local CDNA sample at /path" is clearly a NEW submission,
+        # not a follow-up on the current job's results. Require at least TWO
+        # signals when switching FROM a Dogme analysis skill to avoid false
+        # positives on things like "parse /path/to/result.csv".
+        _signal_count = sum([_has_analysis, _has_sample, _has_data_type])
+        _from_dogme_skill = current_skill in (
+            "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna"
+        )
+        if _has_local_path:
+            if _from_dogme_skill:
+                # From a Dogme skill, require path + at least 2 of:
+                # analysis verb, sample keyword, data type keyword
+                if _signal_count >= 2:
+                    return "analyze_local_sample"
+            else:
+                # From other skills, path + any 1 signal is enough
+                if _signal_count >= 1:
+                    return "analyze_local_sample"
 
     # --- Signals for ENCODE_Search ---
     _encode_words = ["encode", "encsr", "encff", "encode portal"]
@@ -1970,18 +1986,23 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             raise Exception(f"MCP call to Server3 failed: {e}")
         
         run_uuid = result.get("run_uuid") if isinstance(result, dict) else None
+        _work_directory = result.get("work_directory", "") if isinstance(result, dict) else ""
         
         if run_uuid:
             
             # Create EXECUTION_JOB block
+            # Include model_name so _auto_trigger_analysis can call the same LLM
+            _gate_model = gate_payload.get("model", "default")
             job_block = _create_block_internal(
                 session,
                 project_id,
                 "EXECUTION_JOB",
                 {
                     "run_uuid": run_uuid,
+                    "work_directory": _work_directory,
                     "sample_name": job_data["sample_name"],
                     "mode": job_data["mode"],
+                    "model": _gate_model,
                     "status": "SUBMITTED",
                     "message": f"Job submitted: {run_uuid}",
                     "job_status": {
@@ -2129,16 +2150,21 @@ async def _auto_trigger_analysis(
     project_id: str, run_uuid: str, job_payload: dict, owner_id: str | None
 ):
     """
-    Automatically start analysing a just-completed Dogme job.
+    Automatically analyse a just-completed Dogme job.
 
-    Creates a system USER_MESSAGE + AGENT_PLAN block that fetches the analysis
-    summary from Server 4 and presents it to the user, then invites further
-    exploration using the mode-specific Dogme analysis skill.
+    1. Fetches the analysis summary (file listing) from Server 4.
+    2. Parses key CSV result files (final_stats, qc_summary) via Server 4 MCP.
+    3. Passes everything to the LLM for an intelligent first interpretation.
+    4. Saves the LLM response as an AGENT_PLAN block with token tracking.
+
+    Falls back to a static template if the LLM call fails.
     """
     sample_name = job_payload.get("sample_name", "Unknown")
     mode = job_payload.get("mode", "DNA")
+    model_key = job_payload.get("model", "default")
 
-    logger.info("Auto-triggering analysis", run_uuid=run_uuid, sample_name=sample_name, mode=mode)
+    logger.info("Auto-triggering analysis", run_uuid=run_uuid,
+                sample_name=sample_name, mode=mode, model=model_key)
 
     session = SessionLocal()
     try:
@@ -2151,60 +2177,57 @@ async def _auto_trigger_analysis(
             owner_id=owner_id,
         )
 
-        # 2. Fetch analysis summary from Server 4
-        summary_md = ""
+        # Also save to conversation history so the LLM sees it
+        if owner_id:
+            await save_conversation_message(
+                session, project_id, owner_id, "user",
+                f"Job \"{sample_name}\" completed. Analyze the results."
+            )
+
+        # 2. Fetch analysis summary + key CSV data from Server 4
+        summary_data = {}  # structured summary from get_analysis_summary
+        parsed_csvs = {}   # filename → parsed rows from key CSVs
         try:
             server4_url = get_service_url("server4")
             client = MCPHttpClient(name="server4", base_url=server4_url)
             await client.connect()
             try:
-                summary = await client.call_tool("get_analysis_summary", run_uuid=run_uuid)
+                summary_data = await client.call_tool(
+                    "get_analysis_summary", run_uuid=run_uuid
+                )
+                if not isinstance(summary_data, dict):
+                    summary_data = {}
+
+                # Parse key CSV files for the LLM
+                # Prioritise small, high-value files: final_stats, qc_summary
+                csv_files = (
+                    summary_data
+                    .get("file_summary", {})
+                    .get("csv_files", [])
+                )
+                _KEY_PATTERNS = ("final_stats", "qc_summary")
+                for finfo in csv_files:
+                    fname = finfo.get("name", "")
+                    fsize = finfo.get("size", 0)
+                    if fsize > 500_000:  # skip files > 500 KB
+                        continue
+                    if any(pat in fname.lower() for pat in _KEY_PATTERNS):
+                        try:
+                            parse_result = await client.call_tool(
+                                "parse_csv_file",
+                                run_uuid=run_uuid,
+                                filename=fname,
+                                max_rows=50,
+                            )
+                            if isinstance(parse_result, dict) and parse_result.get("data"):
+                                parsed_csvs[fname] = parse_result
+                        except Exception as csv_err:
+                            logger.debug("Failed to parse CSV for auto-analysis",
+                                         filename=fname, error=str(csv_err))
             finally:
                 await client.disconnect()
-
-            if isinstance(summary, dict):
-                # Build a concise overview from the structured data
-                # The MCP tool returns both a markdown 'summary' string and
-                # structured fields (all_file_counts, file_summary, etc.)
-                all_counts = summary.get("all_file_counts", {})
-                file_summary = summary.get("file_summary", {})
-                key_results = summary.get("key_results", {})
-                total_files = all_counts.get("total_files", 0)
-                csv_count = all_counts.get("csv_count", len(file_summary.get("csv_files", [])))
-                bed_count = all_counts.get("bed_count", len(file_summary.get("bed_files", [])))
-                txt_count = all_counts.get("txt_count", len(file_summary.get("txt_files", [])))
-
-                summary_md = (
-                    f"### 📊 Analysis Ready: {sample_name}\n\n"
-                    f"**Run UUID:** `{run_uuid}`\n"
-                    f"**Mode:** {summary.get('mode', mode)} &nbsp;|&nbsp; "
-                    f"**Status:** {summary.get('status', 'COMPLETED')} &nbsp;|&nbsp; "
-                    f"**Total files:** {total_files}\n\n"
-                    f"| Category | Count |\n"
-                    f"|----------|-------|\n"
-                    f"| CSV / TSV | {csv_count} |\n"
-                    f"| BED | {bed_count} |\n"
-                    f"| Text / other | {txt_count} |\n\n"
-                )
-
-                # List key result files
-                csv_files = file_summary.get("csv_files", [])
-                if csv_files:
-                    summary_md += "**Key result files:**\n"
-                    for f in csv_files[:8]:
-                        size_kb = f.get("size", 0) / 1024
-                        summary_md += f"- `{f['name']}` ({size_kb:.1f} KB)\n"
-                    if len(csv_files) > 8:
-                        summary_md += f"- _…and {len(csv_files) - 8} more_\n"
-                    summary_md += "\n"
         except Exception as e:
             logger.warning("Failed to fetch analysis summary", run_uuid=run_uuid, error=str(e))
-            summary_md = (
-                f"### 📊 Job Completed: {sample_name}\n\n"
-                f"The {mode} job finished successfully. "
-                f"I couldn't fetch the file summary automatically, but you can ask me to "
-                f"analyze the results.\n\n"
-            )
 
         # 3. Map mode → Dogme analysis skill
         mode_skill_map = {
@@ -2214,33 +2237,213 @@ async def _auto_trigger_analysis(
         }
         analysis_skill = mode_skill_map.get(mode.upper(), "analyze_job_results")
 
-        summary_md += (
-            "💡 *You can ask me to dive deeper — for example:*\n"
-            "- \"Show me the modification summary\"\n"
-            "- \"Parse the CSV results\"\n"
-            "- \"Give me a QC report\"\n"
+        # 4. Build data context string for the LLM
+        data_context = _build_auto_analysis_context(
+            sample_name, mode, run_uuid, summary_data, parsed_csvs
         )
 
-        # 4. Create AGENT_PLAN block with the summary
+        # 5. Call the LLM for an intelligent interpretation
+        llm_md = ""
+        llm_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        engine = None
+        try:
+            engine = AgentEngine(model_key=model_key)
+            user_prompt = (
+                f"A Dogme {mode} job for sample \"{sample_name}\" just completed.\n"
+                f"Run UUID: {run_uuid}\n\n"
+                f"Here is the analysis summary and key result data:\n\n"
+                f"{data_context}\n\n"
+                f"Provide a concise interpretation of these results. "
+                f"Highlight key metrics, any QC concerns, and suggest "
+                f"next steps the user could explore."
+            )
+            llm_md, llm_usage = await run_in_threadpool(
+                engine.think,
+                user_prompt,
+                analysis_skill,
+                None,  # no conversation history needed — data is self-contained
+            )
+            # Strip any tags the LLM might emit (it shouldn't, but be safe)
+            llm_md = re.sub(r'\[\[DATA_CALL:.*?\]\]', '', llm_md)
+            llm_md = re.sub(r'\[\[SKILL_SWITCH_TO:.*?\]\]', '', llm_md)
+            llm_md = re.sub(r'\[\[APPROVAL_NEEDED\]\]', '', llm_md)
+            llm_md = llm_md.strip()
+            logger.info("Auto-analysis LLM call succeeded",
+                        run_uuid=run_uuid, tokens=llm_usage.get("total_tokens", 0))
+        except Exception as llm_err:
+            logger.warning("Auto-analysis LLM call failed, using static template",
+                           run_uuid=run_uuid, error=str(llm_err))
+            llm_md = ""  # fall through to static template below
+
+        # 6. Build the final markdown
+        if llm_md:
+            # LLM succeeded — prepend a header and append exploration hints
+            final_md = (
+                f"### 📊 Analysis: {sample_name}\n"
+                f"**Run UUID:** `{run_uuid}` &nbsp;|&nbsp; "
+                f"**Mode:** {mode} &nbsp;|&nbsp; "
+                f"**Status:** COMPLETED\n\n"
+                f"{llm_md}\n\n"
+                f"💡 *You can ask me to dive deeper — for example:*\n"
+                f"- \"Show me the modification summary\"\n"
+                f"- \"Parse the CSV results\"\n"
+                f"- \"Give me a QC report\"\n"
+            )
+            _model_name = engine.model_name if engine else "system"
+        else:
+            # Fallback: static template (same as before)
+            final_md = _build_static_analysis_summary(
+                sample_name, mode, run_uuid, summary_data
+            )
+            _model_name = "system"
+            llm_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        # 7. Create AGENT_PLAN block with the analysis
+        _token_payload = {
+            **llm_usage,
+            "model": _model_name,
+        }
         _create_block_internal(
             session,
             project_id,
             "AGENT_PLAN",
             {
-                "markdown": summary_md,
+                "markdown": final_md,
                 "skill": analysis_skill,
-                "model": "system",
+                "model": _model_name,
+                "tokens": _token_payload,
             },
             status="DONE",
             owner_id=owner_id,
         )
 
-        logger.info("Auto-analysis block created", run_uuid=run_uuid, skill=analysis_skill)
+        # Save assistant response to conversation history with token tracking
+        if owner_id:
+            await save_conversation_message(
+                session, project_id, owner_id, "assistant", final_md,
+                token_data=_token_payload, model_name=_model_name
+            )
+
+        logger.info("Auto-analysis block created", run_uuid=run_uuid,
+                    skill=analysis_skill, model=_model_name,
+                    tokens=llm_usage.get("total_tokens", 0))
 
     except Exception as e:
         logger.error("Auto-trigger analysis failed", run_uuid=run_uuid, error=str(e))
     finally:
         session.close()
+
+
+def _build_auto_analysis_context(
+    sample_name: str, mode: str, run_uuid: str,
+    summary_data: dict, parsed_csvs: dict,
+) -> str:
+    """
+    Build a structured text context from the Server 4 summary and parsed CSVs
+    for the LLM to interpret.
+    """
+    parts = []
+
+    # File inventory
+    if summary_data:
+        all_counts = summary_data.get("all_file_counts", {})
+        file_summary = summary_data.get("file_summary", {})
+        total_files = all_counts.get("total_files", 0)
+        csv_count = all_counts.get("csv_count", len(file_summary.get("csv_files", [])))
+        bed_count = all_counts.get("bed_count", len(file_summary.get("bed_files", [])))
+        txt_count = all_counts.get("txt_count", len(file_summary.get("txt_files", [])))
+        parts.append(
+            f"## File Inventory\n"
+            f"Total files: {total_files} (CSV/TSV: {csv_count}, BED: {bed_count}, "
+            f"Text/other: {txt_count})"
+        )
+
+        csv_files = file_summary.get("csv_files", [])
+        if csv_files:
+            parts.append("**Available CSV files:**")
+            for f in csv_files[:12]:
+                size_kb = f.get("size", 0) / 1024
+                parts.append(f"- {f['name']} ({size_kb:.1f} KB)")
+            if len(csv_files) > 12:
+                parts.append(f"- …and {len(csv_files) - 12} more")
+
+    # Parsed CSV data
+    for fname, parse_result in parsed_csvs.items():
+        rows = parse_result.get("data", [])
+        columns = parse_result.get("columns", [])
+        total_rows = parse_result.get("total_rows", len(rows))
+        if not rows:
+            continue
+        parts.append(f"\n## Data: {fname} ({total_rows} rows)")
+        if columns:
+            parts.append("| " + " | ".join(str(c) for c in columns) + " |")
+            parts.append("| " + " | ".join("---" for _ in columns) + " |")
+        for row in rows[:30]:  # cap at 30 rows for token economy
+            if isinstance(row, dict):
+                vals = [str(row.get(c, "")) for c in columns] if columns else [str(v) for v in row.values()]
+            elif isinstance(row, (list, tuple)):
+                vals = [str(v) for v in row]
+            else:
+                vals = [str(row)]
+            parts.append("| " + " | ".join(vals) + " |")
+        if total_rows > 30:
+            parts.append(f"\n_(showing 30 of {total_rows} rows)_")
+
+    return "\n".join(parts) if parts else "No analysis data available."
+
+
+def _build_static_analysis_summary(
+    sample_name: str, mode: str, run_uuid: str, summary_data: dict,
+) -> str:
+    """
+    Build a static markdown summary (fallback when the LLM call fails).
+    This is the original template that was used before the LLM pass was added.
+    """
+    if summary_data:
+        all_counts = summary_data.get("all_file_counts", {})
+        file_summary = summary_data.get("file_summary", {})
+        total_files = all_counts.get("total_files", 0)
+        csv_count = all_counts.get("csv_count", len(file_summary.get("csv_files", [])))
+        bed_count = all_counts.get("bed_count", len(file_summary.get("bed_files", [])))
+        txt_count = all_counts.get("txt_count", len(file_summary.get("txt_files", [])))
+
+        md = (
+            f"### 📊 Analysis Ready: {sample_name}\n\n"
+            f"**Run UUID:** `{run_uuid}`\n"
+            f"**Mode:** {summary_data.get('mode', mode)} &nbsp;|&nbsp; "
+            f"**Status:** {summary_data.get('status', 'COMPLETED')} &nbsp;|&nbsp; "
+            f"**Total files:** {total_files}\n\n"
+            f"| Category | Count |\n"
+            f"|----------|-------|\n"
+            f"| CSV / TSV | {csv_count} |\n"
+            f"| BED | {bed_count} |\n"
+            f"| Text / other | {txt_count} |\n\n"
+        )
+
+        csv_files = file_summary.get("csv_files", [])
+        if csv_files:
+            md += "**Key result files:**\n"
+            for f in csv_files[:8]:
+                size_kb = f.get("size", 0) / 1024
+                md += f"- `{f['name']}` ({size_kb:.1f} KB)\n"
+            if len(csv_files) > 8:
+                md += f"- _…and {len(csv_files) - 8} more_\n"
+            md += "\n"
+    else:
+        md = (
+            f"### 📊 Job Completed: {sample_name}\n\n"
+            f"The {mode} job finished successfully. "
+            f"I couldn't fetch the file summary automatically, but you can ask me to "
+            f"analyze the results.\n\n"
+        )
+
+    md += (
+        "💡 *You can ask me to dive deeper — for example:*\n"
+        "- \"Show me the modification summary\"\n"
+        "- \"Parse the CSV results\"\n"
+        "- \"Give me a QC report\"\n"
+    )
+    return md
 
 
 # --- CHAT PROGRESS STATUS ---

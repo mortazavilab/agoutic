@@ -103,7 +103,7 @@ def require_auth(api_url: str) -> Dict:
         st.caption(f"Debug: Using API URL: {api_url}")
         
         # Use st.link_button for a more prominent clickable button
-        st.link_button("🔐 Log in with Google", login_url, use_container_width=True)
+        st.link_button("🔐 Log in with Google", login_url, width="stretch")
         
         st.caption(f"You will be redirected to Google to authenticate, then back to this page.")
         st.stop()

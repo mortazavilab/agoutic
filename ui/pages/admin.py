@@ -152,7 +152,7 @@ try:
                     "last_login": st.column_config.DatetimeColumn("Last Login", width="small"),
                 },
                 hide_index=True,
-                use_container_width=True
+                width="stretch"
             )
 
         with tab4:
@@ -172,7 +172,7 @@ try:
                         df_daily = df_daily.set_index("date")
                         st.line_chart(
                             df_daily[["prompt_tokens", "completion_tokens", "total_tokens"]],
-                            use_container_width=True,
+                            width="stretch",
                         )
                     else:
                         st.info("No token data recorded yet. Token tracking starts with the next LLM call.")
@@ -211,7 +211,7 @@ try:
                                     "% used": st.column_config.NumberColumn("% Used", format="%.1f%%"),
                                 },
                                 hide_index=True,
-                                use_container_width=True,
+                                width="stretch",
                             )
 
                         # ── Set token limits ───────────────────────────────────
@@ -284,7 +284,7 @@ try:
                                                 "last_message_at": st.column_config.TextColumn("Last Active"),
                                             },
                                             hide_index=True,
-                                            use_container_width=True,
+                                            width="stretch",
                                         )
                                     # Per-user daily chart
                                     user_daily = detail.get("daily", [])
@@ -294,7 +294,7 @@ try:
                                         df_ud = df_ud.set_index("date")
                                         st.line_chart(
                                             df_ud[["prompt_tokens", "completion_tokens"]],
-                                            use_container_width=True,
+                                            width="stretch",
                                         )
                     else:
                         st.info("No token data recorded yet.")

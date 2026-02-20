@@ -170,7 +170,7 @@ with st.sidebar:
             max_chars=40,
             help="Lowercase letters, numbers, hyphens. Will be auto-slugified.",
         )
-        if st.button("Create", key="_create_project_btn", use_container_width=True):
+        if st.button("Create", key="_create_project_btn", width="stretch"):
             _slug = _slugify_project_name(_new_name or _default_slug)
             st.session_state["_create_new_project"] = _slug
             st.rerun()
@@ -203,7 +203,7 @@ with st.sidebar:
     # [C] CHAT CONTROLS
     col_clear, col_refresh = st.columns(2)
     with col_clear:
-        if st.button("🗑️ Clear Chat", use_container_width=True):
+        if st.button("🗑️ Clear Chat", width="stretch"):
             try:
                 resp = make_authenticated_request(
                     "DELETE",
@@ -221,7 +221,7 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Error: {e}")
     with col_refresh:
-        if st.button("🔄 Refresh", use_container_width=True):
+        if st.button("🔄 Refresh", width="stretch"):
             st.rerun()
 
     st.divider()
@@ -270,7 +270,7 @@ with st.sidebar:
                     else:
                         col_name, col_archive = st.columns([5, 1])
                         with col_name:
-                            if st.button(f"📂 {proj_name}{label_extra}", key=f"proj_{proj_id}", use_container_width=True):
+                            if st.button(f"📂 {proj_name}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
                                 # Switch to this project
                                 st.session_state.active_project_id = proj_id
                                 st.session_state.blocks = []
@@ -314,7 +314,7 @@ with st.sidebar:
                 st.caption(f"{len(conversations)} conversation(s)")
                 for conv in conversations[:5]:  # Show last 5
                     conv_title = conv.get("title", "Untitled")[:30]
-                    if st.button(f"📝 {conv_title}...", key=f"conv_{conv['id']}", use_container_width=True):
+                    if st.button(f"📝 {conv_title}...", key=f"conv_{conv['id']}", width="stretch"):
                         # Load this conversation
                         msg_resp = make_authenticated_request(
                             "GET",
@@ -340,7 +340,7 @@ with st.sidebar:
                 for job in jobs[:3]:  # Show last 3
                     status_emoji = "✅" if job.get("status") == "COMPLETED" else "⏳"
                     job_name = job.get("sample_name", "Unknown")[:20]
-                    if st.button(f"{status_emoji} {job_name}", key=f"job_{job['id']}", use_container_width=True):
+                    if st.button(f"{status_emoji} {job_name}", key=f"job_{job['id']}", width="stretch"):
                         st.session_state.selected_job = job
                         st.rerun()
             else:
@@ -387,7 +387,7 @@ with st.sidebar:
                 _df_tok = _pd.DataFrame(_daily)
                 _df_tok["date"] = _pd.to_datetime(_df_tok["date"])
                 _df_tok = _df_tok.set_index("date")
-                st.line_chart(_df_tok["total_tokens"], use_container_width=True)
+                st.line_chart(_df_tok["total_tokens"], width="stretch")
             _since = _tok_data.get("tracking_since")
             if _since:
                 st.caption(f"Tracking since {_since[:10]}")
@@ -496,7 +496,7 @@ def _render_md_with_dataframes(md: str, block_id: str, section: str):
             table_index[0] += 1
             st.dataframe(
                 df,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 height=min(400, 35 * len(df) + 38),
                 key=f"_mdtbl_{block_id}_{section}_{idx}",
@@ -600,7 +600,7 @@ def _render_embedded_dataframes(dfs: dict, block_id: str, *, only_visible: bool 
             _disp = _df[_sel_cols] if _sel_cols else _df
             st.dataframe(
                 _disp,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 height=min(400, 35 * len(_disp) + 38),
             )
@@ -669,7 +669,10 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
         df_plot = df.copy()
         for col in [x_col, y_col]:
             if col and col in df_plot.columns:
-                df_plot[col] = pd.to_numeric(df_plot[col], errors="ignore")
+                try:
+                    df_plot[col] = pd.to_numeric(df_plot[col])
+                except (ValueError, TypeError):
+                    pass  # leave non-numeric columns as-is
 
         if chart_type == "histogram":
             if not x_col:
@@ -828,7 +831,7 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str):
             fig = _build_plotly_figure(chart_group[0], df, df_label)
             if fig:
                 _safe_key = _re.sub(r"[^a-zA-Z0-9_]", "_", f"plot_{block_id}_{chart_idx}")
-                st.plotly_chart(fig, use_container_width=True, key=_safe_key)
+                st.plotly_chart(fig, width="stretch", key=_safe_key)
             else:
                 st.warning(f"Could not render {chart_type} chart for DF{df_id}. "
                            "Check that the specified columns exist.")
@@ -849,7 +852,7 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str):
                     title=" / ".join(title_parts) if title_parts else f"DF{df_id} — {chart_type}",
                 )
                 _safe_key = _re.sub(r"[^a-zA-Z0-9_]", "_", f"plot_{block_id}_{chart_idx}")
-                st.plotly_chart(combined, use_container_width=True, key=_safe_key)
+                st.plotly_chart(combined, width="stretch", key=_safe_key)
             else:
                 st.warning(f"Could not render multi-trace {chart_type} chart for DF{df_id}.")
         chart_idx += 1
@@ -870,12 +873,17 @@ def render_block(block, expected_project_id: str = ""):
     status = block.get("status", "NEW")
     block_id = block["id"]
     
-    # Metadata
+    # Metadata — resolve project name from cached list (fall back to short UUID)
     b_skill = content.get("skill", "N/A")
     b_model = content.get("model", "N/A")
+    b_project_display = b_project[:12] + "…"  # default: truncated UUID
+    for _cp in st.session_state.get("_cached_projects", []):
+        if _cp.get("id") == b_project:
+            b_project_display = _cp.get("name", b_project_display)
+            break
 
     def show_metadata():
-        st.caption(f"📌 **Proj:** `{b_project}` | 🧠 **Model:** `{b_model}` | 🛠️ **Skill:** `{b_skill}`")
+        st.caption(f"📌 **Proj:** {b_project_display} | 🧠 **Model:** `{b_model}` | 🛠️ **Skill:** `{b_skill}`")
 
     if btype == "USER_MESSAGE":
         with st.chat_message("user"):
@@ -1097,8 +1105,8 @@ def render_block(block, expected_project_id: str = ""):
                         # Action buttons
                         col1, col2 = st.columns(2)
                         
-                        submit_approve = col1.form_submit_button("✅ Approve", use_container_width=True)
-                        submit_reject = col2.form_submit_button("❌ Reject", use_container_width=True)
+                        submit_approve = col1.form_submit_button("✅ Approve", width="stretch")
+                        submit_reject = col2.form_submit_button("❌ Reject", width="stretch")
                         
                         if submit_approve:
                             # Build edited params
@@ -1169,9 +1177,16 @@ def render_block(block, expected_project_id: str = ""):
             run_uuid = content.get("run_uuid", "")
             sample_name = content.get("sample_name", "Unknown")
             mode = content.get("mode", "Unknown")
+            work_directory = content.get("work_directory", "")
             
             st.write(f"### 🧬 Nextflow Job: {sample_name} ({mode})")
-            st.caption(f"Run UUID: `{run_uuid}`")
+            # Show human-readable folder name (e.g. "workflow2") when available
+            if work_directory:
+                import pathlib as _pathlib
+                _folder_name = _pathlib.PurePosixPath(work_directory).name
+                st.caption(f"📁 `{_folder_name}` &nbsp;|&nbsp; Run UUID: `{run_uuid}`")
+            else:
+                st.caption(f"Run UUID: `{run_uuid}`")
             
             # For RUNNING jobs, live-fetch status directly from Server 1
             # (bypasses stale block payload — always fresh from Server 3)

@@ -135,7 +135,7 @@ if rows:
 
     edited_df = st.data_editor(
         df.drop(columns=["_id"]),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Archive": st.column_config.CheckboxColumn("🗄️ Archive", default=False),
@@ -167,7 +167,7 @@ if rows:
         btn1, btn2, btn3 = st.columns(3)
         with btn1:
             if archive_ids and st.button(
-                f"🗄️ Archive {len(archive_ids)} project(s)", use_container_width=True
+                f"🗄️ Archive {len(archive_ids)} project(s)", width="stretch"
             ):
                 ok, fail = 0, 0
                 for pid in archive_ids:
@@ -211,7 +211,7 @@ if rows:
                             st.rerun()
                 else:
                     if st.button(
-                        f"🗑️ Delete {len(delete_ids)} permanently", use_container_width=True
+                        f"🗑️ Delete {len(delete_ids)} permanently", width="stretch"
                     ):
                         st.session_state[_bulk_del_key] = True
                         st.rerun()
@@ -305,7 +305,7 @@ with tab_jobs:
                     })
                 st.dataframe(
                     pd.DataFrame(job_rows),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -344,7 +344,7 @@ with tab_files:
                     })
                 st.dataframe(
                     pd.DataFrame(file_rows),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
                 st.caption(f"{len(files)} file(s)")

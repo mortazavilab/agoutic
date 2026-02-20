@@ -2,6 +2,25 @@
 
 ## [Unreleased] - 2026-02-19
 
+### Added — LLM-Powered Auto-Analysis After Job Completion
+
+- **`_auto_trigger_analysis()` now passes results through the LLM**
+  - Previously, when a Dogme job completed, the auto-analysis step built a static markdown template listing file counts and filenames — no LLM was involved (`model: "system"`). Now the function fetches structured data from Server 4 **and** parses key CSV files (`final_stats`, `qc_summary`) via `parse_csv_file` MCP calls, then passes everything to the LLM for an intelligent first interpretation.
+  - The LLM receives a structured context block (file inventory + parsed CSV tables) and is asked to highlight key metrics, QC concerns, and suggest next steps. Tags (`[[DATA_CALL:...]]`, `[[SKILL_SWITCH_TO:...]]`, `[[APPROVAL_NEEDED]]`) are stripped from the LLM response as a safety measure.
+  - Token usage is tracked: the AGENT_PLAN block now includes a `tokens` payload with `prompt_tokens`, `completion_tokens`, `total_tokens`, and `model` — consistent with regular chat turns.
+  - Both the system USER_MESSAGE and the assistant AGENT_PLAN are saved to conversation history (`save_conversation_message`), so follow-up turns see the auto-analysis context.
+  - **Graceful fallback**: if the LLM call fails (Ollama down, timeout, etc.) the original static template is used and `model` is set to `"system"` with zero token counts.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **`model` field added to `EXECUTION_JOB` block payload**
+  - The EXECUTION_JOB block now carries the `model` key from the approval gate, so `_auto_trigger_analysis` can instantiate `AgentEngine` with the same model the user selected for the conversation.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Helper functions extracted for clarity**
+  - `_build_auto_analysis_context()` — builds a structured text context (file inventory + markdown tables from parsed CSVs) for the LLM prompt.
+  - `_build_static_analysis_summary()` — the original static template, now a standalone function used as the fallback.
+  - Applied to: [server1/app.py](server1/app.py)
+
 ### Added — `search_by_assay` MCP Tool (Server 2 extension)
 
 - **`server2/mcp_server.py` — extends ENCODELIB without modifying it**
@@ -74,6 +93,23 @@
   - Reference genome pattern is tightened to only match known genomes (`GRCh38|mm39|mm10|hg38|T2T-CHM13`) — prevents false matches on the word "Missing" from agent summaries.
   - Injects a `[CONTEXT: Parameters already collected from this conversation: ... Do NOT re-ask for these. Only ask for fields still missing.]` line at the top of the user message so the LLM sees all prior answers without needing to scan full history.
   - Applied to: [server1/app.py](server1/app.py)
+
+### Fixed — New Sample Submission Blocked While on Dogme Analysis Skill
+
+- **`_auto_detect_skill_switch()` now switches to `analyze_local_sample` from Dogme analysis skills**
+  - Previously, the pre-LLM skill switch excluded `run_dogme_dna`, `run_dogme_rna`, and `run_dogme_cdna` from the `analyze_local_sample` detection to avoid false positives. This meant a user saying "Analyze the local mouse CDNA sample called Jamshid2 at /path" while on `run_dogme_cdna` would **not** switch skills — the LLM would interpret "Jamshid2" as a filename in the current job's results and call `find_file`, which fails.
+  - The exclusion list now only contains `analyze_local_sample` itself. When the current skill is a Dogme analysis skill, a **stricter threshold** is applied: the message must have a local path **plus at least 2** of (analysis verb, sample keyword, data type keyword). From non-Dogme skills, the original threshold of path + 1 signal applies. This prevents false positives on messages like "parse /path/to/result.csv" while correctly catching "Analyze the local CDNA sample at /path".
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Improved — Block Headers Show Project Name and Workflow Folder
+
+- **Block metadata header shows project name instead of UUID**
+  - `render_block()` in the UI now resolves the project name from the cached projects list for the `📌 Proj:` header. Falls back to a truncated UUID (`c7f75875…`) if the project isn't in the cache. Previously displayed the raw UUID (`c7f75875-b7f8-4835-8f94-28fd4f8090bf`).
+  - Applied to: [ui/app.py](ui/app.py)
+
+- **EXECUTION_JOB block shows `workflowN` folder name alongside run UUID**
+  - Server 1 now stores the `work_directory` path (returned by Server 3's `submit_dogme_job`) in the EXECUTION_JOB block payload. The UI extracts the folder name (e.g. `workflow2`) from the path and displays it as `📁 workflow2 | Run UUID: 3862fd86...`. Previously only the opaque run UUID was shown, with no visible connection to the actual directory on disk.
+  - Applied to: [server1/app.py](server1/app.py), [ui/app.py](ui/app.py)
 
 ### Fixed — `submit_dogme_job` MCP Wrapper Missing `username` / `project_slug`
 
