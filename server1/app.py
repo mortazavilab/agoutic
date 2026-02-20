@@ -2141,6 +2141,20 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 # Remove raw data <details> blocks — the filtered data
                 # will be injected by _inject_job_context when needed.
                 _md = _DETAILS_RE.sub("", _md)
+                # Fix A: skip bare find_file JSON echo blocks — if the entire
+                # assistant turn is just a find_file result JSON (LLM echoed it
+                # instead of acting on it), exclude it from history so the LLM
+                # doesn't treat it as a "completed" action and loop.
+                _md_stripped = re.sub(r'```(?:json)?|```', '', _md).strip()
+                if '"primary_path"' in _md_stripped and ('"success": true' in _md_stripped or '"success":true' in _md_stripped):
+                    try:
+                        _probe = json.loads(_md_stripped)
+                        if _probe.get("success") and _probe.get("primary_path"):
+                            logger.debug("Skipping bare find_file echo block from history",
+                                         primary_path=_probe["primary_path"])
+                            continue  # don't add to conversation_history
+                    except (json.JSONDecodeError, ValueError):
+                        pass  # not clean JSON — keep it
                 conversation_history.append({
                     "role": "assistant",
                     "content": _md
@@ -2715,6 +2729,66 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         
         # 6c. Format results and run second-pass LLM analysis
         _analyze_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        # Fix B: Recovery guard — detect when the LLM echoed a find_file JSON
+        # result verbatim instead of emitting a [[DATA_CALL:...]] tag.
+        # This happens with weaker models (e.g. devstral-2) that have low
+        # instruction-following fidelity. When detected:
+        #   1. Extract primary_path and run_uuid from the echoed JSON
+        #   2. Call the appropriate parse tool directly
+        #   3. Inject the result into all_results so the normal second-pass
+        #      analyze_results flow handles it as if a DATA_CALL had fired.
+        if not all_results and '"primary_path"' in clean_markdown:
+            _echo_stripped = re.sub(r'```(?:json)?|```', '', clean_markdown).strip()
+            if '"success": true' in _echo_stripped or '"success":true' in _echo_stripped:
+                try:
+                    _echo_data = json.loads(_echo_stripped)
+                    if (_echo_data.get("success")
+                            and _echo_data.get("primary_path")
+                            and _echo_data.get("run_uuid")):
+                        _recovery_path = _echo_data["primary_path"]
+                        _recovery_uuid = _echo_data["run_uuid"]
+                        _recovery_tool = _pick_file_tool(_recovery_path)
+                        logger.info(
+                            "[CHAIN-RECOVERY] LLM echoed find_file JSON — auto-chaining",
+                            tool=_recovery_tool,
+                            file_path=_recovery_path,
+                            run_uuid=_recovery_uuid,
+                        )
+                        _chain_params: dict = {
+                            "run_uuid": _recovery_uuid,
+                            "file_path": _recovery_path,
+                        }
+                        if _recovery_tool == "parse_csv_file":
+                            _chain_params["max_rows"] = 100
+                        elif _recovery_tool == "parse_bed_file":
+                            _chain_params["max_records"] = 100
+                        elif _recovery_tool == "read_file_content":
+                            _chain_params["preview_lines"] = 50
+                        try:
+                            _recovery_url = get_service_url("server4")
+                            _recovery_mcp = MCPHttpClient(name="server4", base_url=_recovery_url)
+                            await _recovery_mcp.connect()
+                            _recovery_result = await _recovery_mcp.call_tool(
+                                _recovery_tool, **_chain_params
+                            )
+                            await _recovery_mcp.disconnect()
+                            # Replace clean_markdown with a neutral placeholder so
+                            # analyze_results writes the real summary, not the echo.
+                            clean_markdown = ""
+                            all_results["server4"] = [{
+                                "tool": _recovery_tool,
+                                "params": _chain_params,
+                                "data": _recovery_result,
+                            }]
+                            logger.info("[CHAIN-RECOVERY] Parse succeeded",
+                                        tool=_recovery_tool)
+                        except Exception as _re:
+                            logger.error("[CHAIN-RECOVERY] Parse failed",
+                                         tool=_recovery_tool, error=str(_re))
+                except (json.JSONDecodeError, ValueError):
+                    pass  # not clean JSON — leave all_results empty, fall through normally
+
         if all_results:
             # Check if all results are errors (skip second pass if so)
             has_real_data = any(
