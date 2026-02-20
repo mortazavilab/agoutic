@@ -32,6 +32,8 @@ async def submit_dogme_job(
     reference_genome: str | list[str] = "mm39",
     project_id: str | None = None,
     user_id: str | None = None,
+    username: str | None = None,
+    project_slug: str | None = None,
     modifications: str | None = None,
     input_type: str | None = None,
     entry_point: str | None = None,
@@ -46,6 +48,8 @@ async def submit_dogme_job(
     result = await tools.submit_dogme_job(
         project_id=_project_id,
         user_id=user_id,
+        username=username,
+        project_slug=project_slug,
         sample_name=sample_name,
         mode=mode,
         reference_genome=reference_genome,

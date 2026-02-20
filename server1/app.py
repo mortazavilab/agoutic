@@ -776,6 +776,102 @@ def _inject_job_context(user_message: str, active_skill: str,
         return augmented, {}, {"skill": active_skill, "context": "dogme",
                                "df_note_injected": bool(_df_note)}
 
+    # --- Local sample intake: inject already-collected parameters ---
+    # Weak models lose track of parameters gathered across turns when the
+    # system prompt is large.  Scan the conversation so far and inject a
+    # concise [CONTEXT] line so the LLM doesn't have to re-parse history.
+    if active_skill == "analyze_local_sample":
+        _collected: dict[str, str] = {}
+        _field_patterns = {
+            "sample_name": re.compile(
+                r'(?:sample\s*name|name)[:\s*]+([^\n*,]+)', re.IGNORECASE),
+            "data_path": re.compile(
+                r'(?:data\s*path|path|directory)[:\s*]+(/[^\n*,]+)', re.IGNORECASE),
+            "data_type": re.compile(
+                r'(?:data\s*type|sample\s*type|type|mode)[:\s*]+'
+                r'(DNA|RNA|CDNA|cDNA|Fiber-seq|Fiberseq)', re.IGNORECASE),
+            "reference_genome": re.compile(
+                r'(?:reference\s*genome|genome)[:\s*]+'
+                r'(GRCh38|mm39|mm10|hg38|T2T-CHM13)', re.IGNORECASE),
+        }
+
+        # First pass: extract from the original user request and any assistant
+        # summaries already in conversation_history.
+        for msg in conversation_history:
+            content = msg.get("content", "")
+            for field, pat in _field_patterns.items():
+                m = pat.search(content)
+                if m:
+                    _collected[field] = m.group(1).strip().rstrip("*").strip()
+
+        # Heuristic: detect data_type from keywords in original user message
+        if "data_type" not in _collected:
+            _first_user = next(
+                (m.get("content", "") for m in conversation_history
+                 if m.get("role") == "user"), "")
+            _fl = _first_user.lower()
+            if "cdna" in _fl or "c-dna" in _fl:
+                _collected["data_type"] = "CDNA"
+            elif "rna" in _fl and "cdna" not in _fl:
+                _collected["data_type"] = "RNA"
+            elif "fiber" in _fl:
+                _collected["data_type"] = "Fiber-seq"
+            elif "dna" in _fl:
+                _collected["data_type"] = "DNA"
+
+        # Heuristic: extract sample_name from phrasing like "called <name>"
+        if "sample_name" not in _collected:
+            for msg in conversation_history:
+                if msg.get("role") != "user":
+                    continue
+                _called_m = re.search(
+                    r'(?:called|named|name(?:d)?)\s+(\S+)', msg["content"], re.IGNORECASE)
+                if _called_m:
+                    _collected["sample_name"] = _called_m.group(1).strip().rstrip(".,;:")
+                    break
+
+        # Heuristic: extract data_path from user messages containing absolute paths
+        if "data_path" not in _collected:
+            for msg in conversation_history:
+                if msg.get("role") != "user":
+                    continue
+                _path_m = re.search(r'(/[^\s,;:*?"<>|]+)', msg["content"])
+                if _path_m:
+                    _collected["data_path"] = _path_m.group(1).strip()
+                    break
+
+        # Heuristic: detect reference_genome from short user reply like "mm39"
+        if "reference_genome" not in _collected:
+            for msg in conversation_history:
+                if msg.get("role") != "user":
+                    continue
+                _genome_m = re.match(
+                    r'^\s*(GRCh38|mm39|mm10|hg38)\s*$', msg["content"], re.IGNORECASE)
+                if _genome_m:
+                    _collected["reference_genome"] = _genome_m.group(1).strip()
+
+        # Also check current message for a genome answer
+        _cur_genome_m = re.match(
+            r'^\s*(GRCh38|mm39|mm10|hg38)\s*$', user_message, re.IGNORECASE)
+        if _cur_genome_m:
+            _collected["reference_genome"] = _cur_genome_m.group(1).strip()
+
+        if _collected:
+            _parts = []
+            for k, v in _collected.items():
+                _parts.append(f"{k}={v}")
+            context_line = (
+                f"[CONTEXT: Parameters already collected from this conversation: "
+                f"{', '.join(_parts)}. "
+                f"Do NOT re-ask for these. Only ask for fields still missing.]"
+            )
+            augmented = f"{context_line}\n{user_message}"
+            return augmented, {}, {"skill": active_skill, "context": "local_sample_intake",
+                                   "collected_params": _collected}
+
+        return user_message, {}, {"skill": active_skill, "context": "local_sample_intake",
+                                  "collected_params": {}}
+
     # --- ENCODE skills: inject previous search context for follow-ups ---
     encode_skills = {"ENCODE_Search", "ENCODE_LongRead"}
     if active_skill in encode_skills:

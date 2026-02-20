@@ -66,6 +66,22 @@
   - New Project button replaced with an expander form; project name is pre-filled with the slug default and run through `_slugify_project_name()` before creation.
   - Applied to: [ui/app.py](ui/app.py)
 
+### Fixed — Agent Forgets Parameters During `analyze_local_sample` Multi-Turn Conversations
+
+- **Context injection for `analyze_local_sample` skill added to `_inject_job_context()`**
+  - `_inject_job_context()` had handlers for Dogme skills (UUID/work_dir injection) and ENCODE skills (dataframe injection), but **nothing for `analyze_local_sample`**. When the system prompt grew with PLOT docs, `download_files` skill, and expanded `ENCODE_Search.md`, devstral-2 could no longer reliably track parameters across turns — e.g. replying "mm39" for reference genome caused the agent to forget `sample_name`, `data_path`, and `data_type` collected in earlier turns.
+  - New `analyze_local_sample` branch extracts already-collected parameters (`sample_name`, `data_path`, `data_type`, `reference_genome`) from conversation history using regex patterns that handle both plain text and Markdown bold formatting (e.g. `**Sample Name:** Jamshid`).
+  - Reference genome pattern is tightened to only match known genomes (`GRCh38|mm39|mm10|hg38|T2T-CHM13`) — prevents false matches on the word "Missing" from agent summaries.
+  - Injects a `[CONTEXT: Parameters already collected from this conversation: ... Do NOT re-ask for these. Only ask for fields still missing.]` line at the top of the user message so the LLM sees all prior answers without needing to scan full history.
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Fixed — `submit_dogme_job` MCP Wrapper Missing `username` / `project_slug`
+
+- **MCP tool registration updated to pass through `username` and `project_slug`**
+  - The `submit_dogme_job()` wrapper in `mcp_server.py` defines the parameters exposed via FastMCP. When `username` and `project_slug` were added to `mcp_tools.py`'s `Server3MCPTools.submit_dogme_job()`, the MCP wrapper was never updated to match. This caused FastMCP to reject `username` and `project_slug` as "unexpected keyword arguments" when Server 1 called the tool after the approval gate.
+  - Added `username: str | None = None` and `project_slug: str | None = None` to both the wrapper function signature and the inner `await tools.submit_dogme_job(...)` call.
+  - Applied to: [server3/mcp_server.py](server3/mcp_server.py)
+
 ### Fixed — `find_file` JSON Echo Loop (weak-model regression)
 
 - **Fix A — Bare `find_file` JSON blocks stripped from conversation history**
