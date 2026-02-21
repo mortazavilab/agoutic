@@ -990,7 +990,42 @@ def render_block(block, expected_project_id: str = ""):
                 
             else:
                 # Pending approval - show editable parameter form
-                if extracted_params:
+                _gate_action = extracted_params.get("gate_action") or content.get("gate_action", "job")
+
+                if _gate_action == "download" and extracted_params.get("files"):
+                    # ── Download approval form ──
+                    _dl_files = extracted_params["files"]
+                    _dl_total = extracted_params.get("total_size_bytes", 0)
+                    _dl_target = extracted_params.get("target_dir", "data/")
+                    _dl_mb = round(_dl_total / (1024 * 1024), 1) if _dl_total else "?"
+
+                    st.write(f"**📥 Download Plan** — {len(_dl_files)} file(s), ~{_dl_mb} MB → `{_dl_target}`")
+                    for _f in _dl_files:
+                        _fname = _f.get("filename", "?")
+                        _fsize = _f.get("size_bytes")
+                        _fmb = f" ({round(_fsize / (1024 * 1024), 1)} MB)" if _fsize else ""
+                        st.markdown(f"- `{_fname}`{_fmb}")
+
+                    col1, col2 = st.columns(2)
+                    if col1.button("✅ Approve Download", key=f"dl_approve_{block_id}"):
+                        payload_update = dict(content)
+                        make_authenticated_request(
+                            "PATCH",
+                            f"{API_URL}/block/{block_id}",
+                            json={"status": "APPROVED", "payload": payload_update}
+                        )
+                        st.rerun()
+                    if col2.button("❌ Cancel", key=f"dl_reject_{block_id}"):
+                        payload_update = dict(content)
+                        payload_update["rejection_reason"] = "User cancelled download"
+                        make_authenticated_request(
+                            "PATCH",
+                            f"{API_URL}/block/{block_id}",
+                            json={"status": "REJECTED", "payload": payload_update}
+                        )
+                        st.rerun()
+
+                elif extracted_params:
                     st.write("**📋 Extracted Parameters** (edit if needed):")
                     
                     with st.form(key=f"params_form_{block_id}"):
@@ -1455,12 +1490,31 @@ def render_block(block, expected_project_id: str = ""):
             downloaded = content.get("downloaded", 0)
             total = content.get("total_files", len(dl_files))
             total_bytes = content.get("bytes_downloaded", 0)
+            expected_total_bytes = content.get("expected_total_bytes", 0)
             source = content.get("source", "url")
 
             if dl_status == "RUNNING":
                 cur = content.get("current_file", "")
-                st.info(f"⬇️ **Downloading** ({downloaded}/{total} files) — {cur}")
-                st.progress(downloaded / max(total, 1))
+                cur_bytes = content.get("current_file_bytes", 0)
+                cur_expected = content.get("current_file_expected", 0)
+
+                # Per-file byte progress
+                if cur_expected > 0:
+                    _pct = min(cur_bytes / cur_expected, 1.0)
+                    _cur_mb = round(cur_bytes / (1024 * 1024), 1)
+                    _exp_mb = round(cur_expected / (1024 * 1024), 1)
+                    st.info(f"⬇️ **Downloading** ({downloaded}/{total} files) — `{cur}` ({_cur_mb}/{_exp_mb} MB)")
+                    st.progress(_pct)
+                elif expected_total_bytes > 0:
+                    # Fallback: overall progress based on total expected bytes
+                    _pct = min(total_bytes / expected_total_bytes, 1.0)
+                    _dl_mb = round(total_bytes / (1024 * 1024), 1)
+                    _exp_mb = round(expected_total_bytes / (1024 * 1024), 1)
+                    st.info(f"⬇️ **Downloading** ({downloaded}/{total} files) — `{cur}` ({_dl_mb}/{_exp_mb} MB)")
+                    st.progress(_pct)
+                else:
+                    st.info(f"⬇️ **Downloading** ({downloaded}/{total} files) — `{cur}`")
+                    st.progress(downloaded / max(total, 1))
             elif dl_status == "DONE":
                 mb = round(total_bytes / (1024 * 1024), 2) if total_bytes else 0
                 st.success(f"✅ **Download complete** — {downloaded} file(s), {mb} MB")

@@ -2,6 +2,37 @@
 
 ## [Unreleased] - 2026-02-20
 
+### Added — ENCODE file download infrastructure
+
+- **"download ENCFF..." resolves metadata and starts download automatically**
+  - `_auto_generate_data_calls()` detects download intent (keywords: download, grab, fetch, save) + ENCFF accession and generates a `get_file_metadata` call with `_chain: "download"`. After metadata resolves, the chain handler extracts the download URL (prefers `cloud_metadata.url` / S3 link, falls back to ENCODE `href`), sets `active_skill = "download_files"` and `needs_approval = True`.
+  - Parent experiment resolution: checks the current user message for ENCSR accessions first (e.g. "download ENCFF921XAH from experiment ENCSR160HKZ"), then falls back to `_find_experiment_for_file()` which scans conversation history.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Download chain fires for both auto-generated and LLM-generated tags**
+  - The chain handler now triggers on `_chain == "download"` (auto-generated calls) OR `active_skill == "download_files"` (LLM-generated tags). Previously, when the LLM correctly generated `get_file_metadata`, the chain didn't fire because LLM tags don't carry `_chain`, causing the approval gate to fall through to Dogme job params.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Auto-generated calls now go through tool correction pipeline**
+  - Auto-generated calls from `_auto_generate_data_calls()` previously bypassed `_correct_tool_routing()` and `_validate_encode_params()`, causing ENCFF accessions to be passed as experiment accessions to the wrong tool. Now the same correction pipeline is applied: `_correct_tool_routing` + `_validate_encode_params` for ENCODE, `_validate_server4_params` for server4.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Download-specific approval gate (not Dogme job params)**
+  - When `gate_action == "download"`, the approval gate shows the file list with sizes and target directory instead of calling `extract_job_parameters_from_conversation` (which always extracted Dogme DNA/RNA params). UI renders a dedicated download approval form with Approve/Cancel buttons.
+  - Applied to: [server1/app.py](server1/app.py), [ui/app.py](ui/app.py)
+
+- **Per-file byte-level download progress**
+  - `_download_files_background()` now tracks `expected_total_bytes`, `current_file_bytes`, `current_file_expected` from `size_bytes` metadata or `Content-Length` header. Progress updates are throttled to every 0.5s to avoid DB spam. UI shows a Streamlit progress bar with MB downloaded/expected for the current file, with fallback to overall byte progress or file-count progress.
+  - Applied to: [server1/app.py](server1/app.py), [ui/app.py](ui/app.py)
+
+- **`_auto_detect_skill_switch` detects download intent**
+  - "download" + ENCFF or URL now triggers a skill switch to `download_files` regardless of current skill.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **`download_after_approval()` prefers gate file list**
+  - Refactored to check `gate_params.get("files")` first (populated by the download chain), then falls back to URL scanning. Also uses `target_dir` from the gate when available.
+  - Applied to: [server1/app.py](server1/app.py)
+
 ### Fixed — ENCODE accession hallucinations
 
 - **LLM replaces correct ENCSR with a hallucinated one in its text response**

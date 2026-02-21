@@ -699,6 +699,15 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
         if any(w in msg_lower for w in _results_words):
             return "analyze_job_results"
 
+    # --- Signals for download_files ---
+    _download_words = ["download", "grab", "fetch", "save"]
+    _has_download = any(w in msg_lower for w in _download_words)
+    _has_file_accession = bool(re.search(r'ENCFF[A-Z0-9]{6}', user_message, re.IGNORECASE))
+    _has_url = bool(re.search(r'https?://', msg_lower))
+    if current_skill != "download_files":
+        if _has_download and (_has_file_accession or _has_url):
+            return "download_files"
+
     return None
 
 
@@ -856,6 +865,38 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     # Detect ENCODE accession numbers (ENCSR, ENCFF, ENCLB, etc.)
     accession_matches = re.findall(r'(ENC[A-Z]{2}\d{3}[A-Z]{3})', user_message, re.IGNORECASE)
     accessions = [a.upper() for a in accession_matches]
+
+    # --- Download intent detection ---
+    # "download ENCFF921XAH" should resolve the file URL and start a download,
+    # not trigger a get_files_by_type search.
+    _download_intent = any(w in msg_lower for w in (
+        "download", "grab", "fetch", "save", "get me",
+    ))
+    _encff_accessions = [a for a in accessions if a.startswith("ENCFF")]
+
+    if _download_intent and _encff_accessions:
+        # Find the parent experiment — check current message first, then history
+        _encsr_in_msg = [a for a in accessions if a.startswith("ENCSR")]
+        for _encff in _encff_accessions:
+            _parent_exp = _encsr_in_msg[0] if _encsr_in_msg else \
+                _find_experiment_for_file(_encff, conversation_history)
+            if _parent_exp:
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_file_metadata",
+                    "params": {"accession": _parent_exp, "file_accession": _encff},
+                    "_chain": "download",  # signal to auto-download after metadata resolves
+                })
+            else:
+                # No parent experiment — try to get metadata with just the ENCFF
+                # (the _correct_tool_routing code will handle this)
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_file_metadata",
+                    "params": {"file_accession": _encff},
+                    "_chain": "download",
+                })
+        return calls
 
     # If no accession in the message, check for conversational references
     # ("them", "these", "each", "all of them", "for those", etc.)
@@ -2459,9 +2500,9 @@ Please use the parameter editing form below to make corrections.""",
 async def download_after_approval(project_id: str, gate_block_id: str):
     """Background task to start downloading files after approval.
 
-    Scans AGENT_PLAN blocks for download URLs (resolved via get_file_url
-    DATA_CALLs) and HTTP/HTTPS links from the conversation, then initiates
-    the download via the internal download infrastructure.
+    If the gate extracted_params contains a 'files' list (set by the download
+    chain), use those directly.  Otherwise falls back to scanning conversation
+    blocks for HTTP/HTTPS URLs.
     """
     session = SessionLocal()
     try:
@@ -2471,30 +2512,44 @@ async def download_after_approval(project_id: str, gate_block_id: str):
             return
 
         owner_id = gate_block.owner_id
+        gate_payload = get_block_payload(gate_block)
+        gate_params = gate_payload.get("extracted_params", {})
 
-        # Scan conversation blocks for URLs
-        query = select(ProjectBlock)\
-            .where(ProjectBlock.project_id == project_id)\
-            .order_by(ProjectBlock.seq.asc())
-        blocks = session.execute(query).scalars().all()
-
+        # --- Preferred path: files list from download chain ---
         urls: list[dict] = []
-        url_pattern = re.compile(r'https?://[^\s\)\"\'>\]]+')
+        _target_dir_str: str | None = gate_params.get("target_dir")
 
-        for blk in blocks:
-            if blk.type not in ("AGENT_PLAN", "USER_MESSAGE"):
-                continue
-            payload = get_block_payload(blk)
-            text = payload.get("markdown", "") or payload.get("text", "")
-            for match in url_pattern.finditer(text):
-                url = match.group(0).rstrip(".,;:")
-                # Skip obvious non-file URLs (API endpoints, portal pages)
-                if any(skip in url for skip in ["/api/", "/search/", "portal.encode"]):
+        if gate_params.get("files"):
+            for f in gate_params["files"]:
+                urls.append({
+                    "url": f["url"],
+                    "filename": f.get("filename", f["url"].rsplit("/", 1)[-1].split("?")[0] or "file"),
+                    "size_bytes": f.get("size_bytes"),
+                })
+
+        # --- Fallback: scan conversation blocks for URLs ---
+        if not urls:
+            query = select(ProjectBlock)\
+                .where(ProjectBlock.project_id == project_id)\
+                .order_by(ProjectBlock.seq.asc())
+            blocks = session.execute(query).scalars().all()
+
+            url_pattern = re.compile(r'https?://[^\s\)\"\'>\]]+')
+
+            for blk in blocks:
+                if blk.type not in ("AGENT_PLAN", "USER_MESSAGE"):
                     continue
-                filename = url.rsplit("/", 1)[-1].split("?")[0] or "file"
-                # Avoid duplicates
-                if not any(u["url"] == url for u in urls):
-                    urls.append({"url": url, "filename": filename})
+                payload = get_block_payload(blk)
+                text = payload.get("markdown", "") or payload.get("text", "")
+                for match in url_pattern.finditer(text):
+                    url = match.group(0).rstrip(".,;:")
+                    # Skip obvious non-file URLs (API endpoints, portal pages)
+                    if any(skip in url for skip in ["/api/", "/search/", "portal.encode"]):
+                        continue
+                    filename = url.rsplit("/", 1)[-1].split("?")[0] or "file"
+                    # Avoid duplicates
+                    if not any(u["url"] == url for u in urls):
+                        urls.append({"url": url, "filename": filename})
 
         if not urls:
             _create_block_internal(
@@ -2510,16 +2565,19 @@ async def download_after_approval(project_id: str, gate_block_id: str):
             )
             return
 
-        # Resolve project directory
-        owner_user = session.execute(select(User).where(User.id == owner_id)).scalar_one_or_none()
-        project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
-
-        if owner_user and owner_user.username and project_obj and project_obj.slug:
-            project_dir = Path(AGOUTIC_DATA) / "users" / owner_user.username / project_obj.slug
+        # Resolve target directory from gate params or project directory
+        if _target_dir_str:
+            target_dir = Path(_target_dir_str)
         else:
-            project_dir = Path(AGOUTIC_DATA) / "users" / owner_id / project_id
+            owner_user = session.execute(select(User).where(User.id == owner_id)).scalar_one_or_none()
+            project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
 
-        target_dir = project_dir / "data"
+            if owner_user and owner_user.username and project_obj and project_obj.slug:
+                project_dir = Path(AGOUTIC_DATA) / "users" / owner_user.username / project_obj.slug
+            else:
+                project_dir = Path(AGOUTIC_DATA) / "users" / owner_id / project_id
+
+            target_dir = project_dir / "data"
         target_dir.mkdir(parents=True, exist_ok=True)
 
         download_id = str(uuid.uuid4())
@@ -3893,10 +3951,27 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # From auto-generated tags (safety net)
         if not has_any_tags and auto_calls:
             for ac in auto_calls:
-                entry = {"tool": ac["tool"], "params": ac["params"]}
+                _ac_tool = ac["tool"]
+                _ac_params = dict(ac["params"])
+                _ac_source = ac["source_key"]
+
+                # Apply the same corrections as LLM-generated tags
+                if _ac_source == "encode":
+                    _ac_tool, _ac_params = _correct_tool_routing(
+                        _ac_tool, _ac_params, req.message, conversation_history)
+                    _ac_params = _validate_encode_params(_ac_tool, _ac_params, req.message)
+                elif _ac_source == "server4":
+                    _ac_params = _validate_server4_params(
+                        _ac_tool, _ac_params, req.message,
+                        conversation_history=conversation_history,
+                        history_blocks=history_blocks,
+                        project_dir=_project_dir_str,
+                    )
+
+                entry = {"tool": _ac_tool, "params": _ac_params}
                 if "_chain" in ac:
                     entry["_chain"] = ac["_chain"]
-                calls_by_source.setdefault(ac["source_key"], []).append(entry)
+                calls_by_source.setdefault(_ac_source, []).append(entry)
 
         # From new DATA_CALL tags
         for match in data_call_matches:
@@ -4013,6 +4088,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
 
         # 6c. Execute all tool calls grouped by source
         all_results = {}  # {source_key: [result_dicts]}
+        _pending_download_files: list[dict] = []  # populated by download chain
         
         for source_key, calls in calls_by_source.items():
             logger.info("Executing tool calls", source=source_key, count=len(calls))
@@ -4063,6 +4139,58 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                             "data": result_data,
                         })
                         logger.info("Tool call successful", source=source_key, tool=tool_name)
+
+                        # --- Chaining: download after get_file_metadata ---
+                        # Trigger when _chain=="download" (auto-generated) OR
+                        # when active_skill is download_files and LLM generated
+                        # the get_file_metadata tag directly (no _chain key).
+                        _is_download_chain = (
+                            call.get("_chain") == "download"
+                            or active_skill == "download_files"
+                        )
+                        if _is_download_chain \
+                                and tool_name == "get_file_metadata" \
+                                and isinstance(result_data, dict):
+                            _dl_url = None
+                            _file_acc = params.get("file_accession", "")
+                            _file_size = result_data.get("file_size")
+                            _file_fmt = result_data.get("file_format", "")
+                            _file_name = f"{_file_acc}.{_file_fmt}" if _file_acc and _file_fmt else _file_acc
+
+                            # Prefer the cloud_metadata URL (direct S3 link)
+                            _cloud = result_data.get("cloud_metadata")
+                            if isinstance(_cloud, dict) and _cloud.get("url"):
+                                _dl_url = _cloud["url"]
+                            # Fallback: construct from href
+                            elif result_data.get("href"):
+                                _dl_url = f"https://www.encodeproject.org{result_data['href']}"
+
+                            if _dl_url:
+                                _dl_file_info = {
+                                    "url": _dl_url,
+                                    "filename": _file_name,
+                                    "size_bytes": _file_size,
+                                    "accession": _file_acc,
+                                }
+                                # Store on the request context for the approval gate
+                                # to pick up instead of extracting Dogme job params
+                                _pending_download_files = [_dl_file_info]
+                                logger.info(
+                                    "Download chain: resolved URL from file metadata",
+                                    file_accession=_file_acc, url=_dl_url,
+                                    size_bytes=_file_size,
+                                )
+                                # Force download_files skill and approval
+                                active_skill = "download_files"
+                                needs_approval = True
+                                # Set a clean confirmation message (bypass LLM summary)
+                                _size_mb = round(_file_size / (1024 * 1024), 1) if _file_size else "?"
+                                clean_markdown = (
+                                    f"**Download Plan:**\n"
+                                    f"- **File:** `{_file_name}` ({_size_mb} MB)\n"
+                                    f"- **Destination:** `data/`\n\n"
+                                    f"Proceed with download?"
+                                )
 
                         # --- Chaining: follow up find_file with parse/read ---
                         # Works whether _chain was set by auto_calls or needs
@@ -4536,8 +4664,19 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             # Determine gate action based on active skill
             gate_action = "download" if active_skill == "download_files" else "job"
 
-            # Extract parameters before creating approval gate
-            extracted_params = await extract_job_parameters_from_conversation(session, req.project_id)
+            if gate_action == "download" and _pending_download_files:
+                # Download gate: show the files to be downloaded, not Dogme params
+                _total_dl_bytes = sum(f.get("size_bytes") or 0 for f in _pending_download_files)
+                _dl_target = str(_resolve_project_dir(session, user, req.project_id) / "data")
+                extracted_params = {
+                    "gate_action": "download",
+                    "files": _pending_download_files,
+                    "total_size_bytes": _total_dl_bytes,
+                    "target_dir": _dl_target,
+                }
+            else:
+                # Job gate: extract Dogme pipeline parameters
+                extracted_params = await extract_job_parameters_from_conversation(session, req.project_id)
             
             gate_block = _create_block_internal(
                 session,
@@ -5471,12 +5610,23 @@ async def _download_files_background(
     files: list[dict],
     target_dir: Path,
 ):
-    """Background task that streams files from URLs into the target directory."""
+    """Background task that streams files from URLs into the target directory.
+
+    Provides per-file byte-level progress updates so the UI can render a
+    progress bar.  Expected total size is computed from file_spec['size_bytes']
+    when available.
+    """
     session = SessionLocal()
     downloaded_files = []
     total_bytes = 0
+    # Expected total bytes across all files (may be 0 if sizes are unknown)
+    expected_total_bytes = sum(f.get("size_bytes") or 0 for f in files)
+    # Throttle progress-block writes to avoid DB spam (update at most every 0.5s)
+    _last_progress_write = 0.0
+    import time as _time
+
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(300.0)) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(600.0)) as client:
             for i, file_spec in enumerate(files):
                 dl_info = _active_downloads.get(download_id, {})
                 if dl_info.get("cancelled"):
@@ -5490,10 +5640,16 @@ async def _download_files_background(
                 url = file_spec["url"]
                 filename = file_spec.get("filename") or url.rsplit("/", 1)[-1].split("?")[0] or f"file_{i}"
                 dest = target_dir / filename
+                file_expected = file_spec.get("size_bytes") or 0
 
                 try:
                     async with client.stream("GET", url) as resp:
                         resp.raise_for_status()
+                        # Use Content-Length header if per-file size is unknown
+                        if not file_expected:
+                            _cl = resp.headers.get("content-length")
+                            if _cl and _cl.isdigit():
+                                file_expected = int(_cl)
                         file_bytes = 0
                         with open(dest, "wb") as f:
                             async for chunk in resp.aiter_bytes(chunk_size=65536):
@@ -5501,17 +5657,33 @@ async def _download_files_background(
                                 file_bytes += len(chunk)
                                 total_bytes += len(chunk)
 
+                                # Throttled per-chunk progress update
+                                _now = _time.monotonic()
+                                if _now - _last_progress_write >= 0.5:
+                                    _last_progress_write = _now
+                                    _update_download_block(session, block_id, {
+                                        "downloaded": i,
+                                        "bytes_downloaded": total_bytes,
+                                        "expected_total_bytes": expected_total_bytes,
+                                        "current_file": filename,
+                                        "current_file_bytes": file_bytes,
+                                        "current_file_expected": file_expected,
+                                    })
+
                     downloaded_files.append({
                         "filename": filename,
                         "size_bytes": file_bytes,
                         "path": str(dest),
                     })
 
-                    # Update progress
+                    # Per-file completion update
                     _update_download_block(session, block_id, {
                         "downloaded": i + 1,
                         "bytes_downloaded": total_bytes,
+                        "expected_total_bytes": expected_total_bytes,
                         "current_file": filename,
+                        "current_file_bytes": file_bytes,
+                        "current_file_expected": file_expected,
                     })
 
                 except Exception as e:
