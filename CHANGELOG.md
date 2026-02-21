@@ -33,6 +33,12 @@
   - Refactored to check `gate_params.get("files")` first (populated by the download chain), then falls back to URL scanning. Also uses `target_dir` from the gate when available.
   - Applied to: [server1/app.py](server1/app.py)
 
+### Fixed — "list files in data" returns parent directory instead of contents
+
+- **`_validate_server4_params` no longer overwrites auto-resolved subdirectory paths**
+  - After downloading a file to `data/`, "list files in data" showed the project root (1 entry: `data/`) instead of the data directory contents. The auto-generated call correctly resolved `work_dir=/project/data`, but `_validate_server4_params` overwrote it with the project-level `work_dir` from context. Now preserves the incoming `work_dir` when it's already a valid subdirectory of the resolved context dir.
+  - Applied to: [server1/app.py](server1/app.py)
+
 ### Fixed — ENCODE accession hallucinations
 
 - **LLM replaces correct ENCSR with a hallucinated one in its text response**

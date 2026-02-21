@@ -573,12 +573,23 @@ def _validate_server4_params(
                 # Show only immediate contents of the subfolder, not deep recursion
                 params["max_depth"] = 1
 
-        if real_wd != llm_wd:
-            logger.warning(
-                "Overriding LLM work_dir with context value",
-                llm_value=llm_wd, resolved=real_wd, tool=tool,
+        # If the incoming work_dir is already a valid subdirectory of the
+        # resolved context dir, keep it — auto-generated calls (from
+        # _auto_generate_data_calls) already resolved the correct path and
+        # overriding would lose the subfolder (e.g. /project/data → /project).
+        if llm_wd and llm_wd.startswith(real_wd.rstrip("/") + "/"):
+            logger.info(
+                "Keeping incoming work_dir (valid subdirectory of context)",
+                incoming=llm_wd, context_wd=real_wd, tool=tool,
             )
-        params["work_dir"] = real_wd
+            params["work_dir"] = llm_wd
+        else:
+            if real_wd != llm_wd:
+                logger.warning(
+                    "Overriding LLM work_dir with context value",
+                    llm_value=llm_wd, resolved=real_wd, tool=tool,
+                )
+            params["work_dir"] = real_wd
     elif not llm_wd:
         logger.warning(
             "No work_dir in context or LLM params", tool=tool,
