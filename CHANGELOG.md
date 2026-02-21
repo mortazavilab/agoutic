@@ -2,6 +2,38 @@
 
 ## [Unreleased] - 2026-02-20
 
+### Fixed — File Browsing Routing and Skill Independence
+
+- **Browsing commands now skill-independent (not gated on Dogme skills)**
+  - "list workflows", "list files", "list files in X" now work from ANY skill (ENCODE_Search, welcome, etc.) — not just Dogme analysis skills. Moved browsing logic to the top of `_auto_generate_data_calls()` so it runs first, before any ENCODE or other skill-specific catch-all can claim the message.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Project directory as minimum context for file browsing**
+  - Browsing commands previously required `work_dir` from EXECUTION_JOB history (only available after a Dogme job ran). Now the project directory (resolved from `_resolve_project_dir()`) is always available as a fallback. Added `project_dir` parameter to `_auto_generate_data_calls()` and `_validate_server4_params()`.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **"list workflows" from ENCODE skill routed to ENCODE instead of server4**
+  - The ENCODE catch-all extracted "workflows" as a search term and generated `search_by_biosample`. Added a browsing-command override in the main chat handler that detects browsing patterns and forces the correct server4 auto-generated calls, suppressing any LLM-generated ENCODE tags.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **"list files in workflow1/annot" showed workflow2/annot instead**
+  - The subfolder rescue prioritized the LLM's invented param (`subfolder=annot`, which lost the `workflow1/` prefix) over the user message. Swapped priority: user message parsing now comes first (preserving the full `workflow1/annot` path), with the LLM hint as fallback only.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Previous ENCODE DataFrame shown alongside file listings**
+  - When browsing from an ENCODE skill, `_inject_job_context()` injected the previous K562 dataframe. The browsing override cleared LLM tags but not `_injected_dfs`. Now also clears `_injected_dfs = {}` and `_injected_previous_data = False`.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Smarter project-dir derivation for "list workflows"**
+  - Previously blindly stripped the last path component to get the project dir, which would over-strip if `work_dir` was already the project dir. Now only strips `/workflowN/` suffix; otherwise treats `work_dir` as already project-level. Applied to both `_auto_generate_data_calls()` and `_validate_server4_params()`.
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Added — File Browsing in System Prompt
+
+- **File browsing instructions in system prompt (all skills)**
+  - Added a "FILE BROWSING" section to the system prompt that's always visible regardless of active skill. Tells the LLM it can use `list_job_files` via DATA_CALL tags for browsing at any time, and that the system automatically resolves the correct project/workflow directory.
+  - Applied to: [server1/agent_engine.py](server1/agent_engine.py)
+
 ### Fixed — Server 4 Placeholder `work_dir` and Local Sample Intake Bugs
 
 - **Always force `work_dir` from conversation context — never trust the LLM**
@@ -35,6 +67,18 @@
 - **`workflow1/` filtered out by `discover_files()` skip logic**
   - The `work/` and `dor*/` skip filter used `startswith("work")` which matched `workflow1`, `workflow2`, etc. Changed to exact `child.name == "work"` for directories and `parts[0] == "work"` for the recursive path, so only the Nextflow `work/` directory is skipped.
   - Applied to: [server4/analysis_engine.py](server4/analysis_engine.py)
+
+- **"list files in annot" ignored the subfolder**
+  - When the LLM generated `subfolder=annot` (an invented param), it was stripped as unknown, and the subpath was lost. Now `_validate_server4_params()` rescues subfolder hints from invented LLM params AND parses the user message for "list files in <subpath>" — then appends the subpath to `work_dir` via `_resolve_workflow_path()`.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Sample name contaminated by file listing table headers**
+  - The `sample_name` regex matched bare `Name` in markdown table headers (`| Name | Path | Size |`), capturing "| Path | Size |" as the sample name. Tightened to require `Sample Name` (not bare `Name`) and added `|` to the exclusion character class.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Skip second-pass LLM for file browsing commands**
+  - "list files" and "list workflows" now show the formatted file table directly instead of passing it through a second LLM call that would produce an unwanted summary/interpretation.
+  - Applied to: [server1/app.py](server1/app.py)
 
 - **Fixed `work_dir=/work_dir` and `work_dir={work_dir_from_context}` placeholders in Server 4 DATA_CALL tags** *(superseded by always-force fix above)*
   - When the LLM copies template variables from skill docs, it emits literal strings like `/work_dir`, `<work_dir>`, or `{work_dir_from_context}` instead of the real workflow path, causing "Work directory not found" errors.

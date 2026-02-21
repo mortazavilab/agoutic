@@ -428,6 +428,7 @@ def _validate_server4_params(
     tool: str, params: dict, user_message: str,
     conversation_history: list | None = None,
     history_blocks: list | None = None,
+    project_dir: str = "",
 ) -> dict:
     """
     Always force *work_dir* from conversation context and strip unknown params.
@@ -454,6 +455,16 @@ def _validate_server4_params(
         "categorize_job_files": {"work_dir", "run_uuid"},
     }
     allowed = _KNOWN_PARAMS.get(tool)
+
+    # --- Rescue subfolder hints before stripping unknown params ---
+    # The LLM may pass invented params like subfolder=annot, path=annot,
+    # directory=annot etc.  Capture these before they're stripped.
+    _subfolder_hint = ""
+    for _sf_key in ("subfolder", "subpath", "path", "directory", "folder", "subdir"):
+        if _sf_key in params and (not allowed or _sf_key not in allowed):
+            _subfolder_hint = params[_sf_key]
+            break
+
     if allowed:
         _extra = set(params) - allowed
         if _extra:
@@ -470,6 +481,9 @@ def _validate_server4_params(
     # If multiple workflows, pick the matching one by filename/sample
     if not real_wd and ctx.get("workflows"):
         real_wd = ctx["workflows"][-1].get("work_dir", "")
+    # Fallback: use the project directory if no workflow-level work_dir
+    if not real_wd and project_dir:
+        real_wd = project_dir
     workflows = ctx.get("workflows", [])
     if len(workflows) > 1:
         _fname = params.get("file_name", "").lower()
@@ -486,8 +500,32 @@ def _validate_server4_params(
             r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',
             user_message, re.IGNORECASE,
         ):
-            real_wd = real_wd.rstrip("/").rsplit("/", 1)[0]
+            # If real_wd came from a workflow (has /workflow\d+/ suffix),
+            # strip to the parent project directory.
+            if re.search(r'/workflow\d+/?$', real_wd):
+                real_wd = real_wd.rstrip("/").rsplit("/", 1)[0]
+            # Otherwise real_wd is already the project dir (from project_dir fallback)
             params["max_depth"] = 1  # only top-level dirs
+
+        # "list files in <subpath>" — append subfolder to work_dir.
+        # Source 1 (preferred): parse from user message — preserves
+        #   workflow prefix (e.g. "workflow1/annot") that the LLM may strip.
+        # Source 2 (fallback): subfolder hint from LLM's invented param.
+        if tool == "list_job_files" and not params.get("max_depth"):
+            _sub = ""
+            _sub_m = re.search(
+                r'\b(?:list|show)\s+(?:the\s+)?files?\s+'
+                r'(?:in|under|at|of)\s+(.+)',
+                user_message, re.IGNORECASE,
+            )
+            if _sub_m:
+                _sub = _sub_m.group(1).strip().strip('"\'')
+            if not _sub:
+                _sub = _subfolder_hint
+            if _sub:
+                real_wd = _resolve_workflow_path(_sub, real_wd, workflows)
+                # Show only immediate contents of the subfolder, not deep recursion
+                params["max_depth"] = 1
 
         if real_wd != llm_wd:
             logger.warning(
@@ -675,7 +713,8 @@ def _extract_encode_search_term(user_message: str) -> str | None:
 
 def _auto_generate_data_calls(user_message: str, skill_key: str,
                               conversation_history: list | None = None,
-                              history_blocks: list | None = None) -> list[dict]:
+                              history_blocks: list | None = None,
+                              project_dir: str = "") -> list[dict]:
     """
     Safety net: if the LLM failed to generate DATA_CALL tags, detect obvious
     patterns in the user's message and auto-generate the appropriate tool calls.
@@ -687,6 +726,61 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     """
     calls = []
     msg_lower = user_message.lower()
+
+    # --- Browsing commands (highest priority, skill-independent) ---
+    # "list workflows", "list files" etc. always route to server4 when there
+    # is a project directory, regardless of the active skill.  Must run before
+    # any skill-specific logic (e.g. ENCODE catch-all) to avoid mis-routing.
+    job_context = _extract_job_context_from_history(
+        conversation_history, history_blocks=history_blocks)
+    work_dir = job_context.get("work_dir", "")
+    run_uuid = job_context.get("run_uuid", "")
+    workflows = job_context.get("workflows", [])
+    # Derive the project directory — prefer parent-of-work_dir (when
+    # work_dir is a workflow directory like .../test16/workflow1); fall back
+    # to the explicitly-passed project_dir (from the chat endpoint).
+    _project_dir = ""
+    if work_dir:
+        if re.search(r'/workflow\d+/?$', work_dir):
+            _project_dir = work_dir.rstrip("/").rsplit("/", 1)[0]
+        else:
+            _project_dir = work_dir  # already project-level
+    if not _project_dir and project_dir:
+        _project_dir = project_dir
+
+    # --- "list workflows" command ---
+    if re.search(r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b', msg_lower):
+        if _project_dir:
+            calls.append({
+                "source_type": "service", "source_key": "server4",
+                "tool": "list_job_files",
+                "params": {"work_dir": _project_dir, "max_depth": 1},
+            })
+        return calls
+
+    # --- "list files" / "list files in <path>" command ---
+    _list_files_m = re.search(
+        r'\b(?:list|show|what)\s+(?:the\s+)?files?\b'
+        r'(?:\s+(?:in|under|at|of)\s+(.+?))?\s*$',
+        user_message, re.IGNORECASE,
+    )
+    if _list_files_m:
+        _subpath = (_list_files_m.group(1) or "").strip().strip('"\'')
+        _base_wd = work_dir or _project_dir
+        _target_wd = _resolve_workflow_path(
+            _subpath, _base_wd, workflows,
+        ) if _base_wd else ""
+        if _target_wd:
+            _params: dict = {"work_dir": _target_wd}
+            # For subfolder listings, only show immediate contents
+            if _subpath:
+                _params["max_depth"] = 1
+            calls.append({
+                "source_type": "service", "source_key": "server4",
+                "tool": "list_job_files",
+                "params": _params,
+            })
+        return calls
 
     # Organism lookup for KNOWN biosamples.  This is NOT exhaustive — it
     # exists only so we can add an organism= hint when we recognise the term.
@@ -892,43 +986,8 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
                     "analyze_job_results"}
     if not calls and skill_key in dogme_skills:
-        job_context = _extract_job_context_from_history(
-            conversation_history, history_blocks=history_blocks)
-        work_dir = job_context.get("work_dir", "")
-        run_uuid = job_context.get("run_uuid", "")
-        workflows = job_context.get("workflows", [])
-
-        # --- "list workflows" command ---
-        if re.search(r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b', msg_lower):
-            # List subdirectories in the project base dir.
-            # Project dir = parent of work_dir.
-            if work_dir:
-                _project_dir = work_dir.rstrip("/").rsplit("/", 1)[0]
-                calls.append({
-                    "source_type": "service", "source_key": "server4",
-                    "tool": "list_job_files",
-                    "params": {"work_dir": _project_dir, "max_depth": 1},
-                })
-            return calls
-
-        # --- "list files" / "list files in <path>" command ---
-        _list_files_m = re.search(
-            r'\b(?:list|show|what)\s+(?:the\s+)?files?\b'
-            r'(?:\s+(?:in|under|at|of)\s+(.+?))?\s*$',
-            user_message, re.IGNORECASE,
-        )
-        if _list_files_m:
-            _subpath = (_list_files_m.group(1) or "").strip().strip('"\'')
-            _target_wd = _resolve_workflow_path(
-                _subpath, work_dir, workflows,
-            )
-            if _target_wd:
-                calls.append({
-                    "source_type": "service", "source_key": "server4",
-                    "tool": "list_job_files",
-                    "params": {"work_dir": _target_wd},
-                })
-            return calls
+        # job_context, work_dir, run_uuid, workflows already extracted above
+        # (browsing block at the top of this function).
 
         # --- "set workflow" / "use workflow" command ---
         # Handled conversationally — the LLM picks up which workflow to use.
@@ -1240,7 +1299,7 @@ def _inject_job_context(user_message: str, active_skill: str,
         #   sample_name, path, sample_type, reference_genome
         _field_patterns = {
             "sample_name": re.compile(
-                r'(?:sample\s*name|name)[:\s*]+([^\n*,]+)', re.IGNORECASE),
+                r'(?:sample\s*name)[:\s*]+([^\n*,|]+)', re.IGNORECASE),
             "path": re.compile(
                 r'(?:data\s*path|path|directory)[:\s*]+(/[^\n*,]+)', re.IGNORECASE),
             "sample_type": re.compile(
@@ -3305,7 +3364,12 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # Initialize engine with the selected model (from UI request)
         engine = AgentEngine(model_key=req.model)
         _emit_progress(req.request_id, "thinking", f"Thinking using {engine.model_name}...")
-        
+
+        # Resolve the project directory path for file-browsing commands.
+        # This is the minimum context needed for list_job_files, list_workflows, etc.
+        _project_dir_path = _resolve_project_dir(session, user, req.project_id)
+        _project_dir_str = str(_project_dir_path) if _project_dir_path else ""
+
         # 2a. Pre-LLM skill switch detection — catch obvious mismatches
         # before wasting time on an LLM call with the wrong skill.
         auto_skill = _auto_detect_skill_switch(req.message, active_skill)
@@ -3625,10 +3689,48 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         _msg_lower = req.message.lower()
         _has_referential = any(w in _msg_lower for w in _ref_words)
 
-        if not has_any_tags and (not _injected_previous_data or _injected_was_capped):
+        # --- Browsing-command override ---
+        # "list workflows", "list files", etc. must always route to server4,
+        # regardless of the active skill.  When the skill is ENCODE_Search the
+        # LLM may generate an ENCODE tag instead of a server4 tag.  Detect
+        # this and force the correct auto-generated call.
+        _is_browsing_override = False
+        _browsing_patterns = [
+            r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',
+            r'\b(?:list|show)\s+(?:the\s+)?files?\b',
+        ]
+        if any(re.search(p, _msg_lower) for p in _browsing_patterns):
+            _browse_calls = _auto_generate_data_calls(
+                req.message, active_skill,
+                conversation_history, history_blocks=history_blocks,
+                project_dir=_project_dir_str,
+            )
+            if _browse_calls:
+                # Only keep server4 calls from the override
+                _browse_calls = [c for c in _browse_calls if c.get("source_key") == "server4"]
+            if _browse_calls:
+                auto_calls = _browse_calls
+                _is_browsing_override = True
+                # Suppress any LLM-generated tags (they're wrong for browsing)
+                data_call_matches = []
+                legacy_encode_matches = []
+                legacy_analysis_matches = []
+                has_any_tags = False
+                clean_markdown = ""
+                # Clear injected ENCODE DFs so they're not rendered alongside
+                # the file listing
+                _injected_dfs = {}
+                _injected_previous_data = False
+                logger.warning(
+                    "Browsing-command override: replacing LLM tags with server4 calls",
+                    skill=active_skill, calls=len(auto_calls),
+                )
+
+        if not _is_browsing_override and not has_any_tags and (not _injected_previous_data or _injected_was_capped):
             # Case 1: LLM produced no tags at all — auto-generate
             auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history,
-                                                     history_blocks=history_blocks)
+                                                     history_blocks=history_blocks,
+                                                     project_dir=_project_dir_str)
             if auto_calls:
                 logger.warning("LLM failed to generate DATA_CALL tags, auto-generating",
                               count=len(auto_calls), skill=active_skill)
@@ -3691,7 +3793,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     history_accessions=sorted(_history_accessions),
                 )
                 auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history,
-                                                         history_blocks=history_blocks)
+                                                         history_blocks=history_blocks,
+                                                         project_dir=_project_dir_str)
                 if auto_calls:
                     # Discard the LLM-generated tags
                     data_call_matches = []
@@ -3766,6 +3869,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     corrected_tool, params, req.message,
                     conversation_history=conversation_history,
                     history_blocks=history_blocks,
+                    project_dir=_project_dir_str,
                 )
 
             calls_by_source.setdefault(source_key, []).append({
