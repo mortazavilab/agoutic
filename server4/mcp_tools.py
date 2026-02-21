@@ -14,7 +14,8 @@ from server4.analysis_engine import (
     parse_csv_file,
     parse_bed_file,
     generate_analysis_summary,
-    get_job_work_dir
+    get_job_work_dir,
+    resolve_work_dir,
 )
 from server4.config import MAX_PREVIEW_LINES
 
@@ -34,45 +35,44 @@ def _dumps(obj: Any) -> str:
 # ==================== MCP Tool Definitions ====================
 
 async def list_job_files(
-    run_uuid: str,
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
     extensions: Optional[str] = None,
-    compact: bool = True
+    compact: bool = True,
+    max_depth: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     List all files in a job's work directory.
-    
+
     Args:
-        run_uuid: Job UUID to list files for
+        work_dir: Absolute path to the workflow directory (preferred)
+        run_uuid: Job UUID (legacy fallback)
         extensions: Optional comma-separated list of extensions (e.g., ".txt,.csv,.bed")
         compact: If True and file_count > 100, return only path and name (faster, smaller response)
-    
+        max_depth: If set, only list entries up to this many levels deep (1 = immediate children).
+
     Returns:
         Dict with file listing including paths, sizes, and metadata
     """
     try:
-        # Parse extensions if provided
         ext_list = None
         if extensions:
             ext_list = [ext.strip() for ext in extensions.split(',')]
-        
-        # Discover files
-        file_listing = discover_files(run_uuid, ext_list)
-        
-        # For large listings, return compact format to avoid truncation
+
+        file_listing = discover_files(run_uuid, ext_list, work_dir_path=work_dir,
+                                      max_depth=max_depth)
+
         if compact and file_listing.file_count > 100:
             return {
                 "success": True,
-                "run_uuid": file_listing.run_uuid,
                 "work_dir": file_listing.work_dir,
                 "file_count": file_listing.file_count,
                 "total_size_bytes": file_listing.total_size,
                 "files": [{"path": f.path, "name": f.name, "size": f.size} for f in file_listing.files]
             }
-        
-        # For smaller listings, return full details
+
         return {
             "success": True,
-            "run_uuid": file_listing.run_uuid,
             "work_dir": file_listing.work_dir,
             "file_count": file_listing.file_count,
             "total_size_bytes": file_listing.total_size,
@@ -94,56 +94,56 @@ async def list_job_files(
 
 
 async def find_file_tool(
-    run_uuid: str,
-    file_name: str
+    file_name: str,
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Find a specific file by name in a job's work directory.
     Returns the relative path if found, avoiding serialization/display truncation.
-    
+
     Args:
-        run_uuid: Job UUID
         file_name: Filename to search for (exact or partial match)
-    
+        work_dir: Absolute path to the workflow directory (preferred)
+        run_uuid: Job UUID (legacy fallback)
+
     Returns:
         Dict with matching file paths
     """
     try:
-        work_dir = get_job_work_dir(run_uuid)
-        if not work_dir or not work_dir.exists():
+        resolved = resolve_work_dir(work_dir=work_dir, run_uuid=run_uuid)
+        _id = work_dir or run_uuid or "?"
+        if not resolved or not resolved.exists():
             return {
                 "success": False,
-                "error": "Job not found or work directory missing",
-                "run_uuid": run_uuid
+                "error": "Work directory not found",
+                "work_dir": work_dir or "",
             }
-        
+
         # Search for files matching the name
         # IMPORTANT: Only return files in result directories, NOT intermediate work/ folder
-        file_paths = []  # Flat list of paths to avoid MCP truncation
-        for file_path in work_dir.rglob("*"):
+        file_paths = []
+        for file_path in resolved.rglob("*"):
             if file_path.is_file() and file_name.lower() in file_path.name.lower():
-                relative_path = str(file_path.relative_to(work_dir))
-                # FILTER: Skip any paths in work/ folder (intermediate cached results)
+                relative_path = str(file_path.relative_to(resolved))
                 if not relative_path.startswith("work/"):
                     file_paths.append(relative_path)
-        
+
         if not file_paths:
             return {
                 "success": False,
                 "error": "File not found (checked result directories only, ignored work/ folder)",
                 "search_term": file_name,
-                "run_uuid": run_uuid
+                "work_dir": str(resolved),
             }
-        
-        # Return with flat paths array and primary_path highlighted
-        # primary_path is the ONLY path agents should use
+
         return {
             "success": True,
-            "run_uuid": run_uuid,
+            "work_dir": str(resolved),
             "search_term": file_name,
             "file_count": len(file_paths),
-            "paths": file_paths,  # Flat array of result paths (work/ paths excluded)
-            "primary_path": file_paths[0]  # Use this path EXACTLY as shown
+            "paths": file_paths,
+            "primary_path": file_paths[0]
         }
     
     except Exception as e:
@@ -155,32 +155,34 @@ async def find_file_tool(
 
 
 async def read_file_content_tool(
-    run_uuid: str,
     file_path: str,
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
     preview_lines: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Read content from a specific file in a job's work directory.
-    
+
     Args:
-        run_uuid: Job UUID
         file_path: Relative path to file from work directory
+        work_dir: Absolute path to the workflow directory (preferred)
+        run_uuid: Job UUID (legacy fallback)
         preview_lines: Optional line limit for preview (default: all lines)
-    
+
     Returns:
         Dict with file content and metadata
     """
     try:
-        # Apply default preview limit if not specified
         if preview_lines is None:
             preview_lines = MAX_PREVIEW_LINES
-        
-        # Read file content
-        content_response = read_file_content(run_uuid, file_path, preview_lines)
-        
+
+        content_response = read_file_content(
+            run_uuid, file_path, preview_lines, work_dir_path=work_dir
+        )
+
         return {
             "success": True,
-            "run_uuid": content_response.run_uuid,
+            "work_dir": work_dir or "",
             "file_path": content_response.file_path,
             "content": content_response.content,
             "line_count": content_response.line_count,
@@ -209,28 +211,31 @@ async def read_file_content_tool(
 
 
 async def parse_csv_file_tool(
-    run_uuid: str,
     file_path: str,
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
     max_rows: Optional[int] = 100
 ) -> Dict[str, Any]:
     """
     Parse a CSV or TSV file and return structured data.
-    
+
     Args:
-        run_uuid: Job UUID
         file_path: Relative path to CSV/TSV file
+        work_dir: Absolute path to the workflow directory (preferred)
+        run_uuid: Job UUID (legacy fallback)
         max_rows: Maximum rows to return (default: 100)
-    
+
     Returns:
         Dict with parsed table data including columns and rows
     """
     try:
-        # Parse CSV file
-        parsed_data = parse_csv_file(run_uuid, file_path, max_rows)
-        
+        parsed_data = parse_csv_file(
+            run_uuid, file_path, max_rows, work_dir_path=work_dir
+        )
+
         return {
             "success": True,
-            "run_uuid": parsed_data.run_uuid,
+            "work_dir": work_dir or "",
             "file_path": parsed_data.file_path,
             "columns": parsed_data.columns,
             "row_count": parsed_data.row_count,
@@ -260,28 +265,31 @@ async def parse_csv_file_tool(
 
 
 async def parse_bed_file_tool(
-    run_uuid: str,
     file_path: str,
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
     max_records: Optional[int] = 100
 ) -> Dict[str, Any]:
     """
     Parse a BED format file and return structured genomic records.
-    
+
     Args:
-        run_uuid: Job UUID
         file_path: Relative path to BED file
+        work_dir: Absolute path to the workflow directory (preferred)
+        run_uuid: Job UUID (legacy fallback)
         max_records: Maximum records to return (default: 100)
-    
+
     Returns:
         Dict with parsed BED records
     """
     try:
-        # Parse BED file
-        parsed_data = parse_bed_file(run_uuid, file_path, max_records)
-        
+        parsed_data = parse_bed_file(
+            run_uuid, file_path, max_records, work_dir_path=work_dir
+        )
+
         return {
             "success": True,
-            "run_uuid": parsed_data.run_uuid,
+            "work_dir": work_dir or "",
             "file_path": parsed_data.file_path,
             "record_count": parsed_data.record_count,
             "preview_records": parsed_data.preview_records,
@@ -309,23 +317,27 @@ async def parse_bed_file_tool(
         }
 
 
-async def get_analysis_summary_tool(run_uuid: str) -> Dict[str, Any]:
+async def get_analysis_summary_tool(
+    run_uuid: Optional[str] = None,
+    work_dir: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Get comprehensive analysis summary for a completed job.
     Includes file categorization, key results, and parsed reports.
-    
+
     Args:
-        run_uuid: Job UUID
-    
+        run_uuid: Job UUID (still needed for DB metadata lookup)
+        work_dir: Absolute path to the workflow directory (used for file ops)
+
     Returns:
         Dict with success and formatted summary
     """
     try:
-        # Generate summary
-        summary = generate_analysis_summary(run_uuid)
-        
-        # Format as markdown tables
-        output = f"Analysis Summary for UUID: {summary.run_uuid}\n\n"
+        summary = generate_analysis_summary(
+            run_uuid, work_dir_path=work_dir
+        )
+
+        output = f"Analysis Summary for: {summary.sample_name}\n\n"
         
         # Basic info table
         output += "Field | Value\n--- | ---\n"
@@ -406,24 +418,27 @@ async def get_analysis_summary_tool(run_uuid: str) -> Dict[str, Any]:
         }
 
 
-async def categorize_job_files_tool(run_uuid: str) -> Dict[str, Any]:
+async def categorize_job_files_tool(
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Categorize all files in a job's work directory by type.
     Groups files into txt, csv, bed, and other categories.
-    
+
     Args:
-        run_uuid: Job UUID
-    
+        work_dir: Absolute path to the workflow directory (preferred)
+        run_uuid: Job UUID (legacy fallback)
+
     Returns:
         Dict with categorized file lists
     """
     try:
-        # Categorize files
-        file_summary = categorize_files(run_uuid)
-        
+        file_summary = categorize_files(run_uuid, work_dir_path=work_dir)
+
         return {
             "success": True,
-            "run_uuid": run_uuid,
+            "work_dir": work_dir or "",
             "txt_files": [f.dict() for f in file_summary.txt_files],
             "csv_files": [f.dict() for f in file_summary.csv_files],
             "bed_files": [f.dict() for f in file_summary.bed_files],
@@ -467,62 +482,74 @@ TOOL_REGISTRY = {
 # Tool schemas for MCP server
 TOOL_SCHEMAS = {
     "list_job_files": {
-        "description": "List all files in a job's work directory with optional extension filtering. Returns compact format (path, name, size only) for large directories.",
+        "description": "List all files in a workflow directory with optional extension filtering.",
         "parameters": {
             "type": "object",
             "properties": {
+                "work_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the workflow directory (preferred)"
+                },
                 "run_uuid": {
                     "type": "string",
-                    "description": "Job UUID to list files for"
+                    "description": "Job UUID (legacy fallback \u2014 prefer work_dir)"
                 },
                 "extensions": {
                     "type": "string",
-                    "description": "Optional comma-separated list of extensions (e.g., '.txt,.csv,.bed') to filter files"
+                    "description": "Optional comma-separated list of extensions (e.g., '.txt,.csv,.bed')"
                 },
-                "compact": {
-                    "type": "boolean",
-                    "description": "If true (default), returns minimal info (path, name, size) for large listings to avoid truncation"
-                }
+                "max_depth": {
+                    "type": "integer",
+                    "description": "Only list entries up to this many levels deep (1 = immediate children)"
+                },
             },
-            "required": ["run_uuid"]
+            "required": []
         }
     },
     "find_file": {
-        "description": "Find a specific file by name (exact or partial match) and return its relative path. Useful when file listings are truncated or to get direct path without browsing.",
+        "description": "Find a specific file by name (exact or partial match) and return its relative path.",
         "parameters": {
             "type": "object",
             "properties": {
-                "run_uuid": {
-                    "type": "string",
-                    "description": "Job UUID to search in"
-                },
                 "file_name": {
                     "type": "string",
                     "description": "Filename to search for (exact or partial match, case-insensitive)"
-                }
+                },
+                "work_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the workflow directory (preferred)"
+                },
+                "run_uuid": {
+                    "type": "string",
+                    "description": "Job UUID (legacy fallback \u2014 prefer work_dir)"
+                },
             },
-            "required": ["run_uuid", "file_name"]
+            "required": ["file_name"]
         }
     },
     "read_file_content": {
-        "description": "Read content from a specific file in a job's work directory",
+        "description": "Read content from a specific file in a workflow directory",
         "parameters": {
             "type": "object",
             "properties": {
-                "run_uuid": {
-                    "type": "string",
-                    "description": "Job UUID"
-                },
                 "file_path": {
                     "type": "string",
                     "description": "Relative path to file from work directory"
+                },
+                "work_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the workflow directory (preferred)"
+                },
+                "run_uuid": {
+                    "type": "string",
+                    "description": "Job UUID (legacy fallback \u2014 prefer work_dir)"
                 },
                 "preview_lines": {
                     "type": "integer",
                     "description": "Optional line limit for preview"
                 }
             },
-            "required": ["run_uuid", "file_path"]
+            "required": ["file_path"]
         }
     },
     "parse_csv_file": {
@@ -530,20 +557,24 @@ TOOL_SCHEMAS = {
         "parameters": {
             "type": "object",
             "properties": {
-                "run_uuid": {
-                    "type": "string",
-                    "description": "Job UUID"
-                },
                 "file_path": {
                     "type": "string",
                     "description": "Relative path to CSV/TSV file"
+                },
+                "work_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the workflow directory (preferred)"
+                },
+                "run_uuid": {
+                    "type": "string",
+                    "description": "Job UUID (legacy fallback \u2014 prefer work_dir)"
                 },
                 "max_rows": {
                     "type": "integer",
                     "description": "Maximum rows to return (default: 100)"
                 }
             },
-            "required": ["run_uuid", "file_path"]
+            "required": ["file_path"]
         }
     },
     "parse_bed_file": {
@@ -551,46 +582,58 @@ TOOL_SCHEMAS = {
         "parameters": {
             "type": "object",
             "properties": {
-                "run_uuid": {
-                    "type": "string",
-                    "description": "Job UUID"
-                },
                 "file_path": {
                     "type": "string",
                     "description": "Relative path to BED file"
+                },
+                "work_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the workflow directory (preferred)"
+                },
+                "run_uuid": {
+                    "type": "string",
+                    "description": "Job UUID (legacy fallback \u2014 prefer work_dir)"
                 },
                 "max_records": {
                     "type": "integer",
                     "description": "Maximum records to return (default: 100)"
                 }
             },
-            "required": ["run_uuid", "file_path"]
+            "required": ["file_path"]
         }
     },
     "get_analysis_summary": {
-        "description": "Get comprehensive analysis summary for a completed job including file categorization and parsed reports",
+        "description": "Get comprehensive analysis summary for a completed job",
         "parameters": {
             "type": "object",
             "properties": {
                 "run_uuid": {
                     "type": "string",
-                    "description": "Job UUID"
-                }
+                    "description": "Job UUID (needed for DB metadata lookup)"
+                },
+                "work_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the workflow directory"
+                },
             },
             "required": ["run_uuid"]
         }
     },
     "categorize_job_files": {
-        "description": "Categorize all files in a job's work directory by type (txt, csv, bed, other)",
+        "description": "Categorize all files in a workflow directory by type (txt, csv, bed, other)",
         "parameters": {
             "type": "object",
             "properties": {
+                "work_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the workflow directory (preferred)"
+                },
                 "run_uuid": {
                     "type": "string",
-                    "description": "Job UUID"
-                }
+                    "description": "Job UUID (legacy fallback \u2014 prefer work_dir)"
+                },
             },
-            "required": ["run_uuid"]
+            "required": []
         }
     }
 }

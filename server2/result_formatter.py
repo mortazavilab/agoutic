@@ -156,6 +156,44 @@ def _format_data(
                 result += f"\n*({len(cols) - MAX_DISPLAY_COLS} more columns not shown)*\n"
             return result
 
+        # Server 4 file listing results — render as a readable table
+        if "files" in data and isinstance(data["files"], list) and "file_count" in data:
+            files = data["files"]
+            work_dir = data.get("work_dir", "")
+            total_count = data.get("file_count", len(files))
+            total_bytes = data.get("total_size_bytes", 0)
+            result = f"**Directory: {work_dir}** ({total_count} entries"
+            if total_bytes:
+                if total_bytes > 1_000_000_000:
+                    result += f", {total_bytes / 1_000_000_000:.1f} GB"
+                elif total_bytes > 1_000_000:
+                    result += f", {total_bytes / 1_000_000:.1f} MB"
+                elif total_bytes > 1_000:
+                    result += f", {total_bytes / 1_000:.1f} KB"
+            result += ")\n\n"
+            result += "| Name | Path | Size |\n"
+            result += "|---|---|---|\n"
+            for f in files:
+                if isinstance(f, dict):
+                    name = f.get("name", "")
+                    path = f.get("path", "")
+                    size = f.get("size", 0)
+                    if isinstance(size, (int, float)) and size > 0:
+                        if size > 1_000_000_000:
+                            size_str = f"{size / 1_000_000_000:.1f} GB"
+                        elif size > 1_000_000:
+                            size_str = f"{size / 1_000_000:.1f} MB"
+                        elif size > 1_000:
+                            size_str = f"{size / 1_000:.1f} KB"
+                        else:
+                            size_str = f"{size} B"
+                    else:
+                        size_str = "—" if name.endswith("/") else "0 B"
+                    result += f"| {name} | {path} | {size_str} |\n"
+                else:
+                    result += f"| {f} | | |\n"
+            return result
+
         # Generic dict — show as compact JSON (strip deeply nested objects)
         # For analysis/parsing results (Server 4), allow deeper nesting so row data is visible
         is_analysis_data = "records" in data or "preview_rows" in data

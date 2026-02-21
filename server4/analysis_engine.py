@@ -35,10 +35,39 @@ from server4.db import get_db
 
 # ==================== File Discovery ====================
 
+def resolve_work_dir(
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
+) -> Optional[Path]:
+    """
+    Resolve the work directory from *either* a direct path or a run UUID.
+
+    Precedence:
+      1. ``work_dir`` — used directly if it is an absolute path that exists.
+      2. ``run_uuid`` — looked up via DB (legacy path).
+
+    At least one of the two must be provided.
+    """
+    # Direct path — preferred (avoids DB lookup entirely)
+    if work_dir:
+        p = Path(work_dir)
+        if p.is_absolute() and p.exists():
+            return p
+        # Could be an absolute path that doesn't exist yet — still return it
+        if p.is_absolute():
+            return p
+
+    # Fallback: UUID-based DB lookup
+    if run_uuid:
+        return get_job_work_dir(run_uuid)
+
+    return None
+
+
 def get_job_work_dir(run_uuid: str) -> Optional[Path]:
     """
-    Get work directory path for a job.
-    
+    Get work directory path for a job (legacy UUID-based lookup).
+
     Resolves in order:
       1. nextflow_work_dir from the job record (may be slug-based or UUID-based)
       2. output_directory from the job record
@@ -52,9 +81,9 @@ def get_job_work_dir(run_uuid: str) -> Optional[Path]:
         # Use nextflow_work_dir if available — this is the authoritative source.
         # New jobs store slug-based paths (e.g. users/eli/my-project/workflow1/),
         # old jobs store UUID-based paths (e.g. users/{uuid}/{uuid}/{run_uuid}/).
-        work_dir = job.nextflow_work_dir or job.output_directory
-        if work_dir:
-            return Path(work_dir)
+        wd = job.nextflow_work_dir or job.output_directory
+        if wd:
+            return Path(wd)
         # Try jailed path if user_id is available (legacy UUID layout)
         user_id = getattr(job, 'user_id', None)
         if user_id and job.project_id:
@@ -65,30 +94,82 @@ def get_job_work_dir(run_uuid: str) -> Optional[Path]:
         return AGOUTIC_WORK_DIR / run_uuid
 
 
-def discover_files(run_uuid: str, extensions: Optional[List[str]] = None) -> FileListing:
+def discover_files(
+    run_uuid: Optional[str] = None,
+    extensions: Optional[List[str]] = None,
+    *,
+    work_dir_path: Optional[str] = None,
+    max_depth: Optional[int] = None,
+) -> FileListing:
     """
     Discover all files in a job's work directory.
-    
+
     Args:
-        run_uuid: Job UUID
+        run_uuid: Job UUID (legacy — prefer work_dir_path)
         extensions: Optional list of extensions to filter (e.g., ['.txt', '.csv'])
-    
+        work_dir_path: Absolute path to the workflow directory
+        max_depth: If set, only list entries up to this many levels deep.
+                   1 = immediate children only (files + dirs).
+
     Returns:
         FileListing with all discovered files
     """
-    work_dir = get_job_work_dir(run_uuid)
+    work_dir = resolve_work_dir(work_dir=work_dir_path, run_uuid=run_uuid)
     if not work_dir or not work_dir.exists():
-        raise FileNotFoundError(f"Work directory not found for job {run_uuid}")
+        _id = work_dir_path or run_uuid or '?'
+        raise FileNotFoundError(f"Work directory not found for {_id}")
     
     files = []
     total_size = 0
+
+    # --- Depth-limited listing (e.g. for "list workflows") ---
+    if max_depth is not None and max_depth >= 1:
+        # Only list immediate children (depth=1) — include both files and
+        # directories (directories are returned as entries with size=0 and
+        # a trailing '/' in the name so callers can distinguish them).
+        for child in sorted(work_dir.iterdir()):
+            relative_path = child.relative_to(work_dir)
+            rel_str = str(relative_path)
+            # Skip work/ and dor*/ directories (Nextflow intermediates)
+            _dirname = child.name
+            if _dirname == "work" or _dirname.startswith("dor"):
+                continue
+            if child.is_dir():
+                files.append(FileInfo(
+                    path=rel_str + "/",
+                    name=child.name + "/",
+                    size=0,
+                    extension="",
+                    modified_time=datetime.fromtimestamp(child.stat().st_mtime)
+                ))
+            elif child.is_file():
+                stat = child.stat()
+                if extensions and child.suffix.lower() not in extensions:
+                    continue
+                files.append(FileInfo(
+                    path=rel_str,
+                    name=child.name,
+                    size=stat.st_size,
+                    extension=child.suffix,
+                    modified_time=datetime.fromtimestamp(stat.st_mtime)
+                ))
+                total_size += stat.st_size
+        return FileListing(
+            run_uuid=run_uuid or "",
+            work_dir=str(work_dir),
+            files=files,
+            file_count=len(files),
+            total_size=total_size
+        )
     
+    # --- Full recursive listing ---
     # Recursively find all files
     for file_path in work_dir.rglob("*"):
         if file_path.is_file():
             # Skip files in work/ or dor*/ subdirectories (intermediate processing files)
             relative_path = file_path.relative_to(work_dir)
-            if str(relative_path).startswith("work/") or str(relative_path).startswith("dor"):
+            _parts = relative_path.parts
+            if _parts and (_parts[0] == "work" or _parts[0].startswith("dor")):
                 continue
             
             # Filter by extension if specified
@@ -109,7 +190,7 @@ def discover_files(run_uuid: str, extensions: Optional[List[str]] = None) -> Fil
             total_size += stat.st_size
     
     return FileListing(
-        run_uuid=run_uuid,
+        run_uuid=run_uuid or "",
         work_dir=str(work_dir),
         files=sorted(files, key=lambda f: f.path),
         file_count=len(files),
@@ -117,9 +198,13 @@ def discover_files(run_uuid: str, extensions: Optional[List[str]] = None) -> Fil
     )
 
 
-def categorize_files(run_uuid: str) -> JobFileSummary:
+def categorize_files(
+    run_uuid: Optional[str] = None,
+    *,
+    work_dir_path: Optional[str] = None,
+) -> JobFileSummary:
     """Categorize files by type."""
-    all_files = discover_files(run_uuid)
+    all_files = discover_files(run_uuid, work_dir_path=work_dir_path)
     
     txt_files = []
     csv_files = []
@@ -148,24 +233,28 @@ def categorize_files(run_uuid: str) -> JobFileSummary:
 # ==================== File Reading ====================
 
 def read_file_content(
-    run_uuid: str,
-    file_path: str,
-    preview_lines: Optional[int] = None
+    run_uuid: Optional[str] = None,
+    file_path: str = "",
+    preview_lines: Optional[int] = None,
+    *,
+    work_dir_path: Optional[str] = None,
 ) -> FileContentResponse:
     """
     Read content from a file.
-    
+
     Args:
-        run_uuid: Job UUID
+        run_uuid: Job UUID (legacy — prefer work_dir_path)
         file_path: Relative path from work directory
         preview_lines: Optional line limit for preview
-    
+        work_dir_path: Absolute path to the workflow directory
+
     Returns:
         FileContentResponse with file content
     """
-    work_dir = get_job_work_dir(run_uuid)
+    work_dir = resolve_work_dir(work_dir=work_dir_path, run_uuid=run_uuid)
+    _id = work_dir_path or run_uuid or '?'
     if not work_dir:
-        raise FileNotFoundError(f"Work directory not found for job {run_uuid}")
+        raise FileNotFoundError(f"Work directory not found for {_id}")
     
     # Construct and validate file path
     full_path = work_dir / file_path
@@ -189,13 +278,14 @@ def read_file_content(
     
     # Read content
     try:
+        _uuid = run_uuid or ""
         with open(full_path, 'r', encoding='utf-8') as f:
             if preview_lines:
                 lines = []
                 for i, line in enumerate(f):
                     if i >= preview_lines:
                         return FileContentResponse(
-                            run_uuid=run_uuid,
+                            run_uuid=_uuid,
                             file_path=file_path,
                             content=''.join(lines),
                             line_count=preview_lines,
@@ -209,7 +299,7 @@ def read_file_content(
                 total_lines = preview_lines + remaining
                 
                 return FileContentResponse(
-                    run_uuid=run_uuid,
+                    run_uuid=_uuid,
                     file_path=file_path,
                     content=''.join(lines),
                     line_count=total_lines,
@@ -220,7 +310,7 @@ def read_file_content(
                 content = f.read()
                 line_count = content.count('\n') + 1
                 return FileContentResponse(
-                    run_uuid=run_uuid,
+                    run_uuid=_uuid,
                     file_path=file_path,
                     content=content,
                     line_count=line_count,
@@ -234,24 +324,28 @@ def read_file_content(
 # ==================== CSV/TSV Parsing ====================
 
 def parse_csv_file(
-    run_uuid: str,
-    file_path: str,
-    max_rows: Optional[int] = None
+    run_uuid: Optional[str] = None,
+    file_path: str = "",
+    max_rows: Optional[int] = None,
+    *,
+    work_dir_path: Optional[str] = None,
 ) -> ParsedTableData:
     """
     Parse CSV/TSV file using pandas for proper type detection.
-    
+
     Args:
-        run_uuid: Job UUID
+        run_uuid: Job UUID (legacy — prefer work_dir_path)
         file_path: Relative path from work directory
         max_rows: Maximum rows to return (for preview)
-    
+        work_dir_path: Absolute path to the workflow directory
+
     Returns:
         ParsedTableData with structured data
     """
-    work_dir = get_job_work_dir(run_uuid)
+    work_dir = resolve_work_dir(work_dir=work_dir_path, run_uuid=run_uuid)
+    _id = work_dir_path or run_uuid or '?'
     if not work_dir:
-        raise FileNotFoundError(f"Work directory not found for job {run_uuid}")
+        raise FileNotFoundError(f"Work directory not found for {_id}")
     
     full_path = (work_dir / file_path).resolve()
     
@@ -307,7 +401,7 @@ def parse_csv_file(
     }
     
     return ParsedTableData(
-        run_uuid=run_uuid,
+        run_uuid=run_uuid or "",
         file_path=file_path,
         columns=columns,
         row_count=total_rows,
@@ -329,24 +423,28 @@ def _safe_scalar(val) -> Any:
 # ==================== BED File Parsing ====================
 
 def parse_bed_file(
-    run_uuid: str,
-    file_path: str,
-    max_records: Optional[int] = None
+    run_uuid: Optional[str] = None,
+    file_path: str = "",
+    max_records: Optional[int] = None,
+    *,
+    work_dir_path: Optional[str] = None,
 ) -> ParsedBedData:
     """
     Parse BED format file.
-    
+
     Args:
-        run_uuid: Job UUID
+        run_uuid: Job UUID (legacy — prefer work_dir_path)
         file_path: Relative path from work directory
         max_records: Maximum records to return (for preview)
-    
+        work_dir_path: Absolute path to the workflow directory
+
     Returns:
         ParsedBedData with structured records
     """
-    work_dir = get_job_work_dir(run_uuid)
+    work_dir = resolve_work_dir(work_dir=work_dir_path, run_uuid=run_uuid)
+    _id = work_dir_path or run_uuid or '?'
     if not work_dir:
-        raise FileNotFoundError(f"Work directory not found for job {run_uuid}")
+        raise FileNotFoundError(f"Work directory not found for {_id}")
     
     full_path = (work_dir / file_path).resolve()
     
@@ -405,7 +503,7 @@ def parse_bed_file(
     }
     
     return ParsedBedData(
-        run_uuid=run_uuid,
+        run_uuid=run_uuid or "",
         file_path=file_path,
         record_count=total_records,
         records=records,
@@ -416,23 +514,34 @@ def parse_bed_file(
 
 # ==================== Analysis Summary ====================
 
-def generate_analysis_summary(run_uuid: str) -> AnalysisSummary:
+def generate_analysis_summary(
+    run_uuid: Optional[str] = None,
+    *,
+    work_dir_path: Optional[str] = None,
+) -> AnalysisSummary:
     """
     Generate comprehensive analysis summary for a job.
-    
+
     Args:
-        run_uuid: Job UUID
-    
+        run_uuid: Job UUID (still needed — summary requires DB metadata)
+        work_dir_path: Absolute path to the workflow directory (used for file discovery)
+
     Returns:
         AnalysisSummary with all available information
     """
+    # We need the DB record for sample_name/mode/status, so run_uuid is still required
+    # for generate_analysis_summary.  work_dir_path is passed through for file ops.
+    if not run_uuid:
+        raise ValueError("run_uuid is required for generate_analysis_summary")
     with get_db() as db:
         job = db.query(DogmeJob).filter(DogmeJob.run_uuid == run_uuid).first()
         if not job:
             raise ValueError(f"Job not found: {run_uuid}")
-        
+
+        _wdp = work_dir_path or (job.nextflow_work_dir or job.output_directory or None)
+
         # Categorize all files
-        all_file_summary = categorize_files(run_uuid)
+        all_file_summary = categorize_files(run_uuid, work_dir_path=_wdp)
         
         # Filter to key result files only for display
         key_file_patterns = []
@@ -472,13 +581,13 @@ def generate_analysis_summary(run_uuid: str) -> AnalysisSummary:
         parsed_reports = {}
         
         # Look for common report files
-        work_dir = get_job_work_dir(run_uuid)
+        work_dir = resolve_work_dir(work_dir=_wdp, run_uuid=run_uuid)
         if work_dir:
             # Parse QC summary if exists
             qc_files = [f for f in file_summary.csv_files if 'qc_summary' in f.name.lower() or 'qc' in f.name.lower()]
             if qc_files:
                 try:
-                    qc_data = parse_csv_file(run_uuid, qc_files[0].path, max_rows=100)
+                    qc_data = parse_csv_file(run_uuid, qc_files[0].path, max_rows=100, work_dir_path=_wdp)
                     parsed_reports['qc_summary'] = qc_data.dict()
                 except Exception:
                     pass
@@ -487,7 +596,7 @@ def generate_analysis_summary(run_uuid: str) -> AnalysisSummary:
             stats_files = [f for f in file_summary.csv_files if 'stats' in f.name.lower() or 'flagstat' in f.name.lower()]
             if stats_files:
                 try:
-                    stats_data = parse_csv_file(run_uuid, stats_files[0].path, max_rows=100)
+                    stats_data = parse_csv_file(run_uuid, stats_files[0].path, max_rows=100, work_dir_path=_wdp)
                     parsed_reports['stats'] = stats_data.dict()
                 except Exception:
                     pass
@@ -498,7 +607,7 @@ def generate_analysis_summary(run_uuid: str) -> AnalysisSummary:
                 gene_files = [f for f in file_summary.csv_files if 'gene_counts' in f.name.lower() or 'counts' in f.name.lower() and 'gene' in f.name.lower()]
                 if gene_files:
                     try:
-                        gene_data = parse_csv_file(run_uuid, gene_files[0].path, max_rows=50)
+                        gene_data = parse_csv_file(run_uuid, gene_files[0].path, max_rows=50, work_dir_path=_wdp)
                         parsed_reports['gene_counts'] = gene_data.dict()
                     except Exception:
                         pass
@@ -507,7 +616,7 @@ def generate_analysis_summary(run_uuid: str) -> AnalysisSummary:
                 transcript_files = [f for f in file_summary.csv_files if 'transcript_counts' in f.name.lower() or 'isoform' in f.name.lower()]
                 if transcript_files:
                     try:
-                        transcript_data = parse_csv_file(run_uuid, transcript_files[0].path, max_rows=50)
+                        transcript_data = parse_csv_file(run_uuid, transcript_files[0].path, max_rows=50, work_dir_path=_wdp)
                         parsed_reports['transcript_counts'] = transcript_data.dict()
                     except Exception:
                         pass

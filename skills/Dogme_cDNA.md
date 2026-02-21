@@ -107,8 +107,8 @@ If the user needs modification data, they should re-run with direct RNA (for RNA
 
 ## Quick Workflow: Parse a File
 
-**When asked to parse a file, check for `[CONTEXT: run_uuid=...]` in the user message first.**
-The system injects the UUID automatically — use it directly in your DATA_CALL, don't search for it.
+**When asked to parse a file, check for `[CONTEXT: work_dir=...]` in the user message first.**
+The system injects the workflow directory automatically — use it directly in your DATA_CALL, don't search for it.
 
 Follow the comprehensive workflow in the included guide: `[INCLUDED REFERENCE: DOGME_QUICK_WORKFLOW_GUIDE.md]`
 
@@ -126,9 +126,9 @@ That guide includes:
 ### cDNA-Specific Notes
 
 **Files to search for:**
-- Gene counts: `find_file(run_uuid=..., file_name=gene_counts)` or `final_stats`
-- Transcript info: `find_file(run_uuid=..., file_name=transcript)` or `isoform`
-- Alignment stats: `find_file(run_uuid=..., file_name=stats)` or `flagstat`
+- Gene counts: `find_file(work_dir=..., file_name=gene_counts)` or `final_stats`
+- Transcript info: `find_file(work_dir=..., file_name=transcript)` or `isoform`
+- Alignment stats: `find_file(work_dir=..., file_name=stats)` or `flagstat`
 
 **Typical directories:**
 - `annot/` — final annotations and counts
@@ -150,7 +150,7 @@ When user says "analyze the results":
 
 **STEP 1:** Get the analysis summary
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **STEP 2:** Present filtered file summary

@@ -28,7 +28,7 @@ If the user's message contains any of these patterns, switch to `analyze_job_res
 - "read the output"
 - "parse the csv"
 - "check the bed file"
-- And the conversation mentions a completed job or run_uuid
+- And the conversation mentions a completed job or workflow directory
 
 **Example:**
 User: "Can you give me a QC report?"
@@ -40,9 +40,13 @@ Agent: "[[SKILL_SWITCH_TO: analyze_job_results]]"
 
 **DO NOT include [[APPROVAL_NEEDED]] tag until ALL required information is collected from the user.**
 
+⚠️ **DO NOT describe your reasoning steps.** Never output "STEP 1: Review conversation history" or similar. Just ACT — check what's missing and respond directly.
+
+⚠️ **EXTRACT from the original request.** If the user says "CDNA sample" or "mouse sample", the `sample_type` and organism are ALREADY PROVIDED. Do not ask again. The word "CDNA" anywhere in the conversation means `sample_type=CDNA`. The word "mouse" means `reference_genome=mm39`. The word "human" means `reference_genome=GRCh38`.
+
 ### Step 1: Check What Information is Missing
 
-Review the conversation history to see what information the user has already provided.
+Review the conversation history AND the `[CONTEXT]` line (if present) to see what information the user has already provided. The `[CONTEXT]` line lists parameters that have ALREADY been extracted — treat them as collected.
 
 ### Step 2: Ask ONE Question at a Time
 
@@ -93,6 +97,7 @@ I will submit this to the Dogme {sample_type} pipeline for analysis.
 
 ## Example Conversation Flow
 
+**Example 1: Minimal info provided (ask step by step)**
 ```
 User: "I want to analyze a local mouse sample"
 
@@ -111,13 +116,6 @@ Agent: "What type of sequencing data is this?
 
 User: "DNA"
 
-Agent: "Which reference genome should be used?
-- mm39 (mouse)
-- GRCh38 (human)
-- Other (please specify)"
-
-User: "mm39"
-
 Agent: "I have all the information needed:
 
 📋 **Sample Name:** liver_rep1
@@ -129,6 +127,23 @@ I will submit this to the Dogme DNA pipeline for analysis.
 
 [[APPROVAL_NEEDED]]"
 ```
+
+**Example 2: Most info in the first message — only ask what's truly missing**
+```
+User: "Analyze the local mouse CDNA sample called Jamshid at /media/data/CDNA/pod5"
+
+Agent: "I have all the information needed:
+
+📋 **Sample Name:** Jamshid
+📁 **Data Path:** /media/data/CDNA/pod5
+🧬 **Data Type:** CDNA
+🔬 **Reference Genome:** mm39
+
+I will submit this to the Dogme CDNA pipeline for analysis.
+
+[[APPROVAL_NEEDED]]"
+```
+(Here, "CDNA" → sample_type, "mouse" → mm39, "called Jamshid" → sample_name, path is explicit. ALL 4 fields are present — go straight to approval.)
 
 ## Important Rules
 

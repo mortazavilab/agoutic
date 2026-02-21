@@ -24,8 +24,18 @@ AGOUTIC_CODE/
 AGOUTIC_DATA/
 ├── database/
 │   └── agoutic_v23.sqlite    → DB_FILE
-├── server3_work/             → SERVER3_WORK_DIR
-└── server3_logs/             → SERVER3_LOGS_DIR
+├── server3_work/             → SERVER3_WORK_DIR (legacy flat jobs)
+├── server3_logs/             → SERVER3_LOGS_DIR
+└── users/                    → Per-user project directories
+    └── {username}/
+        └── {project-slug}/
+            ├── data/             # Uploaded input data
+            ├── workflow1/        # First job output
+            │   ├── annot/        # Annotations, stats, counts
+            │   ├── bams/         # BAM alignment files
+            │   ├── bedMethyl/    # Methylation output
+            │   └── fastqs/       # FASTQ files
+            └── workflow2/        # Second job (auto-incremented)
 ```
 
 ## Configuration Scenarios
@@ -125,6 +135,21 @@ python -c "from server3.config import AGOUTIC_CODE, AGOUTIC_DATA; print(f'{AGOUT
 # Check directories can be created
 mkdir -p $AGOUTIC_DATA/database $AGOUTIC_DATA/server3_work $AGOUTIC_DATA/server3_logs
 ```
+
+## Workflow Browsing Commands
+
+Once a Dogme job completes, you can browse and parse result files via the chat interface:
+
+| Command | What it does |
+|---|---|
+| `list workflows` | Lists all workflow folders in the project |
+| `list files` | Lists files in the current (most recent) workflow |
+| `list files in annot` | Lists files in a subfolder of the current workflow |
+| `list files in workflow2/annot` | Lists files in a specific workflow's subfolder |
+| `parse annot/File.csv` | Finds and parses a CSV file by relative path |
+| `parse workflow2/annot/File.csv` | Parses a file in a specific workflow |
+
+These commands are handled by Server 1's safety net (`_auto_generate_data_calls`) which generates `list_job_files`, `find_file`, and `parse_csv_file` Server 4 MCP tool calls automatically.
 
 ## Documentation
 

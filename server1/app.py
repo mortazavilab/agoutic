@@ -168,8 +168,12 @@ _SEARCH_STYLE_PARAMS = frozenset(
 # Well-known human cell lines — used only for defaulting organism=Homo sapiens.
 # The misrouting guard itself is structural (any non-ENCSR accession redirects).
 _HUMAN_BIOSAMPLES = frozenset([
-    "k562", "gm12878", "hela", "hela-s3", "hepg2", "hek293", "jurkat",
-    "mcf-7", "mcf7", "a549", "u2os", "imr90", "h1", "h9",
+    "k562", "gm12878", "hela", "hela-s3", "hepg2", "hek293", "hek293t",
+    "jurkat", "mcf-7", "mcf7", "a549", "u2os", "imr90", "imr-90",
+    "h1", "h9", "hff", "hff-myc", "wtc-11", "wtc11", "lncap", "panc-1",
+    "panc1", "sk-n-sh", "sknsh", "caco-2", "caco2", "sh-sy5y", "shsy5y",
+    "hl-60", "hl60", "thp-1", "thp1", "u937", "nb4", "kasumi-1",
+    "raji", "namalwa", "rpmi-8226", "mm.1s",
 ])
 # Pattern for a valid ENCODE experiment accession: ENCSR + 6 uppercase alphanumeric chars
 _ENCSR_PATTERN = re.compile(r'^ENCSR[A-Z0-9]{6}$', re.IGNORECASE)
@@ -376,6 +380,129 @@ def _correct_tool_routing(tool: str, params: dict, user_message: str,
     return tool, params
 
 
+def _validate_encode_params(tool: str, params: dict, user_message: str) -> dict:
+    """
+    Last-chance fix for ENCODE tool params before the MCP call.
+
+    Common LLM mistakes this catches:
+    - search_by_biosample called without search_term (required) but with
+      assay_title containing the biosample name (e.g. assay_title=MEL).
+    - organism=Homo sapiens/Mus musculus added when the user never
+      mentioned a species — wrong organism filter → zero results.
+    """
+    params = dict(params)  # shallow copy
+
+    # --- Fix 1: missing search_term in search_by_biosample ---
+    if tool == "search_by_biosample" and "search_term" not in params:
+        # Try to salvage from assay_title if it doesn't look like an assay
+        assay_val = params.get("assay_title", "")
+        if assay_val and not _looks_like_assay(assay_val):
+            params["search_term"] = assay_val
+            del params["assay_title"]
+            logger.warning("Moved assay_title to search_term (was biosample, not assay)",
+                          search_term=assay_val)
+        else:
+            # Try to extract from user message
+            extracted = _extract_encode_search_term(user_message)
+            if extracted:
+                params["search_term"] = extracted
+                logger.warning("Injected missing search_term from user message",
+                              search_term=extracted)
+
+    # --- Fix 2: strip organism unless user explicitly mentioned it ---
+    if "organism" in params:
+        msg_lower = user_message.lower()
+        _explicit_organism = any(kw in msg_lower for kw in (
+            "mouse", "human", "homo sapiens", "mus musculus",
+            "drosophila", "c. elegans", "worm", "fly",
+        ))
+        if not _explicit_organism:
+            removed = params.pop("organism")
+            logger.info("Stripped auto-organism (user didn't request it)",
+                       removed_organism=removed)
+
+    return params
+
+
+def _validate_server4_params(
+    tool: str, params: dict, user_message: str,
+    conversation_history: list | None = None,
+    history_blocks: list | None = None,
+) -> dict:
+    """
+    Always force *work_dir* from conversation context and strip unknown params.
+
+    The LLM cannot be trusted to produce the correct work_dir — it may
+    emit a placeholder (``/work_dir``, ``{work_dir}``), an invented path,
+    or the project-level dir instead of a workflow dir.  We therefore
+    always resolve the real work_dir from history and override whatever
+    the LLM supplied.
+
+    Also strips parameters that the Server 4 MCP tool doesn't accept
+    (e.g. ``sample=Jamshid``) to prevent Pydantic validation errors.
+    """
+    params = dict(params)  # shallow copy
+
+    # --- Strip unknown params for each tool ---
+    _KNOWN_PARAMS: dict[str, set[str]] = {
+        "list_job_files": {"work_dir", "run_uuid", "extensions", "compact", "max_depth"},
+        "find_file": {"file_name", "work_dir", "run_uuid"},
+        "read_file_content": {"file_path", "work_dir", "run_uuid", "preview_lines"},
+        "parse_csv_file": {"file_path", "work_dir", "run_uuid", "max_rows"},
+        "parse_bed_file": {"file_path", "work_dir", "run_uuid", "max_records"},
+        "get_analysis_summary": {"run_uuid", "work_dir"},
+        "categorize_job_files": {"work_dir", "run_uuid"},
+    }
+    allowed = _KNOWN_PARAMS.get(tool)
+    if allowed:
+        _extra = set(params) - allowed
+        if _extra:
+            logger.warning("Stripping unknown Server 4 params",
+                          tool=tool, extra_params=sorted(_extra))
+            params = {k: v for k, v in params.items() if k in allowed}
+
+    # --- Force work_dir from context ---
+    ctx = _extract_job_context_from_history(
+        conversation_history, history_blocks=history_blocks
+    )
+    real_wd = ctx.get("work_dir", "")
+
+    # If multiple workflows, pick the matching one by filename/sample
+    if not real_wd and ctx.get("workflows"):
+        real_wd = ctx["workflows"][-1].get("work_dir", "")
+    workflows = ctx.get("workflows", [])
+    if len(workflows) > 1:
+        _fname = params.get("file_name", "").lower()
+        for wf in workflows:
+            sn = wf.get("sample_name", "").lower()
+            if sn and (_fname and sn in _fname):
+                real_wd = wf["work_dir"]
+                break
+
+    llm_wd = params.get("work_dir", "")
+    if real_wd:
+        # "list workflows" needs the *project* dir, not a workflow dir.
+        if tool == "list_job_files" and re.search(
+            r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',
+            user_message, re.IGNORECASE,
+        ):
+            real_wd = real_wd.rstrip("/").rsplit("/", 1)[0]
+            params["max_depth"] = 1  # only top-level dirs
+
+        if real_wd != llm_wd:
+            logger.warning(
+                "Overriding LLM work_dir with context value",
+                llm_value=llm_wd, resolved=real_wd, tool=tool,
+            )
+        params["work_dir"] = real_wd
+    elif not llm_wd:
+        logger.warning(
+            "No work_dir in context or LLM params", tool=tool,
+        )
+
+    return params
+
+
 def _find_experiment_for_file(file_accession: str,
                               conversation_history: list | None) -> str | None:
     """
@@ -491,8 +618,64 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
     return None
 
 
+# Stop-words for the ENCODE search-term extractor.  These are stripped before
+# identifying the likely biosample / search term from the user's query.
+_ENCODE_STOP_WORDS = frozenset([
+    "how", "many", "much", "does", "do", "did", "is", "are", "was", "were",
+    "what", "which", "where", "the", "a", "an", "of", "in", "for", "on",
+    "and", "or", "to", "with", "from", "by", "at", "its", "it", "this",
+    "that", "there", "have", "has", "had", "can", "could", "will", "would",
+    "show", "me", "give", "get", "find", "search", "list", "tell", "about",
+    "encode", "experiments", "experiment", "data", "results", "available",
+    "portal", "database", "total", "count", "number", "please", "i", "want",
+    "need", "look", "up", "any", "all", "some",
+    # Referential / pronoun words — should not be treated as search terms
+    "them", "they", "those", "these", "their", "its", "ones", "samples",
+])
+
+
+def _extract_encode_search_term(user_message: str) -> str | None:
+    """
+    Extract the most likely biosample / search term from an ENCODE query.
+
+    Uses pattern matching first (e.g. "how many X experiments"), then falls
+    back to stripping stop-words and returning the remaining content word(s).
+    Returns None only if nothing usable can be extracted.
+    """
+    msg = user_message.strip()
+
+    # Pattern 1: "how many <TERM> experiments"
+    m = re.search(r'how many\s+(.+?)\s+experiments?', msg, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    # Pattern 2: "search encode for <TERM>"  /  "search for <TERM>"
+    m = re.search(r'search\s+(?:encode\s+)?for\s+(.+?)(?:\s+experiments?|\s*$)', msg, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    # Pattern 3: "<TERM> experiments in encode"
+    m = re.search(r'(.+?)\s+experiments?\s+(?:in|on|from)\s+encode', msg, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    # Pattern 4: "does encode have <TERM>"
+    m = re.search(r'does\s+encode\s+have\s+(.+?)(?:\s+experiments?|\s*\??\s*$)', msg, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    # Fallback: strip stop-words and return the remaining token(s)
+    tokens = re.findall(r'[A-Za-z0-9][\w.\-]*', msg)
+    content = [t for t in tokens if t.lower() not in _ENCODE_STOP_WORDS]
+    if content:
+        return " ".join(content)
+
+    return None
+
+
 def _auto_generate_data_calls(user_message: str, skill_key: str,
-                              conversation_history: list | None = None) -> list[dict]:
+                              conversation_history: list | None = None,
+                              history_blocks: list | None = None) -> list[dict]:
     """
     Safety net: if the LLM failed to generate DATA_CALL tags, detect obvious
     patterns in the user's message and auto-generate the appropriate tool calls.
@@ -505,16 +688,28 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     calls = []
     msg_lower = user_message.lower()
 
-    # Common cell lines and tissues (shared across detection paths)
-    biosamples = {
-        "k562": ("K562", "Homo sapiens"),
-        "gm12878": ("GM12878", "Homo sapiens"),
-        "hela": ("HeLa-S3", "Homo sapiens"),
-        "hepg2": ("HepG2", "Homo sapiens"),
-        "c2c12": ("C2C12", "Mus musculus"),
-        "liver": ("liver", None),
-        "brain": ("brain", None),
-        "heart": ("heart", None),
+    # Organism lookup for KNOWN biosamples.  This is NOT exhaustive — it
+    # exists only so we can add an organism= hint when we recognise the term.
+    # Unknown terms still get sent to the API (see catch-all at the bottom).
+    _KNOWN_ORGANISMS: dict[str, str] = {
+        # Human
+        "k562": "Homo sapiens", "gm12878": "Homo sapiens",
+        "hela": "Homo sapiens", "hepg2": "Homo sapiens",
+        "hek293": "Homo sapiens", "a549": "Homo sapiens",
+        "mcf-7": "Homo sapiens", "mcf7": "Homo sapiens",
+        "jurkat": "Homo sapiens", "imr-90": "Homo sapiens",
+        "imr90": "Homo sapiens", "u2os": "Homo sapiens",
+        "hff": "Homo sapiens", "wtc-11": "Homo sapiens",
+        "lncap": "Homo sapiens", "panc-1": "Homo sapiens",
+        "sk-n-sh": "Homo sapiens", "h1": "Homo sapiens",
+        "h9": "Homo sapiens", "caco-2": "Homo sapiens",
+        "sh-sy5y": "Homo sapiens",
+        # Mouse
+        "c2c12": "Mus musculus", "nih3t3": "Mus musculus",
+        "mef": "Mus musculus", "mel": "Mus musculus",
+        "es-e14": "Mus musculus", "mesc": "Mus musculus",
+        "g1e": "Mus musculus", "ch12": "Mus musculus",
+        "v6.5": "Mus musculus",
     }
 
     # --- ENCODE patterns ---
@@ -589,12 +784,25 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 detected_assay = canonical
                 break
 
-        # Check current message first for explicit biosample mentions
-        for keyword, (term, organism) in biosamples.items():
+        # --- Strategy: try specific detections first, then catch-all ---
+        # 1. Known biosample (organism hint available)
+        # 2. Referential follow-up from conversation history
+        # 3. Assay-only query
+        # 4. Known target protein / histone mark
+        # 5. CATCH-ALL: extract unknown term and send to search_by_biosample
+
+        # 1. Check for a known biosample (lets us add organism= hint)
+        for keyword, organism in _KNOWN_ORGANISMS.items():
             if keyword in msg_lower:
-                params = {"search_term": term}
-                if organism:
-                    params["organism"] = organism
+                # Grab the original-case version from the user message
+                _orig_m = re.search(rf'\b({re.escape(keyword)})\b', user_message, re.IGNORECASE)
+                _search_term = _orig_m.group(1) if _orig_m else keyword.upper()
+                params: dict[str, str] = {"search_term": _search_term}
+                # Only add organism if user explicitly mentioned species
+                if "mouse" in msg_lower or "mus musculus" in msg_lower:
+                    params["organism"] = "Mus musculus"
+                elif "human" in msg_lower or "homo sapiens" in msg_lower:
+                    params["organism"] = "Homo sapiens"
                 if detected_assay:
                     params["assay_title"] = detected_assay
                 calls.append({
@@ -603,19 +811,16 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 })
                 break
 
-        # If no biosample in current message but user used referential words
-        # ("list of them", "show me those", assay-filter follow-ups, etc.),
-        # scan conversation history for previous biosample term and re-query.
-        # This handles: "how many long read RNA-seq?" or "give me their accessions"
-        # after a prior K562 search.
+        # 2. Referential follow-up — scan history for previous biosample term
         if not calls and (_has_referential or detected_assay) and conversation_history:
             for hist_msg in reversed(conversation_history[-6:]):
                 content_lower = hist_msg.get("content", "").lower()
-                for keyword, (term, organism) in biosamples.items():
+                for keyword, organism in _KNOWN_ORGANISMS.items():
                     if keyword in content_lower:
-                        params = {"search_term": term}
-                        if organism:
-                            params["organism"] = organism
+                        _orig_m = re.search(rf'\b({re.escape(keyword)})\b',
+                                            hist_msg.get("content", ""), re.IGNORECASE)
+                        _search_term = _orig_m.group(1) if _orig_m else keyword.upper()
+                        params = {"search_term": _search_term}
                         if detected_assay:
                             params["assay_title"] = detected_assay
                         calls.append({
@@ -635,36 +840,141 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 "params": {"assay_title": detected_assay},
             })
 
+        # 4. Target-based query: no biosample, no assay, but a known target protein
+        # e.g. "search ENCODE for CTCF" or "H3K27ac experiments"
+        if not calls and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+            _known_targets = {
+                "ctcf", "polr2a", "ep300", "max", "myc", "jun", "fos",
+                "rest", "yy1", "tcf7l2", "gata1", "gata2", "spi1",
+                "cebpb", "stat1", "stat3", "irf1", "nrf1", "rad21",
+                "smc3", "nipbl", "znf143", "brd4", "mediator",
+                "h3k27ac", "h3k4me3", "h3k4me1", "h3k36me3",
+                "h3k27me3", "h3k9me3", "h3k79me2", "h2afz", "h4k20me1",
+            }
+            # Check if user mentions a known target (word-boundary match)
+            for _tgt in _known_targets:
+                if re.search(rf'\b{re.escape(_tgt)}\b', msg_lower):
+                    # Use original case from user message for the target value
+                    _tgt_match = re.search(rf'\b({re.escape(_tgt)})\b', user_message, re.IGNORECASE)
+                    _tgt_val = _tgt_match.group(1) if _tgt_match else _tgt.upper()
+                    calls.append({
+                        "source_type": "consortium", "source_key": "encode",
+                        "tool": "search_by_target",
+                        "params": {"target": _tgt_val},
+                    })
+                    break
+
+        # 5. CATCH-ALL: nothing matched above but we're on an ENCODE skill.
+        #    Extract the most likely search term from the user's message and
+        #    send it to search_by_biosample.  Let the ENCODE API decide if
+        #    the term is valid — we can't enumerate every cell line / tissue.
+        if not calls and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+            _extracted = _extract_encode_search_term(user_message)
+            if _extracted:
+                params = {"search_term": _extracted}
+                # Infer organism from context words
+                if "mouse" in msg_lower or "mus musculus" in msg_lower:
+                    params["organism"] = "Mus musculus"
+                elif "human" in msg_lower or "homo sapiens" in msg_lower:
+                    params["organism"] = "Homo sapiens"
+                if detected_assay:
+                    params["assay_title"] = detected_assay
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "search_by_biosample", "params": params,
+                })
+                logger.info("Catch-all: extracted unknown search term for ENCODE",
+                           search_term=_extracted)
+
     # --- Dogme / Server4 file-parsing patterns ---
     # When in a Dogme analysis skill and user asks to parse/show a file,
     # auto-generate find_file + parse/read calls so the LLM gets real data.
     dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
                     "analyze_job_results"}
     if not calls and skill_key in dogme_skills:
+        job_context = _extract_job_context_from_history(
+            conversation_history, history_blocks=history_blocks)
+        work_dir = job_context.get("work_dir", "")
+        run_uuid = job_context.get("run_uuid", "")
+        workflows = job_context.get("workflows", [])
+
+        # --- "list workflows" command ---
+        if re.search(r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b', msg_lower):
+            # List subdirectories in the project base dir.
+            # Project dir = parent of work_dir.
+            if work_dir:
+                _project_dir = work_dir.rstrip("/").rsplit("/", 1)[0]
+                calls.append({
+                    "source_type": "service", "source_key": "server4",
+                    "tool": "list_job_files",
+                    "params": {"work_dir": _project_dir, "max_depth": 1},
+                })
+            return calls
+
+        # --- "list files" / "list files in <path>" command ---
+        _list_files_m = re.search(
+            r'\b(?:list|show|what)\s+(?:the\s+)?files?\b'
+            r'(?:\s+(?:in|under|at|of)\s+(.+?))?\s*$',
+            user_message, re.IGNORECASE,
+        )
+        if _list_files_m:
+            _subpath = (_list_files_m.group(1) or "").strip().strip('"\'')
+            _target_wd = _resolve_workflow_path(
+                _subpath, work_dir, workflows,
+            )
+            if _target_wd:
+                calls.append({
+                    "source_type": "service", "source_key": "server4",
+                    "tool": "list_job_files",
+                    "params": {"work_dir": _target_wd},
+                })
+            return calls
+
+        # --- "set workflow" / "use workflow" command ---
+        # Handled conversationally — the LLM picks up which workflow to use.
+        # We just inject context (done by _inject_job_context).
+
+        # --- File-parse / read patterns ---
         parse_keywords = ["parse", "show me", "read", "open", "display",
                           "view", "get", "what's in", "contents of"]
         if any(kw in msg_lower for kw in parse_keywords):
-            # Extract filename from user message
-            # Patterns: "parse filename.csv", "show me filename.txt", etc.
-            file_pattern = r'(?:parse|show\s+me|read|open|display|view|get)\s+(?:the\s+)?(?:file\s+)?(\S+\.(?:csv|tsv|bed|txt|log|html))'
+            # Extract filename / relative path from user message.
+            # Handles: "parse annot/File.csv", "parse workflow2/annot/File.csv",
+            #          "parse File.csv", "show me the file File.csv"
+            file_pattern = (
+                r'(?:parse|show\s+me|read|open|display|view|get)'
+                r'\s+(?:the\s+)?(?:file\s+)?'
+                r'(\S+\.(?:csv|tsv|bed|txt|log|html))'
+            )
             file_match = re.search(file_pattern, msg_lower)
             if file_match:
                 filename = file_match.group(1)
-                # Also try to grab the original-case version from the raw message
+                # Grab the original-case version from the raw message
                 file_match_orig = re.search(file_pattern, user_message, re.IGNORECASE)
                 if file_match_orig:
                     filename = file_match_orig.group(1)
 
-                # Get UUID from conversation history
-                job_context = _extract_job_context_from_history(conversation_history)
-                run_uuid = job_context.get("run_uuid")
-                if run_uuid:
-                    # Step 1: find_file to locate the full relative path
+                # Resolve the path: could be just a filename, a subpath
+                # (annot/File.csv), or workflow-prefixed (workflow2/annot/File.csv).
+                _resolved_wd, _resolved_file = _resolve_file_path(
+                    filename, work_dir, workflows,
+                )
+                if not _resolved_wd and work_dir:
+                    _resolved_wd = work_dir
+                if not _resolved_wd and run_uuid:
+                    _resolved_wd = None  # will use run_uuid fallback
+
+                if _resolved_wd or run_uuid:
+                    _params: dict = {"file_name": _resolved_file}
+                    if _resolved_wd:
+                        _params["work_dir"] = _resolved_wd
+                    else:
+                        _params["run_uuid"] = run_uuid
                     calls.append({
                         "source_type": "service", "source_key": "server4",
                         "tool": "find_file",
-                        "params": {"run_uuid": run_uuid, "file_name": filename},
-                        "_chain": _pick_file_tool(filename),  # follow-up tool
+                        "params": _params,
+                        "_chain": _pick_file_tool(_resolved_file),
                     })
 
     return calls
@@ -681,42 +991,145 @@ def _pick_file_tool(filename: str) -> str:
         return "read_file_content"
 
 
-def _extract_job_context_from_history(conversation_history: list | None) -> dict:
+def _resolve_workflow_path(
+    subpath: str,
+    default_work_dir: str,
+    workflows: list[dict],
+) -> str:
     """
-    Scan conversation history for the most recent job UUID and work directory.
-    Returns a dict with 'run_uuid' and optionally 'work_dir' keys.
+    Resolve a user-provided subpath to an absolute directory for `list_job_files`.
+
+    Handles:
+      - Empty subpath → default_work_dir (current workflow)
+      - "workflow2" → that workflow's work_dir
+      - "workflow2/annot" → that workflow's work_dir + "/annot"
+      - "annot" → default_work_dir + "/annot"
+
+    Returns the absolute directory path, or default_work_dir if resolution fails.
     """
-    context = {}
+    if not subpath:
+        return default_work_dir
+
+    # Split the subpath to check if the first component is a known workflow
+    parts = subpath.replace("\\", "/").split("/", 1)
+    first = parts[0].lower()
+    remainder = parts[1] if len(parts) > 1 else ""
+
+    # Check if first component matches a workflow folder name
+    for wf in workflows:
+        wf_dir = wf.get("work_dir", "")
+        wf_folder = wf_dir.rstrip("/").rsplit("/", 1)[-1].lower() if wf_dir else ""
+        if first == wf_folder:
+            base = wf_dir.rstrip("/")
+            return f"{base}/{remainder}" if remainder else base
+
+    # Not a workflow name — treat entire subpath as relative to default_work_dir
+    if default_work_dir:
+        return f"{default_work_dir.rstrip('/')}/{subpath}"
+
+    return default_work_dir
+
+
+def _resolve_file_path(
+    user_path: str,
+    default_work_dir: str,
+    workflows: list[dict],
+) -> tuple[str, str]:
+    """
+    Resolve a user-provided file path (may include workflow prefix or subdir)
+    into (work_dir, filename_or_relpath) for find_file / parse calls.
+
+    Handles:
+      - "File.csv"                           → (default_work_dir, "File.csv")
+      - "annot/File.csv"                     → (default_work_dir, "File.csv")
+                                                 (find_file searches recursively)
+      - "workflow2/annot/File.csv"           → (workflow2_dir, "File.csv")
+
+    Returns (resolved_work_dir, filename).  The filename is always just the
+    basename so that find_file's recursive search works regardless of subdir.
+    """
+    user_path = user_path.replace("\\", "/").strip("/")
+    parts = user_path.split("/")
+
+    # If there are path components, check if the first one is a workflow folder
+    if len(parts) > 1:
+        first = parts[0].lower()
+        for wf in workflows:
+            wf_dir = wf.get("work_dir", "")
+            wf_folder = wf_dir.rstrip("/").rsplit("/", 1)[-1].lower() if wf_dir else ""
+            if first == wf_folder:
+                # Match by sample name too for multi-workflow disambiguation
+                return wf_dir, parts[-1]
+
+        # Also try matching by sample name
+        for wf in workflows:
+            sn = wf.get("sample_name", "").lower()
+            if sn and sn in parts[-1].lower():
+                return wf.get("work_dir", default_work_dir), parts[-1]
+
+    return default_work_dir, parts[-1]
+
+
+def _extract_job_context_from_history(
+    conversation_history: list | None,
+    history_blocks: list | None = None,
+) -> dict:
+    """
+    Scan conversation / block history for job context.
+
+    Returns a dict with:
+      - 'work_dir'  : str — work directory of the *most recent* job
+      - 'run_uuid'  : str — run UUID of the most recent job (internal only)
+      - 'workflows' : list[dict] — all workflows in the project
+           Each dict: {work_dir, sample_name, mode, run_uuid}
+    """
+    context: dict = {}
+
+    # --- Primary source: EXECUTION_JOB blocks (authoritative) -----------
+    workflows: list[dict] = []
+    if history_blocks:
+        for blk in history_blocks:
+            if blk.type != "EXECUTION_JOB":
+                continue
+            _pl = get_block_payload(blk)
+            _wd = _pl.get("work_directory", "")
+            _uuid = _pl.get("run_uuid", "")
+            if _wd or _uuid:
+                workflows.append({
+                    "work_dir": _wd,
+                    "sample_name": _pl.get("sample_name", ""),
+                    "mode": _pl.get("mode", ""),
+                    "run_uuid": _uuid,
+                })
+        if workflows:
+            latest = workflows[-1]
+            context["work_dir"] = latest["work_dir"]
+            context["run_uuid"] = latest["run_uuid"]
+            context["workflows"] = workflows
+            return context
+
+    # --- Fallback: parse conversation text for UUID/work_dir (legacy) ----
     if not conversation_history:
         return context
 
     uuid_pattern = r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
-
-    # Scan from most recent to oldest
     for msg in reversed(conversation_history):
         content = msg.get("content", "")
         if not content:
             continue
-
-        # Look for UUID — prefer explicit "UUID:" or "run_uuid" references
         if "run_uuid" not in context:
-            # Priority patterns (most specific first)
             explicit_match = re.search(
                 r'(?:use UUID|Run UUID|run_uuid|UUID)[:\s=]+\s*(' + uuid_pattern + r')',
                 content, re.IGNORECASE
             )
             if explicit_match:
                 context["run_uuid"] = explicit_match.group(1).lower()
-
         if "work_dir" not in context:
             work_dir_match = re.search(r'Work Directory:\s*(\S+)', content)
             if work_dir_match:
                 context["work_dir"] = work_dir_match.group(1).strip()
-
         if "run_uuid" in context and "work_dir" in context:
             break
-
-    # Fallback: if no explicit UUID match, grab the most recent UUID from history
     if "run_uuid" not in context:
         for msg in reversed(conversation_history):
             content = msg.get("content", "")
@@ -724,7 +1137,6 @@ def _extract_job_context_from_history(conversation_history: list | None) -> dict
             if uuid_matches:
                 context["run_uuid"] = uuid_matches[-1].lower()
                 break
-
     return context
 
 
@@ -748,16 +1160,42 @@ def _inject_job_context(user_message: str, active_skill: str,
     if not conversation_history:
         return user_message, {}, {}
 
-    # --- Dogme skills: inject UUID and work directory ---
+    # --- Dogme skills: inject workflow directory paths ---
     dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
                     "analyze_job_results"}
     if active_skill in dogme_skills:
-        context = _extract_job_context_from_history(conversation_history)
+        context = _extract_job_context_from_history(
+            conversation_history, history_blocks=history_blocks
+        )
+        workflows = context.get("workflows", [])
+
+        # Build [CONTEXT] line(s) — list ALL workflows so the LLM can
+        # reference files from any workflow in the project.
         parts = []
-        if context.get("run_uuid"):
+        if workflows:
+            if len(workflows) == 1:
+                wf = workflows[0]
+                parts.append(f"work_dir={wf['work_dir']}")
+                if wf.get("sample_name"):
+                    parts.append(f"sample={wf['sample_name']}")
+            else:
+                # Multiple workflows — enumerate them
+                wf_lines = []
+                for i, wf in enumerate(workflows, 1):
+                    _folder = wf["work_dir"].rstrip("/").rsplit("/", 1)[-1] if wf["work_dir"] else f"workflow{i}"
+                    _label = f"{_folder} (sample={wf.get('sample_name', '?')}, mode={wf.get('mode', '?')}): work_dir={wf['work_dir']}"
+                    wf_lines.append(_label)
+                parts.append("workflows=[\n  " + "\n  ".join(wf_lines) + "\n]")
+                # Also note which one is the most recent / active
+                latest = workflows[-1]
+                _latest_folder = latest["work_dir"].rstrip("/").rsplit("/", 1)[-1] if latest["work_dir"] else "?"
+                parts.append(f"active_workflow={_latest_folder}")
+        elif context.get("work_dir"):
+            # Fallback: single work_dir from conversation text
+            parts.append(f"work_dir={context['work_dir']}")
+        elif context.get("run_uuid"):
+            # Legacy fallback
             parts.append(f"run_uuid={context['run_uuid']}")
-            if context.get("work_dir"):
-                parts.append(f"work_dir={context['work_dir']}")
 
         # Check for an explicit DF reference (e.g. "plot a histogram of DF1").
         # If found, look up the DataFrame from history and inject its metadata so
@@ -798,12 +1236,14 @@ def _inject_job_context(user_message: str, active_skill: str,
     # concise [CONTEXT] line so the LLM doesn't have to re-parse history.
     if active_skill == "analyze_local_sample":
         _collected: dict[str, str] = {}
+        # Field names MUST match the skill doc (Local_Sample_Intake.md):
+        #   sample_name, path, sample_type, reference_genome
         _field_patterns = {
             "sample_name": re.compile(
                 r'(?:sample\s*name|name)[:\s*]+([^\n*,]+)', re.IGNORECASE),
-            "data_path": re.compile(
+            "path": re.compile(
                 r'(?:data\s*path|path|directory)[:\s*]+(/[^\n*,]+)', re.IGNORECASE),
-            "data_type": re.compile(
+            "sample_type": re.compile(
                 r'(?:data\s*type|sample\s*type|type|mode)[:\s*]+'
                 r'(DNA|RNA|CDNA|cDNA|Fiber-seq|Fiberseq)', re.IGNORECASE),
             "reference_genome": re.compile(
@@ -820,20 +1260,26 @@ def _inject_job_context(user_message: str, active_skill: str,
                 if m:
                     _collected[field] = m.group(1).strip().rstrip("*").strip()
 
-        # Heuristic: detect data_type from keywords in original user message
-        if "data_type" not in _collected:
-            _first_user = next(
-                (m.get("content", "") for m in conversation_history
-                 if m.get("role") == "user"), "")
-            _fl = _first_user.lower()
+        # Heuristic: detect sample_type from keywords in ALL user messages
+        # AND the current message (which hasn't been appended to history yet).
+        # ALWAYS run this — user messages are the source of truth for sample_type,
+        # not assistant echoes (which may have gotten it wrong, e.g. "DNA" for CDNA).
+        _st_from_user: str | None = None
+        _all_user_texts = [m.get("content", "") for m in conversation_history
+                           if m.get("role") == "user"]
+        _all_user_texts.append(user_message)  # current turn
+        for _ut in _all_user_texts:
+            _fl = _ut.lower()
             if "cdna" in _fl or "c-dna" in _fl:
-                _collected["data_type"] = "CDNA"
+                _st_from_user = "CDNA"; break
             elif "rna" in _fl and "cdna" not in _fl:
-                _collected["data_type"] = "RNA"
+                _st_from_user = "RNA"; break
             elif "fiber" in _fl:
-                _collected["data_type"] = "Fiber-seq"
+                _st_from_user = "Fiber-seq"; break
             elif "dna" in _fl:
-                _collected["data_type"] = "DNA"
+                _st_from_user = "DNA"; break
+        if _st_from_user:
+            _collected["sample_type"] = _st_from_user
 
         # Heuristic: extract sample_name from phrasing like "called <name>"
         if "sample_name" not in _collected:
@@ -845,16 +1291,27 @@ def _inject_job_context(user_message: str, active_skill: str,
                 if _called_m:
                     _collected["sample_name"] = _called_m.group(1).strip().rstrip(".,;:")
                     break
+            # Also check current message (first turn won't be in history yet)
+            if "sample_name" not in _collected:
+                _called_m = re.search(
+                    r'(?:called|named|name(?:d)?)\s+(\S+)', user_message, re.IGNORECASE)
+                if _called_m:
+                    _collected["sample_name"] = _called_m.group(1).strip().rstrip(".,;:")
 
-        # Heuristic: extract data_path from user messages containing absolute paths
-        if "data_path" not in _collected:
+        # Heuristic: extract path from user messages containing absolute paths
+        if "path" not in _collected:
             for msg in conversation_history:
                 if msg.get("role") != "user":
                     continue
                 _path_m = re.search(r'(/[^\s,;:*?"<>|]+)', msg["content"])
                 if _path_m:
-                    _collected["data_path"] = _path_m.group(1).strip()
+                    _collected["path"] = _path_m.group(1).strip()
                     break
+            # Also check current message
+            if "path" not in _collected:
+                _path_m = re.search(r'(/[^\s,;:*?"<>|]+)', user_message)
+                if _path_m:
+                    _collected["path"] = _path_m.group(1).strip()
 
         # Heuristic: detect reference_genome from short user reply like "mm39"
         if "reference_genome" not in _collected:
@@ -872,15 +1329,43 @@ def _inject_job_context(user_message: str, active_skill: str,
         if _cur_genome_m:
             _collected["reference_genome"] = _cur_genome_m.group(1).strip()
 
+        # Heuristic: infer reference_genome from organism keywords
+        if "reference_genome" not in _collected:
+            _all_text = " ".join(
+                m.get("content", "") for m in conversation_history
+                if m.get("role") == "user"
+            ) + " " + user_message
+            _all_lower = _all_text.lower()
+            if "mouse" in _all_lower or "mus musculus" in _all_lower:
+                _collected["reference_genome"] = "mm39"
+            elif "human" in _all_lower or "homo sapiens" in _all_lower:
+                _collected["reference_genome"] = "GRCh38"
+
         if _collected:
             _parts = []
             for k, v in _collected.items():
                 _parts.append(f"{k}={v}")
-            context_line = (
-                f"[CONTEXT: Parameters already collected from this conversation: "
-                f"{', '.join(_parts)}. "
-                f"Do NOT re-ask for these. Only ask for fields still missing.]"
-            )
+
+            # If all 4 fields are collected, give the LLM an unambiguous
+            # directive so it doesn't misread e.g. "CDNA" as "DNA".
+            _required = {"sample_name", "path", "sample_type", "reference_genome"}
+            if _required.issubset(_collected.keys()):
+                context_line = (
+                    f"[CONTEXT: ALL 4 parameters are collected — go straight to "
+                    f"the approval summary. Use these EXACT values:\n"
+                    f"  sample_name={_collected['sample_name']}\n"
+                    f"  path={_collected['path']}\n"
+                    f"  sample_type={_collected['sample_type']}\n"
+                    f"  reference_genome={_collected['reference_genome']}\n"
+                    f"Show the summary with these values and include [[APPROVAL_NEEDED]]. "
+                    f"The pipeline is Dogme {_collected['sample_type']}.]"
+                )
+            else:
+                context_line = (
+                    f"[CONTEXT: Parameters already collected from this conversation: "
+                    f"{', '.join(_parts)}. "
+                    f"Do NOT re-ask for these. Only ask for fields still missing.]"
+                )
             augmented = f"{context_line}\n{user_message}"
             return augmented, {}, {"skill": active_skill, "context": "local_sample_intake",
                                    "collected_params": _collected}
@@ -893,15 +1378,74 @@ def _inject_job_context(user_message: str, active_skill: str,
     if active_skill in encode_skills:
         msg_lower = user_message.lower()
 
-        # Check if current message already has an explicit biosample or accession
+        # Check if current message already has an explicit accession
         has_accession = bool(re.findall(r'ENC[A-Z]{2}\d{3}[A-Z]{3}', user_message, re.IGNORECASE))
-        biosample_keywords = {
-            "k562", "gm12878", "hela", "hepg2", "c2c12",
-            "liver", "brain", "heart", "kidney", "lung",
-        }
-        has_biosample = any(bs in msg_lower for bs in biosample_keywords)
 
-        if not has_accession and not has_biosample:
+        # Detect if the message is a NEW search query (not a follow-up on
+        # existing data).  We use positive signals for "new query" rather
+        # than trying to enumerate every biosample — that doesn't scale.
+        #
+        # A message is a NEW query if it:
+        #   a) Contains explicit new-query patterns, OR
+        #   b) Mentions a term that wasn't in the previous results.
+        #
+        # A message is a FOLLOW-UP if it:
+        #   - Asks about data already on screen ("how many of them are RNA-seq?")
+        #   - References a DF ("show me DF1")
+        #   - Uses referential words with no new subject ("which are methylated?")
+
+        # Positive signals for a NEW independent query
+        _new_query_patterns = [
+            r'how many\s+\S+.*experiments?',      # "how many X experiments"
+            r'search\s+(?:encode\s+)?for\s+\S+',  # "search encode for X"
+            r'does\s+encode\s+have\s+\S+',         # "does encode have X"
+            r'\S+\s+experiments?\s+(?:in|on|from)\s+encode',  # "X experiments in encode"
+            r'(?:find|list|show|get)\s+(?:all\s+)?\S+\s+experiments?',  # "list X experiments"
+        ]
+        _is_new_query = any(re.search(p, msg_lower) for p in _new_query_patterns)
+
+        # Referential language is a strong signal for follow-up —
+        # the user is talking about data already on screen.
+        _followup_signals = [
+            r'\bof\s+them\b',          # "how many of them"
+            r'\bthose\b',               # "show those"
+            r'\bthese\b',               # "filter these"
+            r'\bthe\s+results?\b',     # "the results"
+            r'\bthe\s+data\b',         # "the data"
+            r'\bfrom\s+(?:the\s+)?(?:previous|last|above)\b',
+            r'\bDF\s*\d+\b',          # explicit DF reference
+            r'\bamong\s+them\b',       # "among them"
+            r'\bof\s+those\b',         # "of those"
+        ]
+        _is_followup = any(re.search(p, msg_lower) for p in _followup_signals)
+        if _is_followup:
+            _is_new_query = False  # override — referential language wins
+
+        # Also check: does the message mention a term that is NOT present in
+        # any previous dataframe labels?  If so, it's a new search subject.
+        if not _is_new_query and not has_accession and not _is_followup:
+            _extracted_term = _extract_encode_search_term(user_message)
+            if _extracted_term:
+                _prev_labels_lower = set()
+                if history_blocks:
+                    for _hblk in reversed(history_blocks[-4:]):
+                        if _hblk.type == "AGENT_PLAN":
+                            _hblk_dfs = get_block_payload(_hblk).get("_dataframes", {})
+                            for _dn in _hblk_dfs:
+                                _prev_labels_lower.add(_dn.lower())
+                # If the extracted term doesn't appear in any previous DF label,
+                # it's a new subject
+                _term_lower = _extracted_term.lower()
+                if _prev_labels_lower and not any(
+                    _term_lower in lbl for lbl in _prev_labels_lower
+                ):
+                    _is_new_query = True
+                    logger.info(
+                        "Detected new ENCODE search subject (not in prev DFs)",
+                        term=_extracted_term, prev_labels=_prev_labels_lower,
+                    )
+
+        if not has_accession and not _is_new_query:
             # No new subject in message — this is a follow-up question.
             # PREFERRED: inject dataframe rows from the most recent AGENT_PLAN
             # block that has _dataframes — this gives the LLM the full, accurate
@@ -2184,6 +2728,7 @@ async def _auto_trigger_analysis(
     sample_name = job_payload.get("sample_name", "Unknown")
     mode = job_payload.get("mode", "DNA")
     model_key = job_payload.get("model", "default")
+    work_directory = job_payload.get("work_directory", "")
 
     logger.info("Auto-triggering analysis", run_uuid=run_uuid,
                 sample_name=sample_name, mode=mode, model=model_key)
@@ -2215,7 +2760,8 @@ async def _auto_trigger_analysis(
             await client.connect()
             try:
                 summary_data = await client.call_tool(
-                    "get_analysis_summary", run_uuid=run_uuid
+                    "get_analysis_summary", run_uuid=run_uuid,
+                    work_dir=work_directory or None,
                 )
                 if not isinstance(summary_data, dict):
                     summary_data = {}
@@ -2235,11 +2781,17 @@ async def _auto_trigger_analysis(
                         continue
                     if any(pat in fname.lower() for pat in _KEY_PATTERNS):
                         try:
+                            _csv_params: dict = {
+                                "file_path": fname,
+                                "max_rows": 50,
+                            }
+                            if work_directory:
+                                _csv_params["work_dir"] = work_directory
+                            else:
+                                _csv_params["run_uuid"] = run_uuid
                             parse_result = await client.call_tool(
                                 "parse_csv_file",
-                                run_uuid=run_uuid,
-                                filename=fname,
-                                max_rows=50,
+                                **_csv_params,
                             )
                             if isinstance(parse_result, dict) and parse_result.get("data"):
                                 parsed_csvs[fname] = parse_result
@@ -2272,7 +2824,7 @@ async def _auto_trigger_analysis(
             engine = AgentEngine(model_key=model_key)
             user_prompt = (
                 f"A Dogme {mode} job for sample \"{sample_name}\" just completed.\n"
-                f"Run UUID: {run_uuid}\n\n"
+                f"Work directory: {work_directory}\n\n"
                 f"Here is the analysis summary and key result data:\n\n"
                 f"{data_context}\n\n"
                 f"Provide a concise interpretation of these results. "
@@ -2300,9 +2852,10 @@ async def _auto_trigger_analysis(
         # 6. Build the final markdown
         if llm_md:
             # LLM succeeded — prepend a header and append exploration hints
+            _wf_name = work_directory.rstrip('/').rsplit('/', 1)[-1] if work_directory else ''
             final_md = (
                 f"### 📊 Analysis: {sample_name}\n"
-                f"**Run UUID:** `{run_uuid}` &nbsp;|&nbsp; "
+                f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
                 f"**Mode:** {mode} &nbsp;|&nbsp; "
                 f"**Status:** COMPLETED\n\n"
                 f"{llm_md}\n\n"
@@ -2315,7 +2868,8 @@ async def _auto_trigger_analysis(
         else:
             # Fallback: static template (same as before)
             final_md = _build_static_analysis_summary(
-                sample_name, mode, run_uuid, summary_data
+                sample_name, mode, run_uuid, summary_data,
+                work_directory=work_directory,
             )
             _model_name = "system"
             llm_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -2416,6 +2970,7 @@ def _build_auto_analysis_context(
 
 def _build_static_analysis_summary(
     sample_name: str, mode: str, run_uuid: str, summary_data: dict,
+    work_directory: str = "",
 ) -> str:
     """
     Build a static markdown summary (fallback when the LLM call fails).
@@ -2429,9 +2984,10 @@ def _build_static_analysis_summary(
         bed_count = all_counts.get("bed_count", len(file_summary.get("bed_files", [])))
         txt_count = all_counts.get("txt_count", len(file_summary.get("txt_files", [])))
 
+        _wf_name = work_directory.rstrip("/").rsplit("/", 1)[-1] if work_directory else ""
         md = (
             f"### 📊 Analysis Ready: {sample_name}\n\n"
-            f"**Run UUID:** `{run_uuid}`\n"
+            f"**Workflow:** {_wf_name}\n"
             f"**Mode:** {summary_data.get('mode', mode)} &nbsp;|&nbsp; "
             f"**Status:** {summary_data.get('status', 'COMPLETED')} &nbsp;|&nbsp; "
             f"**Total files:** {total_files}\n\n"
@@ -2697,7 +3253,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # Get all USER_MESSAGE and AGENT_PLAN blocks for this project
         history_query = select(ProjectBlock)\
             .where(ProjectBlock.project_id == req.project_id)\
-            .where(ProjectBlock.type.in_(["USER_MESSAGE", "AGENT_PLAN"]))\
+            .where(ProjectBlock.type.in_(["USER_MESSAGE", "AGENT_PLAN", "EXECUTION_JOB"]))\
             .order_by(ProjectBlock.seq.asc())
         
         history_result = session.execute(history_query)
@@ -3071,12 +3627,41 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
 
         if not has_any_tags and (not _injected_previous_data or _injected_was_capped):
             # Case 1: LLM produced no tags at all — auto-generate
-            auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history)
+            auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history,
+                                                     history_blocks=history_blocks)
             if auto_calls:
                 logger.warning("LLM failed to generate DATA_CALL tags, auto-generating",
                               count=len(auto_calls), skill=active_skill)
                 # Replace the LLM's unhelpful response with a brief note
                 clean_markdown = ""
+            elif active_skill in ("ENCODE_Search", "ENCODE_LongRead"):
+                # Hallucination guard: the LLM may have confidently stated a
+                # count or claimed results exist, but NO tool was actually
+                # called.  Detect this and strip the hallucinated response.
+                _halluc_patterns = [
+                    r'there are [\d,]+ .* experiments',
+                    r'found [\d,]+ .* results',
+                    r'interactive table below',
+                    r'experiment list .* below',
+                    r'[\d,]+ experiments in ENCODE',
+                ]
+                _is_hallucinated = any(
+                    re.search(p, clean_markdown, re.IGNORECASE)
+                    for p in _halluc_patterns
+                )
+                if _is_hallucinated:
+                    logger.warning(
+                        "LLM hallucinated ENCODE results without tool execution, "
+                        "stripping response",
+                        skill=active_skill,
+                        response_preview=clean_markdown[:200],
+                    )
+                    clean_markdown = (
+                        "I wasn't able to find an ENCODE query tool for that "
+                        "search term. Could you clarify — is this a **cell line**, "
+                        "**tissue**, **target protein**, or **assay type**? "
+                        "That will help me pick the right query."
+                    )
         elif has_any_tags and _has_referential:
             # Case 2: LLM produced tags BUT user used referential words.
             # Validate that the accessions in the tags actually appeared in
@@ -3105,7 +3690,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     llm_accessions=sorted(_llm_accessions),
                     history_accessions=sorted(_history_accessions),
                 )
-                auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history)
+                auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history,
+                                                         history_blocks=history_blocks)
                 if auto_calls:
                     # Discard the LLM-generated tags
                     data_call_matches = []
@@ -3120,6 +3706,22 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         
         # Load aliases for correcting LLM-hallucinated tool/param names
         _tool_aliases = get_all_tool_aliases()
+        # Server 4 tool aliases (not in CONSORTIUM_REGISTRY)
+        _tool_aliases.update({
+            "list_workflows": "list_job_files",
+            "list_files": "list_job_files",
+            "browse_files": "list_job_files",
+            "browse_workflow": "list_job_files",
+            "find_files": "find_file",
+            "search_file": "find_file",
+            "search_files": "find_file",
+            "read_file": "read_file_content",
+            "get_file": "read_file_content",
+            "parse_csv": "parse_csv_file",
+            "parse_bed": "parse_bed_file",
+            "analysis_summary": "get_analysis_summary",
+            "job_summary": "get_analysis_summary",
+        })
         _param_aliases = get_all_param_aliases()
         
         # From auto-generated tags (safety net)
@@ -3154,6 +3756,18 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             corrected_tool, params = _correct_tool_routing(
                 corrected_tool, params, req.message, conversation_history)
 
+            # Validate/fix ENCODE params (missing search_term, wrong organism)
+            if source_key == "encode":
+                params = _validate_encode_params(corrected_tool, params, req.message)
+
+            # Validate/fix Server 4 params (placeholder work_dir)
+            if source_key == "server4":
+                params = _validate_server4_params(
+                    corrected_tool, params, req.message,
+                    conversation_history=conversation_history,
+                    history_blocks=history_blocks,
+                )
+
             calls_by_source.setdefault(source_key, []).append({
                 "tool": corrected_tool,
                 "params": params,
@@ -3180,6 +3794,9 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             corrected_tool, params = _correct_tool_routing(
                 corrected_tool, params, req.message, conversation_history)
 
+            # Validate/fix ENCODE params (missing search_term, wrong organism)
+            params = _validate_encode_params(corrected_tool, params, req.message)
+
             calls_by_source.setdefault("encode", []).append({
                 "tool": corrected_tool,
                 "params": params,
@@ -3203,7 +3820,31 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 "params": {"run_uuid": run_uuid},
             })
         
-        # 6b. Execute all tool calls grouped by source
+        # 6b. Deduplicate tool calls within each source.
+        # The LLM sometimes emits both a DATA_CALL and a legacy ENCODE_CALL
+        # (or two DATA_CALL tags with slightly different casing) for the same
+        # logical query.  Deduplicate by (tool, canonical_params) so the same
+        # search isn't executed twice.
+        for _src_key in list(calls_by_source):
+            _seen: set[str] = set()
+            _deduped: list[dict] = []
+            for _call in calls_by_source[_src_key]:
+                # Build a canonical key: tool + sorted params (case-insensitive values)
+                _canon_params = tuple(
+                    sorted((k, v.lower() if isinstance(v, str) else v)
+                           for k, v in _call["params"].items())
+                )
+                _key = (_call["tool"], _canon_params)
+                _key_str = str(_key)
+                if _key_str not in _seen:
+                    _seen.add(_key_str)
+                    _deduped.append(_call)
+                else:
+                    logger.info("Deduplicated duplicate tool call",
+                               tool=_call["tool"], params=_call["params"])
+            calls_by_source[_src_key] = _deduped
+
+        # 6c. Execute all tool calls grouped by source
         all_results = {}  # {source_key: [result_dicts]}
         
         for source_key, calls in calls_by_source.items():
@@ -3266,12 +3907,18 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                             # Infer follow-up tool from filename if not explicitly set
                             if not chain_tool:
                                 chain_tool = _pick_file_tool(primary_path)
+                            # Prefer work_dir over run_uuid for chaining
+                            chain_work_dir = result_data.get("work_dir") or params.get("work_dir")
                             chain_uuid = result_data.get("run_uuid") or params.get("run_uuid")
-                            if chain_uuid:
+                            if chain_work_dir or chain_uuid:
                                 logger.info("Chaining find_file → parse/read",
                                            chain_tool=chain_tool, file_path=primary_path)
                                 try:
-                                    chain_params = {"run_uuid": chain_uuid, "file_path": primary_path}
+                                    chain_params: dict = {"file_path": primary_path}
+                                    if chain_work_dir:
+                                        chain_params["work_dir"] = chain_work_dir
+                                    elif chain_uuid:
+                                        chain_params["run_uuid"] = chain_uuid
                                     if chain_tool == "parse_csv_file":
                                         chain_params["max_rows"] = 100
                                     elif chain_tool == "parse_bed_file":
@@ -3394,7 +4041,21 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                        has_real_data=has_real_data,
                        preview=formatted_data[:500])
 
-            if has_real_data and formatted_data.strip():
+            # --- Skip second-pass LLM for pure browsing commands ---
+            # "list files", "list workflows" etc. should show the file table
+            # directly — no LLM re-interpretation needed.
+            _browsing_tools = {"list_job_files", "categorize_job_files"}
+            _all_tools_used = set()
+            for _src_results in all_results.values():
+                for _r in _src_results:
+                    _all_tools_used.add(_r.get("tool", ""))
+            _is_browsing = bool(_all_tools_used) and _all_tools_used <= _browsing_tools
+
+            if _is_browsing and has_real_data and formatted_data.strip():
+                # Show the formatted file listing directly — no second pass
+                clean_markdown = formatted_data
+
+            elif has_real_data and formatted_data.strip():
                 # Cap data size to avoid overwhelming the LLM context window.
                 # For large list results, keep only the header block (tool name,
                 # found-count, and the 📊 Summary table) and drop the individual
@@ -3550,7 +4211,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                             "columns": _cols,
                             "data": _rows,
                             "row_count": len(_rd),
-                            "metadata": {},
+                            "metadata": {"visible": True},
                         }
 
         # 8. Save AGENT_PLAN (The Text)

@@ -157,25 +157,51 @@ Write the tag on its own line. It executes automatically and returns data.
 
 ---
 
-## 🎯 KEY CONCEPT: Biosamples vs Targets
+## 🎯 KEY CONCEPT: Biosamples vs Targets vs Assays
 
 **BIOSAMPLES** = cell lines, tissues, organs, primary cells:
-- K562, C2C12, GM12878, HeLa, HepG2, liver, brain, heart, etc.
+- **Human cell lines:** K562, GM12878, HeLa, HepG2, HEK293, A549, MCF-7, Jurkat, IMR-90, U2OS, H1, H9, HFF, WTC-11, LNCAP, PANC-1, SK-N-SH
+- **Mouse cell lines:** C2C12, NIH3T3, MEF, MEL, ES-E14, mESC, V6.5, G1E, G1E-ER4, CH12.LX
+- **Primary cells / tissues:** liver, brain, heart, lung, kidney, spleen, thymus, pancreas, adrenal gland, endothelial cell, fibroblast, monocyte, T-cell, B-cell, neural progenitor, iPSC, organoid
 - These are what the experiment was performed ON
 - Use `search_by_biosample` with `search_term=`
 
 **TARGETS** = proteins, transcription factors, histone modifications:
-- CTCF, H3K27ac, H3K4me3, POLR2A, EP300, etc.
+- **Transcription factors:** CTCF, POLR2A, EP300, MAX, MYC, JUN, FOS, REST, YY1, TCF7L2, GATA1, GATA2, SPI1, CEBPB, STAT1, STAT3, IRF1, NRF1
+- **Histone marks:** H3K27ac, H3K4me3, H3K4me1, H3K36me3, H3K27me3, H3K9me3, H3K79me2, H2AFZ, H4K20me1
+- **Cohesin / chromatin:** SMC3, RAD21, NIPBL
 - These are what the experiment was measuring/targeting
 - Use `search_by_target` with `target=`
 
 **ASSAY TYPES** = the experimental technique:
-- TF ChIP-seq, Histone ChIP-seq, RNA-seq, ATAC-seq, DNase-seq, etc.
+- TF ChIP-seq, Histone ChIP-seq, total RNA-seq, long read RNA-seq, polyA plus RNA-seq, ATAC-seq, DNase-seq, WGBS, RRBS, eCLIP, in situ Hi-C, microRNA-seq, RAMPAGE, CAGE, PRO-seq, GRO-seq, Mint-ChIP-seq, CRISPR RNA-seq, shRNA RNA-seq
 - Use the `assay_title=` parameter to filter
 
 **ORGANISMS**:
-- Mouse cell lines (C2C12, etc.) → `organism=Mus musculus`
+- Mouse cell lines (C2C12, NIH3T3, etc.) → `organism=Mus musculus`
 - Human cell lines (K562, GM12878, HeLa, etc.) → `organism=Homo sapiens`
+
+---
+
+## ⚠️ IMPORTANT: Don't Limit Yourself to Known Terms
+
+**You do NOT need to recognise a biosample name to query it.** The ENCODE API accepts any biosample term — if it doesn't exist, the API simply returns zero results. That's fine.
+
+**Default rule:** If the user mentions a term that isn't clearly an assay type or a target protein, **treat it as a biosample** and use `search_by_biosample`. Examples:
+- "How many MEL experiments?" → `search_by_biosample` with `search_term=MEL`
+- "Search ENCODE for Panc1" → `search_by_biosample` with `search_term=Panc1`
+- "Any WTC-11 data?" → `search_by_biosample` with `search_term=WTC-11`
+
+**Only use a different tool when you're SURE it's not a biosample:**
+- **Target clues:** protein names are often uppercase abbreviations (CTCF, POLR2A), histone marks follow H3K/H4K patterns (H3K27ac, H3K4me3) → use `search_by_target`
+- **Assay clues:** technique names contain "-seq", "ChIP", "CLIP", "Hi-C", method suffixes → use `search_by_assay`
+
+**When truly ambiguous** (e.g., user says "search ENCODE for XYZ" and XYZ could be a protein or a cell line), ask:
+```
+Is "{term}" a cell line/tissue (biosample) or a protein/histone mark (target)? That determines which search I run.
+```
+
+🚨 **NEVER invent a count.** If you're not sure, QUERY first — don't guess "1,000" or any other number.
 
 ---
 
@@ -185,6 +211,8 @@ Write the tag on its own line. It executes automatically and returns data.
 |-----------|-------------------|
 | "C2C12 experiments" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=C2C12, organism=Mus musculus]]` |
 | "K562 experiments" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562, organism=Homo sapiens]]` |
+| "GM12878 experiments" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=GM12878, organism=Homo sapiens]]` |
+| "How many GM12878 experiments" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=GM12878, organism=Homo sapiens]]` |
 | "K562 CTCF ChIP-seq" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562, target=CTCF, assay_title=TF ChIP-seq, organism=Homo sapiens]]` |
 | "All CTCF experiments" | `[[DATA_CALL: consortium=encode, tool=search_by_target, target=CTCF, organism=Homo sapiens]]` |
 | "Liver RNA-seq" | `[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=liver, organism=Homo sapiens, assay_title=total RNA-seq]]` |
@@ -344,11 +372,21 @@ Get server information.
 ## Plan Logic
 
 # ═══════════════════════════════════════════════════════════════
-# BEFORE YOU DO ANYTHING: CHECK YOUR TAG FORMAT!
+# 🚨🚨🚨 DO NOT DESCRIBE STEPS — EXECUTE IMMEDIATELY 🚨🚨🚨
 # ═══════════════════════════════════════════════════════════════
-# 
+#
+# ❌ DO NOT write: "STEP 1: Search ENCODE for..."
+# ❌ DO NOT write: "STEP 2: Count the results..."
+# ❌ DO NOT write: "Let me perform a search..."
+# ❌ DO NOT write: "I will use the search function..."
+# ❌ DO NOT write: Search Encode (biosample=GM12878)
+#
+# ✅ JUST WRITE THE TAG:
+# [[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=GM12878, organism=Homo sapiens]]
+#
 # ✅ CORRECT:   [[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR123ABC]]
 # ❌ WRONG:     Get Experiment (accession=ENCSR123ABC)
+# ❌ WRONG:     Search Encode (biosample=GM12878)
 #
 # If you write plain text without [[brackets]], the tool WILL NOT RUN!
 # ═══════════════════════════════════════════════════════════════

@@ -144,13 +144,30 @@ python server1/server2_mcp_client.py
 - **Docs:** [server3/README.md](server3/README.md)
 
 ### Server 4: Analysis Engine (Port 8002)
-- **Role:** Results analysis and QC
+- **Role:** Results analysis, QC reporting, and workflow file browsing
 - **Tech:** fastmcp + Python analysis tools
 - **Features:**
-  - Parse pipeline outputs
-  - Generate QC reports
-  - Summarize results
-  - File content analysis
+  - Parse pipeline outputs (CSV, TSV, BED files)
+  - Generate QC reports and analysis summaries
+  - File discovery and content reading
+  - Workflow folder browsing via `list_job_files`
+- **Workflow Directory Layout:**
+  ```
+  $AGOUTIC_DATA/users/{username}/{project-slug}/
+  ├── data/              # Uploaded input data
+  ├── workflow1/         # First job's output
+  │   ├── annot/         # Annotations, final stats, counts
+  │   ├── bams/          # BAM alignment files
+  │   ├── bedMethyl/     # Methylation BED output
+  │   ├── fastqs/        # FASTQ files
+  │   └── ...
+  └── workflow2/         # Second job's output
+  ```
+- **Agent Commands** (handled automatically by Server 1's safety net):
+  - `list workflows` — lists all workflow folders in the project
+  - `list files` / `list files in workflow2/annot` — lists files in a workflow or subfolder
+  - `parse annot/File.csv` — finds and parses a file by relative path
+  - `parse workflow2/annot/File.csv` — parses a file in a specific workflow
 - **Docs:** [server4/README.md](server4/README.md)
 
 ## 📁 Project Structure

@@ -112,14 +112,15 @@ asyncio.run(analyze())
 
 ## MCP Tools
 
-All 6 MCP tools available for AI agents:
+All 7 MCP tools available for AI agents (all accept `work_dir` preferred, `run_uuid` as fallback):
 
-1. **list_job_files** - `list_job_files(run_uuid, extensions?)`
-2. **read_file_content** - `read_file_content(run_uuid, file_path, preview_lines?)`
-3. **parse_csv_file** - `parse_csv_file(run_uuid, file_path, max_rows?)`
-4. **parse_bed_file** - `parse_bed_file(run_uuid, file_path, max_records?)`
-5. **get_analysis_summary** - `get_analysis_summary(run_uuid)`
-6. **categorize_job_files** - `categorize_job_files(run_uuid)`
+1. **list_job_files** - `list_job_files(work_dir, extensions?, compact?)`
+2. **find_file** - `find_file(work_dir, file_name)` — partial match, skips `work/`
+3. **read_file_content** - `read_file_content(work_dir, file_path, preview_lines?)`
+4. **parse_csv_file** - `parse_csv_file(work_dir, file_path, max_rows?)`
+5. **parse_bed_file** - `parse_bed_file(work_dir, file_path, max_records?)`
+6. **get_analysis_summary** - `get_analysis_summary(work_dir)`
+7. **categorize_job_files** - `categorize_job_files(work_dir)`
 
 ## Environment Variables
 

@@ -113,8 +113,8 @@ The Dogme RNA pipeline performs:
 
 ## Quick Workflow: Parse a File
 
-**When asked to parse a file, check for `[CONTEXT: run_uuid=...]` in the user message first.**
-The system injects the UUID automatically — use it directly in your DATA_CALL, don't search for it.
+**When asked to parse a file, check for `[CONTEXT: work_dir=...]` in the user message first.**
+The system injects the workflow directory automatically — use it directly in your DATA_CALL, don't search for it.
 
 Follow the comprehensive workflow in the included guide: `[INCLUDED REFERENCE: DOGME_QUICK_WORKFLOW_GUIDE.md]`
 
@@ -132,10 +132,10 @@ That guide includes:
 ### RNA-Specific Notes
 
 **Files to search for:**
-- Modification sites: `find_file(run_uuid=..., file_name=m6A)` or `modkit`
-- Gene expression: `find_file(run_uuid=..., file_name=gene_counts)` or `transcript`
-- Poly(A) tails: `find_file(run_uuid=..., file_name=polya)`
-- Alignment stats: `find_file(run_uuid=..., file_name=stats)` or `flagstat`
+- Modification sites: `find_file(work_dir=..., file_name=m6A)` or `modkit`
+- Gene expression: `find_file(work_dir=..., file_name=gene_counts)` or `transcript`
+- Poly(A) tails: `find_file(work_dir=..., file_name=polya)`
+- Alignment stats: `find_file(work_dir=..., file_name=stats)` or `flagstat`
 
 **Typical directories:**
 - `modkit/` — RNA modification calls and pileup data
@@ -158,7 +158,7 @@ When user says "analyze the results":
 
 **STEP 1:** Get the analysis summary
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **STEP 2:** Present filtered file summary
@@ -196,12 +196,12 @@ When user says "analyze the results":
 
 **STEP 5:** Parse gene/transcript counts using FULL path from STEP 3
 ```
-[[DATA_CALL: service=server4, tool=parse_csv_file, run_uuid=<uuid>, file_path=counts/sample_name_gene_counts.csv]]
+[[DATA_CALL: service=server4, tool=parse_csv_file, work_dir=<work_dir>, file_path=counts/sample_name_gene_counts.csv]]
 ```
 
 **STEP 6:** Parse modification BED files to get detailed m6A and other modification locations from STEP 3
 ```
-[[DATA_CALL: service=server4, tool=parse_bed_file, run_uuid=<uuid>, file_path=bedMethyl/sample_name.mod.bed]]
+[[DATA_CALL: service=server4, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.mod.bed]]
 ```
 
 **STEP 7:** Present results with RNA-specific interpretation (modification sites, expression levels, poly(A) analysis)

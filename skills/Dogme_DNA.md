@@ -99,8 +99,8 @@ The Dogme DNA pipeline performs:
 
 ## Quick Workflow: Parse a File
 
-**When asked to parse a file, check for `[CONTEXT: run_uuid=...]` in the user message first.**
-The system injects the UUID automatically — use it directly in your DATA_CALL, don't search for it.
+**When asked to parse a file, check for `[CONTEXT: work_dir=...]` in the user message first.**
+The system injects the workflow directory automatically — use it directly in your DATA_CALL, don't search for it.
 
 Follow the comprehensive workflow in the included guide: `[INCLUDED REFERENCE: DOGME_QUICK_WORKFLOW_GUIDE.md]`
 
@@ -117,9 +117,9 @@ That guide includes:
 ### DNA-Specific Notes
 
 **Files to search for:**
-- Methylation data: `find_file(run_uuid=..., file_name=5mC)` or `CpG`
-- Fiber-seq data: `find_file(run_uuid=..., file_name=fiberseq)` or `m6A`
-- Alignment stats: `find_file(run_uuid=..., file_name=stats)` or `flagstat`
+- Methylation data: `find_file(work_dir=..., file_name=5mC)` or `CpG`
+- Fiber-seq data: `find_file(work_dir=..., file_name=fiberseq)` or `m6A`
+- Alignment stats: `find_file(work_dir=..., file_name=stats)` or `flagstat`
 
 **Typical directories:**
 - `bedMethyl/` — methylation calls and CpG frequencies
@@ -141,7 +141,7 @@ When user says "analyze the results":
 
 **STEP 1:** Get the analysis summary
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **STEP 2:** Present filtered file summary

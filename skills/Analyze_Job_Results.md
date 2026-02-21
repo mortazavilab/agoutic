@@ -57,7 +57,8 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 
 ## Inputs
 
-* `run_uuid`: (String) The UUID of the completed job to analyze
+* `work_dir`: (String) The workflow directory path of the completed job to analyze (preferred)
+* `run_uuid`: (String, Legacy) The UUID of the completed job — only used as fallback
 * `analysis_type`: (String, Optional) Type of analysis: "qc_report", "summary", "detailed", "files_only"
 
 ## Plan Logic
@@ -67,7 +68,7 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 **Execute immediately with get_analysis_summary to get mode for routing:**
 
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **Then immediately switch to the appropriate Dogme skill based on the mode field from get_analysis_summary.**
@@ -75,13 +76,13 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 **If user just wants summary/overview, use get_analysis_summary:**
 
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **But for analysis requests, use list_job_files with filtering to exclude work files:**
 
 ```
-[[DATA_CALL: service=server4, tool=list_job_files, run_uuid=<uuid>, extensions=.csv,.tsv,.bed,.txt]]
+[[DATA_CALL: service=server4, tool=list_job_files, work_dir=<work_dir>, extensions=.csv,.tsv,.bed,.txt]]
 ```
 
 **This shows only final result files (CSV, TSV, BED, TXT) and excludes work/intermediate files that bloat the counts.**
@@ -118,48 +119,40 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 
 ### 1. Information Gathering
 
-**BEFORE DOING ANYTHING ELSE - UUID CONFIRMATION**
+**BEFORE DOING ANYTHING ELSE - WORKFLOW DIRECTORY CONFIRMATION**
 
-When you see "use UUID: {uuid}" in the user's message:
-1. Write it out: "Using UUID: {uuid}"
-2. Check it's 36 chars long: `len(uuid) == 36`
-3. Tell the user which UUID you're using
-4. THEN proceed with get_analysis_summary using THAT UUID
-
-This prevents silently using the wrong UUID.
+The system injects `[CONTEXT: work_dir=...]` at the start of the user message. Use that work_dir directly.
 
 **STEP 1: Check Current Request FIRST**
 
-**PRIORITY 1 - EXPLICIT UUID IN CURRENT MESSAGE:**
-- If user says "use UUID: {uuid}" → COPY THAT UUID EXACTLY AND USE IT IMMEDIATELY
+**PRIORITY 1 - CONTEXT INJECTION:**
+- Check for `[CONTEXT: work_dir=...]` at the start of the user message
+- If present, use that work_dir directly in your DATA_CALL
 - Do NOT look elsewhere
-- Do NOT grab a UUID from earlier in the conversation
-- Do NOT use a previous job's UUID
-- When user says "use UUID: b954620b-a2c7-4474-9249-f31d8d55856f", use EXACTLY that UUID, character-for-character
-- If user says "parse {filename}" → LOOK FOR "use UUID:" in THIS message or the IMMEDIATELY PREVIOUS message ONLY
+- Do NOT use a workflow directory from earlier in the conversation
 
 **PRIORITY 2 - Check Conversation History**
 
-Only if no explicit UUID in current request, scan recent conversation history:
-- Look for "Run UUID: {uuid}" in recent messages (especially from job submission responses)
+Only if no `[CONTEXT: ...]` line, scan recent conversation history:
+- Look for "Workflow:" in recent "Analysis Ready" messages
 - Look for sample names mentioned with "completed successfully" or "Job completed"
-- The most recent completed job UUID is likely what the user wants analyzed
+- The most recent completed job's workflow directory is what the user wants analyzed
 
-**STEP 2: If UUID Found (Current or History)**
-- Use that UUID immediately
-- Mention to the user which job you're analyzing: "I'll analyze the recently completed job {sample_name} (UUID: {uuid})"
+**STEP 2: If work_dir Found (Context or History)**
+- Use that work_dir immediately
+- Mention to the user which job you're analyzing: "I'll analyze the recently completed job {sample_name}"
 - Proceed to job verification
 
-**STEP 3: If NO UUID Found Anywhere**
+**STEP 3: If NO work_dir Found Anywhere**
 Ask the user for the information:
 
 Example questions:
-- "Which job would you like me to analyze? Please provide the job UUID or sample name."
+- "Which job would you like me to analyze? Please provide the sample name."
 - "What type of analysis would you like? (QC report, summary, or detailed file analysis)"
 
 **DO NOT include [[APPROVAL_NEEDED]] when asking for information - just ask the questions.**
 
-**IMPORTANT:** If you find a UUID in the conversation history, DO NOT submit a new job. Use the EXISTING UUID.
+**IMPORTANT:** If you find a workflow in the conversation history, DO NOT submit a new job. Use the EXISTING workflow directory.
 
 ---
 
@@ -167,22 +160,19 @@ Example questions:
 
 The analysis tools require the actual job UUID. **Do NOT use old UUIDs from previous analysis sections.**
 
-**RULE:** Use ONLY the UUID from the CURRENT analysis request, which is typically from the most recent job completion message.
+**RULE:** Use ONLY the work_dir from the CURRENT analysis request, which is typically from the `[CONTEXT: work_dir=...]` line injected by the system or the most recent job completion message.
 
-**Common mistake:** Analysis from an EARLIER section of this conversation might show UUID `abc123...`. If the user now asks "analyze jamshid", verify there's NOT a MORE RECENT job completion with a DIFFERENT UUID `def456...`. Always use the LATEST one.
+**Common mistake:** An EARLIER section of this conversation might show a different workflow. If the user now asks "analyze jamshid", verify there's NOT a MORE RECENT workflow for that sample. Always use the LATEST one.
 
 **Example:**
 ```
-Earlier message shows:
-  Run UUID: abc123...  ← ignore this
+Context injection shows:
+[CONTEXT: work_dir=/media/.../project/workflow2, sample=jamshid]
 
-Current message shows:
-  Run UUID: def456...  ← USE THIS ONE
-
-[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=def456...]]
+[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=/media/.../project/workflow2]]
 ```
 
-**⚠️ If you get "File not found" error:** Check your UUID against the current job's completion message. Wrong UUID is the most common cause.
+**⚠️ If you get "File not found" error:** Check your work_dir against the context injection. Wrong directory is the most common cause.
 
 ## SPECIAL CASE: User Requests Specific File Parsing
 
@@ -201,40 +191,10 @@ Current message shows:
 #
 # 🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 
-⚠️ **UUID VALIDATION FIRST - CRITICAL:**
-
-Before you execute ANY tool call, validate the UUID:
-- The user-provided UUID must be COMPLETE — check the FULL string
-- Common error: LLM corrupts UUIDs (characters get scrambled, not just truncated)
-- Format: Should be 36 characters in pattern `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12)
-- All characters must be lowercase hex (0-9, a-f) and no other characters
-
-**UUID validation checklist:**
-- ✅ Exactly 36 characters
-- ✅ Format: `8-4-4-4-12` segments with dashes
-- ✅ All characters lowercase hex or dash
-- ✅ No spaces, uppercase letters, or symbols (except dashes)
-
-**Example - UUID validation with corruption detection:**
-```
-User says: "use UUID: b954620b-a2c7-4474-9249-f31d8d55856f"
-YOUR CHECK: Does this match format? Let me verify:
-  Length: 36 ✅
-  Format: 8-4-4-4-12 ✅
-  Hex chars: b954620b-a2c7-4474-9249-f31d8d55856f ✅
-  RESULT: ✅ VALID - Use this UUID
-
-If you see in error: "UUID b954620b-a274-4474-9249-f31d8d55856f not found"
-⚠️  ALERT: Compare to original: b954620b-a2c7-4474-9249-f31d8d55856f
-  Segment 2 is different: a2c7 vs a274 (CORRUPTED)
-  ❌ DO NOT USE - UUID was corrupted during transmission
-  ✅ Re-read user input and use: b954620b-a2c7-4474-9249-f31d8d55856f
-```
-
-⚠️ **The DataCall below MUST execute right now with the FULL VALID UUID:**
+⚠️ **The DataCall below MUST execute right now with the work_dir from context:**
 
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<FULL_36_CHAR_UUID>]]
+[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **After you get the response with `mode` field:**
@@ -271,19 +231,18 @@ Switch to the appropriate Dogme skill based on mode:
 - ❌ DO NOT print warnings without executing
 - ❌ DO NOT display ANY output before switching skills
 - ❌ DO NOT call multiple tools — just get mode and switch skill
-- ❌ DO NOT truncate or shorten the UUID
-- ✅ DO validate UUID is 36 characters long
-- ✅ DO call get_analysis_summary immediately with FULL UUID
+- ✅ DO use the work_dir from the context injection
+- ✅ DO call get_analysis_summary immediately
 - ✅ DO switch to Dogme skill IMMEDIATELY after receiving response
 - ✅ DO NOT display summary table or file listing before skill switch
 - ✅ Let the Dogme skill handle find_file and parse_csv_file calls
 
 ### 2. Job Verification and Mode-Aware Routing
 
-Once you have the job identifier, get the analysis summary first:
+Once you have the workflow directory, get the analysis summary first:
 
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, run_uuid=<uuid>]]
+[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 The summary includes the job's **mode** (DNA, RNA, or CDNA). Based on the mode, switch to the appropriate analysis interpretation skill:
@@ -335,11 +294,11 @@ Discover what output files are available:
 **⚠️ TIP: Use extension filtering for large jobs**
 Since jobs can have 500+ files, use the `extensions` parameter to filter the listing:
 ```
-[[DATA_CALL: service=server4, tool=list_job_files, run_uuid=<uuid>, extensions=.csv,.tsv,.bed]]
+[[DATA_CALL: service=server4, tool=list_job_files, work_dir=<work_dir>, extensions=.csv,.tsv,.bed]]
 ```
 This returns only the key result files without truncation instead of trying to list all files.
 
-**Endpoint:** `GET /analysis/jobs/{run_uuid}/files/categorize`
+**Endpoint:** `GET /analysis/jobs/{work_dir}/files/categorize`
 
 This returns files grouped by type:
 ```json
@@ -355,7 +314,7 @@ This returns files grouped by type:
 
 For a comprehensive QC report:
 
-**Endpoint:** `GET /analysis/jobs/{run_uuid}/summary`
+**Endpoint:** `GET /analysis/jobs/{work_dir}/summary`
 
 This returns:
 - File inventory (counts by type)
@@ -368,15 +327,15 @@ This returns:
 
 For specific file analysis:
 
-**Endpoint:** `GET /analysis/files/content?run_uuid={run_uuid}&file_path={path}&preview_lines=50`
+**Endpoint:** `GET /analysis/files/content?work_dir={work_dir}&file_path={path}&preview_lines=50`
 - Reads text files with preview
 
-**Endpoint:** `GET /analysis/files/parse/csv?run_uuid={run_uuid}&file_path={path}&max_rows=100`
+**Endpoint:** `GET /analysis/files/parse/csv?work_dir={work_dir}&file_path={path}&max_rows=100`
 - Parses CSV/TSV files into structured data
 - Returns column names and data rows
 - Useful for statistics, counts, metrics
 
-**Endpoint:** `GET /analysis/files/parse/bed?run_uuid={run_uuid}&file_path={path}&max_records=100`
+**Endpoint:** `GET /analysis/files/parse/bed?work_dir={work_dir}&file_path={path}&max_records=100`
 - Parses BED genomic files
 - Returns chromosome coordinates and annotations
 
@@ -417,9 +376,9 @@ Present results in clear sections:
 ```markdown
 ## QC Report: {sample_name}
 
-**Job UUID:** {run_uuid}
+**Workflow:** {workflow_folder}
 **Status:** {status}
-**Workflow:** {workflow_type}
+**Mode:** {workflow_type}
 
 ### File Summary
 - TXT files: {count}
@@ -440,7 +399,7 @@ Present results in clear sections:
 
 **These are examples of what the skill CAN do, but for actual execution, follow the immediate tool call pattern above.**
 
-**User:** "Give me a QC report for job 4d9376a5-5a4b-4642-86cd-78f7a63fab3d"
+**User:** "Give me a QC report for this job"
 
 **Agent Response:** (Should execute tool calls immediately, not list numbered steps)
 
@@ -457,16 +416,16 @@ Present results in clear sections:
 All analysis endpoints are available on Server 1 at http://localhost:8000:
 
 ### File Discovery
-- `GET /analysis/jobs/{run_uuid}/files?extensions={optional}` - List files with optional filtering
-- `GET /analysis/jobs/{run_uuid}/files/categorize` - Group files by type
+- `GET /analysis/jobs/{work_dir}/files?extensions={optional}` - List files with optional filtering
+- `GET /analysis/jobs/{work_dir}/files/categorize` - Group files by type
 
 ### File Reading
-- `GET /analysis/files/content?run_uuid={uuid}&file_path={path}&preview_lines={n}` - Read text files
-- `GET /analysis/files/parse/csv?run_uuid={uuid}&file_path={path}&max_rows={n}` - Parse CSV/TSV
-- `GET /analysis/files/parse/bed?run_uuid={uuid}&file_path={path}&max_records={n}` - Parse BED genomics
+- `GET /analysis/files/content?work_dir={work_dir}&file_path={path}&preview_lines={n}` - Read text files
+- `GET /analysis/files/parse/csv?work_dir={work_dir}&file_path={path}&max_rows={n}` - Parse CSV/TSV
+- `GET /analysis/files/parse/bed?work_dir={work_dir}&file_path={path}&max_records={n}` - Parse BED genomics
 
 ### Analysis
-- `GET /analysis/jobs/{run_uuid}/summary` - Comprehensive analysis summary
+- `GET /analysis/jobs/{work_dir}/summary` - Comprehensive analysis summary
 
 ## Notes
 

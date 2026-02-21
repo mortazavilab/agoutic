@@ -1,6 +1,149 @@
 # Changelog - February 2026
 
+## [Unreleased] - 2026-02-20
+
+### Fixed — Server 4 Placeholder `work_dir` and Local Sample Intake Bugs
+
+- **Always force `work_dir` from conversation context — never trust the LLM**
+  - Previously `_validate_server4_params()` only caught placeholder patterns (`/work_dir`, `{work_dir}`, `<work_dir>` etc.). The LLM also invents wrong paths like `/media/.../project`. Now the function always resolves `work_dir` from EXECUTION_JOB block history and overrides whatever the LLM supplied. Special case: "list workflows" trims to the project parent dir.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Include `EXECUTION_JOB` blocks in history query**
+  - The DB query that builds `history_blocks` only fetched `USER_MESSAGE` and `AGENT_PLAN` blocks. `_extract_job_context_from_history()` looks for `EXECUTION_JOB` blocks to find the authoritative `work_dir`, but never found any — falling back to fragile text parsing. Added `EXECUTION_JOB` to the query filter.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Pass `history_blocks` to `_auto_generate_data_calls()`**
+  - The safety-net auto-generation function called `_extract_job_context_from_history()` without `history_blocks`, so it could never find EXECUTION_JOB blocks even when they existed. Now `history_blocks` is threaded through from the call site.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Server 4 tool aliases for hallucinated tool names**
+  - The LLM frequently generates `list_workflows`, `find_files`, `parse_csv`, `read_file` etc. instead of the real MCP tool names. Added alias mapping: `list_workflows`→`list_job_files`, `find_files`→`find_file`, `parse_csv`→`parse_csv_file`, `read_file`→`read_file_content`, `analysis_summary`→`get_analysis_summary`, etc.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Strip unknown Server 4 params (e.g. `sample=Jamshid`)**
+  - The LLM adds invented params like `sample=Jamshid` that Server 4 tools don't accept, causing Pydantic validation errors. `_validate_server4_params()` now strips any param not in a per-tool allowlist before the MCP call.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **"list workflows" returns 502 files → now shows top-level dirs only**
+  - When using `list_job_files` on the project dir, `discover_files()` recursively listed all files. Added `max_depth` parameter: `max_depth=1` lists only immediate children (workflow folders). Both the auto-generated safety-net call and `_validate_server4_params()` now set `max_depth=1` for "list workflows" commands.
+  - Applied to: [server1/app.py](server1/app.py), [server4/analysis_engine.py](server4/analysis_engine.py), [server4/mcp_tools.py](server4/mcp_tools.py), [server4/mcp_server.py](server4/mcp_server.py)
+
+- **File listing results showed "..." for all fields**
+  - Server 4 `list_job_files` results are dicts with a `files` array. The result formatter's `_compact_dict()` truncated nested file objects to `"..."` at depth 2. Added a dedicated file-listing table formatter in `_format_data()` that renders files as a proper markdown table with Name, Path, and human-readable Size columns.
+  - Applied to: [server2/result_formatter.py](server2/result_formatter.py)
+
+- **`workflow1/` filtered out by `discover_files()` skip logic**
+  - The `work/` and `dor*/` skip filter used `startswith("work")` which matched `workflow1`, `workflow2`, etc. Changed to exact `child.name == "work"` for directories and `parts[0] == "work"` for the recursive path, so only the Nextflow `work/` directory is skipped.
+  - Applied to: [server4/analysis_engine.py](server4/analysis_engine.py)
+
+- **Fixed `work_dir=/work_dir` and `work_dir={work_dir_from_context}` placeholders in Server 4 DATA_CALL tags** *(superseded by always-force fix above)*
+  - When the LLM copies template variables from skill docs, it emits literal strings like `/work_dir`, `<work_dir>`, or `{work_dir_from_context}` instead of the real workflow path, causing "Work directory not found" errors.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Fixed CDNA misidentified as DNA in Local Sample Intake**
+  - The `sample_type` keyword heuristic was gated by `if "sample_type" not in _collected`, so if a previous assistant message had echoed "Data Type: DNA" (wrong), the regex would extract "DNA" and the heuristic would never run. Now the user-message keyword heuristic ALWAYS runs and overrides regex-extracted values, since user messages are the source of truth.
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Added — Workflow Browsing and Relative Path Support
+
+- **"list workflows" command**
+  - Detects "list workflows" / "show workflows" in user messages and auto-generates a `list_job_files` call on the project base directory (parent of the current workflow). Allows users to see all workflow folders (workflow1, workflow2, etc.) in their project.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **"list files" command with subfolder support**
+  - Detects "list files" / "list files in workflow2/annot" patterns. Resolves the path using `_resolve_workflow_path()` which handles: empty subpath → current workflow, "workflow2" → that workflow's dir, "workflow2/annot" → that workflow's annot/ subdir, "annot" → current workflow's annot/ subdir.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Relative path file parsing**
+  - "parse annot/File.csv" and "parse workflow2/annot/File.csv" now work. Added `_resolve_file_path()` which splits user paths, checks if the first component is a known workflow folder name, resolves to the correct `work_dir`, and extracts the basename for `find_file` searches.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Removed template variables from skill docs**
+  - Replaced all `{work_dir}`, `{work_dir_from_context}`, and `{tool}` template variables in `DOGME_QUICK_WORKFLOW_GUIDE.md` with concrete example paths and explicit "NEVER use template variables" warnings. Added "Browsing Commands" reference section.
+  - Applied to: [skills/DOGME_QUICK_WORKFLOW_GUIDE.md](skills/DOGME_QUICK_WORKFLOW_GUIDE.md)
+
+- **Fixed sample_name not extracted from current message**
+  - The "called <name>" heuristic only scanned `conversation_history`, not the current message. On the first turn (empty history), `sample_name` was never collected even when the user said "called Jamshid", leaving the LLM to extract it (unreliably).
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Stronger context injection when all 4 fields are collected**
+  - When all 4 required fields (sample_name, path, sample_type, reference_genome) are extracted, the `[CONTEXT]` line now says "Use these EXACT values" with each field on its own line and specifies the pipeline name ("Dogme CDNA"), rather than a generic "Do NOT re-ask" message that the LLM would ignore.
+  - Applied to: [server1/app.py](server1/app.py)
+
+### Fixed — ENCODE Search Context Injection and Hallucination Bugs
+
+- **Replaced hardcoded `biosample_keywords` with heuristic detection**
+  - Previously, `server1/app.py` used a hardcoded set of 10 biosamples (K562, HeLa, etc.) to determine if a query was a "new search" or a "follow-up". Unknown cell lines (like HL-60) were incorrectly treated as follow-ups, causing the system to inject stale data from previous queries (e.g., MEL) and hallucinate answers based on the wrong dataset.
+  - Replaced the hardcoded list with a three-layer heuristic:
+    1. **New-query patterns**: Regex matches for explicit searches (e.g., "how many X experiments", "search encode for X").
+    2. **Follow-up signals**: Referential language (e.g., "of them", "those", "DF3") that overrides new-query patterns.
+    3. **Extracted-term vs. previous DFs**: Extracts the search term and checks if it appears in previous dataframe labels. If it's a new subject, it's treated as a new query.
+  - Added pronouns ("them", "those", "these", etc.) to `_ENCODE_STOP_WORDS` so the fallback tokenizer doesn't treat them as search terms.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Fixed missing `visible: True` metadata on fresh ENCODE search dataframes**
+  - When a fresh `search_by_biosample` API call returned results, the resulting dataframe was stored without the `visible: True` metadata flag.
+  - The auto-selector for follow-up queries (which looks for the most recent visible dataframe) ignored these fresh dataframes and fell back to older, explicitly visible dataframes (like injected filtered results).
+  - Added `"visible": True` to the metadata of all `_SEARCH_TOOLS` dataframes so they can be correctly targeted by follow-up queries.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Replaced exhaustive `biosamples` dict with catch-all extractor**
+  - The safety net (`_auto_generate_data_calls`) previously relied on a hardcoded dictionary of known biosamples to generate API calls. If a term wasn't in the dict, the LLM would hallucinate a response without making an API call.
+  - Replaced the exhaustive dict with a slim `_KNOWN_ORGANISMS` dict (used only for organism hints) and a new `_extract_encode_search_term()` regex-based catch-all extractor that handles ANY biosample name.
+  - Added a hallucination guard: if no tool was executed but the LLM claims "there are N experiments" or "interactive table below", the response is stripped and a disambiguation message is shown.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Fixed organism auto-addition and missing `search_term`**
+  - The system was incorrectly auto-adding `organism=Homo sapiens` to mouse cell lines (like MEL) and placing the cell line name in `assay_title` instead of `search_term`.
+  - Created `_validate_encode_params()` to fix missing `search_term` by moving non-assay values from `assay_title`, and to strip `organism` unless the user explicitly mentioned a species.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Added tool aliases and deduplication**
+  - Added `"search": "search_by_biosample"` to `tool_aliases` and `Search (...)` to `fallback_patterns` to fix "Unknown tool: search" errors.
+  - Added a deduplication step after collecting all tool calls to prevent duplicate dataframes from appearing in the UI.
+  - Applied to: [server1/app.py](server1/app.py), [server2/config.py](server2/config.py)
+
+- **Updated ENCODE and Local Sample Intake skills**
+  - Updated `ENCODE_Search.md` to instruct the LLM not to limit itself to known terms and to never invent a count.
+  - Updated `Local_Sample_Intake.md` with anti-step directives ("DO NOT describe your reasoning steps"), fixed field name mismatches (`data_type`→`sample_type`, `data_path`→`path`), and added mouse/human genome inference.
+  - Applied to: [skills/ENCODE_Search.md](skills/ENCODE_Search.md), [skills/Local_Sample_Intake.md](skills/Local_Sample_Intake.md)
+
 ## [Unreleased] - 2026-02-19
+
+### Changed — Workflow Directory (`work_dir`) Replaces `run_uuid` as Primary Identifier
+
+- **All Server 4 analysis tools now accept `work_dir` as the primary parameter**
+  - `work_dir` (absolute path to the workflow folder, e.g. `.../users/alice/project/workflow1/`) is now the preferred way to identify which job's files to access. `run_uuid` is retained as a legacy fallback for backward compatibility.
+  - New `resolve_work_dir(work_dir, run_uuid)` function in `analysis_engine.py` acts as a central resolver: tries `work_dir` first (direct path), falls back to UUID-based DB lookup.
+  - All 7 MCP tool functions (`list_job_files`, `find_file`, `read_file_content`, `parse_csv_file`, `parse_bed_file`, `get_analysis_summary`, `categorize_job_files`) updated with `work_dir` as first parameter.
+  - All 7 MCP protocol wrappers in `mcp_server.py` updated.
+  - Response dicts now return `work_dir` instead of `run_uuid`.
+  - TOOL_SCHEMAS rewritten with `work_dir` documented as preferred.
+  - Applied to: [server4/analysis_engine.py](server4/analysis_engine.py), [server4/mcp_tools.py](server4/mcp_tools.py), [server4/mcp_server.py](server4/mcp_server.py), [server4/schemas.py](server4/schemas.py)
+
+- **Context injection now provides workflow directories instead of UUIDs**
+  - `_extract_job_context_from_history()` — rewritten to scan history blocks for EXECUTION_JOB entries and build a `workflows` list with `{work_dir, sample_name, mode, run_uuid}` for each job. Previously only extracted the most recent UUID.
+  - `_inject_job_context()` Dogme section — injects ALL workflow dirs with sample names. Single workflow: `[CONTEXT: work_dir=..., sample=...]`. Multiple workflows: enumerates each with folder name, sample, and mode.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **`_auto_generate_data_calls()` uses `work_dir` for file operations**
+  - DATA_CALL find_file calls now use `work_dir=` instead of `run_uuid=`.
+  - Smart matching: when multiple workflows exist, matches filename prefix to sample_name to pick the correct workflow directory.
+  - Chained tool calls extract `work_dir` from find_file response.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **Auto-analysis no longer shows UUIDs to users**
+  - `_auto_trigger_analysis()` LLM prompt uses "Work directory:" instead of "Run UUID:".
+  - Analysis header shows "**Workflow:** workflowN" instead of UUID.
+  - `_build_static_analysis_summary()` fallback template shows workflow folder name.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **All skill docs updated to use `work_dir` instead of `run_uuid`**
+  - `DOGME_QUICK_WORKFLOW_GUIDE.md` — UUID validation section replaced with simpler work_dir guidance; all DATA_CALL examples use `work_dir=`.
+  - `Dogme_cDNA.md`, `Dogme_DNA.md`, `Dogme_RNA.md` — context injection references, find_file examples, and DATA_CALL templates updated.
+  - `Analyze_Job_Results.md` — inputs, DATA_CALLs, API endpoint docs, QC report template, and information gathering section updated.
+  - `Local_Sample_Intake.md` — routing condition updated.
+  - Applied to: [skills/](skills/)
 
 ### Added — LLM-Powered Auto-Analysis After Job Completion
 

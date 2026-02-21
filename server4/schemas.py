@@ -17,7 +17,7 @@ class FileInfo(BaseModel):
 
 class FileListing(BaseModel):
     """Response for file listing."""
-    run_uuid: str
+    run_uuid: str = ""
     work_dir: str
     files: List[FileInfo]
     file_count: int
@@ -27,14 +27,15 @@ class FileListing(BaseModel):
 # File content schemas
 class FileContentRequest(BaseModel):
     """Request to read file content."""
-    run_uuid: str
+    run_uuid: str = ""
+    work_dir: str = ""
     file_path: str
     preview_lines: Optional[int] = Field(None, description="Number of lines to preview")
 
 
 class FileContentResponse(BaseModel):
     """Response with file content."""
-    run_uuid: str
+    run_uuid: str = ""
     file_path: str
     content: str
     line_count: Optional[int] = None
@@ -45,7 +46,7 @@ class FileContentResponse(BaseModel):
 # CSV/TSV parsing schemas
 class ParsedTableData(BaseModel):
     """Parsed tabular data."""
-    run_uuid: str
+    run_uuid: str = ""
     file_path: str
     columns: List[str]
     row_count: int
@@ -69,7 +70,7 @@ class BedRecord(BaseModel):
 
 class ParsedBedData(BaseModel):
     """Parsed BED file data."""
-    run_uuid: str
+    run_uuid: str = ""
     file_path: str
     record_count: int
     records: List[BedRecord]
@@ -88,7 +89,7 @@ class JobFileSummary(BaseModel):
 
 class AnalysisSummary(BaseModel):
     """Complete analysis summary for a job."""
-    run_uuid: str
+    run_uuid: str = ""
     sample_name: str
     mode: str  # DNA/RNA/CDNA
     status: str
@@ -105,3 +106,4 @@ class ErrorResponse(BaseModel):
     error: str
     detail: Optional[str] = None
     run_uuid: Optional[str] = None
+    work_dir: Optional[str] = None

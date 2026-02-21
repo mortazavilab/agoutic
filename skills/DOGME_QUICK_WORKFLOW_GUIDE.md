@@ -2,73 +2,41 @@
 
 This document contains the consolidated workflow steps for parsing files across all Dogme analysis skills (DNA, RNA, cDNA). Each mode-specific skill references this guide.
 
-## UUID Guidance - Critical Foundation
+## Workflow Directory Guidance - Critical Foundation
 
-⚠️ **🚨 CRITICAL - DO THIS FIRST: Validate and Verify the UUID 🚨**
+⚠️ **🚨 CRITICAL - DO THIS FIRST: Find Your Workflow Directory 🚨**
 
-**The #1 cause of "File not found" errors is using the WRONG or CORRUPTED UUID.**
+**The system uses workflow directories (not UUIDs) to locate job files.**
 
-**STEP 1: VALIDATE UUID FORMAT FIRST - BEFORE ANY TOOL CALLS**
+Each completed job has a `work_dir` — the absolute path to its workflow folder (e.g. `/media/backup_disk/agoutic_root/users/alice/my-project/workflow1/`).
 
-⚠️ **UUID corruption happens**: LLMs commonly corrupt long strings including UUIDs
-- Pattern: Valid UUID = 36 characters in format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
-- Each segment must be lowercase hex (0-9, a-f)
-- Common errors: Character scrambling (`a2c7` → `a274`), truncation, or case changes
+**STEP 1: Extract work_dir from context injection**
 
-**Validation checklist BEFORE using UUID:**
-- ✅ Length is exactly 36 characters
-- ✅ Format matches: `8-4-4-4-12` segments separated by dashes
-- ✅ All characters are lowercase hex (0-9, a-f)
-- ✅ No spaces or extra characters
+**PREFERRED: Check for `[CONTEXT: work_dir=...]` at the start of the user message.**
+The system automatically injects workflow directory paths. If present, use the `work_dir` value directly.
 
-**Example of corruption:**
+**Single workflow:**
 ```
-Original from user: b954620b-a2c7-4474-9249-f31d8d55856f (CORRECT - 36 chars, all hex)
-What tool might receive: b954620b-a274-4474-9249-f31d8d55856f (WRONG - a2c7→a274)
-
-✅ CORRECT pattern: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (8-4-4-4-12)
-❌ WRONG: A2C7-a2c7 (mixed case)
-❌ WRONG: b954620ba2c74474 (missing dashes)
-❌ WRONG: b954620b-a27-4474-9249-f31d8d55856f (wrong segment length)
+[CONTEXT: work_dir=/media/backup_disk/agoutic_root/users/alice/my-project/workflow1, sample=jamshid]
 ```
 
-**If you see "Job not found" error:**
-1. Check the UUID in the error message
-2. Compare character-by-character to original user input
-3. If they differ (especially in the middle segments), UUID was corrupted
-4. Re-read the original user input and use THAT UUID
-
-**STEP 2: Extract UUID from context injection or conversation**
-
-**PREFERRED: Check for `[CONTEXT: run_uuid=...]` at the start of the user message.**
-The system automatically injects the most recent job UUID. If present, use it directly — no need to search conversation history.
-
-**FALLBACK:** If no `[CONTEXT: ...]` line, look at the conversation for the MOST RECENT "use UUID:" message or "Analysis Ready" message. Extract the UUID from that message.
-
-**WRONG:** Using a UUID from an earlier section of the conversation
-- ❌ `6a8613d4-832c-4420-927e-6265b614c8b2` (from analysis of a different job earlier)
-- ❌ An old text from history
-
-**RIGHT:** Using the CURRENT, MOST RECENT job UUID
-- ✅ `b954620b-a2c7-4474-9249-f31d8d55856f` (from the latest message in THIS conversation)
-
-**Example - What to look for:**
+**Multiple workflows:**
 ```
-Most recent message in conversation:
-———————————————
-use UUID: b954620b-a2c7-4474-9249-f31d8d55856f     ← COPY THIS EXACTLY, ALL 36 CHARS
-
-Or from analysis:
-📊 Analysis Ready: sample_name
-Run UUID: b954620b-a2c7-4474-9249-f31d8d55856f     ← THIS IS WHAT YOU USE
-
-Use this UUID in EVERY tool call:
-[[DATA_CALL: service=server4, tool=find_file, run_uuid=b954620b-a2c7-4474-9249-f31d8d55856f, file_name=...]]
-[[DATA_CALL: service=server4, tool=parse_..., run_uuid=b954620b-a2c7-4474-9249-f31d8d55856f, file_path=...]]
-———————————————
+[CONTEXT: workflows=[
+  workflow1 (sample=jamshid, mode=RNA): work_dir=/media/.../workflow1
+  workflow2 (sample=ali, mode=DNA): work_dir=/media/.../workflow2
+], active_workflow=workflow2]
 ```
 
-**Rule:** If you see multiple "use UUID:" messages in conversation history, use ONLY the last one. The most recent one is the active job.
+**Use the work_dir value from the CONTEXT line in EVERY tool call:**
+```
+[[DATA_CALL: service=server4, tool=find_file, work_dir=/media/.../workflow1, file_name=gene_counts]]
+[[DATA_CALL: service=server4, tool=parse_csv_file, work_dir=/media/.../workflow1, file_path=counts/sample_gene_counts.csv]]
+```
+
+**FALLBACK:** If no `[CONTEXT: ...]` line, look for the most recent "Analysis Ready" or "Workflow:" message in conversation history.
+
+**Rule:** If you see multiple workflows, match the file to the correct workflow by sample name. Use only the `work_dir` for that workflow.
 
 ---
 
@@ -113,17 +81,18 @@ If you were switched from `analyze_job_results` with a "parse {filename}" reques
 
 **The system automatically injects job context into your message.** Look for a line like:
 ```
-[CONTEXT: run_uuid=b954620b-a2c7-4474-9249-f31d8d55856f, work_dir=/media/backup_disk/...]
+[CONTEXT: work_dir=/media/backup_disk/agoutic_root/users/alice/project/workflow1, sample=jamshid]
 ```
 
-**USE THAT run_uuid DIRECTLY in your DATA_CALL tags. Do NOT search for it.**
+**USE THAT work_dir DIRECTLY in your DATA_CALL tags. Do NOT search for it.**
 
-1. **Read the `[CONTEXT: ...]` line** — it has the run_uuid you need
+1. **Read the `[CONTEXT: ...]` line** — it has the work_dir you need
 2. **Extract the filename** from the user's message (e.g., "parse jamshid.mm39_final_stats.csv")  
-3. **Execute find_file IMMEDIATELY** with no explanation:
+3. **Execute find_file IMMEDIATELY** with the ACTUAL path from [CONTEXT], not a template variable:
    ```
-   [[DATA_CALL: service=server4, tool=find_file, run_uuid={uuid_from_context}, file_name=jamshid.mm39_final_stats.csv]]
+   [[DATA_CALL: service=server4, tool=find_file, work_dir=/media/.../workflow1, file_name=jamshid.mm39_final_stats.csv]]
    ```
+   ⚠️ **NEVER write `work_dir={work_dir}` or `work_dir={work_dir_from_context}` — always use the REAL PATH.**
 
 4. **Continue with STEP 1-5 below** to find and parse the file
 
@@ -161,9 +130,10 @@ When user says "parse [filename]":
 
 ### STEP 1: EXECUTE NOW - Call find_file
 
-Replace `{filename}` with the actual file being searched:
+Replace `{filename}` with the actual file being searched.
+**⚠️ Replace `{work_dir}` with the ACTUAL path from [CONTEXT] — e.g. `/media/.../workflow1`. NEVER output a template variable.**
 ```
-[[DATA_CALL: service=server4, tool=find_file, run_uuid={uuid}, file_name={filename}]]
+[[DATA_CALL: service=server4, tool=find_file, work_dir=/media/.../workflow1, file_name={filename}]]
 ```
 
 ### STEP 2: Extract `primary_path` from the response
@@ -188,10 +158,11 @@ Including the directory prefix:
 
 ### STEP 4: Use it in parse call - COPY THE EXACT VALUE
 
-Replace `{tool}` with `parse_csv_file`, `parse_bed_file`, or `read_file_content`:
+Use the correct tool (`parse_csv_file`, `parse_bed_file`, or `read_file_content`) with the REAL work_dir path:
 ```
-[[DATA_CALL: service=server4, tool={tool}, run_uuid={uuid}, file_path=directory/filename.ext]]
+[[DATA_CALL: service=server4, tool=parse_csv_file, work_dir=/media/.../workflow1, file_path=annot/sample_final_stats.csv]]
 ```
+⚠️ **NEVER use template variables like `{tool}` or `{work_dir}` — always substitute with actual values.**
 
 **Tool selection guide:**
 - **CSV files** (gene counts, stats): Use `parse_csv_file`
@@ -259,11 +230,11 @@ Then add mode-specific interpretation (see individual Dogme skills)
 ## Demonstration: What Happens with Wrong vs Right Paths
 
 **If you use:** `file_path=filename.ext`
-- System looks for: `/media/backup_disk/agoutic_root/server3_work/{uuid}/filename.ext` ❌
+- System looks for: `/work_dir/filename.ext` ❌
 - Result: **FILE NOT FOUND ERROR** (file isn't in root, it's in subdirectory)
 
 **If you use:** `file_path=directory/filename.ext`
-- System looks for: `/media/backup_disk/agoutic_root/server3_work/{uuid}/directory/filename.ext` ✅
+- System looks for: `/work_dir/directory/filename.ext` ✅
 - Result: **SUCCESS** (file found and parsed)
 
 **Key:** The directory prefix (subdirectory) IS REQUIRED and CANNOT be omitted.
@@ -273,7 +244,7 @@ Then add mode-specific interpretation (see individual Dogme skills)
 ## Critical Rules - Apply to All Modes
 
 **Before calling any parse tool, verify:**
-- ✅ UUID is from MOST RECENT "Analysis Ready" message
+- ✅ work_dir is from the `[CONTEXT: ...]` line or the MOST RECENT "Analysis Ready" message
 - ✅ `primary_path` includes a directory prefix
 - ✅ Using EXACT copy of `primary_path` from find_file response
 - ✅ Not modifying or shortening the path
@@ -291,6 +262,23 @@ Then add mode-specific interpretation (see individual Dogme skills)
 - Ask permission for obvious next steps
 - Get stuck in explanation loops — act first, explain results
 - Say "the query did not return expected data" when `success: true`
+- Output template variables like `{work_dir}` — always use the actual path
+
+---
+
+## Browsing Commands
+
+The system handles these commands automatically — just respond naturally to the results.
+
+**"list workflows"** — Lists all workflow folders in the project. Useful when user has run multiple jobs.
+
+**"list files"** — Lists files in the current (most recent) workflow.
+
+**"list files in workflow2/annot"** — Lists files in a specific subfolder, optionally prefixed by a workflow name.
+
+**"parse annot/File.csv"** — Parses a file using a relative path within the current workflow. The system resolves the path automatically.
+
+**"parse workflow2/annot/File.csv"** — Parses a file in a specific workflow when multiple workflows exist.
 
 ---
 

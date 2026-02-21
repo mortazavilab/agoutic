@@ -406,6 +406,62 @@ async def submit_via_mcp(job_params):
         return await client.submit_dogme_job(**job_params)
 ```
 
+## Integration with Server 4
+
+Server 1 calls Server 4 MCP tools for file discovery, parsing, and analysis of completed workflow results.
+
+### Workflow Directory Structure
+
+Each completed Dogme job writes output to a `workflow{N}/` folder inside the project directory:
+
+```
+$AGOUTIC_DATA/users/{username}/{project-slug}/
+├── data/              # Uploaded input data
+├── workflow1/         # First job
+│   ├── annot/         # Annotations, final stats, gene counts
+│   ├── bams/          # BAM alignment files
+│   ├── bedMethyl/     # Methylation BED output
+│   ├── fastqs/        # FASTQ files
+│   ├── kallisto/      # Kallisto quantification (cDNA)
+│   └── work/          # Nextflow intermediates (excluded from listing)
+└── workflow2/         # Second job (auto-incremented)
+```
+
+### Agent-Level Browsing Commands
+
+Server 1's `_auto_generate_data_calls()` safety net detects browsing commands and generates the appropriate Server 4 tool calls automatically — the LLM doesn't need to produce `[[DATA_CALL:...]]` tags for these:
+
+| User says | Server 1 generates |
+|---|---|
+| `list workflows` | `list_job_files(work_dir=<project_dir>)` |
+| `list files` | `list_job_files(work_dir=<current_workflow>)` |
+| `list files in annot` | `list_job_files(work_dir=<workflow>/annot)` |
+| `list files in workflow2/annot` | `list_job_files(work_dir=<workflow2>/annot)` |
+| `parse annot/File.csv` | `find_file(work_dir=<workflow>, file_name=File.csv)` → `parse_csv_file(...)` |
+| `parse workflow2/annot/File.csv` | `find_file(work_dir=<workflow2>, file_name=File.csv)` → `parse_csv_file(...)` |
+
+### Path Resolution Helpers
+
+- **`_resolve_workflow_path(subpath, default_work_dir, workflows)`** — resolves user subpaths like `"workflow2/annot"` to absolute directory paths
+- **`_resolve_file_path(user_path, default_work_dir, workflows)`** — resolves user file paths like `"workflow2/annot/File.csv"` to `(work_dir, filename)` tuples
+- **`_validate_server4_params(...)`** — catches placeholder `work_dir` values (`/work_dir`, `{work_dir}`, `<work_dir>`) and replaces them with the real path from EXECUTION_JOB blocks
+
+### Context Injection
+
+For Dogme skills, `_inject_job_context()` prepends a `[CONTEXT: ...]` line with the workflow directory path(s) so the LLM can reference them:
+
+```
+[CONTEXT: work_dir=/media/.../users/alice/my-project/workflow1, sample=jamshid]
+```
+
+For multi-workflow projects:
+```
+[CONTEXT: workflows=[
+  workflow1 (sample=jamshid, mode=CDNA): work_dir=/media/.../workflow1
+  workflow2 (sample=ali, mode=DNA): work_dir=/media/.../workflow2
+], active_workflow=workflow2]
+```
+
 ## Project & Block Structure
 
 ### Project Blocks

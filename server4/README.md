@@ -94,14 +94,34 @@ Server4 follows the **dual-interface pattern** established by Server3:
 
 ## MCP Tools
 
-Server4 exposes 6 MCP tools for AI agents:
+Server4 exposes 7 MCP tools for AI agents:
 
-1. **`list_job_files`** - List all files with optional extension filtering
-2. **`read_file_content`** - Read file content with preview limits
-3. **`parse_csv_file`** - Parse CSV/TSV files
-4. **`parse_bed_file`** - Parse BED format files
-5. **`get_analysis_summary`** - Get comprehensive summary
-6. **`categorize_job_files`** - Categorize files by type
+1. **`list_job_files`** - List all files in a workflow directory (or subfolder) with optional extension filtering
+2. **`find_file`** - Find a specific file by name (exact or partial, case-insensitive) — skips `work/` intermediates
+3. **`read_file_content`** - Read file content with preview limits
+4. **`parse_csv_file`** - Parse CSV/TSV files with column stats
+5. **`parse_bed_file`** - Parse BED format files
+6. **`get_analysis_summary`** - Get comprehensive job summary
+7. **`categorize_job_files`** - Categorize files by type
+
+All tools accept `work_dir` (preferred, absolute path to workflow folder) or `run_uuid` (legacy fallback).
+
+### Workflow Directory Layout
+
+Each Dogme job writes output to a `workflow{N}/` folder:
+
+```
+$AGOUTIC_DATA/users/{username}/{project-slug}/
+├── workflow1/
+│   ├── annot/       # Annotations, final stats, gene counts
+│   ├── bams/        # BAM alignment files
+│   ├── bedMethyl/   # Methylation BED output
+│   ├── fastqs/      # FASTQ files
+│   ├── kallisto/    # Kallisto quantification (cDNA)
+│   ├── dorModels/   # Dorado models
+│   └── work/        # Nextflow intermediates (skipped by file tools)
+└── workflow2/       # Second job (auto-incremented)
+```
 
 ### Tool Usage Example
 
@@ -112,16 +132,23 @@ from server1.server4_mcp_client import Server4MCPClient
 client = Server4MCPClient()
 await client.connect()
 
-# List files
+# List files in a workflow
 files = await client.list_job_files(
-    run_uuid="72f9f625-c755-441b-bab4-d91e735b8612",
+    work_dir="/media/.../users/alice/my-project/workflow1",
     extensions=".csv,.bed"
 )
 
-# Parse CSV
+# Find a file by partial name
+result = await client.find_file(
+    work_dir="/media/.../users/alice/my-project/workflow1",
+    file_name="qc_summary"
+)
+# Returns: {"primary_path": "annot/sample.mm39_qc_summary.csv", ...}
+
+# Parse CSV using the discovered path
 data = await client.parse_csv_file(
-    run_uuid="72f9f625-c755-441b-bab4-d91e735b8612",
-    file_path="annot/kourosh.mm39_final_stats.csv",
+    work_dir="/media/.../users/alice/my-project/workflow1",
+    file_path="annot/sample.mm39_final_stats.csv",
     max_rows=100
 )
 ```
