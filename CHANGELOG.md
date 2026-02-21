@@ -2,6 +2,18 @@
 
 ## [Unreleased] - 2026-02-20
 
+### Fixed — "list workflows" shows only workflow directories
+
+- **`data/` and other non-workflow dirs excluded from "list workflows"**
+  - "list workflows" listed everything in the project directory, including `data/`. Added `name_pattern` parameter to `discover_files()`, `list_job_files()`, and all MCP registrations. Server1 now passes `name_pattern="workflow*"` for "list workflows" calls so only `workflow1/`, `workflow2/`, etc. are returned.
+  - Applied to: [server4/analysis_engine.py](server4/analysis_engine.py), [server4/mcp_tools.py](server4/mcp_tools.py), [server4/mcp_server.py](server4/mcp_server.py), [server1/app.py](server1/app.py)
+
+### Fixed — Approval gate triggered for file browsing commands
+
+- **Browsing commands no longer trigger APPROVAL_NEEDED gate**
+  - When on a Dogme skill (e.g. `run_dogme_cdna`), the LLM emitted `[[APPROVAL_NEEDED]]` alongside a browsing response, causing the approval confirmation UI to appear. The browsing override now also sets `needs_approval = False` and `plot_specs = []`.
+  - Applied to: [server1/app.py](server1/app.py)
+
 ### Fixed — File Browsing Routing and Skill Independence
 
 - **Browsing commands now skill-independent (not gated on Dogme skills)**

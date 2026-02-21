@@ -40,6 +40,7 @@ async def list_job_files(
     extensions: Optional[str] = None,
     compact: bool = True,
     max_depth: Optional[int] = None,
+    name_pattern: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     List all files in a job's work directory.
@@ -60,7 +61,8 @@ async def list_job_files(
             ext_list = [ext.strip() for ext in extensions.split(',')]
 
         file_listing = discover_files(run_uuid, ext_list, work_dir_path=work_dir,
-                                      max_depth=max_depth)
+                                      max_depth=max_depth,
+                                      name_pattern=name_pattern)
 
         if compact and file_listing.file_count > 100:
             return {
@@ -501,6 +503,10 @@ TOOL_SCHEMAS = {
                 "max_depth": {
                     "type": "integer",
                     "description": "Only list entries up to this many levels deep (1 = immediate children)"
+                },
+                "name_pattern": {
+                    "type": "string",
+                    "description": "Optional fnmatch glob to filter entry names (e.g., 'workflow*')"
                 },
             },
             "required": []

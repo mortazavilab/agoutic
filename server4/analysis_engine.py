@@ -4,6 +4,7 @@ Handles file discovery, parsing, and analysis of Dogme job results.
 """
 
 import csv
+import fnmatch
 import json
 import pandas as pd
 import numpy as np
@@ -100,6 +101,7 @@ def discover_files(
     *,
     work_dir_path: Optional[str] = None,
     max_depth: Optional[int] = None,
+    name_pattern: Optional[str] = None,
 ) -> FileListing:
     """
     Discover all files in a job's work directory.
@@ -110,6 +112,8 @@ def discover_files(
         work_dir_path: Absolute path to the workflow directory
         max_depth: If set, only list entries up to this many levels deep.
                    1 = immediate children only (files + dirs).
+        name_pattern: Optional fnmatch glob to filter entry names
+                      (e.g., 'workflow*' to show only workflow dirs).
 
     Returns:
         FileListing with all discovered files
@@ -133,6 +137,9 @@ def discover_files(
             # Skip work/ and dor*/ directories (Nextflow intermediates)
             _dirname = child.name
             if _dirname == "work" or _dirname.startswith("dor"):
+                continue
+            # Apply optional name pattern filter (fnmatch glob)
+            if name_pattern and not fnmatch.fnmatch(_dirname, name_pattern):
                 continue
             if child.is_dir():
                 files.append(FileInfo(

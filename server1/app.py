@@ -506,6 +506,7 @@ def _validate_server4_params(
                 real_wd = real_wd.rstrip("/").rsplit("/", 1)[0]
             # Otherwise real_wd is already the project dir (from project_dir fallback)
             params["max_depth"] = 1  # only top-level dirs
+            params["name_pattern"] = "workflow*"  # filter to workflow dirs only
 
         # "list files in <subpath>" — append subfolder to work_dir.
         # Source 1 (preferred): parse from user message — preserves
@@ -754,7 +755,7 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
             calls.append({
                 "source_type": "service", "source_key": "server4",
                 "tool": "list_job_files",
-                "params": {"work_dir": _project_dir, "max_depth": 1},
+                "params": {"work_dir": _project_dir, "max_depth": 1, "name_pattern": "workflow*"},
             })
         return calls
 
@@ -3717,6 +3718,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 legacy_analysis_matches = []
                 has_any_tags = False
                 clean_markdown = ""
+                needs_approval = False  # browsing is not a job submission
+                plot_specs = []         # no plots for file listings
                 # Clear injected ENCODE DFs so they're not rendered alongside
                 # the file listing
                 _injected_dfs = {}
