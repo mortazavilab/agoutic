@@ -2,6 +2,20 @@
 
 ## [Unreleased] - 2026-02-20
 
+### Fixed — ENCODE accession hallucinations
+
+- **LLM replaces correct ENCSR with a hallucinated one in its text response**
+  - When calling a tool like `get_files_by_type(accession=ENCSR160HKZ)`, the LLM would correctly fetch the right data but then write "There are 12 BAM files for ENCSR000CQZ" in its summary. Added a post-processing pass on `clean_markdown`: if the user message contains exactly one ENCSR accession, any different ENCSR appearing in the LLM's text is replaced with the correct one.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **LLM calls wrong tool/accession for ENCFF file metadata ("metadata for ENCFF921XAH" → fetched ENCSR503QZJ)**
+  - The LLM called `get_files_by_type(accession=ENCSR503QZJ)` (completely hallucinated experiment) instead of `get_file_metadata(accession=ENCSR160HKZ, file_accession=ENCFF921XAH)`. The ENCFF-detection logic in `_correct_tool_routing` only applied to `get_experiment`, not to other ENCODE tools. Added a general ENCFF catch-all at the end of `_correct_tool_routing`: if ENCFF appears in the user message and the tool is anything other than `get_file_metadata`, redirect to `get_file_metadata` with the parent experiment found from conversation history.
+  - Applied to: [server1/app.py](server1/app.py)
+
+- **`_validate_encode_params` Fix 3: replace hallucinated ENCSR in tool params**
+  - If the user explicitly stated an ENCSR accession in their message and the LLM's tag used a different ENCSR, the parameter is corrected before the API call.
+  - Applied to: [server1/app.py](server1/app.py)
+
 ### Fixed — "list workflows" shows only workflow directories
 
 - **`data/` and other non-workflow dirs excluded from "list workflows"**

@@ -377,6 +377,37 @@ def _correct_tool_routing(tool: str, params: dict, user_message: str,
                     ),
                 }
 
+    # --- General ENCFF catch-all (any ENCODE tool, not just get_experiment) ---
+    # When the user message contains an ENCFF file accession but the tool
+    # called is *not* get_file_metadata (e.g. LLM called get_files_by_type
+    # with a hallucinated ENCSR instead).
+    if tool not in ("get_file_metadata",):
+        encff_in_msg = re.findall(r'(ENCFF[A-Z0-9]{6})', user_message.upper())
+        if encff_in_msg:
+            file_acc = encff_in_msg[0]
+            exp_acc = _find_experiment_for_file(file_acc, conversation_history)
+            if exp_acc:
+                logger.warning(
+                    "General ENCFF catch-all: ENCFF in user message, rerouting to get_file_metadata",
+                    from_tool=tool, file_accession=file_acc, experiment=exp_acc,
+                )
+                return "get_file_metadata", {
+                    "accession": exp_acc, "file_accession": file_acc}
+            else:
+                logger.warning(
+                    "General ENCFF catch-all: ENCFF in user message but no parent experiment found",
+                    from_tool=tool, file_accession=file_acc,
+                )
+                return "get_file_metadata", {
+                    "file_accession": file_acc,
+                    "__routing_error__": (
+                        f"Cannot look up file metadata for {file_acc} without "
+                        f"knowing its parent experiment (ENCSR...). "
+                        f"Please first query the experiment that contains this "
+                        f"file, then ask about the file."
+                    ),
+                }
+
     return tool, params
 
 
@@ -420,6 +451,20 @@ def _validate_encode_params(tool: str, params: dict, user_message: str) -> dict:
             removed = params.pop("organism")
             logger.info("Stripped auto-organism (user didn't request it)",
                        removed_organism=removed)
+
+    # --- Fix 3: replace hallucinated ENCSR with what the user explicitly stated ---
+    # If the user message contains a valid ENCSR accession and the LLM put a
+    # *different* ENCSR in "accession", always trust the user's value.
+    if "accession" in params and params["accession"]:
+        _encsr_in_msg = re.findall(r'(ENCSR[A-Z0-9]{6})', user_message, re.IGNORECASE)
+        if _encsr_in_msg:
+            _user_encsr = _encsr_in_msg[0].upper()
+            if params["accession"].upper() != _user_encsr:
+                logger.warning(
+                    "Replaced hallucinated ENCSR with user-stated accession",
+                    hallucinated=params["accession"], correct=_user_encsr,
+                )
+                params["accession"] = _user_encsr
 
     return params
 
@@ -3643,8 +3688,23 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # Also remove any remaining plain text patterns that might not have been converted
         for pattern in all_fallback_patterns.keys():
             clean_markdown = re.sub(pattern, '', clean_markdown, flags=re.IGNORECASE).strip()
-        
-        # 5b. Auto-tag safety net: if LLM failed to generate any DATA_CALL tags,
+
+        # Fix hallucinated ENCSR accessions in LLM text response.
+        # If the user explicitly stated exactly one ENCSR accession and the LLM
+        # mentions a *different* ENCSR in its text, replace the wrong one.
+        _encsr_in_user_msg = re.findall(r'(ENCSR[A-Z0-9]{6})', req.message, re.IGNORECASE)
+        if len(_encsr_in_user_msg) == 1:
+            _correct_encsr = _encsr_in_user_msg[0].upper()
+            _encsr_in_reply = re.findall(r'(ENCSR[A-Z0-9]{6})', clean_markdown, re.IGNORECASE)
+            _wrong_encsr = [a.upper() for a in _encsr_in_reply if a.upper() != _correct_encsr]
+            for _wrong in set(_wrong_encsr):
+                logger.warning("Fixing hallucinated ENCSR in LLM text",
+                               hallucinated=_wrong, correct=_correct_encsr)
+                clean_markdown = re.sub(
+                    re.escape(_wrong), _correct_encsr, clean_markdown, flags=re.IGNORECASE
+                )
+
+
         #     detect patterns in the user message and auto-generate appropriate calls.
         #     ALSO validates accessions when the user uses referential words ("them",
         #     "each of them", etc.) to catch LLM-hallucinated accession numbers.
