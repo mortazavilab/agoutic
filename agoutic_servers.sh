@@ -2,7 +2,7 @@
 # =============================================================================
 # AGOUTIC - Server Manager
 # =============================================================================
-# Launches all server processes (Server 1, 3, 4, and consortium MCP servers)
+# Launches all server processes (Cortex, 3, 4, and consortium MCP servers)
 # as background processes with PID tracking and log files.
 #
 # Features:
@@ -28,22 +28,22 @@ PIDS_DIR="$AGOUTIC_CODE/pids"
 LOGS_DIR="$AGOUTIC_DATA/logs"
 
 # Port assignments
-SERVER1_PORT="${SERVER1_PORT:-8000}"
-SERVER3_PORT="${SERVER3_PORT:-8003}"
-SERVER3_MCP_PORT="${SERVER3_MCP_PORT:-8002}"
-SERVER4_PORT="${SERVER4_PORT:-8004}"
-SERVER4_MCP_PORT="${SERVER4_MCP_PORT:-8005}"
+CORTEX_PORT="${CORTEX_PORT:-8000}"
+LAUNCHPAD_PORT="${LAUNCHPAD_PORT:-8003}"
+LAUNCHPAD_MCP_PORT="${LAUNCHPAD_MCP_PORT:-8002}"
+ANALYZER_PORT="${ANALYZER_PORT:-8004}"
+ANALYZER_MCP_PORT="${ANALYZER_MCP_PORT:-8005}"
 ENCODE_MCP_PORT="${ENCODE_MCP_PORT:-8006}"
 UI_PORT="${UI_PORT:-8501}"
 
 # Map service names to ports
 declare -A PORT_MAP=(
-    ["server3-rest"]=$SERVER3_PORT
-    ["server3-mcp"]=$SERVER3_MCP_PORT
-    ["server4-rest"]=$SERVER4_PORT
-    ["server4-mcp"]=$SERVER4_MCP_PORT
+    ["launchpad-rest"]=$LAUNCHPAD_PORT
+    ["launchpad-mcp"]=$LAUNCHPAD_MCP_PORT
+    ["analyzer-rest"]=$ANALYZER_PORT
+    ["analyzer-mcp"]=$ANALYZER_MCP_PORT
     ["encode-mcp"]=$ENCODE_MCP_PORT
-    ["server1"]=$SERVER1_PORT
+    ["cortex"]=$CORTEX_PORT
 )
 
 # Colors
@@ -102,7 +102,7 @@ rotate_logs() {
 
         # Only rotate the current (non-timestamped) log files.
         # Already-rotated files contain a dot-separated timestamp like
-        # "server1.20260213_082438.jsonl" — skip them.
+        # "cortex.20260213_082438.jsonl" — skip them.
         if [[ "$name" == *.* ]]; then
             continue
         fi
@@ -323,37 +323,37 @@ cmd_start() {
     log "Starting AGOUTIC servers..."
     echo ""
 
-    # Server 3 - REST API (Nextflow/Dogme job execution)
-    start_process "server3-rest" \
-        "python -m uvicorn server3.app:app --host 0.0.0.0 --port $SERVER3_PORT"
+    # Launchpad - REST API (Nextflow/Dogme job execution)
+    start_process "launchpad-rest" \
+        "python -m uvicorn launchpad.app:app --host 0.0.0.0 --port $LAUNCHPAD_PORT"
 
-    # Server 3 - MCP Server (HTTP mode)
-    start_process "server3-mcp" \
-        "python -m server3.mcp_server --host 0.0.0.0 --port $SERVER3_MCP_PORT"
+    # Launchpad - MCP Server (HTTP mode)
+    start_process "launchpad-mcp" \
+        "python -m launchpad.mcp_server --host 0.0.0.0 --port $LAUNCHPAD_MCP_PORT"
 
-    # Server 4 - REST API (Analysis engine)
-    start_process "server4-rest" \
-        "python -m server4.app"
+    # Analyzer - REST API (Analysis engine)
+    start_process "analyzer-rest" \
+        "python -m analyzer.app"
 
-    # Server 4 - MCP Server (HTTP mode)
-    start_process "server4-mcp" \
-        "python -m server4.mcp_server --host 0.0.0.0 --port $SERVER4_MCP_PORT"
+    # Analyzer - MCP Server (HTTP mode)
+    start_process "analyzer-mcp" \
+        "python -m analyzer.mcp_server --host 0.0.0.0 --port $ANALYZER_MCP_PORT"
 
     # ENCODE MCP Server (consortium)
     start_process "encode-mcp" \
-        "python -m server2.launch_encode --host 0.0.0.0 --port $ENCODE_MCP_PORT"
+        "python -m atlas.launch_encode --host 0.0.0.0 --port $ENCODE_MCP_PORT"
 
-    # Server 1 - Main orchestrator (start last)
-    start_process "server1" \
-        "python -m uvicorn server1.app:app --host 0.0.0.0 --port $SERVER1_PORT"
+    # Cortex - Main orchestrator (start last)
+    start_process "cortex" \
+        "python -m uvicorn cortex.app:app --host 0.0.0.0 --port $CORTEX_PORT"
 
     echo ""
     log "All servers started. Port summary:"
-    echo "  Server 1 (Orchestrator):   http://localhost:$SERVER1_PORT"
-    echo "  Server 3 (Jobs REST):      http://localhost:$SERVER3_PORT"
-    echo "  Server 3 (Jobs MCP):       http://localhost:$SERVER3_MCP_PORT"
-    echo "  Server 4 (Analysis REST):  http://localhost:$SERVER4_PORT"
-    echo "  Server 4 (Analysis MCP):   http://localhost:$SERVER4_MCP_PORT"
+    echo "  Cortex (Orchestrator):   http://localhost:$CORTEX_PORT"
+    echo "  Launchpad (Jobs REST):      http://localhost:$LAUNCHPAD_PORT"
+    echo "  Launchpad (Jobs MCP):       http://localhost:$LAUNCHPAD_MCP_PORT"
+    echo "  Analyzer (Analysis REST):  http://localhost:$ANALYZER_PORT"
+    echo "  Analyzer (Analysis MCP):   http://localhost:$ANALYZER_MCP_PORT"
     echo "  ENCODE (Consortium MCP):   http://localhost:$ENCODE_MCP_PORT"
     echo ""
     log "Structured logs:  $LOGS_DIR/*.jsonl"
@@ -365,12 +365,12 @@ cmd_stop() {
     log "Stopping AGOUTIC servers..."
     echo ""
 
-    stop_process "server1"
+    stop_process "cortex"
     stop_process "encode-mcp"
-    stop_process "server4-mcp"
-    stop_process "server4-rest"
-    stop_process "server3-mcp"
-    stop_process "server3-rest"
+    stop_process "analyzer-mcp"
+    stop_process "analyzer-rest"
+    stop_process "launchpad-mcp"
+    stop_process "launchpad-rest"
 
     echo ""
     log "All servers stopped."
@@ -380,8 +380,8 @@ cmd_status() {
     log "AGOUTIC server status:"
     echo ""
 
-    local services=("server3-rest" "server3-mcp" "server4-rest" "server4-mcp" "encode-mcp" "server1")
-    local labels=("Server 3 REST" "Server 3 MCP" "Server 4 REST" "Server 4 MCP" "ENCODE MCP" "Server 1")
+    local services=("launchpad-rest" "launchpad-mcp" "analyzer-rest" "analyzer-mcp" "encode-mcp" "cortex")
+    local labels=("Launchpad REST" "Launchpad MCP" "Analyzer REST" "Analyzer MCP" "ENCODE MCP" "Cortex")
 
     for i in "${!services[@]}"; do
         local name="${services[$i]}"

@@ -30,8 +30,8 @@ The system automatically injects workflow directory paths. If present, use the `
 
 **Use the work_dir value from the CONTEXT line in EVERY tool call:**
 ```
-[[DATA_CALL: service=server4, tool=find_file, work_dir=/media/.../workflow1, file_name=gene_counts]]
-[[DATA_CALL: service=server4, tool=parse_csv_file, work_dir=/media/.../workflow1, file_path=counts/sample_gene_counts.csv]]
+[[DATA_CALL: service=analyzer, tool=find_file, work_dir=/media/.../workflow1, file_name=gene_counts]]
+[[DATA_CALL: service=analyzer, tool=parse_csv_file, work_dir=/media/.../workflow1, file_path=counts/sample_gene_counts.csv]]
 ```
 
 **FALLBACK:** If no `[CONTEXT: ...]` line, look for the most recent "Analysis Ready" or "Workflow:" message in conversation history.
@@ -90,7 +90,7 @@ If you were switched from `analyze_job_results` with a "parse {filename}" reques
 2. **Extract the filename** from the user's message (e.g., "parse jamshid.mm39_final_stats.csv")  
 3. **Execute find_file IMMEDIATELY** with the ACTUAL path from [CONTEXT], not a template variable:
    ```
-   [[DATA_CALL: service=server4, tool=find_file, work_dir=/media/.../workflow1, file_name=jamshid.mm39_final_stats.csv]]
+   [[DATA_CALL: service=analyzer, tool=find_file, work_dir=/media/.../workflow1, file_name=jamshid.mm39_final_stats.csv]]
    ```
    ⚠️ **NEVER write `work_dir={work_dir}` or `work_dir={work_dir_from_context}` — always use the REAL PATH.**
 
@@ -133,7 +133,7 @@ When user says "parse [filename]":
 Replace `{filename}` with the actual file being searched.
 **⚠️ Replace `{work_dir}` with the ACTUAL path from [CONTEXT] — e.g. `/media/.../workflow1`. NEVER output a template variable.**
 ```
-[[DATA_CALL: service=server4, tool=find_file, work_dir=/media/.../workflow1, file_name={filename}]]
+[[DATA_CALL: service=analyzer, tool=find_file, work_dir=/media/.../workflow1, file_name={filename}]]
 ```
 
 ### STEP 2: Extract `primary_path` from the response
@@ -160,7 +160,7 @@ Including the directory prefix:
 
 Use the correct tool (`parse_csv_file`, `parse_bed_file`, or `read_file_content`) with the REAL work_dir path:
 ```
-[[DATA_CALL: service=server4, tool=parse_csv_file, work_dir=/media/.../workflow1, file_path=annot/sample_final_stats.csv]]
+[[DATA_CALL: service=analyzer, tool=parse_csv_file, work_dir=/media/.../workflow1, file_path=annot/sample_final_stats.csv]]
 ```
 ⚠️ **NEVER use template variables like `{tool}` or `{work_dir}` — always substitute with actual values.**
 

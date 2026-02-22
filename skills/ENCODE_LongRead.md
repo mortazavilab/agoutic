@@ -20,7 +20,7 @@ This skill handles **downloading and processing ENCODE long-read sequencing data
 - User has **local data** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
 - User wants **job results** → `[[SKILL_SWITCH_TO: analyze_job_results]]`
 
-## Server 2 Tools Available
+## Atlas Tools Available
 
 This skill can use [[DATA_CALL: consortium=encode, tool=...]] tags for metadata and download operations:
 
@@ -99,7 +99,7 @@ First, I'll resolve the download URLs for each file:
 [[DATA_CALL: consortium=encode, tool=get_file_url, accession=ENCSR000ABC, file_accession=ENCFF001AAB]]
 ```
 
-**Important:** Do NOT use `download_files` from Server 2. Use `get_file_url` to resolve URLs, then the system downloads files into the user's project data/ directory.
+**Important:** Do NOT use `download_files` from Atlas. Use `get_file_url` to resolve URLs, then the system downloads files into the user's project data/ directory.
 
 Report results:
 - Number of files downloaded
@@ -165,4 +165,4 @@ Options:
 2. **Only switch to `analyze_local_sample`** after files are downloaded. Never switch to `run_dogme_dna`, `run_dogme_rna`, or `run_dogme_cdna` — those are for post-job analysis only.
 3. **State `sample_name` and data path explicitly** in your message before outputting `[[SKILL_SWITCH_TO: analyze_local_sample]]` so the intake skill can find them in conversation history.
 4. **Do NOT collect sample type, reference genome, or Dogme settings** — that's `analyze_local_sample`'s job.
-5. **Do NOT generate [[DATA_CALL: service=server3, ...]] tags** — job submission is handled automatically after user approval in the intake skill.
+5. **Do NOT generate [[DATA_CALL: service=launchpad, ...]] tags** — job submission is handled automatically after user approval in the intake skill.

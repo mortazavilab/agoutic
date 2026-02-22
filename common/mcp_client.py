@@ -31,7 +31,7 @@ class MCPHttpClient:
     def __init__(self, name: str, base_url: str, timeout: float = 120.0):
         """
         Args:
-            name: Human-readable name for logging (e.g., "encode", "server3")
+            name: Human-readable name for logging (e.g., "encode", "launchpad")
             base_url: Base URL of the running MCP server (e.g., "http://localhost:8006")
             timeout: HTTP request timeout in seconds
         """

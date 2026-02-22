@@ -68,7 +68,7 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 **Execute immediately with get_analysis_summary to get mode for routing:**
 
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
+[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **Then immediately switch to the appropriate Dogme skill based on the mode field from get_analysis_summary.**
@@ -76,13 +76,13 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 **If user just wants summary/overview, use get_analysis_summary:**
 
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
+[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **But for analysis requests, use list_job_files with filtering to exclude work files:**
 
 ```
-[[DATA_CALL: service=server4, tool=list_job_files, work_dir=<work_dir>, extensions=.csv,.tsv,.bed,.txt]]
+[[DATA_CALL: service=analyzer, tool=list_job_files, work_dir=<work_dir>, extensions=.csv,.tsv,.bed,.txt]]
 ```
 
 **This shows only final result files (CSV, TSV, BED, TXT) and excludes work/intermediate files that bloat the counts.**
@@ -169,7 +169,7 @@ The analysis tools require the actual job UUID. **Do NOT use old UUIDs from prev
 Context injection shows:
 [CONTEXT: work_dir=/media/.../project/workflow2, sample=jamshid]
 
-[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=/media/.../project/workflow2]]
+[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=/media/.../project/workflow2]]
 ```
 
 **⚠️ If you get "File not found" error:** Check your work_dir against the context injection. Wrong directory is the most common cause.
@@ -194,7 +194,7 @@ Context injection shows:
 ⚠️ **The DataCall below MUST execute right now with the work_dir from context:**
 
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
+[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **After you get the response with `mode` field:**
@@ -242,7 +242,7 @@ Switch to the appropriate Dogme skill based on mode:
 Once you have the workflow directory, get the analysis summary first:
 
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
+[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 The summary includes the job's **mode** (DNA, RNA, or CDNA). Based on the mode, switch to the appropriate analysis interpretation skill:
@@ -294,7 +294,7 @@ Discover what output files are available:
 **⚠️ TIP: Use extension filtering for large jobs**
 Since jobs can have 500+ files, use the `extensions` parameter to filter the listing:
 ```
-[[DATA_CALL: service=server4, tool=list_job_files, work_dir=<work_dir>, extensions=.csv,.tsv,.bed]]
+[[DATA_CALL: service=analyzer, tool=list_job_files, work_dir=<work_dir>, extensions=.csv,.tsv,.bed]]
 ```
 This returns only the key result files without truncation instead of trying to list all files.
 
@@ -413,7 +413,7 @@ Present results in clear sections:
 
 ## Available API Endpoints Summary
 
-All analysis endpoints are available on Server 1 at http://localhost:8000:
+All analysis endpoints are available on Cortex at http://localhost:8000:
 
 ### File Discovery
 - `GET /analysis/jobs/{work_dir}/files?extensions={optional}` - List files with optional filtering

@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 2.7  
+**Version:** 2.8  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -8,10 +8,10 @@
 AGOUTIC is a general-purpose agent for analyzing and interpreting long-read genomic data (Nanopore/PacBio). It uses a **Dual Interface** architecture (REST + MCP) to allow both human users and AI agents to orchestrate complex bioinformatics pipelines.
 
 The system is composed of:
-- **Server 1**: Agent Engine - AI-powered orchestration and user interaction
-- **Server 2**: ENCODE Integration - Public data retrieval via ENCODELIB
-- **Server 3**: Execution Engine - Dogme/Nextflow pipeline management
-- **Server 4**: Analysis Engine - Results analysis and QC reporting
+- **Cortex**: Agent Engine - AI-powered orchestration and user interaction
+- **Atlas**: ENCODE Integration - Public data retrieval via ENCODELIB
+- **Launchpad**: Execution Engine - Dogme/Nextflow pipeline management
+- **Analyzer**: Analysis Engine - Results analysis and QC reporting
 - **UI**: Web interface for monitoring and control
 
 ## 🔒 Security & Multi-User Isolation
@@ -24,7 +24,7 @@ AGOUTIC enforces access control at every layer:
 - **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{user_id}/{project_id}/`) with input sanitization and jail-escape guards.
 - **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
 - **Project management**: Full dashboard for browsing projects, viewing stats/files/jobs, renaming, archiving, and permanent deletion with cascading cleanup.
-- **Migration**: Run `python server1/migrate_hardening.py` to add hardening columns. Run `python server1/migrate_token_tracking.py` to add token tracking columns. Run `python server1/migrate_usernames.py` to add the `username` column, then `python server1/set_usernames.py auto` to derive usernames from email addresses. All scripts respect `$AGOUTIC_DATA` and are safe to re-run.
+- **Migration**: Run `python cortex/migrate_hardening.py` to add hardening columns. Run `python cortex/migrate_token_tracking.py` to add token tracking columns. Run `python cortex/migrate_usernames.py` to add the `username` column, then `python cortex/set_usernames.py auto` to derive usernames from email addresses. All scripts respect `$AGOUTIC_DATA` and are safe to re-run.
 - **Username paths**: User-jailed filesystem paths use `$AGOUTIC_DATA/users/{username}/{project-slug}/` instead of raw IDs, giving human-readable directory trees.
 
 ## 🚀 Quick Start
@@ -40,32 +40,32 @@ conda activate agoutic_core
 ### Run the System
 
 ```bash
-# Terminal 1: Start Server 3 (Job Execution Engine)
-uvicorn server3.app:app --host 0.0.0.0 --port 8001 --reload
+# Terminal 1: Start Launchpad (Job Execution Engine)
+uvicorn launchpad.app:app --host 0.0.0.0 --port 8001 --reload
 
-# Terminal 2: Start Server 1 (Agent Engine)
-uvicorn server1.app:app --host 0.0.0.0 --port 8000 --reload
+# Terminal 2: Start Cortex (Agent Engine)
+uvicorn cortex.app:app --host 0.0.0.0 --port 8000 --reload
 
 # Terminal 3: Start UI
 cd ui && python app.py
 
-# Optional: Server 2 & 4 start automatically when needed
+# Optional: Atlas & 4 start automatically when needed
 # But can be started manually for testing:
-# cd /Users/eli/code/ENCODELIB && python encode_server.py  # Server 2
-# cd server4 && uvicorn app:app --port 8002                # Server 4
+# cd /Users/eli/code/ENCODELIB && python encode_server.py  # Atlas
+# cd analyzer && uvicorn app:app --port 8002                # Analyzer
 ```
 
 ### Verify Installation
 
 ```bash
-# Check Server 1 health
+# Check Cortex health
 curl http://localhost:8000/health
 
-# Check Server 3 health
+# Check Launchpad health
 curl http://localhost:8001/health
 
-# Test Server 2 connection
-python server1/server2_mcp_client.py
+# Test Atlas connection
+python cortex/atlas_mcp_client.py
 
 # Expected: Connection success and K562 search results
 ```
@@ -83,14 +83,14 @@ python server1/server2_mcp_client.py
 │       │ REST API                                            │
 │       ↓                                                      │
 │  ┌────────────────────────────────────────┐                │
-│  │        Server 1 (Agent Engine)         │                │
+│  │        Cortex (Agent Engine)         │                │
 │  │     AI Orchestration + Coordination    │                │
 │  └────┬────────────┬────────────┬─────────┘                │
 │       │            │            │                           │
 │       │ MCP        │ REST       │ MCP                       │
 │       ↓            ↓            ↓                           │
 │  ┌────────┐  ┌──────────┐  ┌──────────┐                   │
-│  │Server 2│  │ Server 3 │  │ Server 4 │                   │
+│  │Atlas│  │ Launchpad │  │ Analyzer │                   │
 │  │ENCODE  │  │ Nextflow │  │ Analysis │                   │
 │  │ Portal │  │ Pipeline │  │  Engine  │                   │
 │  └────┬───┘  └─────┬────┘  └─────┬────┘                   │
@@ -104,12 +104,12 @@ python server1/server2_mcp_client.py
 
 ## 🔧 System Components
 
-### Server 1: Agent Engine (Port 8000)
+### Cortex: Agent Engine (Port 8000)
 - **Role:** Central orchestrator with LLM reasoning
 - **Tech:** FastAPI + OpenAI-compatible LLM
 - **Features:**
   - Chat interface with skill-based workflows
-  - Coordinates Server 2, 3, and 4
+  - Coordinates Atlas, 3, and 4
   - Block-based project timeline
   - Background job monitoring
   - User authentication
@@ -119,21 +119,27 @@ python server1/server2_mcp_client.py
   - **Per-message and per-conversation token tracking** — every LLM response records `prompt_tokens`, `completion_tokens`, `total_tokens`, and `model_name` in the database; exposed via `GET /user/token-usage` (own data) and `GET /admin/token-usage` (all users)
   - **`find_file` echo recovery** — when a weak model emits a `find_file` JSON result verbatim instead of a `[[DATA_CALL:...]]` tag, the pipeline intercepts the response, auto-chains to `parse_csv_file`/`parse_bed_file`/`read_file_content`, and strips the bad block from conversation history to prevent looping
   - **ENCODE tool routing guards** — structural checks prevent LLM misrouting (e.g. cell-line names sent to `get_experiment`); assay-only queries are routed to `search_by_assay`
+  - **Tool Schema Contracts** — machine-readable JSON Schema for every MCP tool, fetched at startup from `/tools/schema` endpoints on all servers. Injected into the system prompt as a compact reference and used for pre-call param validation (strip unknown params, check required fields, normalise enums).
+  - **Structured Conversation State** — typed `ConversationState` JSON (skill, project, sample, experiment, dataframes, workflows) built each turn and injected as `[STATE]...[/STATE]` so the LLM always sees current context
+  - **Error-Handling Playbook** — deterministic failure rules in the system prompt + structured `[TOOL_ERROR]` blocks + single-retry for transient failures
+  - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
+  - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
 
-### Server 2: ENCODELIB (Port 8080)
+### Atlas: ENCODELIB (Port 8080)
 - **Role:** ENCODE Portal data retrieval
-- **Tech:** fastmcp + ENCODE API, extended via `server2/mcp_server.py`
+- **Tech:** fastmcp + ENCODE API, extended via `atlas/mcp_server.py`
 - **Features:**
   - Search experiments by biosample/organism/target
   - **`search_by_assay`** — assay-first search (e.g. *"how many RNA-seq experiments"*) across both organisms, returning combined counts and per-organism lists
   - Download experiment files
   - Metadata caching
   - 15+ MCP tools for data access
-  - Agent routing guards in Server 1 prevent structural misrouting (e.g. cell-line names sent to `get_experiment`)
-- **Extension pattern:** `server2/mcp_server.py` imports ENCODELIB's FastMCP `server` instance and registers additional tools on it. `launch_encode.py` imports from this module so extensions are available without modifying ENCODELIB.
-- **Docs:** [SERVER2_IMPLEMENTATION.md](SERVER2_IMPLEMENTATION.md)
+  - Agent routing guards in Cortex prevent structural misrouting (e.g. cell-line names sent to `get_experiment`)
+- **Extension pattern:** `atlas/mcp_server.py` imports ENCODELIB's FastMCP `server` instance and registers additional tools on it. `launch_encode.py` imports from this module so extensions are available without modifying ENCODELIB.
+- **Tool schemas:** `atlas/tool_schemas.py` defines JSON Schema contracts for all 16 ENCODE tools, served via `/tools/schema` GET endpoint.
+- **Docs:** [ATLAS_IMPLEMENTATION.md](ATLAS_IMPLEMENTATION.md)
 
-### Server 3: Execution Engine (Port 8001)
+### Launchpad: Execution Engine (Port 8001)
 - **Role:** Nextflow pipeline execution
 - **Tech:** FastAPI + Nextflow + Dogme
 - **Features:**
@@ -141,9 +147,9 @@ python server1/server2_mcp_client.py
   - Real-time job monitoring
   - Log streaming
   - User-jailed working directories
-- **Docs:** [server3/README.md](server3/README.md)
+- **Docs:** [launchpad/README.md](launchpad/README.md)
 
-### Server 4: Analysis Engine (Port 8002)
+### Analyzer: Analysis Engine (Port 8002)
 - **Role:** Results analysis, QC reporting, and workflow file browsing
 - **Tech:** fastmcp + Python analysis tools
 - **Features:**
@@ -163,12 +169,12 @@ python server1/server2_mcp_client.py
   │   └── ...
   └── workflow2/         # Second job's output
   ```
-- **Agent Commands** (handled automatically by Server 1's safety net):
+- **Agent Commands** (handled automatically by Cortex's safety net):
   - `list workflows` — lists all workflow folders in the project
   - `list files` / `list files in workflow2/annot` — lists files in a workflow or subfolder
   - `parse annot/File.csv` — finds and parses a file by relative path
   - `parse workflow2/annot/File.csv` — parses a file in a specific workflow
-- **Docs:** [server4/README.md](server4/README.md)
+- **Docs:** [analyzer/README.md](analyzer/README.md)
 
 ## 📁 Project Structure
 
@@ -178,11 +184,11 @@ agoutic/
 ├── environment.yml               # Conda environment specification
 ├── CONFIGURATION.md              # Path configuration guide
 ├── ARCHITECTURE_UPDATE.md        # System architecture (all servers)
-├── SERVER2_IMPLEMENTATION.md     # Server 2 integration guide
-├── SERVER2_QUICKSTART.md         # Server 2 quick reference
+├── ATLAS_IMPLEMENTATION.md     # Atlas integration guide
+├── ATLAS_QUICKSTART.md         # Atlas quick reference
 │
-├── server1/                      # Agent Engine
-│   ├── README.md                # Server 1 documentation
+├── cortex/                      # Agent Engine
+│   ├── README.md                # Cortex documentation
 │   ├── app.py                   # FastAPI application
 │   ├── agent_engine.py          # AI agent orchestration
 │   ├── dependencies.py          # Auth gates (require_project_access, require_run_uuid_access)
@@ -199,8 +205,8 @@ agoutic/
 │   ├── set_usernames.py         # CLI: derive/assign usernames and slugify projects
 │   └── test_chat.py             # Tests
 │
-├── server3/                      # Execution Engine
-│   ├── README.md                # Server 3 documentation
+├── launchpad/                      # Execution Engine
+│   ├── README.md                # Launchpad documentation
 │   ├── app.py                   # FastAPI application
 │   ├── nextflow_executor.py    # Nextflow wrapper
 │   ├── mcp_tools.py            # MCP tool definitions
@@ -209,9 +215,9 @@ agoutic/
 │   ├── schemas.py              # Request/response schemas
 │   ├── config.py               # Configuration
 │   ├── db.py                   # Database connection
-│   ├── demo_server3.py         # Demo script
+│   ├── demo_launchpad.py         # Demo script
 │   ├── quickstart.sh           # Quick start setup
-│   ├── test_server3.py         # Tests
+│   ├── test_launchpad.py         # Tests
 │   ├── test_integration.py     # Integration tests
 │   ├── DUAL_INTERFACE.md       # REST + MCP architecture
 │   └── IMPLEMENTATION_SUMMARY.md # Implementation details
@@ -224,10 +230,11 @@ agoutic/
 │       ├── results.py          # Job results analysis (auto-lists project jobs)
 │       └── admin.py            # Admin user management
 │
-├── server2/                      # ENCODE MCP Extension
+├── atlas/                      # ENCODE MCP Extension
 │   ├── launch_encode.py        # HTTP launcher (imports mcp_server for extensions)
-│   ├── mcp_server.py           # Extends ENCODELIB FastMCP with search_by_assay
-│   ├── config.py               # Server 2 configuration
+│   ├── mcp_server.py           # Extends ENCODELIB FastMCP with search_by_assay + /tools/schema
+│   ├── tool_schemas.py         # JSON Schema contracts for all 16 ENCODE tools
+│   ├── config.py               # Atlas configuration
 │   └── result_formatter.py     # Result formatting helpers
 │
 ├── skills/                      # Workflow Definitions
@@ -241,8 +248,8 @@ agoutic/
 └── data/                        # Data & Database (created at runtime)
     ├── database/
     │   └── agoutic_v24.sqlite
-    ├── server3_work/            # Job execution directories
-    ├── server3_logs/            # Server logs
+    ├── launchpad_work/            # Job execution directories
+    ├── launchpad_logs/            # Server logs
     └── users/                   # Per-user jailed project dirs
 ```
 
@@ -262,19 +269,19 @@ AGOUTIC provides two complementary interfaces:
    - Tools exposed as structured capabilities
    - Seamless AI agent integration
 
-See [server3/DUAL_INTERFACE.md](server3/DUAL_INTERFACE.md) for detailed architecture.
+See [launchpad/DUAL_INTERFACE.md](launchpad/DUAL_INTERFACE.md) for detailed architecture.
 
 ### Job Submission Workflow
 
 ```
 User Request
     ↓
-Server 1 (Agent)
+Cortex (Agent)
   - Interprets intent
   - Plans workflow
   - (Optional) Requests approval
     ↓
-Server 3 (Executor)
+Launchpad (Executor)
   - Receives job
   - Generates Nextflow config
   - Submits to cluster/local
@@ -326,15 +333,15 @@ export AGOUTIC_DATA=/path/to/storage
 
 ```
 AGOUTIC_CODE/
-├── server1/          # Agent engine
-├── server3/          # Execution engine
+├── cortex/          # Agent engine
+├── launchpad/          # Execution engine
 ├── ui/               # Web interface
 └── skills/           # Workflow definitions
 
 AGOUTIC_DATA/
 ├── database/         # SQLite database
-├── server3_work/     # Job working directories
-├── server3_logs/     # Server logs
+├── launchpad_work/     # Job working directories
+├── launchpad_logs/     # Server logs
 ├── logs/             # Structured logs (all servers)
 └── users/            # Per-user jailed project dirs
     └── {username}/   # e.g. eli/
@@ -355,11 +362,11 @@ Logs are written to `$AGOUTIC_DATA/logs/`:
 ```
 $AGOUTIC_DATA/logs/
 ├── agoutic.jsonl          # Unified log (all servers)
-├── server1.jsonl          # Server 1 only
-├── server3-rest.jsonl     # Server 3 REST API
-├── server3-mcp.jsonl      # Server 3 MCP
-├── server4-rest.jsonl     # Server 4 REST API
-├── server4-mcp.jsonl      # Server 4 MCP
+├── cortex.jsonl          # Cortex only
+├── launchpad-rest.jsonl     # Launchpad REST API
+├── launchpad-mcp.jsonl      # Launchpad MCP
+├── analyzer-rest.jsonl     # Analyzer REST API
+├── analyzer-mcp.jsonl      # Analyzer MCP
 ├── encode-mcp.jsonl       # ENCODE MCP server
 ├── *.log                  # Raw stdout/stderr (safety net)
 └── *.YYYYMMDD_HHMMSS.*   # Rotated previous logs
@@ -372,7 +379,7 @@ $AGOUTIC_DATA/logs/
 tail -f $AGOUTIC_DATA/logs/agoutic.jsonl | jq .
 
 # Filter by server
-cat $AGOUTIC_DATA/logs/agoutic.jsonl | jq 'select(.server == "server1")'
+cat $AGOUTIC_DATA/logs/agoutic.jsonl | jq 'select(.server == "cortex")'
 
 # Filter by log level
 cat $AGOUTIC_DATA/logs/agoutic.jsonl | jq 'select(.level == "error")'
@@ -396,7 +403,7 @@ Every HTTP request receives a unique `X-Request-ID` header. This ID is:
 
 ### Log Rotation
 
-When servers are started or restarted via `agoutic_servers.sh`, existing log files are automatically renamed with a timestamp (e.g., `server1.20260213_143052.jsonl`). Empty log files are skipped.
+When servers are started or restarted via `agoutic_servers.sh`, existing log files are automatically renamed with a timestamp (e.g., `cortex.20260213_143052.jsonl`). Empty log files are skipped.
 
 ### Environment Variables
 
@@ -409,12 +416,12 @@ When servers are started or restarted via `agoutic_servers.sh`, existing log fil
 ### Development Mode
 
 ```bash
-# Terminal 1: Start Server 3
+# Terminal 1: Start Launchpad
 cd /path/to/agoutic
-uvicorn server3.app:app --port 8001 --reload
+uvicorn launchpad.app:app --port 8001 --reload
 
-# Terminal 2: Start Server 1
-uvicorn server1.app:app --port 8000 --reload
+# Terminal 2: Start Cortex
+uvicorn cortex.app:app --port 8000 --reload
 
 # Terminal 3: Start UI (if using Streamlit)
 cd ui && streamlit run app.py
@@ -423,10 +430,10 @@ cd ui && streamlit run app.py
 ### Using MCP Interface
 
 ```python
-from server1.mcp_client import Server3MCPClient
+from cortex.mcp_client import LaunchpadMCPClient
 
 # Connect to MCP server
-client = Server3MCPClient()
+client = LaunchpadMCPClient()
 await client.connect()
 
 # Submit a job
@@ -464,8 +471,8 @@ curl http://localhost:8001/jobs/{run_uuid}
 ## 📚 Documentation
 
 ### Component Documentation
-- [server1/README.md](server1/README.md) - Agent Engine documentation
-- [server3/README.md](server3/README.md) - Execution Engine documentation  
+- [cortex/README.md](cortex/README.md) - Agent Engine documentation
+- [launchpad/README.md](launchpad/README.md) - Execution Engine documentation  
 - [ui/README.md](ui/README.md) - Web UI documentation
 
 ### Configuration & Setup
@@ -473,46 +480,46 @@ curl http://localhost:8001/jobs/{run_uuid}
 - [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - Path configuration quick start
 
 ### Architecture & Details
-- [server3/DUAL_INTERFACE.md](server3/DUAL_INTERFACE.md) - REST + MCP architecture
-- [server3/IMPLEMENTATION_SUMMARY.md](server3/IMPLEMENTATION_SUMMARY.md) - Implementation details
+- [launchpad/DUAL_INTERFACE.md](launchpad/DUAL_INTERFACE.md) - REST + MCP architecture
+- [launchpad/IMPLEMENTATION_SUMMARY.md](launchpad/IMPLEMENTATION_SUMMARY.md) - Implementation details
 
 ## 🧪 Testing
 
 ### Run All Tests
 
 ```bash
-# Server 3 tests
-pytest server3/test_server3.py -v
+# Launchpad tests
+pytest launchpad/test_launchpad.py -v
 
-# Server 1 tests
-pytest server1/test_chat.py -v
+# Cortex tests
+pytest cortex/test_chat.py -v
 
 # Integration tests
-pytest server3/test_integration.py -v
+pytest launchpad/test_integration.py -v
 ```
 
 ### Run Demo
 
 ```bash
-# Interactive demo for Server 3
-python server3/demo_server3.py
+# Interactive demo for Launchpad
+python launchpad/demo_launchpad.py
 ```
 
 ## 🐛 Troubleshooting
 
 ### Server Won't Start
-- Check port availability: `lsof -i :8001` (Server 3) or `lsof -i :8000` (Server 1)
-- Check database connectivity: `python -c "from server3.db import SessionLocal; SessionLocal()"`
+- Check port availability: `lsof -i :8001` (Launchpad) or `lsof -i :8000` (Cortex)
+- Check database connectivity: `python -c "from launchpad.db import SessionLocal; SessionLocal()"`
 - Check Python version: `python --version` (requires 3.12+)
 
 ### Job Stuck in RUNNING
 - Check Nextflow process: `ps aux | grep nextflow`
-- Check logs: `tail -f $AGOUTIC_DATA/server3_logs/*.log`
+- Check logs: `tail -f $AGOUTIC_DATA/launchpad_logs/*.log`
 - Cancel job: `curl -X POST http://localhost:8001/jobs/{run_uuid}/cancel`
 
 ### Configuration Issues
-- Verify configuration: `python -c "from server3.config import *; print(f'Code: {AGOUTIC_CODE}')"` 
-- Check paths: `ls -la $AGOUTIC_DATA/server3_work`
+- Verify configuration: `python -c "from launchpad.config import *; print(f'Code: {AGOUTIC_CODE}')"` 
+- Check paths: `ls -la $AGOUTIC_DATA/launchpad_work`
 
 ## 📊 Performance
 
@@ -530,7 +537,7 @@ export MAX_CONCURRENT_JOBS=2  # Adjust based on server capacity
 - **Production**: PostgreSQL or MySQL for concurrent access
 
 ```python
-# server3/config.py
+# launchpad/config.py
 DATABASE_URL = "postgresql+asyncpg://user:pass@localhost/agoutic"
 ```
 
@@ -557,17 +564,17 @@ Pre-defined bioinformatics workflows are available in `skills/`:
 
 ```bash
 # Run full test suite
-pytest --cov=server1 --cov=server3 --cov-report=html
+pytest --cov=cortex --cov=launchpad --cov-report=html
 
 # Check code quality
-pylint server1 server3
+pylint cortex launchpad
 ```
 
 ## 📞 Support
 
 - Check [CONFIGURATION.md](CONFIGURATION.md) for configuration issues
-- Check [server3/README.md](server3/README.md) for execution engine issues
-- Check [server1/README.md](server1/README.md) for agent engine issues
+- Check [launchpad/README.md](launchpad/README.md) for execution engine issues
+- Check [cortex/README.md](cortex/README.md) for agent engine issues
 
 ## 📦 Version Information
 
@@ -582,6 +589,6 @@ pylint server1 server3
 
 - complete: Core infrastructure and basic API
 - current: Complete (Current) - Dual interface, MCP integration
-- next: Integration with Server 1 approval gates
+- next: Integration with Cortex approval gates
 - future: Web UI job monitoring dashboard
 - future: Performance optimization & deployment

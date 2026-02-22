@@ -11,14 +11,14 @@ The AGOUTIC system has been updated to use **relative paths** that work within t
 
 ```
 agoutic_code/
-├── server1/                    # Server 1 (Agent Engine)
-├── server3/                    # Server 3 (Job Execution)
+├── cortex/                    # Cortex (Agent Engine)
+├── launchpad/                    # Launchpad (Job Execution)
 ├── skills/                     # LLM Skills
 ├── data/                       # Storage (AUTO-CREATED)
 │   ├── database/
 │   │   └── agoutic_v23.sqlite
-│   ├── server3_work/           # Job work directories
-│   └── server3_logs/           # Job logs
+│   ├── launchpad_work/           # Job work directories
+│   └── launchpad_logs/           # Job logs
 ├── dogme/                      # Dogme pipeline (optional)
 └── environment.yml
 ```
@@ -40,7 +40,7 @@ export NEXTFLOW_BIN=/path/to/nextflow
 
 ## Path Resolution
 
-### Server 3 Configuration (server3/config.py)
+### Launchpad Configuration (launchpad/config.py)
 
 ```python
 # Storage paths - Falls back to agoutic_code/data/
@@ -55,7 +55,7 @@ DOGME_REPO = Path(os.getenv("DOGME_REPO", str(DOGME_REPO_DEFAULT)))
 NEXTFLOW_BIN = Path(os.getenv("NEXTFLOW_BIN", "/usr/local/bin/nextflow"))
 ```
 
-### Server 1 Configuration (server1/config.py)
+### Cortex Configuration (cortex/config.py)
 
 ```python
 # Storage paths - Falls back to agoutic_code/data/
@@ -79,7 +79,7 @@ All paths automatically resolve within `agoutic_code/` folder:
 cd agoutic_code
 
 # Directories create automatically
-python server3/app.py  # Will create data/ folder as needed
+python launchpad/app.py  # Will create data/ folder as needed
 ```
 
 ### Option 2: Custom Storage Location
@@ -93,7 +93,7 @@ cd agoutic_code
 export AGOUTIC_ROOT=/mnt/large_disk/agoutic_data
 
 # Start server
-uvicorn server3.app:app --port 8001
+uvicorn launchpad.app:app --port 8001
 ```
 
 ### Option 3: Custom Everything
@@ -107,7 +107,7 @@ export AGOUTIC_ROOT=/tmp/test_data
 export DOGME_REPO=/home/user/dogme_dev
 export NEXTFLOW_BIN=/home/user/bin/nextflow
 
-uvicorn server3.app:app --port 8001
+uvicorn launchpad.app:app --port 8001
 ```
 
 ## Database Files
@@ -127,35 +127,35 @@ cp agoutic_code/data/database/agoutic_v23.sqlite backup/
 
 ## Job Work Directories
 
-Jobs create working directories in `data/server3_work/`:
+Jobs create working directories in `data/launchpad_work/`:
 
 ```bash
 # View all job work directories
-ls -la agoutic_code/data/server3_work/
+ls -la agoutic_code/data/launchpad_work/
 
 # View specific job
-ls -la agoutic_code/data/server3_work/<run_uuid>/
+ls -la agoutic_code/data/launchpad_work/<run_uuid>/
 
 # Check job outputs
-ls agoutic_code/data/server3_work/<run_uuid>/results/
+ls agoutic_code/data/launchpad_work/<run_uuid>/results/
 
 # View job logs
-cat agoutic_code/data/server3_work/<run_uuid>/log.txt
+cat agoutic_code/data/launchpad_work/<run_uuid>/log.txt
 ```
 
 ## Log Files
 
-Server logs write to `data/server3_logs/`:
+Server logs write to `data/launchpad_logs/`:
 
 ```bash
 # View available log files
-ls agoutic_code/data/server3_logs/
+ls agoutic_code/data/launchpad_logs/
 
 # Watch logs in real-time
-tail -f agoutic_code/data/server3_logs/*.log
+tail -f agoutic_code/data/launchpad_logs/*.log
 
 # Search logs
-grep ERROR agoutic_code/data/server3_logs/*.log
+grep ERROR agoutic_code/data/launchpad_logs/*.log
 ```
 
 ## Path Resolution Examples
@@ -246,8 +246,8 @@ chmod 755 agoutic_code/data
 |-----------|--------------|--------------|-------|
 | Storage | `agoutic_code/data/` | `AGOUTIC_ROOT` | Database, logs, job work dirs |
 | Database | `agoutic_code/data/database/` | - | Auto-created from AGOUTIC_ROOT |
-| Logs | `agoutic_code/data/server3_logs/` | - | Auto-created from AGOUTIC_ROOT |
-| Jobs | `agoutic_code/data/server3_work/` | - | Auto-created from AGOUTIC_ROOT |
+| Logs | `agoutic_code/data/launchpad_logs/` | - | Auto-created from AGOUTIC_ROOT |
+| Jobs | `agoutic_code/data/launchpad_work/` | - | Auto-created from AGOUTIC_ROOT |
 | Dogme | `agoutic_code/dogme/` | `DOGME_REPO` | Optional if in default location |
 | Nextflow | System PATH | `NEXTFLOW_BIN` | Searches `/usr/local/bin/nextflow` |
 | Code | `agoutic_code/` | - | Fixed - where this file is |

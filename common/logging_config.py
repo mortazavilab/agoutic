@@ -7,7 +7,7 @@ unified log file (`agoutic.jsonl`).
 
 Usage in any server:
     from common.logging_config import setup_logging, get_logger
-    setup_logging("server1")
+    setup_logging("cortex")
     logger = get_logger(__name__)
     logger.info("Server started", port=8000)
 """
@@ -21,7 +21,7 @@ import structlog
 
 
 # ---------------------------------------------------------------------------
-# Path resolution (matches server1/config.py and server3/config.py patterns)
+# Path resolution (matches cortex/config.py and launchpad/config.py patterns)
 # ---------------------------------------------------------------------------
 AGOUTIC_CODE = Path(os.getenv("AGOUTIC_CODE", Path(__file__).resolve().parent.parent))
 AGOUTIC_DATA = Path(os.getenv("AGOUTIC_DATA", AGOUTIC_CODE / "data"))
@@ -48,8 +48,8 @@ def setup_logging(
     routed through the same pipeline so every log entry is structured.
 
     Args:
-        server_name: Identifier for this process (e.g. "server1",
-                     "server3-rest", "encode-mcp").  Bound into every
+        server_name: Identifier for this process (e.g. "cortex",
+                     "launchpad-rest", "encode-mcp").  Bound into every
                      log record as ``server``.
         log_level:   Root log level (default ``"INFO"``).
     """

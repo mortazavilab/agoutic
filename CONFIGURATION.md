@@ -49,8 +49,8 @@ All other paths are **automatically derived** from the two root variables:
 ```
 AGOUTIC_CODE/
 ├── skills/              # Workflow definitions
-├── server1/             # Agent engine
-└── server3/             # Job execution engine
+├── cortex/             # Agent engine
+└── launchpad/             # Job execution engine
     └── dogme/           # Dogme pipeline (optional)
 ```
 
@@ -59,13 +59,13 @@ AGOUTIC_CODE/
 AGOUTIC_DATA/
 ├── database/
 │   └── agoutic_v23.sqlite    # SQLite database
-├── server3_work/
+├── launchpad_work/
 │   └── <run_uuid>/           # Individual job directories
 │       ├── nextflow.config
 │       ├── work/             # Nextflow working directory
 │       ├── results/          # Final output
 │       └── *.log            # Job logs
-└── server3_logs/
+└── launchpad_logs/
     └── *.log                 # Server debug logs
 ```
 
@@ -81,10 +81,10 @@ git clone https://github.com/you/agoutic.git /Users/eli/code/agoutic
 cd /Users/eli/code/agoutic
 
 # This creates: /Users/eli/code/agoutic/data/
-python -c "from server3.config import AGOUTIC_CODE, AGOUTIC_DATA; print(f'Code: {AGOUTIC_CODE}\nData: {AGOUTIC_DATA}')"
+python -c "from launchpad.config import AGOUTIC_CODE, AGOUTIC_DATA; print(f'Code: {AGOUTIC_CODE}\nData: {AGOUTIC_DATA}')"
 
-# Run Server 3
-uvicorn server3.app:app --port 8001
+# Run Launchpad
+uvicorn launchpad.app:app --port 8001
 ```
 
 ### Scenario 2: Code on SSD, Data on Large Drive
@@ -99,12 +99,12 @@ export AGOUTIC_DATA=/large-storage/agoutic_data
 
 # Now running code uses the paths you specified
 cd /fast-ssd/agoutic
-uvicorn server3.app:app --port 8001
+uvicorn launchpad.app:app --port 8001
 ```
 
 Verify paths:
 ```bash
-python -c "from server3.config import AGOUTIC_CODE, AGOUTIC_DATA; print(f'Code: {AGOUTIC_CODE}\nData: {AGOUTIC_DATA}')"
+python -c "from launchpad.config import AGOUTIC_CODE, AGOUTIC_DATA; print(f'Code: {AGOUTIC_CODE}\nData: {AGOUTIC_DATA}')"
 ```
 
 ### Scenario 3: Code in Docker, Data on Host
@@ -118,7 +118,7 @@ docker run \
   -e AGOUTIC_CODE=/app/agoutic \
   -e AGOUTIC_DATA=/mnt/data/agoutic \
   -v /Volumes/data/agoutic:/mnt/data/agoutic \
-  agoutic-server3
+  agoutic-launchpad
 ```
 
 ### Scenario 4: Production Setup (Network Storage)
@@ -129,14 +129,14 @@ export AGOUTIC_CODE=/opt/agoutic          # Local code
 export AGOUTIC_DATA=/mnt/nfs/agoutic      # NFS-mounted shared data
 
 # Multiple servers can share same data
-uvicorn server3.app:app --port 8001 --workers 4
+uvicorn launchpad.app:app --port 8001 --workers 4
 ```
 
 ## Configuration in Code
 
-### Server 3 Configuration
+### Launchpad Configuration
 
-[server3/config.py](server3/config.py):
+[launchpad/config.py](launchpad/config.py):
 
 ```python
 # Root variables (only these are configurable)
@@ -144,15 +144,15 @@ AGOUTIC_CODE = Path(os.getenv("AGOUTIC_CODE", ...))  # Code location
 AGOUTIC_DATA = Path(os.getenv("AGOUTIC_DATA", ...))  # Data location
 
 # Everything else is derived
-SERVER3_WORK_DIR = AGOUTIC_DATA / "server3_work"     # Job directories
-SERVER3_LOGS_DIR = AGOUTIC_DATA / "server3_logs"     # Server logs
+LAUNCHPAD_WORK_DIR = AGOUTIC_DATA / "launchpad_work"     # Job directories
+LAUNCHPAD_LOGS_DIR = AGOUTIC_DATA / "launchpad_logs"     # Server logs
 DB_FILE = AGOUTIC_DATA / "database" / "agoutic_v23.sqlite"
 DOGME_REPO = Path(os.getenv("DOGME_REPO", AGOUTIC_CODE / "dogme"))
 ```
 
-### Server 1 Configuration
+### Cortex Configuration
 
-[server1/config.py](server1/config.py):
+[cortex/config.py](cortex/config.py):
 
 ```python
 # Same root variables
@@ -172,8 +172,8 @@ DB_FILE = AGOUTIC_DATA / "database" / "agoutic_v23.sqlite"
 cd /Users/eli/code/agoutic
 
 python -c "
-from server3.config import AGOUTIC_CODE, AGOUTIC_DATA, SERVER3_WORK_DIR, DOGME_REPO, DB_FILE
-from server1.config import SKILLS_DIR
+from launchpad.config import AGOUTIC_CODE, AGOUTIC_DATA, LAUNCHPAD_WORK_DIR, DOGME_REPO, DB_FILE
+from cortex.config import SKILLS_DIR
 
 print('📍 Current Configuration:')
 print()
@@ -184,7 +184,7 @@ print(f'    Dogme: {DOGME_REPO}')
 print()
 print('  DATA STORAGE (AGOUTIC_DATA):')
 print(f'    Root: {AGOUTIC_DATA}')
-print(f'    Work: {SERVER3_WORK_DIR}')
+print(f'    Work: {LAUNCHPAD_WORK_DIR}')
 print(f'    Database: {DB_FILE}')
 "
 ```
@@ -205,12 +205,12 @@ env | grep AGOUTIC
 
 ```bash
 # Check code directory
-ls -la $AGOUTIC_CODE/server1
-ls -la $AGOUTIC_CODE/server3
+ls -la $AGOUTIC_CODE/cortex
+ls -la $AGOUTIC_CODE/launchpad
 ls -la $AGOUTIC_CODE/skills
 
 # Check (or create) data directory
-mkdir -p $AGOUTIC_DATA/{database,server3_work,server3_logs}
+mkdir -p $AGOUTIC_DATA/{database,launchpad_work,launchpad_logs}
 ls -la $AGOUTIC_DATA/
 ```
 
@@ -251,7 +251,7 @@ cp -r $old_data/* $new_data/
 export AGOUTIC_DATA=$new_data
 
 # Verify
-python -c "from server3.config import AGOUTIC_DATA; print(f'Data: {AGOUTIC_DATA}')"
+python -c "from launchpad.config import AGOUTIC_DATA; print(f'Data: {AGOUTIC_DATA}')"
 ```
 
 ## Docker / Container Usage
@@ -275,9 +275,9 @@ ENV AGOUTIC_CODE=/app/agoutic
 ENV AGOUTIC_DATA=/data/agoutic
 
 # Create data directories
-RUN mkdir -p $AGOUTIC_DATA/{database,server3_work,server3_logs}
+RUN mkdir -p $AGOUTIC_DATA/{database,launchpad_work,launchpad_logs}
 
-CMD ["uvicorn", "server3.app:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["uvicorn", "launchpad.app:app", "--host", "0.0.0.0", "--port", "8001"]
 ```
 
 ### Running Container
@@ -297,11 +297,11 @@ docker run \
 - [ ] Clone repository to desired code location
 - [ ] Set `AGOUTIC_CODE` environment variable (optional, defaults to repo location)
 - [ ] Set `AGOUTIC_DATA` environment variable (optional, defaults to `$AGOUTIC_CODE/data`)
-- [ ] Verify paths exist: `python -c "from server3.config import *; print('OK')"`
-- [ ] Create data directories: `mkdir -p $AGOUTIC_DATA/{database,server3_work,server3_logs}`
+- [ ] Verify paths exist: `python -c "from launchpad.config import *; print('OK')"`
+- [ ] Create data directories: `mkdir -p $AGOUTIC_DATA/{database,launchpad_work,launchpad_logs}`
 - [ ] Set other optional variables (DOGME_REPO, NEXTFLOW_BIN)
-- [ ] Run tests: `pytest server3/test_server3.py -v`
-- [ ] Start server: `uvicorn server3.app:app --port 8001`
+- [ ] Run tests: `pytest launchpad/test_launchpad.py -v`
+- [ ] Start server: `uvicorn launchpad.app:app --port 8001`
 
 ## Troubleshooting
 
@@ -318,27 +318,27 @@ Problem: `agoutic_v23.sqlite` created in unexpected location
 Solution: Set `AGOUTIC_DATA` before running:
 ```bash
 export AGOUTIC_DATA=/path/to/desired/location
-python -c "from server3.config import DB_FILE; print(f'Database: {DB_FILE}')"
+python -c "from launchpad.config import DB_FILE; print(f'Database: {DB_FILE}')"
 ```
 
 ### Can't Find Skills Directory
 
-Problem: Skills files not found when running Server 1
+Problem: Skills files not found when running Cortex
 
 Solution: Set `AGOUTIC_CODE` to correct code location:
 ```bash
 export AGOUTIC_CODE=/path/to/agoutic_code
-python -c "from server1.config import SKILLS_DIR; ls -la $SKILLS_DIR"
+python -c "from cortex.config import SKILLS_DIR; ls -la $SKILLS_DIR"
 ```
 
 ### Job Output in Wrong Directory
 
-Problem: `server3_work` directory in unexpected location
+Problem: `launchpad_work` directory in unexpected location
 
 Solution: Verify `AGOUTIC_DATA`:
 ```bash
 echo $AGOUTIC_DATA
-python -c "from server3.config import SERVER3_WORK_DIR; print(SERVER3_WORK_DIR)"
+python -c "from launchpad.config import LAUNCHPAD_WORK_DIR; print(LAUNCHPAD_WORK_DIR)"
 ```
 
 ## Summary

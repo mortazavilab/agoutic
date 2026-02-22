@@ -3,7 +3,7 @@
 ## Description
 
 This skill handles **downloading files** into the user's project from two sources:
-1. **ENCODE files** — given an experiment accession and file type, resolve URLs via Server 2 and download.
+1. **ENCODE files** — given an experiment accession and file type, resolve URLs via Atlas and download.
 2. **Arbitrary URLs** — direct HTTP/HTTPS links to files.
 
 Files are saved into `AGOUTIC_DATA/users/{username}/{project_slug}/data/` (or a user-specified subfolder).
@@ -30,7 +30,7 @@ After downloads complete, the skill suggests next steps based on file types.
 - **General help** → `[[SKILL_SWITCH_TO: welcome]]`
   - Example: "What can you do?"
 
-## Server 2 Tools Available (ENCODE only)
+## Atlas Tools Available (ENCODE only)
 
 Use these [[DATA_CALL: consortium=encode, tool=...]] tags to resolve ENCODE file URLs:
 
@@ -40,7 +40,7 @@ get_files_summary(accession="ENCSR123ABC")
 get_file_url(accession="ENCSR123ABC", file_accession="ENCFF123ABC")
 ```
 
-**Important:** Do NOT use `download_files` from Server 2. Instead, resolve URLs with `get_file_url` and then use the project download endpoint.
+**Important:** Do NOT use `download_files` from Atlas. Instead, resolve URLs with `get_file_url` and then use the project download endpoint.
 
 ## Plan Logic
 
@@ -159,7 +159,7 @@ You need to set a username before downloading files. Please set one in your prof
 ## Important Rules
 
 1. **Always require approval** before starting downloads — use `[[APPROVAL_NEEDED]]`.
-2. **Use get_file_url from Server 2** to resolve ENCODE file URLs — do NOT use Server 2's download_files tool.
+2. **Use get_file_url from Atlas** to resolve ENCODE file URLs — do NOT use Atlas's download_files tool.
 3. **Let the user choose** which file types to download — don't auto-select.
 4. **Show file sizes** whenever available so the user knows what to expect.
 5. **After download, suggest next steps** based on file types (Dogme, dataframes, etc.).

@@ -17,15 +17,15 @@ export AGOUTIC_DATA=/path/to/storage
 ```
 AGOUTIC_CODE/
 ├── skills/              → SKILLS_DIR
-├── server1/
-├── server3/
+├── cortex/
+├── launchpad/
 └── dogme/               → DOGME_REPO
 
 AGOUTIC_DATA/
 ├── database/
 │   └── agoutic_v23.sqlite    → DB_FILE
-├── server3_work/             → SERVER3_WORK_DIR (legacy flat jobs)
-├── server3_logs/             → SERVER3_LOGS_DIR
+├── launchpad_work/             → LAUNCHPAD_WORK_DIR (legacy flat jobs)
+├── launchpad_logs/             → LAUNCHPAD_LOGS_DIR
 └── users/                    → Per-user project directories
     └── {username}/
         └── {project-slug}/
@@ -43,7 +43,7 @@ AGOUTIC_DATA/
 ### Default (No Variables)
 ```bash
 cd /Users/eli/code/agoutic
-uvicorn server3.app:app --port 8001
+uvicorn launchpad.app:app --port 8001
 # Uses: code=/Users/eli/code/agoutic, data=/Users/eli/code/agoutic/data
 ```
 
@@ -51,7 +51,7 @@ uvicorn server3.app:app --port 8001
 ```bash
 export AGOUTIC_CODE=/fast-ssd/agoutic
 export AGOUTIC_DATA=/large-storage/data
-uvicorn server3.app:app --port 8001
+uvicorn launchpad.app:app --port 8001
 ```
 
 ### Docker
@@ -67,7 +67,7 @@ docker run \
 
 ```bash
 python -c "
-from server3.config import AGOUTIC_CODE, AGOUTIC_DATA
+from launchpad.config import AGOUTIC_CODE, AGOUTIC_DATA
 print(f'Code: {AGOUTIC_CODE}')
 print(f'Data: {AGOUTIC_DATA}')
 "
@@ -81,7 +81,7 @@ export AGOUTIC_CODE=/path/to/code
 export AGOUTIC_DATA=/path/to/data
 
 # Or as environment variable when running
-AGOUTIC_CODE=/path/to/code AGOUTIC_DATA=/path/to/data uvicorn server3.app:app
+AGOUTIC_CODE=/path/to/code AGOUTIC_DATA=/path/to/data uvicorn launchpad.app:app
 ```
 
 ## Environment Variables
@@ -98,7 +98,7 @@ AGOUTIC_CODE=/path/to/code AGOUTIC_DATA=/path/to/data uvicorn server3.app:app
 ### Use Different Storage for Jobs
 ```bash
 export AGOUTIC_DATA=/mnt/fast-storage/agoutic
-# Now all jobs go to /mnt/fast-storage/agoutic/server3_work/
+# Now all jobs go to /mnt/fast-storage/agoutic/launchpad_work/
 ```
 
 ### Keep Code on SSD, Data on HDD
@@ -120,20 +120,20 @@ docker run \
 ```bash
 export AGOUTIC_CODE=/opt/agoutic
 export AGOUTIC_DATA=/srv/data/agoutic
-uvicorn server3.app:app --workers 4 --port 8001
+uvicorn launchpad.app:app --workers 4 --port 8001
 ```
 
 ## Verification
 
 ```bash
 # Check all files compile
-python -m py_compile server3/*.py server1/*.py
+python -m py_compile launchpad/*.py cortex/*.py
 
 # Check paths resolve
-python -c "from server3.config import AGOUTIC_CODE, AGOUTIC_DATA; print(f'{AGOUTIC_CODE} / {AGOUTIC_DATA}')"
+python -c "from launchpad.config import AGOUTIC_CODE, AGOUTIC_DATA; print(f'{AGOUTIC_CODE} / {AGOUTIC_DATA}')"
 
 # Check directories can be created
-mkdir -p $AGOUTIC_DATA/database $AGOUTIC_DATA/server3_work $AGOUTIC_DATA/server3_logs
+mkdir -p $AGOUTIC_DATA/database $AGOUTIC_DATA/launchpad_work $AGOUTIC_DATA/launchpad_logs
 ```
 
 ## Workflow Browsing Commands
@@ -149,7 +149,7 @@ Once a Dogme job completes, you can browse and parse result files via the chat i
 | `parse annot/File.csv` | Finds and parses a CSV file by relative path |
 | `parse workflow2/annot/File.csv` | Parses a file in a specific workflow |
 
-These commands are handled by Server 1's safety net (`_auto_generate_data_calls`) which generates `list_job_files`, `find_file`, and `parse_csv_file` Server 4 MCP tool calls automatically.
+These commands are handled by Cortex's safety net (`_auto_generate_data_calls`) which generates `list_job_files`, `find_file`, and `parse_csv_file` Analyzer MCP tool calls automatically.
 
 ## Documentation
 

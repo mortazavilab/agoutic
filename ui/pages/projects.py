@@ -1,7 +1,7 @@
 """
 Projects Dashboard Page
 Browse projects, view job history, file listings, and disk usage.
-All requests go through Server 1 — the UI never contacts backend servers directly.
+All requests go through Cortex — the UI never contacts backend servers directly.
 """
 
 import streamlit as st

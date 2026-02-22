@@ -437,9 +437,9 @@ def get_sanitized_blocks(target_project_id):
     return []
 
 def get_job_debug_info(run_uuid):
-    """Fetch detailed debug information for a failed job via Server 1 proxy."""
+    """Fetch detailed debug information for a failed job via Cortex proxy."""
     try:
-        # Use Server 1 proxy instead of calling Server 3 directly
+        # Use Cortex proxy instead of calling Launchpad directly
         resp = make_authenticated_request(
             "GET",
             f"{API_URL}/jobs/{run_uuid}/debug",
@@ -1223,8 +1223,8 @@ def render_block(block, expected_project_id: str = ""):
             else:
                 st.caption(f"Run UUID: `{run_uuid}`")
             
-            # For RUNNING jobs, live-fetch status directly from Server 1
-            # (bypasses stale block payload — always fresh from Server 3)
+            # For RUNNING jobs, live-fetch status directly from Cortex
+            # (bypasses stale block payload — always fresh from Launchpad)
             job_status = content.get("job_status", {})
             block_status_str = block.get("status", "")
             if run_uuid and block_status_str == "RUNNING":

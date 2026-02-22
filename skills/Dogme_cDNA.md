@@ -150,7 +150,7 @@ When user says "analyze the results":
 
 **STEP 1:** Get the analysis summary
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
+[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **STEP 2:** Present filtered file summary

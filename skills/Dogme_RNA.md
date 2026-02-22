@@ -158,7 +158,7 @@ When user says "analyze the results":
 
 **STEP 1:** Get the analysis summary
 ```
-[[DATA_CALL: service=server4, tool=get_analysis_summary, work_dir=<work_dir>]]
+[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
 **STEP 2:** Present filtered file summary
@@ -196,12 +196,12 @@ When user says "analyze the results":
 
 **STEP 5:** Parse gene/transcript counts using FULL path from STEP 3
 ```
-[[DATA_CALL: service=server4, tool=parse_csv_file, work_dir=<work_dir>, file_path=counts/sample_name_gene_counts.csv]]
+[[DATA_CALL: service=analyzer, tool=parse_csv_file, work_dir=<work_dir>, file_path=counts/sample_name_gene_counts.csv]]
 ```
 
 **STEP 6:** Parse modification BED files to get detailed m6A and other modification locations from STEP 3
 ```
-[[DATA_CALL: service=server4, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.mod.bed]]
+[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.mod.bed]]
 ```
 
 **STEP 7:** Present results with RNA-specific interpretation (modification sites, expression levels, poly(A) analysis)

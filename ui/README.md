@@ -5,7 +5,7 @@
 
 ## Overview
 
-The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUTIC agent, managing projects, monitoring jobs, and viewing analysis results. It communicates **exclusively with Server 1** — all backend architecture (Server 2, 3, 4) is abstracted behind Server 1's API.
+The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUTIC agent, managing projects, monitoring jobs, and viewing analysis results. It communicates **exclusively with Cortex** — all backend architecture (Atlas, 3, 4) is abstracted behind Cortex's API.
 
 ## Features
 
@@ -22,7 +22,7 @@ The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUT
 
 ### Prerequisites
 - Python 3.10+ with the `agoutic_core` conda environment
-- Server 1 running at `http://localhost:8000`
+- Cortex running at `http://localhost:8000`
 
 ### Run the UI
 
@@ -36,7 +36,7 @@ The UI will be available at `http://localhost:8501`.
 
 ## Architecture
 
-The UI follows a strict **single-gateway** pattern: every request goes through Server 1.
+The UI follows a strict **single-gateway** pattern: every request goes through Cortex.
 
 ```
 ┌─────────────────────┐
@@ -47,7 +47,7 @@ The UI follows a strict **single-gateway** pattern: every request goes through S
       REST API (authenticated)
            │
     ┌──────┴──────┐
-    │   Server 1  │  ← Only server the UI talks to
+    │   Cortex  │  ← Only server the UI talks to
     │   (Agent)   │
     └──────┬──────┘
            │ MCP / REST proxies
@@ -71,7 +71,7 @@ The UI follows a strict **single-gateway** pattern: every request goes through S
 - Browse completed job files (CSV, BED, text)
 - Parse and preview structured data as tables
 - Download result files
-- All data fetched via Server 1 analysis proxy endpoints
+- All data fetched via Cortex analysis proxy endpoints
 
 ### Admin ([pages/admin.py](pages/admin.py))
 - Approve or reject pending user registrations

@@ -109,7 +109,7 @@ User asks: "what are their accessions?"
 
 ## Description
 
-This skill provides **DIRECT ACCESS** to the ENCODE Portal via Server 2 (ENCODELIB).
+This skill provides **DIRECT ACCESS** to the ENCODE Portal via Atlas (ENCODELIB).
 
 Use this skill to:
 - Search for experiments by **biosample** (cell lines, tissues)

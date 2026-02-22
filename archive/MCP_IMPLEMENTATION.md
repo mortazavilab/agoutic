@@ -2,21 +2,21 @@
 
 **Status:** ✅ COMPLETE  
 **Date:** January 22, 2026  
-**Addition to:** Server 3 Architecture
+**Addition to:** Launchpad Architecture
 
 ## What Was Built
 
-Server 3 now supports **both REST API and MCP (Model Context Protocol)** interfaces:
+Launchpad now supports **both REST API and MCP (Model Context Protocol)** interfaces:
 
 ```
-Server 1 (Agent)              External Clients
+Cortex (Agent)              External Clients
         |                              |
         |                              |
         ├─── MCP Protocol ────────┐   |
         |    (stdio/subprocess)    |   |
         |                          ↓   |
         |                      ┌─────────────┐
-        |                      │ Server 3    │
+        |                      │ Launchpad    │
         |                      │             │
         └─── REST API ────────→│  Execution  │
              (HTTP/8001)       │  Engine     │
@@ -31,10 +31,10 @@ Server 1 (Agent)              External Clients
 
 ## New Files Created
 
-### Server 3 (3 files)
+### Launchpad (3 files)
 
-1. **server3/mcp_tools.py** (380 lines)
-   - `Server3MCPTools` class with 7 async tools
+1. **launchpad/mcp_tools.py** (380 lines)
+   - `LaunchpadMCPTools` class with 7 async tools
    - Tool registry with JSON Schema specifications
    - Complete tool implementations:
      - `submit_dogme_job()` - Full job submission
@@ -45,31 +45,31 @@ Server 1 (Agent)              External Clients
      - `generate_dogme_config()` - Config preview
      - `scaffold_dogme_dir()` - Workspace setup
 
-2. **server3/mcp_server.py** (120 lines)
+2. **launchpad/mcp_server.py** (120 lines)
    - Stdio-based MCP server
    - Tool listing and routing
    - Async event handling
    - Error handling and result serialization
 
-3. **server3/DUAL_INTERFACE.md** (400+ lines)
+3. **launchpad/DUAL_INTERFACE.md** (400+ lines)
    - Architecture documentation
    - REST vs MCP comparison table
    - Integration patterns
    - Usage examples
    - Troubleshooting guide
 
-### Server 1 (1 file)
+### Cortex (1 file)
 
-4. **server1/mcp_client.py** (340 lines)
-   - `Server3MCPClient` - Subprocess connection management
+4. **cortex/mcp_client.py** (340 lines)
+   - `LaunchpadMCPClient` - Subprocess connection management
    - JSON-RPC protocol handling
    - Tool call routing
-   - `Server1AgentWithMCP` - Agent integration layer
+   - `CortexAgentWithMCP` - Agent integration layer
    - Example workflow
 
 ### Documentation (1 file)
 
-5. **server3/MCP_SUMMARY.md** (400+ lines)
+5. **launchpad/MCP_SUMMARY.md** (400+ lines)
    - Quick reference
    - Integration summary
    - Deployment instructions
@@ -106,15 +106,15 @@ Server 1 (Agent)              External Clients
 ### LLM Agent Using MCP
 
 ```python
-from server1.mcp_client import Server3MCPClient, Server1AgentWithMCP
+from cortex.mcp_client import LaunchpadMCPClient, CortexAgentWithMCP
 import asyncio
 
 async def main():
     # Initialize MCP client
-    mcp_client = Server3MCPClient()
-    agent = Server1AgentWithMCP(mcp_client)
+    mcp_client = LaunchpadMCPClient()
+    agent = CortexAgentWithMCP(mcp_client)
     
-    # Connect to Server 3 MCP server
+    # Connect to Launchpad MCP server
     await agent.initialize()
     
     # Agent workflow:
@@ -158,7 +158,7 @@ asyncio.run(main())
 
 ```bash
 # Start REST server
-uvicorn server3.app:app --port 8001
+uvicorn launchpad.app:app --port 8001
 
 # Call from web/script
 curl http://localhost:8001/jobs/submit -d '...'
@@ -170,10 +170,10 @@ curl http://localhost:8001/jobs/submit -d '...'
 
 ```bash
 # Start MCP server
-python -m server3.mcp_server
+python -m launchpad.mcp_server
 
 # LLM agent calls tools directly
-# Tools executed in Server 1 Agent context
+# Tools executed in Cortex Agent context
 ```
 
 **Use case:** Fully automated LLM workflows, agent reasoning
@@ -182,10 +182,10 @@ python -m server3.mcp_server
 
 ```bash
 # Terminal 1: REST API
-uvicorn server3.app:app --port 8001
+uvicorn launchpad.app:app --port 8001
 
 # Terminal 2: MCP Server
-python -m server3.mcp_server
+python -m launchpad.mcp_server
 
 # Both interfaces available simultaneously
 # Agents use MCP for automation
@@ -198,14 +198,14 @@ python -m server3.mcp_server
 ## File Statistics
 
 ```
-Server 3 MCP Components:
+Launchpad MCP Components:
 ├── mcp_tools.py           380 lines
 ├── mcp_server.py          120 lines  
 └── DUAL_INTERFACE.md      400+ lines
                            ──────────
                            ~900 lines
 
-Server 1 Integration:
+Cortex Integration:
 ├── mcp_client.py          340 lines
 └── (integration code)     ~100 lines
                            ──────────
@@ -241,7 +241,7 @@ MCP Server:
 
 ### Client Integration
 
-MCP Client in Server 1:
+MCP Client in Cortex:
 - ✅ Subprocess lifecycle management
 - ✅ Connection pooling
 - ✅ JSON-RPC marshaling
@@ -269,20 +269,20 @@ MCP Client in Server 1:
 ### Development
 ```bash
 # Everything in one go
-bash server3/quickstart.sh
-uvicorn server3.app:app --port 8001 &
-python -m server3.mcp_server &
-python server3/demo_server3.py
+bash launchpad/quickstart.sh
+uvicorn launchpad.app:app --port 8001 &
+python -m launchpad.mcp_server &
+python launchpad/demo_launchpad.py
 ```
 
 ### Production
 ```bash
 # REST API (scalable)
-uvicorn server3.app:app --workers 4 --port 8001
+uvicorn launchpad.app:app --workers 4 --port 8001
 
 # MCP Server (if using agents)
-python -m server3.mcp_server
-# Or managed by Server 1 process
+python -m launchpad.mcp_server
+# Or managed by Cortex process
 ```
 
 ## Testing & Validation
@@ -300,8 +300,8 @@ python -m server3.mcp_server
 - Results consistent
 
 ### Example Scripts
-- `server3/demo_server3.py` - REST examples
-- `server1/mcp_client.py` - MCP examples
+- `launchpad/demo_launchpad.py` - REST examples
+- `cortex/mcp_client.py` - MCP examples
 
 ## What's Enabled
 
@@ -344,13 +344,13 @@ python -m server3.mcp_server
 ## Next Steps
 
 ### Immediate
-1. Test MCP interface: `python server1/mcp_client.py`
+1. Test MCP interface: `python cortex/mcp_client.py`
 2. Start both servers: REST on 8001, MCP on stdio
 3. Integrate with existing UI
 4. Monitor via REST, automate via MCP
 
 ### Short Term (Week 4)
-- [ ] Connect Server 1 Agent directly to MCP
+- [ ] Connect Cortex Agent directly to MCP
 - [ ] Add MCP tool result caching
 - [ ] Implement job dependency chains
 - [ ] Add webhook callbacks
@@ -363,7 +363,7 @@ python -m server3.mcp_server
 
 ## Summary
 
-Server 3 now provides **both** interfaces:
+Launchpad now provides **both** interfaces:
 
 ### 🌐 REST API
 - 7 HTTP endpoints

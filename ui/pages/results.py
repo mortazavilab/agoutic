@@ -1,7 +1,7 @@
 """
 Job Results Analysis Page
-Displays and analyzes completed job results via Server 1 proxy endpoints.
-All requests go through Server 1 — the UI never contacts backend servers directly.
+Displays and analyzes completed job results via Cortex proxy endpoints.
+All requests go through Cortex — the UI never contacts backend servers directly.
 """
 
 import streamlit as st
@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import require_auth, make_authenticated_request
 
-# Server 1 API URL (the only server the UI talks to)
+# Cortex API URL (the only server the UI talks to)
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title="Job Results", page_icon="📊", layout="wide")
