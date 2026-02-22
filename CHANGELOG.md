@@ -84,6 +84,55 @@ When a `list_job_files` browsing command fails (e.g. directory not found), the e
 - Suggestions include: `list files`, `list project files`, `list project files in data`, `list files in workflow2/annot`, `list workflows`
 - Applied to: `cortex/app.py`
 
+### Fixed — `_validate_analyzer_params` Overriding Auto-Generated Paths
+
+`list files in data` correctly resolved to `test20/data` (via cascading `os.path.isdir`), but `_validate_analyzer_params` overrode it back to `workflow2` because the path wasn't a subdirectory of the current workflow.
+
+- Subdirectory check now also accepts paths under the **project directory** (parent of the workflow dir)
+- Applied to: `cortex/app.py`
+
+### Fixed — "list project files" Not Detected as Browsing Command
+
+"list project files" wasn't matched by the browsing-command override at the caller level, so the LLM handled it instead — generating a spurious Dogme approval gate.
+
+- Added `(?:project\s+)?` to the browsing override regex: `r'\b(?:list|show)\s+(?:the\s+)?(?:project\s+)?files?\b'`
+- Applied to: `cortex/app.py`
+
+### Fixed — Spurious Approval Gate on ENCODE Search After Dogme Context
+
+After a Dogme job or `analyze_local_sample` conversation, switching to ENCODE_Search and running a query (e.g. "how many HL-60 experiments?") triggered a Dogme approval gate. The LLM echoed `[[APPROVAL_NEEDED]]` from conversation history.
+
+- Added `_APPROVAL_SKILLS` whitelist: only `run_dogme_dna`, `run_dogme_rna`, `run_dogme_cdna`, `analyze_local_sample`, and `download_files` may trigger approval gates
+- Any `[[APPROVAL_NEEDED]]` tag from other skills is suppressed and stripped
+- Applied to: `cortex/app.py`
+
+### Fixed — "plot this" Used Wrong DataFrame (Hallucinated DF1)
+
+"plot this by lab" after an ENCODE query producing DF10 plotted DF1 (or DF3) instead. The LLM hallucinated earlier DF references despite having the correct `latest_dataframe` in its state.
+
+- Added `latest_dataframe` field to `ConversationState` in `cortex/schemas.py`
+- Updated `_build_conversation_state()` to populate `latest_dataframe` from the most recent embedded DF
+- Updated PLOT instructions in `agent_engine.py` system prompt: when user says "this/it/the data", use `latest_dataframe` from `[STATE]` JSON
+- Added deterministic post-processing override: if user message has no explicit `DF\d+` reference, replace the LLM's df_id in `[[PLOT:...]]` tags with `_conv_state.latest_dataframe`
+- Applied to: `cortex/app.py`, `cortex/agent_engine.py`, `cortex/schemas.py`
+
+### Fixed — Stale `latest_dataframe` in Cached Conversation State
+
+The fast-path cache in `_build_conversation_state()` returned `latest_dataframe` from the **previous** request's state, because the state was saved _before_ the current block's DFs were embedded. This caused the PLOT df_id override to be a no-op (e.g. replacing DF1 with DF1).
+
+- **Fast-path patch**: after loading cached state from the last AGENT_PLAN block, scan that block's `_dataframes` for any DF IDs newer than `latest_dataframe` and update accordingly
+- **Save-time update**: after embedding DFs into the current block, update `_conv_state.latest_dataframe` and `known_dataframes` before saving, so the cached state is accurate for the next request
+- Applied to: `cortex/app.py`
+
+### Fixed — Empty Response When LLM Only Emits a PLOT Tag
+
+"plot this by lab" showed brief running info then disappeared with an empty response. The LLM output consisted solely of a `[[PLOT:...]]` tag — after stripping it, `clean_markdown` was empty, producing a blank AGENT_PLAN block.
+
+- When `clean_markdown` is empty but `plot_specs` exist, a brief descriptive placeholder is inserted (e.g. "Here is the bar for **DF2**:")
+- Placeholder uses the `"df"` key (string like "DF2") instead of `"df_id"` (integer) for correct formatting
+- The AGENT_PLOT block still renders the interactive chart below
+- Applied to: `cortex/app.py`
+
 ---
 
 ## [2.8] - 2026-02-22

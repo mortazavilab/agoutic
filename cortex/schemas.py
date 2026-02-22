@@ -22,6 +22,7 @@ class ConversationState:
     active_experiment: str | None = None     # ENCSR accession from conversation
     active_file: str | None = None           # ENCFF accession from conversation
     known_dataframes: list[str] = field(default_factory=list)   # ["DF1 (12 BAM files)", ...]
+    latest_dataframe: str | None = None   # "DF8" — most recent DF for "this/it" references
     collected_params: dict[str, str] = field(default_factory=dict)  # partial intake fields
     workflows: list[dict] = field(default_factory=list)
     active_workflow_index: int | None = None

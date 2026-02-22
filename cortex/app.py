@@ -1407,6 +1407,34 @@ def _build_conversation_state(
                 if cached and isinstance(cached, dict):
                     state = ConversationState.from_dict(cached)
                     state.active_skill = active_skill
+                    # The cached state was saved *before* the block's own DFs
+                    # were embedded, so latest_dataframe may be stale.  Patch it
+                    # by scanning the same block's embedded dataframes.
+                    _block_dfs = _pl.get("_dataframes", {})
+                    _max_id = 0
+                    for _bdf_val in _block_dfs.values():
+                        _bdf_meta = _bdf_val.get("metadata", {})
+                        _bdf_id = _bdf_meta.get("df_id")
+                        if isinstance(_bdf_id, int) and _bdf_id > _max_id:
+                            _max_id = _bdf_id
+                    if _max_id > 0:
+                        _patched = f"DF{_max_id}"
+                        if state.latest_dataframe != _patched:
+                            state.latest_dataframe = _patched
+                            # Also append to known_dataframes if missing
+                            if not any(k.startswith(_patched + " ") or k == _patched
+                                       for k in state.known_dataframes):
+                                _bdf_label = ""
+                                _bdf_rows = "?"
+                                for _v in _block_dfs.values():
+                                    _m = _v.get("metadata", {})
+                                    if _m.get("df_id") == _max_id:
+                                        _bdf_label = _m.get("label", "")
+                                        _bdf_rows = _m.get("row_count", "?")
+                                        break
+                                state.known_dataframes.append(
+                                    f"{_patched} ({_bdf_label}, {_bdf_rows} rows)"
+                                )
                     return state
                 break  # only check the most recent AGENT_PLAN
 
@@ -1466,6 +1494,9 @@ def _build_conversation_state(
                 _row_count = _meta.get("row_count", "?")
                 if _df_id and _meta.get("visible", True):
                     state.known_dataframes.append(f"DF{_df_id} ({_label}, {_row_count} rows)")
+        # The latest DF is the highest-numbered one
+        if state.known_dataframes:
+            state.latest_dataframe = state.known_dataframes[-1].split(" ")[0]  # e.g. "DF8"
 
     # --- Extract collected parameters (for analyze_local_sample) ---
     if conversation_history and active_skill == "analyze_local_sample":
@@ -3871,6 +3902,21 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # 4. Parse the "Approval Gate Tag"
         trigger_tag = "[[APPROVAL_NEEDED]]"
         needs_approval = trigger_tag in raw_response
+
+        # Suppress spurious approval gates for skills that never submit jobs.
+        # The LLM sometimes echoes [[APPROVAL_NEEDED]] from conversation
+        # history even when the current skill is a search/browse skill.
+        _APPROVAL_SKILLS = {
+            "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
+            "analyze_local_sample", "download_files",
+        }
+        if needs_approval and active_skill not in _APPROVAL_SKILLS:
+            logger.warning(
+                "Suppressing spurious APPROVAL_NEEDED for non-job skill",
+                skill=active_skill,
+            )
+            needs_approval = False
+            raw_response = raw_response.replace(trigger_tag, "").strip()
         
         # 5. Parse DATA_CALL Tags (unified format for all consortia and services)
         # Format: [[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562]]
@@ -3956,6 +4002,23 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             logger.info("Parsed PLOT tags", count=len(plot_specs),
                        specs=[{"type": s.get("type"), "df_id": s.get("df_id")} for s in plot_specs])
 
+        # 5a-fix. Override hallucinated DF references in PLOT tags.
+        # When the user says "plot this" / "plot it" without naming a specific DF,
+        # the LLM often defaults to DF1.  Correct to the most recent DF.
+        _user_explicit_df = re.search(r'\bDF\s*(\d+)\b', req.message, re.IGNORECASE)
+        if plot_specs and not _user_explicit_df and _conv_state.latest_dataframe:
+            _latest_id_m = re.match(r'DF(\d+)', _conv_state.latest_dataframe)
+            if _latest_id_m:
+                _latest_id = int(_latest_id_m.group(1))
+                for _ps in plot_specs:
+                    if _ps.get("df_id") is not None and _ps["df_id"] != _latest_id:
+                        logger.warning(
+                            "Overriding PLOT df_id with latest DF",
+                            llm_df_id=_ps["df_id"], latest_df_id=_latest_id,
+                        )
+                        _ps["df_id"] = _latest_id
+                        _ps["df"] = f"DF{_latest_id}"
+
         # 5a-b. FALLBACK: If LLM wrote Python code for plotting instead of [[PLOT:...]] tags,
         #        auto-generate the tag from context clues (user message + DF references).
         _plot_keywords = {"plot", "chart", "pie", "histogram", "scatter", "bar chart",
@@ -3991,6 +4054,11 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                         if _ij_id is not None:
                             _auto_df_id = _ij_id
                             break
+                # Last resort: use latest_dataframe from conversation state
+                if _auto_df_id is None and _conv_state.latest_dataframe:
+                    _ld_m = re.match(r'DF(\d+)', _conv_state.latest_dataframe)
+                    if _ld_m:
+                        _auto_df_id = int(_ld_m.group(1))
             # Detect chart type from user message
             _msg_l = req.message.lower()
             if "pie" in _msg_l:
@@ -4056,6 +4124,16 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # Also remove any remaining plain text patterns that might not have been converted
         for pattern in all_fallback_patterns.keys():
             clean_markdown = re.sub(pattern, '', clean_markdown, flags=re.IGNORECASE).strip()
+
+        # If the LLM only emitted a PLOT tag (no surrounding text), insert a
+        # brief placeholder so the AGENT_PLAN block isn't empty in the UI.
+        if not clean_markdown and plot_specs:
+            _ps0 = plot_specs[0]
+            _chart_type = _ps0.get("type", "chart").replace("_", " ")
+            _df_label = _ps0.get("df", "")  # string like "DF2"
+            if not _df_label and _ps0.get("df_id") is not None:
+                _df_label = f"DF{_ps0['df_id']}"
+            clean_markdown = f"Here is the {_chart_type} for **{_df_label}**:" if _df_label else f"Here is the {_chart_type}:"
 
         # Fix hallucinated ENCSR accessions in LLM text response.
         # If the user explicitly stated exactly one ENCSR accession and the LLM
@@ -4988,6 +5066,26 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 _meta["df_id"] = _next_df_id
                 _next_df_id += 1
             # Non-visible DFs intentionally get no df_id
+
+        # Update _conv_state with the newly-embedded DFs so the cached state
+        # saved into this block is accurate for future requests' fast path.
+        if _embedded_dataframes:
+            _max_new_id = 0
+            for _edf_val in _embedded_dataframes.values():
+                _edf_meta = _edf_val.get("metadata", {})
+                _edf_id = _edf_meta.get("df_id")
+                if isinstance(_edf_id, int) and _edf_id > _max_new_id:
+                    _max_new_id = _edf_id
+                    _edf_label = _edf_meta.get("label", "")
+                    _edf_rows = _edf_meta.get("row_count", "?")
+            if _max_new_id > 0:
+                _new_latest = f"DF{_max_new_id}"
+                _conv_state.latest_dataframe = _new_latest
+                if not any(k.startswith(_new_latest + " ") or k == _new_latest
+                           for k in _conv_state.known_dataframes):
+                    _conv_state.known_dataframes.append(
+                        f"{_new_latest} ({_edf_label}, {_edf_rows} rows)"
+                    )
 
         # Consolidate token usage from both LLM passes (think + analyze_results)
         _total_usage = {

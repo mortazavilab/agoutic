@@ -271,7 +271,10 @@ SUPPORTED CHART TYPES:
 - pie        — Proportion of categorical values. Requires: x (category). Optional: y (values), title.
 
 PARAMETER RULES:
-- df: MUST be a valid DF reference (e.g., DF1, DF5) from the conversation
+- df: MUST be a valid DF reference (e.g., DF1, DF5) from the conversation.
+  When the user says "this", "it", "the data", or "the results" without
+  specifying a DF number, use the MOST RECENT dataframe — check
+  latest_dataframe in the [STATE] JSON.
 - x / y: MUST be actual column names from that DataFrame
 - color: Optional categorical column to group/color traces by
 - agg: For bar charts — "count" (count rows per x category), "sum", or "mean"
