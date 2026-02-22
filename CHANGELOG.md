@@ -133,6 +133,14 @@ The fast-path cache in `_build_conversation_state()` returned `latest_dataframe`
 - The AGENT_PLOT block still renders the interactive chart below
 - Applied to: `cortex/app.py`
 
+### Fixed — "plot this" on Dogme Skills Triggered Job Submission
+
+"plot this" after parsing a CSV on a Dogme skill (`run_dogme_cdna`) caused the LLM to emit `list_job_files` + `[[APPROVAL_NEEDED]]` instead of a `[[PLOT:...]]` tag. The user saw a spurious approval gate and a failed Nextflow job.
+
+- **Plot-command override** (5a-c): when `_user_wants_plot` and valid `plot_specs` exist, suppress all `DATA_CALL`, legacy, and `APPROVAL_NEEDED` tags from the LLM response
+- **Implicit DF injection in `_inject_job_context`**: "plot this" on Dogme skills now detects viz keywords even without an explicit `DF\d+` reference, looks up the latest DF from history blocks, and injects a `[NOTE: DF<N> is an in-memory DataFrame...]` hint so the LLM generates `[[PLOT:...]]` instead of tool calls
+- Applied to: `cortex/app.py`
+
 ---
 
 ## [2.8] - 2026-02-22

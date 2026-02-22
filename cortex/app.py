@@ -1660,8 +1660,32 @@ def _inject_job_context(user_message: str, active_skill: str,
         # the LLM knows DF<N> is an in-memory table — NOT a file to look up.
         _df_ref_match = re.search(r'\bDF\s*(\d+)\b', user_message, re.IGNORECASE)
         _df_note = ""
-        if _df_ref_match and history_blocks:
+        # Also detect implicit DF reference via plot/viz keywords ("plot this")
+        _viz_keywords = {"plot", "chart", "graph", "histogram", "scatter",
+                         "pie", "heatmap", "visualize", "bar chart", "box plot"}
+        _implicit_df_ref = (
+            not _df_ref_match
+            and any(kw in user_message.lower() for kw in _viz_keywords)
+        )
+        _tgt_df_id = None
+        if _df_ref_match:
             _tgt_df_id = int(_df_ref_match.group(1))
+        elif _implicit_df_ref and history_blocks:
+            # Find the highest DF ID across all history blocks
+            for _hblk in reversed(history_blocks):
+                if _hblk.type != "AGENT_PLAN":
+                    continue
+                _hblk_dfs = get_block_payload(_hblk).get("_dataframes", {})
+                for _dfd in _hblk_dfs.values():
+                    _m = _dfd.get("metadata", {})
+                    _did = _m.get("df_id")
+                    if isinstance(_did, int):
+                        if _tgt_df_id is None or _did > _tgt_df_id:
+                            _tgt_df_id = _did
+                if _tgt_df_id is not None:
+                    break  # found DFs in the most recent AGENT_PLAN
+
+        if _tgt_df_id is not None and history_blocks:
             for _hblk in reversed(history_blocks):
                 if _hblk.type != "AGENT_PLAN":
                     continue
@@ -4112,6 +4136,28 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 r'\n*(?:Explanation|Output|Note|Here is|The (?:pie|bar|scatter|histogram|box) chart).*$',
                 '', corrected_response, flags=re.DOTALL | re.IGNORECASE
             ).strip()
+
+        # 5a-c. Plot-command override: when the user wants a plot and we have
+        # valid plot_specs, suppress any DATA_CALL / APPROVAL tags the LLM
+        # emitted.  Without this, "plot this" on Dogme skills triggers
+        # list_job_files + a spurious job submission approval gate.
+        if _user_wants_plot and plot_specs and any(s.get("df_id") is not None for s in plot_specs):
+            if data_call_matches or legacy_encode_matches or legacy_analysis_matches or needs_approval:
+                logger.warning(
+                    "Plot-command override: suppressing LLM DATA_CALL/APPROVAL tags",
+                    data_calls=len(data_call_matches),
+                    legacy_encode=len(legacy_encode_matches),
+                    needs_approval=needs_approval,
+                )
+            data_call_matches = []
+            legacy_encode_matches = []
+            legacy_analysis_matches = []
+            needs_approval = False
+            # Strip all tags from LLM response so only the plot placeholder remains
+            corrected_response = re.sub(data_call_pattern, '', corrected_response).strip()
+            corrected_response = re.sub(legacy_encode_pattern, '', corrected_response).strip()
+            corrected_response = re.sub(legacy_analysis_pattern, '', corrected_response).strip()
+            corrected_response = corrected_response.replace(trigger_tag, "").strip()
 
         # Clean all tags from user-visible text
         clean_markdown = corrected_response.replace(trigger_tag, "").strip()
