@@ -8,10 +8,10 @@ This skill handles **downloading and processing ENCODE long-read sequencing data
 
 ## When to Use This Skill
 
-- User wants to **download** ENCODE experiment files
+- User wants to **browse files** for an ENCODE experiment before deciding what to download
 - User wants to **process** long-read data through Dogme pipeline
 - User selected a specific experiment and wants to proceed with analysis
-- User mentions "download", "process", "run pipeline", "analyze this experiment"
+- User mentions "process", "run pipeline", "analyze this experiment"
 
 ## When NOT to Use This Skill
 
@@ -19,6 +19,7 @@ This skill handles **downloading and processing ENCODE long-read sequencing data
 - User asks "how many experiments", "what assays", "show me a table" → `[[SKILL_SWITCH_TO: ENCODE_Search]]`
 - User has **local data** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
 - User wants **job results** → `[[SKILL_SWITCH_TO: analyze_job_results]]`
+- User wants to **download specific files** by ENCFF accession ("download ENCFF...", "grab ENCFF...") → `[[SKILL_SWITCH_TO: download_files]]`
 
 ## Atlas Tools Available
 

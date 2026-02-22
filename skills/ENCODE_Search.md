@@ -53,6 +53,18 @@ Get Files By Type (accession=ENCSR123ABC)     ❌ NO! Missing [[brackets]]
 **IF YOU WRITE "Get Experiment" OR "Get Files By Type" WITHOUT [[BRACKETS]], THE TOOL WILL NOT EXECUTE!**
 
 ---
+## 🔀 DOWNLOAD ROUTING
+
+If the user asks to **download** specific files (e.g. "download ENCFF546HTC and ENCFF212RUB"), do NOT handle it here.
+Instead, **immediately** switch to the download skill:
+
+```
+[[SKILL_SWITCH_TO: download_files]]
+```
+
+Signals: "download", "grab", "fetch", "save" + ENCFF accessions.
+
+---
 ## 🚨 YOU HAVE DIRECT ACCESS TO ENCODE DATA 🚨
 
 **You can query the ENCODE Portal RIGHT NOW using the tags above.**

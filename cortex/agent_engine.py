@@ -187,10 +187,10 @@ class AgentEngine:
         ═══════════════════════════════════════════════════════════════════════════════
         """
         
-        # --- Tool Schema Contract: auto-generated from MCP server schemas ---
-        _tool_contract = format_tool_contract(source_key, source_type)
-        if _tool_contract:
-            data_call_block += f"""
+            # --- Tool Schema Contract: auto-generated from MCP server schemas ---
+            _tool_contract = format_tool_contract(source_key, source_type)
+            if _tool_contract:
+                data_call_block += f"""
 ═══════════════════════════════════════════════════════════════════════════════
 📋 TOOL PARAMETER CONTRACTS — Authoritative reference for all tools below.
 Use ONLY the parameter names listed here. Do NOT invent parameter names.

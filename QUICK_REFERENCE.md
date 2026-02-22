@@ -144,12 +144,17 @@ Once a Dogme job completes, you can browse and parse result files via the chat i
 |---|---|
 | `list workflows` | Lists all workflow folders in the project |
 | `list files` | Lists files in the current (most recent) workflow |
-| `list files in annot` | Lists files in a subfolder of the current workflow |
+| `list files in annot` | Lists files in a subfolder — tries workflow first, then project root |
+| `list files in data` | Lists `data/` — cascades from workflow to project root |
 | `list files in workflow2/annot` | Lists files in a specific workflow's subfolder |
+| `list project files` | Lists top-level project directory contents |
+| `list project files in data` | Lists `data/` — always relative to project root |
 | `parse annot/File.csv` | Finds and parses a CSV file by relative path |
 | `parse workflow2/annot/File.csv` | Parses a file in a specific workflow |
 
 These commands are handled by Cortex's safety net (`_auto_generate_data_calls`) which generates `list_job_files`, `find_file`, and `parse_csv_file` Analyzer MCP tool calls automatically.
+
+**Tip:** Use `list project files` to always target the project root. If `list files in <folder>` can't find the folder, it shows suggestions for alternative commands.
 
 ## Documentation
 

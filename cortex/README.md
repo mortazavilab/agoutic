@@ -465,10 +465,20 @@ Cortex's `_auto_generate_data_calls()` safety net detects browsing commands and 
 |---|---|
 | `list workflows` | `list_job_files(work_dir=<project_dir>)` |
 | `list files` | `list_job_files(work_dir=<current_workflow>)` |
-| `list files in annot` | `list_job_files(work_dir=<workflow>/annot)` |
+| `list files in annot` | `list_job_files(work_dir=<workflow>/annot)` — cascades: tries workflow first, then project root |
+| `list files in data` | `list_job_files(work_dir=<workflow>/data)` or `<project_dir>/data` — uses `os.path.isdir` to find the real directory |
 | `list files in workflow2/annot` | `list_job_files(work_dir=<workflow2>/annot)` |
+| `list project files` | `list_job_files(work_dir=<project_dir>)` — always targets the project root |
+| `list project files in data` | `list_job_files(work_dir=<project_dir>/data)` — always relative to project root |
 | `parse annot/File.csv` | `find_file(work_dir=<workflow>, file_name=File.csv)` → `parse_csv_file(...)` |
 | `parse workflow2/annot/File.csv` | `find_file(work_dir=<workflow2>, file_name=File.csv)` → `parse_csv_file(...)` |
+
+**Path resolution cascade for `list files in <subpath>`:**
+1. Try `<current_workflow>/<subpath>` — if it exists on disk, use it
+2. Try `<project_dir>/<subpath>` — if it exists on disk, use it
+3. Fall back to whichever path is available; if the directory doesn't exist, show error with suggestions
+
+When a browsing command fails, the error is shown directly (no LLM re-interpretation) with suggested alternative commands.
 
 ### Path Resolution Helpers
 

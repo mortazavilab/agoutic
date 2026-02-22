@@ -109,6 +109,6 @@ if __name__ == "__main__":
         logger.info("Analyzer MCP server starting", host=args.host, port=args.port,
                     tools=list(TOOL_REGISTRY.keys()))
 
-        app = mcp.http_app
+        app = mcp.http_app()
         app.routes.insert(0, Route("/tools/schema", _tools_schema_endpoint, methods=["GET"]))
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")

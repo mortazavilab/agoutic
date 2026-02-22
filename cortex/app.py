@@ -582,13 +582,24 @@ def _validate_analyzer_params(
                 params["max_depth"] = 1
 
         # If the incoming work_dir is already a valid subdirectory of the
-        # resolved context dir, keep it — auto-generated calls (from
-        # _auto_generate_data_calls) already resolved the correct path and
-        # overriding would lose the subfolder (e.g. /project/data → /project).
-        if llm_wd and llm_wd.startswith(real_wd.rstrip("/") + "/"):
+        # resolved context dir OR the project dir, keep it — auto-generated
+        # calls (from _auto_generate_data_calls) already resolved the correct
+        # path and overriding would lose the subfolder.
+        # Derive project dir from real_wd (strip /workflowN suffix).
+        _proj_wd = (
+            real_wd.rstrip("/").rsplit("/", 1)[0]
+            if re.search(r'/workflow\d+/?$', real_wd)
+            else real_wd
+        )
+        _is_valid_sub = llm_wd and (
+            llm_wd.startswith(real_wd.rstrip("/") + "/")
+            or llm_wd.startswith(_proj_wd.rstrip("/") + "/")
+            or llm_wd == _proj_wd  # exact match on project dir
+        )
+        if _is_valid_sub:
             logger.info(
-                "Keeping incoming work_dir (valid subdirectory of context)",
-                incoming=llm_wd, context_wd=real_wd, tool=tool,
+                "Keeping incoming work_dir (valid subdirectory of context/project)",
+                incoming=llm_wd, context_wd=real_wd, project_wd=_proj_wd, tool=tool,
             )
             params["work_dir"] = llm_wd
         else:
@@ -824,6 +835,10 @@ _ENCODE_STOP_WORDS = frozenset([
     "need", "look", "up", "any", "all", "some",
     # Referential / pronoun words — should not be treated as search terms
     "them", "they", "those", "these", "their", "its", "ones", "samples",
+    # Visualization / follow-up — not search terms
+    "plot", "chart", "graph", "histogram", "scatter", "visualize", "visualise",
+    "heatmap", "pie", "bar", "box", "distribution", "summarize", "summarise",
+    "compare", "filter", "sort", "group", "aggregate", "breakdown", "table",
 ])
 
 
@@ -882,6 +897,18 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     calls = []
     msg_lower = user_message.lower()
 
+    # --- DF reference / visualization follow-up: never auto-call ---
+    # If the user references an existing DataFrame (DF1, DF2, ...) this is
+    # a follow-up on in-memory data — no new API call is needed.
+    if re.search(r'\bDF\s*\d+\b', user_message, re.IGNORECASE):
+        return calls
+    # Pure visualization intent (no new data request)
+    _VIZ_KEYWORDS = ("plot", "chart", "graph", "histogram", "scatter",
+                     "visualize", "visualise", "heatmap", "pie chart",
+                     "bar chart", "box plot", "distribution")
+    if any(kw in msg_lower for kw in _VIZ_KEYWORDS):
+        return calls
+
     # --- Browsing commands (highest priority, skill-independent) ---
     # "list workflows", "list files" etc. always route to analyzer when there
     # is a project directory, regardless of the active skill.  Must run before
@@ -913,6 +940,25 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
             })
         return calls
 
+    # --- "list project files [in <path>]" — explicitly target project root ---
+    _list_proj_m = re.search(
+        r'\b(?:list|show)\s+project\s+files?\b'
+        r'(?:\s+(?:in|under|at|of)\s+(.+?))?\s*$',
+        user_message, re.IGNORECASE,
+    )
+    if _list_proj_m and _project_dir:
+        _subpath = (_list_proj_m.group(1) or "").strip().strip('"\'')
+        _target_wd = _resolve_workflow_path(
+            _subpath, _project_dir, workflows,
+        ) if _subpath else _project_dir
+        _params: dict = {"work_dir": _target_wd, "max_depth": 1}
+        calls.append({
+            "source_type": "service", "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": _params,
+        })
+        return calls
+
     # --- "list files" / "list files in <path>" command ---
     _list_files_m = re.search(
         r'\b(?:list|show|what)\s+(?:the\s+)?files?\b'
@@ -921,20 +967,41 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     )
     if _list_files_m:
         _subpath = (_list_files_m.group(1) or "").strip().strip('"\'')
-        _base_wd = work_dir or _project_dir
-        _target_wd = _resolve_workflow_path(
-            _subpath, _base_wd, workflows,
-        ) if _base_wd else ""
+        if _subpath:
+            # Try work_dir/<subpath> first; fall back to project_dir/<subpath>
+            _target_wd = ""
+            _wd_candidate = _resolve_workflow_path(
+                _subpath, work_dir, workflows,
+            ) if work_dir else ""
+            if _wd_candidate and os.path.isdir(_wd_candidate):
+                _target_wd = _wd_candidate
+            elif _project_dir and _project_dir != work_dir:
+                _proj_candidate = _resolve_workflow_path(
+                    _subpath, _project_dir, workflows,
+                )
+                if _proj_candidate and os.path.isdir(_proj_candidate):
+                    _target_wd = _proj_candidate
+            # Last resort: use whichever candidate we have, let the server
+            # report "not found" if neither exists.
+            if not _target_wd:
+                _target_wd = _wd_candidate or (
+                    f"{_project_dir.rstrip('/')}/{_subpath}" if _project_dir else ""
+                )
+        else:
+            # No subpath → list current workflow dir
+            _target_wd = work_dir or _project_dir or ""
+
         if _target_wd:
-            _params: dict = {"work_dir": _target_wd}
-            # For subfolder listings, only show immediate contents
+            _params_f: dict = {"work_dir": _target_wd}
             if _subpath:
-                _params["max_depth"] = 1
+                _params_f["max_depth"] = 1
             calls.append({
                 "source_type": "service", "source_key": "analyzer",
                 "tool": "list_job_files",
-                "params": _params,
+                "params": _params_f,
             })
+        # If no resolvable path, return empty calls — the browsing error
+        # handler in the results pipeline will show helpful suggestions.
         return calls
 
     # Organism lookup for KNOWN biosamples.  This is NOT exhaustive — it
@@ -1737,6 +1804,15 @@ def _inject_job_context(user_message: str, active_skill: str,
     encode_skills = {"ENCODE_Search", "ENCODE_LongRead"}
     if active_skill in encode_skills:
         msg_lower = user_message.lower()
+
+        # Browsing commands ("list files", "list workflows") should NOT inject
+        # previous ENCODE dataframes — they route to the analyzer, not ENCODE.
+        _browsing_cmd_patterns = [
+            r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',
+            r'\b(?:list|show)\s+(?:the\s+)?files?\b',
+        ]
+        if any(re.search(p, msg_lower) for p in _browsing_cmd_patterns):
+            return user_message, {}, {"skill": active_skill, "context": "browsing_command"}
 
         # Check if current message already has an explicit accession
         has_accession = bool(re.findall(r'ENC[A-Z]{2}\d{3}[A-Z]{3}', user_message, re.IGNORECASE))
@@ -4050,7 +4126,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         _is_browsing_override = False
         _browsing_patterns = [
             r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',
-            r'\b(?:list|show)\s+(?:the\s+)?files?\b',
+            r'\b(?:list|show)\s+(?:the\s+)?(?:project\s+)?files?\b',
         ]
         if any(re.search(p, _msg_lower) for p in _browsing_patterns):
             _browse_calls = _auto_generate_data_calls(
@@ -4409,10 +4485,17 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                         # --- Chaining: download after get_file_metadata ---
                         # Trigger when _chain=="download" (auto-generated) OR
                         # when active_skill is download_files and LLM generated
-                        # the get_file_metadata tag directly (no _chain key).
+                        # the get_file_metadata tag directly (no _chain key),
+                        # OR when the user's message has clear download intent
+                        # (e.g. "download ENCFF..." on any ENCODE skill).
+                        _msg_lower = req.message.lower() if hasattr(req, 'message') else ""
+                        _user_wants_download = any(
+                            w in _msg_lower for w in ("download", "grab", "fetch", "save")
+                        )
                         _is_download_chain = (
                             call.get("_chain") == "download"
                             or active_skill == "download_files"
+                            or _user_wants_download
                         )
                         if _is_download_chain \
                                 and tool_name == "get_file_metadata" \
@@ -4438,9 +4521,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                                     "size_bytes": _file_size,
                                     "accession": _file_acc,
                                 }
-                                # Store on the request context for the approval gate
-                                # to pick up instead of extracting Dogme job params
-                                _pending_download_files = [_dl_file_info]
+                                # Append (not replace) so multi-file downloads accumulate
+                                _pending_download_files.append(_dl_file_info)
                                 logger.info(
                                     "Download chain: resolved URL from file metadata",
                                     file_accession=_file_acc, url=_dl_url,
@@ -4449,14 +4531,18 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                                 # Force download_files skill and approval
                                 active_skill = "download_files"
                                 needs_approval = True
-                                # Set a clean confirmation message (bypass LLM summary)
-                                _size_mb = round(_file_size / (1024 * 1024), 1) if _file_size else "?"
-                                clean_markdown = (
-                                    f"**Download Plan:**\n"
-                                    f"- **File:** `{_file_name}` ({_size_mb} MB)\n"
-                                    f"- **Destination:** `data/`\n\n"
-                                    f"Proceed with download?"
-                                )
+                                # Build a clean confirmation message listing all pending files
+                                _plan_lines = ["**Download Plan:**"]
+                                _total_mb = 0
+                                for _pf in _pending_download_files:
+                                    _sz = _pf.get("size_bytes") or 0
+                                    _mb = round(_sz / (1024 * 1024), 1)
+                                    _total_mb += _mb
+                                    _plan_lines.append(f"- **File:** `{_pf['filename']}` ({_mb} MB)")
+                                _plan_lines.append(f"- **Total:** {round(_total_mb, 1)} MB")
+                                _plan_lines.append(f"- **Destination:** `data/`\n")
+                                _plan_lines.append("Proceed with download?")
+                                clean_markdown = "\n".join(_plan_lines)
 
                         # --- Chaining: follow up find_file with parse/read ---
                         # Works whether _chain was set by auto_calls or needs
@@ -4642,7 +4728,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                             )
 
             formatted_data = "\n".join(formatted_data_parts)
-            # Prepend provenance headers so the LLM knows where data came from
+            # Build provenance headers for traceability
+            _prov_block = ""
             if _provenance:
                 _prov_lines = []
                 for _p in _provenance:
@@ -4653,7 +4740,9 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                             f"rows={_p.get('rows', '?')}, timestamp={_p['timestamp']}]"
                         )
                 if _prov_lines:
-                    formatted_data = "\n".join(_prov_lines) + "\n\n" + formatted_data
+                    _prov_block = "\n".join(_prov_lines)
+                    # Prepend to formatted_data so the LLM sees provenance context
+                    formatted_data = _prov_block + "\n\n" + formatted_data
             # Append structured errors so the LLM uses the error-handling playbook
             if _error_blocks and not has_real_data:
                 formatted_data += "\n\n" + "\n".join(_error_blocks)
@@ -4666,14 +4755,49 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             # directly — no LLM re-interpretation needed.
             _browsing_tools = {"list_job_files", "categorize_job_files"}
             _all_tools_used = set()
+            _has_download_chain = False
             for _src_results in all_results.values():
                 for _r in _src_results:
                     _all_tools_used.add(_r.get("tool", ""))
+                    if _r.get("_chain") == "download":
+                        _has_download_chain = True
             _is_browsing = bool(_all_tools_used) and _all_tools_used <= _browsing_tools
 
-            if _is_browsing and has_real_data and formatted_data.strip():
-                # Show the formatted file listing directly — no second pass
-                clean_markdown = formatted_data
+            # Also skip second-pass for download workflows — the metadata is
+            # used to build the approval gate, not to summarise for the user.
+            _is_download = _has_download_chain or active_skill == "download_files"
+
+            if (_is_browsing or _is_download) and has_real_data and formatted_data.strip():
+                # Show the formatted file listing directly — no second pass.
+                # Use the raw results (without provenance prefix) and append
+                # provenance as a collapsed section at the end.
+                _display_data = "\n".join(formatted_data_parts)
+                if _prov_block:
+                    _display_data += (
+                        "\n\n<details><summary>📋 Query Details</summary>\n\n"
+                        + _prov_block
+                        + "\n\n</details>"
+                    )
+                clean_markdown = _display_data
+
+            elif _is_browsing and not has_real_data:
+                # Browsing command failed (e.g. directory not found).
+                # Show the error plus helpful suggestions directly.
+                _err_detail = ""
+                for _src_results in all_results.values():
+                    for _r in _src_results:
+                        if "error" in _r:
+                            _err_detail = _r.get("error", "")
+                            break
+                clean_markdown = (
+                    f"⚠️ {_err_detail}\n\n"
+                    "Try one of these:\n"
+                    "- **list files** — files in the current workflow\n"
+                    "- **list project files** — top-level project contents\n"
+                    "- **list project files in data** — a subfolder under the project root\n"
+                    "- **list files in workflow2/annot** — a specific workflow subfolder\n"
+                    "- **list workflows** — all workflows in the project"
+                )
 
             elif has_real_data and formatted_data.strip():
                 # Cap data size to avoid overwhelming the LLM context window.

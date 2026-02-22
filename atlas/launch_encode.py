@@ -74,9 +74,9 @@ def main():
     logger.info("ENCODE MCP server starting", host=args.host, port=args.port, encodelib_path=str(encodelib_path))
 
     # Serve the FastMCP instance over HTTP
-    # FastMCP instances have .http_app for serving over HTTP
+    # FastMCP 2.x: http_app is a method that returns a Starlette app
     if hasattr(mcp_instance, 'http_app'):
-        app = mcp_instance.http_app
+        app = mcp_instance.http_app()
     else:
         # Fallback: assume it's already an ASGI app
         app = mcp_instance

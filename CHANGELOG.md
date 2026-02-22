@@ -2,6 +2,92 @@
 
 ## [Unreleased] - 2026-02-22
 
+### Fixed — FastMCP 2.x Compatibility
+
+FastMCP upgraded to v2.14.2 where `mcp.http_app` changed from a property to a method. All three MCP servers failed to start after the upgrade.
+
+- `launchpad/mcp_server.py`: `mcp.http_app` → `mcp.http_app()`
+- `analyzer/mcp_server.py`: `mcp.http_app` → `mcp.http_app()`
+- `atlas/launch_encode.py`: `mcp_instance.http_app` → `mcp_instance.http_app()`
+
+### Fixed — Spurious ENCODE Auto-Calls on Visualization / DF Follow-ups
+
+When the user typed "plot DF1 by assay", the system fired a spurious `search_by_biosample` call because `_auto_generate_data_calls()` didn't recognise DataFrame references or visualization keywords.
+
+- Added early-return guards in `_auto_generate_data_calls()` for DF references (`\bDF\s*\d+\b`) and visualization keywords (`plot`, `chart`, `graph`, `histogram`, `scatter`, etc.)
+- Expanded `_ENCODE_STOP_WORDS` with visualization/follow-up terms (`plot`, `chart`, `filter`, `sort`, `group`, `aggregate`, `table`, etc.)
+- Applied to: `cortex/app.py`
+
+### Fixed — `UnboundLocalError` on `source_key` in System Prompt
+
+`construct_system_prompt()` in `agent_engine.py` crashed for skills without a data source (e.g. `download_files`) because `format_tool_contract(source_key, source_type)` was outside the `if source_info:` block.
+
+- Indented `format_tool_contract()` call inside the `if source_info:` guard
+- Applied to: `cortex/agent_engine.py`
+
+### Fixed — False "Unexpected Data" on Download Workflows
+
+File download metadata went through the second-pass LLM, which reported "The query did not return the expected data" instead of building the download approval gate.
+
+- Skip second-pass LLM for download workflows: detect via `_chain == "download"` or `active_skill == "download_files"`
+- Applied to: `cortex/app.py`
+
+### Fixed — Multi-File Download Lost Previous Files
+
+`_pending_download_files = [_dl_file_info]` replaced the list on each iteration of the download chain, losing previously resolved files.
+
+- Changed to `_pending_download_files.append(_dl_file_info)`
+- Rebuilt download plan message to list all pending files with individual sizes and total
+- Applied to: `cortex/app.py`
+
+### Fixed — Provenance Block Swallowed Results in Streamlit
+
+Wrapping `[TOOL_RESULT:...]` provenance in `<details>` at the top of browsing output caused Streamlit to render everything inside the collapsed section.
+
+- Separated provenance from display data: plain-text provenance prepended for LLM, collapsed `<details>` appended at end for UI
+- Applied to: `cortex/app.py`
+
+### Fixed — Download Chain Not Triggered from ENCODE Skills
+
+"Download files ENCFF546HTC..." stayed on `ENCODE_LongRead` skill instead of switching to `download_files`.
+
+- Added `_user_wants_download` detection from user message keywords (`download`, `grab`, `fetch`, `save`)
+- Updated `skills/ENCODE_Search.md`: added "🔀 DOWNLOAD ROUTING" section routing download+ENCFF requests to `download_files`
+- Updated `skills/ENCODE_LongRead.md`: removed "download" as a trigger, added download-specific-files routing to `download_files`
+
+### Fixed — Browsing Commands Injected Previous ENCODE DataFrame
+
+"list files in data" while on an ENCODE skill responded with "📋 Answering from previous data (DF6)..." instead of listing files.
+
+- Added browsing-command early exit in `_inject_job_context()` for ENCODE skills — patterns for `list/show workflows` and `list/show files`
+- Applied to: `cortex/app.py`
+
+### Added — Cascading Path Resolution for "list files in \<subfolder\>"
+
+"list files in data" resolved to `workflow2/data` which didn't exist; the `data/` folder was at the project root.
+
+- `list files in <subpath>` now cascades: try `work_dir/<subpath>` first (via `os.path.isdir`), fall back to `project_dir/<subpath>`
+- Applied to: `cortex/app.py`
+
+### Added — "list project files" Command
+
+New explicit command to target the project root directory, bypassing the current workflow.
+
+- `list project files` → lists top-level project directory
+- `list project files in data` → always resolves to `<project_dir>/data`
+- Applied to: `cortex/app.py`
+
+### Added — Browsing Error Suggestions
+
+When a `list_job_files` browsing command fails (e.g. directory not found), the error is shown directly with helpful suggestions instead of going through the LLM.
+
+- Suggestions include: `list files`, `list project files`, `list project files in data`, `list files in workflow2/annot`, `list workflows`
+- Applied to: `cortex/app.py`
+
+---
+
+## [2.8] - 2026-02-22
+
 ### Changed — Server Rename
 
 Full codebase rename from generic `server1/2/3/4` to meaningful names:

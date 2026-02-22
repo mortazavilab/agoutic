@@ -189,8 +189,8 @@ if __name__ == "__main__":
     logger.info("Launchpad MCP server starting", host=args.host, port=args.port,
                 tools=list(TOOL_REGISTRY.keys()))
     
-    # Get the FastAPI app from fastMCP and add schema endpoint
-    app = mcp.http_app
+    # Get the Starlette app from fastMCP and add schema endpoint
+    app = mcp.http_app()
     app.routes.insert(0, Route("/tools/schema", _tools_schema_endpoint, methods=["GET"]))
     
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
