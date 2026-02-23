@@ -40,6 +40,7 @@ class NextflowConfig:
         min_cov: Optional[int] = None,
         per_mod: int = 5,
         accuracy: str = "sup",
+        max_gpu_tasks: int = 1,
     ) -> str:
         """
         Generate a Nextflow configuration string for Dogme pipeline.
@@ -167,18 +168,21 @@ class NextflowConfig:
         config_lines.append("    withName: 'doradoTask' {")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
+        config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("    ")
         config_lines.append("    withName: 'openChromatinTaskBg' {")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
+        config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("")
         config_lines.append("    withName: 'openChromatinTaskBed' {")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
+        config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("")
@@ -261,6 +265,7 @@ class NextflowExecutor:
         min_cov: Optional[int] = None,
         per_mod: int = 5,
         accuracy: str = "sup",
+        max_gpu_tasks: int = 1,
         user_id: Optional[str] = None,
         project_id: Optional[str] = None,
         username: Optional[str] = None,
@@ -435,6 +440,7 @@ class NextflowExecutor:
             min_cov=min_cov,
             per_mod=per_mod,
             accuracy=accuracy,
+            max_gpu_tasks=max_gpu_tasks,
         )
         
         config_path = work_dir / "nextflow.config"

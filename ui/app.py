@@ -1134,6 +1134,16 @@ def render_block(block, expected_project_id: str = ""):
                                 index=accuracy_index,
                                 help="Model accuracy: sup=super accurate, hac=high accuracy, fast=fast mode"
                             )
+                            
+                            # max_gpu_tasks
+                            max_gpu_tasks = st.number_input(
+                                "Max Concurrent GPU Tasks",
+                                min_value=1,
+                                max_value=16,
+                                value=extracted_params.get("max_gpu_tasks") or 1,
+                                step=1,
+                                help="Maximum simultaneous dorado/GPU tasks within a pipeline run (default: 1)"
+                            )
                         
                         st.divider()
                         
@@ -1158,6 +1168,7 @@ def render_block(block, expected_project_id: str = ""):
                                 "min_cov": min_cov,
                                 "per_mod": per_mod,
                                 "accuracy": accuracy,
+                                "max_gpu_tasks": max_gpu_tasks,
                             }
                             
                             # Update block with edited params and approved status

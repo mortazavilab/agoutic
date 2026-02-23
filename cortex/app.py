@@ -2496,6 +2496,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         "min_cov": None,  # Will default based on mode if not specified
         "per_mod": None,  # Will use default 5 if not specified
         "accuracy": None,  # Will use default "sup" if not specified
+        "max_gpu_tasks": None,  # Will use default 1 if not specified
     }
     
     # Detect Dogme entry point from conversation
@@ -2639,6 +2640,19 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
             params["accuracy"] = "fast"
         elif "sup" in all_user_text:
             params["accuracy"] = "sup"
+    
+    # max_gpu_tasks (handle "max gpu tasks 2", "limit dorado to 3", "run 2 gpu tasks at a time")
+    gpu_task_patterns = [
+        r'max[_\s]*gpu[_\s]*tasks?[:\s]+(?:of\s+)?(\d+)',
+        r'limit\s+(?:dorado|gpu)\s+(?:tasks?\s+)?to\s+(\d+)',
+        r'(\d+)\s+(?:concurrent|simultaneous|parallel)\s+(?:dorado|gpu)\s+tasks?',
+        r'(?:run|allow)\s+(\d+)\s+(?:dorado|gpu)\s+tasks?',
+    ]
+    for gp in gpu_task_patterns:
+        gpu_match = re.search(gp, all_user_text)
+        if gpu_match:
+            params["max_gpu_tasks"] = int(gpu_match.group(1))
+            break
     
     logger.info("Extracted parameters", method="heuristics", params=params)
     return params
@@ -3042,6 +3056,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "min_cov": job_params.get("min_cov"),  # Let Launchpad handle None (mode-dependent default)
             "per_mod": job_params.get("per_mod") or 5,
             "accuracy": job_params.get("accuracy") or "sup",
+            "max_gpu_tasks": job_params.get("max_gpu_tasks") or 1,
         }
         
         logger.info("Job parameters prepared", source="edited" if gate_payload.get('edited_params') else "extracted",

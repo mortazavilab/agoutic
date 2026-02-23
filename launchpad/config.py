@@ -36,6 +36,10 @@ NEXTFLOW_BIN = Path(os.getenv("NEXTFLOW_BIN", "/usr/local/bin/nextflow"))
 # Max concurrent jobs
 MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "2"))
 
+# Default max concurrent GPU tasks (dorado, openChromatin) per pipeline run
+# Controls Nextflow maxForks for GPU-bound processes
+DEFAULT_MAX_GPU_TASKS = int(os.getenv("DEFAULT_MAX_GPU_TASKS", "1"))
+
 # Job polling interval (seconds)
 JOB_POLL_INTERVAL = int(os.getenv("JOB_POLL_INTERVAL", "10"))
 
