@@ -1,6 +1,18 @@
 # Changelog - February 2026
 
-## [Unreleased] - 2026-02-22
+## [2.9] - 2026-02-23
+
+### Added — GPU Concurrency Control in Approval Form
+
+Users can now control the maximum number of simultaneous GPU tasks (dorado basecalling, openChromatin) per pipeline run directly from the plan approval form.
+
+- New "🖥️ Max Concurrent GPU Tasks" selectbox (1–8) in the Streamlit approval form
+- Applies Nextflow `maxForks` directive to `doradoTask`, `openChromatinTaskBg`, `openChromatinTaskBed`
+- Default: 1 (safe for single-GPU machines), configurable via `DEFAULT_MAX_GPU_TASKS` env var
+- Natural language extraction: "limit dorado to 3 concurrent tasks" → `max_gpu_tasks: 3`
+- Files changed: `launchpad/config.py`, `launchpad/schemas.py`, `launchpad/nextflow_executor.py`, `launchpad/app.py`, `launchpad/mcp_server.py`, `launchpad/mcp_tools.py`, `cortex/app.py`, `ui/app.py`, `skills/Local_Sample_Intake.md`
+
+## [2.8] - 2026-02-22
 
 ### Fixed — FastMCP 2.x Compatibility
 

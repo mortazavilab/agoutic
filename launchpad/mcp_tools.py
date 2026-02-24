@@ -454,6 +454,7 @@ TOOL_REGISTRY = {
                 },
                 "input_type": {"type": "string", "enum": ["pod5", "bam", "fastq"], "description": "Type of input files (default: pod5)"},
                 "modifications": {"type": "string", "description": "Modification motifs to call (optional)"},
+                "max_gpu_tasks": {"type": "integer", "description": "Max concurrent GPU tasks (dorado/openChromatin) per pipeline run (default: 1)"},
             },
             "required": ["sample_name", "mode", "input_directory"],
         }

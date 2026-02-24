@@ -1085,6 +1085,20 @@ def render_block(block, expected_project_id: str = ""):
                             help="Comma-separated modification motifs (leave empty for auto)"
                         )
                         
+                        # Max concurrent GPU tasks — visible at top level (not hidden in Advanced)
+                        _gpu_raw = extracted_params.get("max_gpu_tasks")
+                        _gpu_val = int(_gpu_raw) if _gpu_raw is not None else 1
+                        if _gpu_val < 1:
+                            _gpu_val = 1
+                        _gpu_options = [1, 2, 3, 4, 5, 6, 7, 8]
+                        _gpu_idx = _gpu_options.index(_gpu_val) if _gpu_val in _gpu_options else 0
+                        max_gpu_tasks = st.selectbox(
+                            "🖥️ Max Concurrent GPU Tasks",
+                            options=_gpu_options,
+                            index=_gpu_idx,
+                            help="Maximum simultaneous dorado/GPU tasks within a pipeline run (default: 1)",
+                        )
+                        
                         # Advanced parameters in expander
                         with st.expander("⚙️ Advanced Parameters (optional)"):
                             st.caption("Leave empty to use defaults")
@@ -1133,16 +1147,6 @@ def render_block(block, expected_project_id: str = ""):
                                 accuracy_options,
                                 index=accuracy_index,
                                 help="Model accuracy: sup=super accurate, hac=high accuracy, fast=fast mode"
-                            )
-                            
-                            # max_gpu_tasks
-                            max_gpu_tasks = st.number_input(
-                                "Max Concurrent GPU Tasks",
-                                min_value=1,
-                                max_value=16,
-                                value=extracted_params.get("max_gpu_tasks") or 1,
-                                step=1,
-                                help="Maximum simultaneous dorado/GPU tasks within a pipeline run (default: 1)"
                             )
                         
                         st.divider()
