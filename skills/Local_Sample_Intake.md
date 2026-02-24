@@ -16,6 +16,7 @@ This is a unified entry point for analyzing local data. It acts as an intake wiz
 * `sample_name`: (String, Required) The desired identifier for the sample.
 * `sample_type`: (String, Required) One of "DNA", "RNA", "CDNA", or "Fiber-seq".
 * `reference_genome`: (String, Required) The target genome (e.g., "GRCh38" for human, "mm39" for mouse).
+* `max_gpu_tasks`: (Integer, Optional) Maximum number of simultaneous GPU tasks (dorado/openChromatin) per pipeline run. Default is 1. The user may say "run 2 GPU tasks at a time" or "limit dorado to 1".
 
 ## Detecting Analysis Requests
 
@@ -90,6 +91,7 @@ Display a summary and include the [[APPROVAL_NEEDED]] tag:
 📁 **Data Path:** {path}  
 🧬 **Data Type:** {sample_type}  
 🔬 **Reference Genome:** {reference_genome}
+🖥️ **Max GPU Tasks:** {max_gpu_tasks} (default: 1, adjustable in approval form)
 
 I will submit this to the Dogme {sample_type} pipeline for analysis.
 

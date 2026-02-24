@@ -41,6 +41,7 @@ class LaunchpadMCPTools:
         min_cov: Optional[int] = None,
         per_mod: Optional[int] = None,
         accuracy: Optional[str] = None,
+        max_gpu_tasks: Optional[int] = None,
         user_id: Optional[str] = None,
         username: Optional[str] = None,
         project_slug: Optional[str] = None,
@@ -68,6 +69,7 @@ class LaunchpadMCPTools:
             min_cov: Optional minimum coverage
             per_mod: Optional per-modification threshold
             accuracy: Optional basecalling accuracy level (e.g., "sup", "hac")
+            max_gpu_tasks: Optional max concurrent GPU tasks (dorado/openChromatin) per run (default: 1)
         
         Returns:
             {"run_uuid": str, "sample_name": str, "status": str, "work_directory": str}
@@ -97,6 +99,8 @@ class LaunchpadMCPTools:
             payload["per_mod"] = per_mod
         if accuracy is not None:
             payload["accuracy"] = accuracy
+        if max_gpu_tasks is not None:
+            payload["max_gpu_tasks"] = max_gpu_tasks
         if user_id is not None:
             payload["user_id"] = user_id
         if username is not None:
@@ -450,6 +454,7 @@ TOOL_REGISTRY = {
                 },
                 "input_type": {"type": "string", "enum": ["pod5", "bam", "fastq"], "description": "Type of input files (default: pod5)"},
                 "modifications": {"type": "string", "description": "Modification motifs to call (optional)"},
+                "max_gpu_tasks": {"type": "integer", "description": "Max concurrent GPU tasks (dorado/openChromatin) per pipeline run (default: 1)"},
             },
             "required": ["sample_name", "mode", "input_directory"],
         }

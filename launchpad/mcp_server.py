@@ -61,6 +61,7 @@ async def submit_dogme_job(
     min_cov: int | None = None,
     per_mod: int | None = None,
     accuracy: str | None = None,
+    max_gpu_tasks: int | None = None,
 ) -> str:
     """Submit a DOGME job for processing. Input can be pod5, bam, or fastq files. Supports multiple reference genomes in parallel."""
     import uuid as _uuid
@@ -81,6 +82,7 @@ async def submit_dogme_job(
         min_cov=min_cov,
         per_mod=per_mod,
         accuracy=accuracy,
+        max_gpu_tasks=max_gpu_tasks,
     )
     return json.dumps(result, indent=2)
 

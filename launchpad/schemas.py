@@ -25,6 +25,7 @@ class SubmitJobRequest(BaseModel):
     min_cov: Optional[int] = None  # Minimum coverage (defaults: 1 for DNA, 3 for RNA/CDNA)
     per_mod: Optional[int] = 5  # Percentage threshold for modifications
     accuracy: Optional[str] = "sup"  # Basecalling accuracy (sup/hac/fast)
+    max_gpu_tasks: Optional[int] = 1  # Max concurrent GPU tasks (dorado/openChromatin) per pipeline run
     
     @field_validator("reference_genome")
     @classmethod

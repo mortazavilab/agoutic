@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 2.8  
+**Version:** 2.9  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -523,6 +523,16 @@ python launchpad/demo_launchpad.py
 
 ## 📊 Performance
 
+### GPU Concurrency (Per-Pipeline)
+
+Control the number of simultaneous GPU tasks (dorado basecalling, openChromatin) within a single pipeline run. Configurable in the approval form or via environment variable:
+
+```bash
+export DEFAULT_MAX_GPU_TASKS=1  # Default: 1 (safe for single-GPU). Range: 1-8
+```
+
+Users can also override per-job in the approval form dropdown or via chat ("limit dorado to 3 concurrent tasks").
+
 ### Concurrent Jobs
 
 Limit concurrent jobs to avoid resource exhaustion:
@@ -578,7 +588,7 @@ pylint cortex launchpad
 
 ## 📦 Version Information
 
-- **Release**: 2.7 — ENCODE routing, username paths, search_by_assay
+- **Release**: 2.9 — GPU concurrency control in approval form
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

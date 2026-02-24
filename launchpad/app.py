@@ -19,6 +19,7 @@ from common.logging_middleware import RequestLoggingMiddleware
 from launchpad.config import (
     JobStatus,
     MAX_CONCURRENT_JOBS,
+    DEFAULT_MAX_GPU_TASKS,
     JOB_POLL_INTERVAL,
     REFERENCE_GENOMES,
     INTERNAL_API_SECRET,
@@ -300,6 +301,7 @@ async def submit_job(req: SubmitJobRequest):
                 min_cov=req.min_cov,
                 per_mod=req.per_mod,
                 accuracy=req.accuracy,
+                max_gpu_tasks=req.max_gpu_tasks or DEFAULT_MAX_GPU_TASKS,
                 user_id=req.user_id,
                 project_id=req.project_id,
                 username=req.username,

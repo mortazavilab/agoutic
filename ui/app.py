@@ -1085,6 +1085,20 @@ def render_block(block, expected_project_id: str = ""):
                             help="Comma-separated modification motifs (leave empty for auto)"
                         )
                         
+                        # Max concurrent GPU tasks — visible at top level (not hidden in Advanced)
+                        _gpu_raw = extracted_params.get("max_gpu_tasks")
+                        _gpu_val = int(_gpu_raw) if _gpu_raw is not None else 1
+                        if _gpu_val < 1:
+                            _gpu_val = 1
+                        _gpu_options = [1, 2, 3, 4, 5, 6, 7, 8]
+                        _gpu_idx = _gpu_options.index(_gpu_val) if _gpu_val in _gpu_options else 0
+                        max_gpu_tasks = st.selectbox(
+                            "🖥️ Max Concurrent GPU Tasks",
+                            options=_gpu_options,
+                            index=_gpu_idx,
+                            help="Maximum simultaneous dorado/GPU tasks within a pipeline run (default: 1)",
+                        )
+                        
                         # Advanced parameters in expander
                         with st.expander("⚙️ Advanced Parameters (optional)"):
                             st.caption("Leave empty to use defaults")
@@ -1158,6 +1172,7 @@ def render_block(block, expected_project_id: str = ""):
                                 "min_cov": min_cov,
                                 "per_mod": per_mod,
                                 "accuracy": accuracy,
+                                "max_gpu_tasks": max_gpu_tasks,
                             }
                             
                             # Update block with edited params and approved status
