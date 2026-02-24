@@ -141,6 +141,23 @@ The fast-path cache in `_build_conversation_state()` returned `latest_dataframe`
 - **Implicit DF injection in `_inject_job_context`**: "plot this" on Dogme skills now detects viz keywords even without an explicit `DF\d+` reference, looks up the latest DF from history blocks, and injects a `[NOTE: DF<N> is an in-memory DataFrame...]` hint so the LLM generates `[[PLOT:...]]` instead of tool calls
 - Applied to: `cortex/app.py`
 
+### Fixed — Multi-File Download Missing Files
+
+"Download ENCFF546HTC and ENCFF212RUB from ENCSR160HKZ" only fetched one file — the LLM emitted a single `get_file_metadata` tag instead of two.
+
+- After the tool call loop, detect all `ENCFF` accessions in the user message and compare against fetched files
+- Auto-fetch any missing file metadata via a direct MCP call to the ENCODE server
+- Rebuild the Download Plan to include all files
+- Applied to: `cortex/app.py`
+
+### Fixed — Raw File Metadata JSON Displayed in Downloads
+
+"Download ENCFF921XAH" showed the full `get_file_metadata` JSON (lab, replicate, cloud_metadata, etc.) instead of the Download Plan summary.
+
+- Split the browsing/download display path: browsing shows formatted data directly, downloads keep the Download Plan
+- Raw file metadata is collapsed into a `<details><summary>📋 File Metadata Details</summary>` section
+- Applied to: `cortex/app.py`
+
 ---
 
 ## [2.8] - 2026-02-22

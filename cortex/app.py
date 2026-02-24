@@ -4730,6 +4730,74 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             
             all_results[source_key] = source_results
         
+        # 6c-auto. Auto-fetch missing ENCFF files for multi-file downloads.
+        # The LLM often emits only ONE get_file_metadata tag when the user
+        # requests multiple files.  Detect missing accessions and fetch them.
+        if _pending_download_files:
+            _msg_text = req.message if hasattr(req, 'message') else ""
+            _requested_encffs = set(
+                m.upper() for m in re.findall(r'ENCFF[A-Z0-9]{6}', _msg_text, re.IGNORECASE)
+            )
+            _fetched_encffs = set(
+                f.get("accession", "").upper() for f in _pending_download_files
+            )
+            _missing_encffs = _requested_encffs - _fetched_encffs
+            if _missing_encffs:
+                # We need the experiment accession for the API call
+                _exp_match = re.search(r'(ENCSR[A-Z0-9]{6})', _msg_text, re.IGNORECASE)
+                _exp_acc = _exp_match.group(1) if _exp_match else None
+                if _exp_acc:
+                    logger.info("Auto-fetching missing ENCFF files for download",
+                               missing=sorted(_missing_encffs), experiment=_exp_acc)
+                    try:
+                        _autofetch_url = get_service_url("encode")
+                        _autofetch_mcp = MCPHttpClient(name="encode", base_url=_autofetch_url)
+                        await _autofetch_mcp.connect()
+                        for _miss_acc in sorted(_missing_encffs):
+                            try:
+                                _miss_result = await _autofetch_mcp.call_tool(
+                                    "get_file_metadata",
+                                    accession=_exp_acc,
+                                    file_accession=_miss_acc,
+                                )
+                                if isinstance(_miss_result, dict):
+                                    _miss_dl_url = None
+                                    _miss_cloud = _miss_result.get("cloud_metadata")
+                                    if isinstance(_miss_cloud, dict) and _miss_cloud.get("url"):
+                                        _miss_dl_url = _miss_cloud["url"]
+                                    elif _miss_result.get("href"):
+                                        _miss_dl_url = f"https://www.encodeproject.org{_miss_result['href']}"
+                                    if _miss_dl_url:
+                                        _miss_fmt = _miss_result.get("file_format", "")
+                                        _miss_fname = f"{_miss_acc}.{_miss_fmt}" if _miss_fmt else _miss_acc
+                                        _pending_download_files.append({
+                                            "url": _miss_dl_url,
+                                            "filename": _miss_fname,
+                                            "size_bytes": _miss_result.get("file_size"),
+                                            "accession": _miss_acc,
+                                        })
+                                        logger.info("Auto-fetched missing file metadata",
+                                                   accession=_miss_acc, url=_miss_dl_url)
+                            except Exception as _mfe:
+                                logger.warning("Failed to auto-fetch file metadata",
+                                              accession=_miss_acc, error=str(_mfe))
+                        await _autofetch_mcp.disconnect()
+                        # Rebuild the Download Plan to include all files
+                        _plan_lines = ["**Download Plan:**"]
+                        _total_mb = 0
+                        for _pf in _pending_download_files:
+                            _sz = _pf.get("size_bytes") or 0
+                            _mb = round(_sz / (1024 * 1024), 1)
+                            _total_mb += _mb
+                            _plan_lines.append(f"- **File:** `{_pf['filename']}` ({_mb} MB)")
+                        _plan_lines.append(f"- **Total:** {round(_total_mb, 1)} MB")
+                        _plan_lines.append(f"- **Destination:** `data/`\n")
+                        _plan_lines.append("Proceed with download?")
+                        clean_markdown = "\n".join(_plan_lines)
+                    except Exception as _conn_e:
+                        logger.warning("Failed to connect for auto-fetch",
+                                      error=str(_conn_e))
+
         # 6c. Build provenance records for all tool calls (audit trail)
         _provenance: list[dict] = []
         _now_ts = datetime.datetime.utcnow().isoformat() + "Z"
@@ -4891,7 +4959,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             # used to build the approval gate, not to summarise for the user.
             _is_download = _has_download_chain or active_skill == "download_files"
 
-            if (_is_browsing or _is_download) and has_real_data and formatted_data.strip():
+            if _is_browsing and has_real_data and formatted_data.strip():
                 # Show the formatted file listing directly — no second pass.
                 # Use the raw results (without provenance prefix) and append
                 # provenance as a collapsed section at the end.
@@ -4903,6 +4971,20 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                         + "\n\n</details>"
                     )
                 clean_markdown = _display_data
+
+            elif _is_download and has_real_data:
+                # For downloads, keep the Download Plan (already in clean_markdown)
+                # and collapse the raw file metadata into a <details> section.
+                _display_data = "\n".join(formatted_data_parts)
+                if _prov_block:
+                    _display_data = _prov_block + "\n\n" + _display_data
+                _metadata_details = (
+                    "\n\n<details><summary>📋 File Metadata Details</summary>\n\n"
+                    + _display_data
+                    + "\n\n</details>"
+                )
+                # Append metadata details after the Download Plan
+                clean_markdown = clean_markdown.rstrip() + _metadata_details
 
             elif _is_browsing and not has_real_data:
                 # Browsing command failed (e.g. directory not found).
