@@ -760,9 +760,12 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
     # --- Signals for analyze_local_sample ---
     # User mentions a local file path + analysis intent
     _has_local_path = bool(re.search(r'(/[a-z_][\w/.-]+|~[\w/.-]+)', user_message))
+    # Also detect relative paths with known extensions (e.g. data/ENCFF921XAH.bam)
+    _has_relative_data_path = bool(re.search(r'\b[\w./]+\.(bam|pod5|fastq|fq|fast5)\b', msg_lower))
+    _has_any_path = _has_local_path or _has_relative_data_path
     _analysis_words = ["analyze", "analyse", "process", "run", "submit", "launch"]
     _has_analysis = any(w in msg_lower for w in _analysis_words)
-    _sample_words = ["sample", "pod5", "local", "my data", "my files"]
+    _sample_words = ["sample", "pod5", "local", "my data", "my files", ".bam", "bam file", "bam files"]
     _has_sample = any(w in msg_lower for w in _sample_words)
     _data_type_words = ["cdna", "dna", "rna", "fiber-seq", "fiberseq"]
     _has_data_type = any(w in msg_lower for w in _data_type_words)
@@ -778,7 +781,7 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
         _from_dogme_skill = current_skill in (
             "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna"
         )
-        if _has_local_path:
+        if _has_any_path:
             if _from_dogme_skill:
                 # From a Dogme skill, require path + at least 2 of:
                 # analysis verb, sample keyword, data type keyword
@@ -2263,7 +2266,7 @@ def _create_block_internal(session, project_id, block_type, payload, status="NEW
 @app.get("/health")
 async def health_check():
     """Health check endpoint (no auth required)"""
-    return {"status": "ok", "service": "cortex"}
+    return {"status": "ok", "service": "cortex", "version": "3.0.0"}
 
 @app.get("/skills")
 async def get_available_skills():
@@ -2514,6 +2517,10 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     elif "unmapped bam" in all_user_text or "remap" in all_user_text:
         params["entry_point"] = "remap"
         params["input_type"] = "bam"
+    elif "downloaded bam" in all_user_text or "from bam" in all_user_text or ("bam" in all_user_text and "from data" in all_user_text):
+        # User wants to run Dogme from downloaded BAM files in project data/
+        params["entry_point"] = "remap"
+        params["input_type"] = "bam"
     elif ".bam" in all_user_text_original:
         # Detect if BAM is mapped or unmapped based on context
         if "mapped" in all_user_text and "unmapped" not in all_user_text:
@@ -2545,7 +2552,14 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         found_genomes.add(g2)
     
     # Convert to list, default to mouse if none found
-    params["reference_genome"] = list(found_genomes) if found_genomes else ["mm39"]
+    # For modkit/annotateRNA, do NOT auto-default genome — the user must specify
+    # the genome the BAM was actually mapped to.
+    if found_genomes:
+        params["reference_genome"] = list(found_genomes)
+    elif params["entry_point"] in ("modkit", "annotateRNA"):
+        params["reference_genome"] = []  # Force the intake skill to ask
+    else:
+        params["reference_genome"] = ["mm39"]
     
     # Detect mode from keywords
     if "rna" in all_user_text and "cdna" not in all_user_text:
@@ -2558,11 +2572,36 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         params["mode"] = "DNA"  # Default to DNA
     
     # Look for paths in user messages (use ORIGINAL case to preserve path)
-    path_pattern = r'(/[^\s,]+(?:/[^\s,]+)*)'
-    paths = re.findall(path_pattern, all_user_text_original)
-    if paths:
-        # Strip trailing punctuation (commas, periods, etc.)
-        cleaned_path = paths[0].rstrip('.,;:!?')
+    # First try: relative paths with known sequencing extensions (data/ENCFF921XAH.bam)
+    _rel_path_pattern = r'\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq|fq|fast5))\b'
+    _rel_paths = re.findall(_rel_path_pattern, all_user_text_original)
+    # Second try: absolute paths
+    _abs_path_pattern = r'(/[^\s,]+(?:/[^\s,]+)*)'
+    _abs_paths = re.findall(_abs_path_pattern, all_user_text_original)
+    
+    if _rel_paths:
+        cleaned_path = _rel_paths[0].rstrip('.,;:!?')
+        # Resolve relative path against project directory
+        _proj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
+        _owner_id = None
+        # Find the project owner from blocks
+        for block in blocks:
+            if block.owner_id:
+                _owner_id = block.owner_id
+                break
+        if _owner_id:
+            _owner_user = session.execute(select(User).where(User.id == _owner_id)).scalar_one_or_none()
+            _uname = getattr(_owner_user, 'username', None) if _owner_user else None
+            _slug = _proj.slug if _proj else None
+            if _uname and _slug:
+                _project_dir = AGOUTIC_DATA / "users" / _uname / _slug
+            else:
+                _project_dir = AGOUTIC_DATA / "users" / _owner_id / project_id
+            params["input_directory"] = str(_project_dir / cleaned_path)
+        else:
+            params["input_directory"] = cleaned_path
+    elif _abs_paths:
+        cleaned_path = _abs_paths[0].rstrip('.,;:!?')
         params["input_directory"] = cleaned_path
     else:
         params["input_directory"] = "/data/samples/test"
@@ -2575,9 +2614,12 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         r'sample\s+name\s+is\s+([a-zA-Z0-9_-]+)',  # "sample name is Jamshid"
         r'named\s+([a-zA-Z0-9_-]+)',  # "named Ali1"
         r'called\s+([a-zA-Z0-9_-]+)',  # "called Ali1"
+        r'(?:the\s+)?sample\s+([a-zA-Z0-9_-]+)',  # "the sample c2c12r1" / "sample c2c12r1"
+        r'analyze\s+(?:the\s+)?(?:sample\s+)?([a-zA-Z0-9_-]+)\s+using',  # "analyze c2c12r1 using"
     ]
     _skip_words = {'is', 'the', 'a', 'an', 'this', 'that', 'it', 'at', 'in', 'on',
-                   'mm39', 'grch38', 'hg38', 'mm10'}
+                   'mm39', 'grch38', 'hg38', 'mm10', 'name', 'type', 'data', 'file',
+                   'using', 'with', 'from', 'for', 'my', 'new', 'rna', 'dna', 'cdna'}
     for msg in reversed(user_messages):
         for pattern in explicit_patterns:
             match = re.search(pattern, msg, re.IGNORECASE)
@@ -3058,6 +3100,21 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "accuracy": job_params.get("accuracy") or "sup",
             "max_gpu_tasks": job_params.get("max_gpu_tasks") or 1,
         }
+
+        # For BAM remap: if no valid input_directory was found, resolve to project data/ dir
+        # This handles "run dogme from downloaded BAM" where BAMs are in projectdir/data/
+        _input_dir = job_data["input_directory"]
+        if (job_data.get("input_type") == "bam"
+            and job_data.get("entry_point") == "remap"
+            and (_input_dir == "/data/samples/test" or not Path(_input_dir).exists())):
+            if _username and _project_slug:
+                _project_data_dir = str(Path(AGOUTIC_DATA) / "users" / _username / _project_slug / "data")
+            else:
+                _project_data_dir = str(Path(AGOUTIC_DATA) / "users" / owner_id / project_id / "data")
+            if Path(_project_data_dir).exists():
+                job_data["input_directory"] = _project_data_dir
+                logger.info("Resolved BAM input to project data dir",
+                           input_directory=_project_data_dir)
         
         logger.info("Job parameters prepared", source="edited" if gate_payload.get('edited_params') else "extracted",
                     job_data=job_data)
@@ -3909,6 +3966,17 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         }
         if skill_switch_match:
             new_skill = skill_switch_match.group(1)
+            # Map common LLM-hallucinated skill names to real registry keys
+            _SKILL_ALIASES = {
+                "run_workflow": "analyze_local_sample",
+                "submit_job": "analyze_local_sample",
+                "run_dogme": "analyze_local_sample",
+                "local_sample": "analyze_local_sample",
+                "encode_search": "ENCODE_Search",
+                "encode_longread": "ENCODE_LongRead",
+                "job_results": "analyze_job_results",
+            }
+            new_skill = _SKILL_ALIASES.get(new_skill, new_skill)
             _skill_switch_debug["requested_skill"] = new_skill
             _skill_switch_debug["in_registry"] = new_skill in SKILLS_REGISTRY
             if new_skill in SKILLS_REGISTRY:

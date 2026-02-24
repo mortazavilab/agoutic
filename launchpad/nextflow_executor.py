@@ -325,24 +325,45 @@ class NextflowExecutor:
         
         elif entry_point == "remap":
             # remap: unmapped BAM → mapped BAM
+            # Dogme expects bams/{sample_name}.unmapped.bam for remap entry
             bams_dir = work_dir / "bams"
             bams_dir.mkdir(parents=True, exist_ok=True)
             
-            bam_file = Path(input_dir)
-            if not bam_file.exists():
-                raise RuntimeError(f"Unmapped BAM file not found: {input_dir}")
+            input_path = Path(input_dir)
+            if input_path.is_dir():
+                # input_dir is a directory (e.g. projectdir/data/) — find BAM files
+                bam_files = list(input_path.glob("*.bam"))
+                if not bam_files:
+                    raise RuntimeError(f"No BAM files found in directory: {input_dir}")
+                # Try to match by sample name first
+                matched = [f for f in bam_files if sample_name.lower() in f.stem.lower()]
+                bam_file = matched[0] if matched else bam_files[0]
+                logger.info("Found BAM in directory", directory=input_dir,
+                           bam_file=str(bam_file), total_bams=len(bam_files))
+            else:
+                bam_file = input_path
+                if not bam_file.exists():
+                    raise RuntimeError(f"Unmapped BAM file not found: {input_dir}")
             
-            bam_link = bams_dir / f"{sample_name}.bam"
+            bam_link = bams_dir / f"{sample_name}.unmapped.bam"
             try:
                 if bam_link.exists():
                     bam_link.unlink()
                 bam_link.symlink_to(bam_file.resolve())
-                logger.info("Created unmapped BAM symlink for remapping", link=str(bam_link), target=input_dir)
+                logger.info("Created unmapped BAM symlink for remapping",
+                           link=str(bam_link), target=str(bam_file))
             except Exception as e:
                 raise RuntimeError(f"Failed to create BAM symlink: {e}")
         
         elif entry_point == "modkit":
             # modkit: mapped BAM → modification calls
+            # Dogme expects bams/{sample_name}.{genome_ref}.bam for mapped BAM entries
+            # genome_ref MUST match the genome the BAM was actually mapped to
+            if not reference_genome:
+                raise RuntimeError(
+                    "reference_genome is required for modkit entry point. "
+                    "Please specify the genome the BAM was mapped to (e.g., GRCh38, mm39)."
+                )
             bams_dir = work_dir / "bams"
             bams_dir.mkdir(parents=True, exist_ok=True)
             
@@ -350,7 +371,8 @@ class NextflowExecutor:
             if not bam_file.exists():
                 raise RuntimeError(f"Mapped BAM file not found: {input_dir}")
             
-            bam_link = bams_dir / f"{sample_name}.bam"
+            genome_ref = reference_genome[0]
+            bam_link = bams_dir / f"{sample_name}.{genome_ref}.bam"
             try:
                 if bam_link.exists():
                     bam_link.unlink()
@@ -361,6 +383,13 @@ class NextflowExecutor:
         
         elif entry_point == "annotateRNA":
             # annotateRNA: mapped RNA/cDNA BAM → transcript annotation
+            # Dogme expects bams/{sample_name}.{genome_ref}.bam for mapped BAM entries
+            # genome_ref MUST match the genome the BAM was actually mapped to
+            if not reference_genome:
+                raise RuntimeError(
+                    "reference_genome is required for annotateRNA entry point. "
+                    "Please specify the genome the BAM was mapped to (e.g., GRCh38, mm39)."
+                )
             bams_dir = work_dir / "bams"
             bams_dir.mkdir(parents=True, exist_ok=True)
             
@@ -368,7 +397,8 @@ class NextflowExecutor:
             if not bam_file.exists():
                 raise RuntimeError(f"Mapped BAM file not found: {input_dir}")
             
-            bam_link = bams_dir / f"{sample_name}.bam"
+            genome_ref = reference_genome[0]
+            bam_link = bams_dir / f"{sample_name}.{genome_ref}.bam"
             try:
                 if bam_link.exists():
                     bam_link.unlink()
@@ -385,19 +415,31 @@ class NextflowExecutor:
         
         elif input_type == "bam":
             # Default BAM handling (assume unmapped, use remap)
+            # Dogme expects bams/{sample_name}.unmapped.bam for remap entry
             bams_dir = work_dir / "bams"
             bams_dir.mkdir(parents=True, exist_ok=True)
             
-            bam_file = Path(input_dir)
-            if not bam_file.exists():
-                raise RuntimeError(f"BAM file not found: {input_dir}")
+            input_path = Path(input_dir)
+            if input_path.is_dir():
+                # input_dir is a directory (e.g. projectdir/data/) — find BAM files
+                bam_files = list(input_path.glob("*.bam"))
+                if not bam_files:
+                    raise RuntimeError(f"No BAM files found in directory: {input_dir}")
+                matched = [f for f in bam_files if sample_name.lower() in f.stem.lower()]
+                bam_file = matched[0] if matched else bam_files[0]
+                logger.info("Found BAM in directory", directory=input_dir,
+                           bam_file=str(bam_file), total_bams=len(bam_files))
+            else:
+                bam_file = input_path
+                if not bam_file.exists():
+                    raise RuntimeError(f"BAM file not found: {input_dir}")
             
-            bam_link = bams_dir / f"{sample_name}.bam"
+            bam_link = bams_dir / f"{sample_name}.unmapped.bam"
             try:
                 if bam_link.exists():
                     bam_link.unlink()
                 bam_link.symlink_to(bam_file.resolve())
-                logger.info("Created BAM symlink", link=str(bam_link), target=input_dir)
+                logger.info("Created BAM symlink", link=str(bam_link), target=str(bam_file))
             except Exception as e:
                 raise RuntimeError(f"Failed to create BAM symlink: {e}")
             

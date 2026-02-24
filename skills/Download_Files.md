@@ -110,13 +110,23 @@ Proceed with download?
 
 After download completes, check the file types and suggest next steps:
 
-**Sequencing data** (.pod5, .bam, .fastq, .fast5):
+**Sequencing data** (.pod5, .fastq, .fast5):
 ```
 These look like sequencing data. I can set up a Dogme pipeline run for DNA, RNA, or cDNA analysis.
 Would you like to proceed?
 
 [[SKILL_SWITCH_TO: analyze_local_sample]]
 ```
+
+**BAM files** (.bam):
+```
+These BAM files have been saved to your project's data/ directory. I can run the Dogme pipeline starting from the remap stage — this skips basecalling and goes straight to alignment and downstream analysis.
+
+Would you like to run Dogme on these BAM files?
+
+[[SKILL_SWITCH_TO: analyze_local_sample]]
+```
+Note: When running from BAM, the system automatically symlinks the BAM as `{sample_name}.unmapped.bam` in the workflow's `bams/` folder and uses the `-entry remap` entry point.
 
 **Tabular data** (.csv, .tsv, .bed, .bedgraph):
 ```

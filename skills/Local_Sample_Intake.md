@@ -12,11 +12,29 @@ This is a unified entry point for analyzing local data. It acts as an intake wiz
 
 ## Inputs
 
-* `path`: (String, Required) The local directory path containing the `.pod5` files.
+* `path`: (String, Required) The local directory path containing `.pod5` or `.bam` files.
 * `sample_name`: (String, Required) The desired identifier for the sample.
 * `sample_type`: (String, Required) One of "DNA", "RNA", "CDNA", or "Fiber-seq".
 * `reference_genome`: (String, Required) The target genome (e.g., "GRCh38" for human, "mm39" for mouse).
+  - **For modkit/annotateRNA entry points:** This MUST be the genome the BAM was actually mapped to. The symlink is named `{sample_name}.{genome_ref}.bam` and Dogme expects this exact naming. Do NOT guess — always ask the user.
 * `max_gpu_tasks`: (Integer, Optional) Maximum number of simultaneous GPU tasks (dorado/openChromatin) per pipeline run. Default is 1. The user may say "run 2 GPU tasks at a time" or "limit dorado to 1".
+
+## Running Dogme from Downloaded BAM Files
+
+When users have **downloaded BAM files** (e.g., from ENCODE) in their project's `data/` directory, Dogme can run starting from the **remap** stage instead of the full pipeline:
+
+1. **Input**: BAM files in `projectdir/data/` (the default download location)
+2. **Symlink**: The system automatically symlinks the BAM into the workflow's `bams/` folder as `{sample_name}.unmapped.bam`
+3. **Entry point**: The pipeline runs with `-entry remap`, skipping basecalling
+4. **Detection**: If the user mentions "downloaded BAM", "from BAM", "BAM files in data", or provides a `.bam` path, the system automatically sets `input_type=bam` and `entry_point=remap`
+
+**If the user has BAM files but no explicit path**, the system resolves the project's `data/` directory automatically.
+
+**Example:**
+```
+User: "Run Dogme on the downloaded BAM files"
+→ input_type=bam, entry_point=remap, input_directory=projectdir/data/
+```
 
 ## Detecting Analysis Requests
 

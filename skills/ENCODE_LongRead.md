@@ -112,13 +112,18 @@ Report results:
 
 After download completes, **only `sample_name` and `input_directory` are known**. The remaining settings (sample type, reference genome, Dogme parameters) must still be collected from the user via `analyze_local_sample`, just like a local sample.
 
+**For BAM downloads:** When the user downloads BAM files, Dogme can run starting from the **remap** stage instead of the full pipeline. The system automatically:
+- Symlinks the BAM into the workflow's `bams/` folder as `{sample_name}.unmapped.bam`
+- Uses `-entry remap` to skip basecalling and start from alignment
+
 **State what's known and switch:**
 
 ```
-✅ Files downloaded successfully to ./files/ENCSR000ABC/
+✅ Files downloaded successfully to data/
 
 - **Sample Name:** ENCSR000ABC
-- **Data Path:** ./files/ENCSR000ABC/
+- **Data Path:** data/
+- **File Type:** BAM (will run from remap stage)
 
 I'll now collect the remaining pipeline settings (sample type, reference genome, etc.).
 

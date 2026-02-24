@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 2.9  
+**Version:** 3.0.0  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -588,7 +588,7 @@ pylint cortex launchpad
 
 ## 📦 Version Information
 
-- **Release**: 2.9 — GPU concurrency control in approval form
+- **Release**: 3.0.0 — BAM-to-Dogme remap pipeline, skill routing fixes
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

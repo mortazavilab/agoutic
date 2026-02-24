@@ -1,5 +1,63 @@
 # Changelog - February 2026
 
+## [3.0.0] - 2026-02-24
+
+### Added — Run Dogme from Downloaded BAM Files
+
+Users can now run the Dogme pipeline starting from the **remap** entry point using downloaded BAM files (e.g., from ENCODE). The system automatically symlinks BAMs into the workflow's `bams/` folder with the correct naming conventions.
+
+- **Remap from BAM**: BAM files in `projectdir/data/` are symlinked as `{sample_name}.unmapped.bam` and run with `-entry remap`
+- **Directory input support**: `input_dir` can now be a directory (not just a single file) — the executor scans for `*.bam` files and matches by sample name
+- **Relative path resolution**: Paths like `data/ENCFF921XAH.bam` are automatically resolved to absolute project paths
+- Files changed: `launchpad/nextflow_executor.py`, `cortex/app.py`, `skills/Local_Sample_Intake.md`, `skills/Download_Files.md`, `skills/ENCODE_LongRead.md`
+
+### Fixed — BAM Symlink Naming Conventions
+
+Corrected symlink naming for all Dogme entry points to match what the pipeline expects:
+
+- **remap**: `{sample_name}.unmapped.bam` (was `{sample_name}.bam`)
+- **modkit**: `{sample_name}.{genome_ref}.bam` (was `{sample_name}.bam`) — genome ref is required, not guessed
+- **annotateRNA**: `{sample_name}.{genome_ref}.bam` (was `{sample_name}.bam`) — genome ref is required, not guessed
+- Files changed: `launchpad/nextflow_executor.py`
+
+### Fixed — Genome Reference Validation for modkit/annotateRNA
+
+For `modkit` and `annotateRNA` entry points, the reference genome must match what the BAM was actually mapped to. The system no longer silently defaults to `mm39`.
+
+- Raises `RuntimeError` if `reference_genome` is empty for modkit/annotateRNA
+- Cortex clears the auto-default genome when entry point is modkit/annotateRNA and no genome was explicitly mentioned, forcing the intake skill to ask the user
+- Files changed: `launchpad/nextflow_executor.py`, `cortex/app.py`, `skills/Local_Sample_Intake.md`
+
+### Fixed — Skill Routing for BAM Analysis Requests
+
+Requests like "analyze the sample c2c12r1 using the bam file data/ENCFF921XAH.bam as a rna sample" now correctly route to `analyze_local_sample` instead of getting stuck on `analyze_job_results`.
+
+- **Relative path detection**: `_auto_detect_skill_switch` now recognizes relative paths with sequencing extensions (`.bam`, `.pod5`, `.fastq`)
+- **BAM as signal word**: Added `.bam`, `bam file`, `bam files` to skill routing signals
+- **Skill alias mapping**: LLM-hallucinated skill names (`run_workflow`, `submit_job`, `run_dogme`) now map to real registry keys
+- Files changed: `cortex/app.py`
+
+### Fixed — Sample Name and Path Extraction
+
+Parameter extraction from conversation now handles natural phrasing and relative paths:
+
+- **Sample name**: Added patterns for "the sample X" and "analyze X using"
+- **Relative paths**: `data/ENCFF921XAH.bam` is detected and resolved to the full project path
+- **Expanded skip words**: Prevents false positives from common words like "name", "type", "data", "rna"
+- Files changed: `cortex/app.py`
+
+### Fixed — SyntaxError in cortex/app.py
+
+Fixed a merge issue where the BAM resolution block was inserted inside the `job_data` dict literal, leaving orphaned entries and an unmatched `}`.
+
+- Files changed: `cortex/app.py`
+
+### Added — Cortex Entry Point Detection for Downloaded BAMs
+
+Cortex now auto-detects "downloaded bam", "from bam", and BAM-from-data scenarios, automatically setting `entry_point=remap` and `input_type=bam`.
+
+- Files changed: `cortex/app.py`
+
 ## [2.9] - 2026-02-23
 
 ### Added — GPU Concurrency Control in Approval Form
