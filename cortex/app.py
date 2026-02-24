@@ -80,6 +80,41 @@ async def startup_event():
     except Exception as e:
         logger.warning("Failed to fetch tool schemas at startup (will retry on first use)", error=str(e))
 
+    # Recovery: re-spawn polling for any EXECUTION_JOB blocks still marked RUNNING.
+    # These are orphaned tasks from a previous server instance that was restarted
+    # before the job finished.  Without this, the block stays stuck in RUNNING
+    # forever, blocking skill switches and suppressing auto-analysis.
+    try:
+        _recovery_session = SessionLocal()
+        try:
+            _orphaned = _recovery_session.query(ProjectBlock).filter(
+                ProjectBlock.type == "EXECUTION_JOB",
+                ProjectBlock.status == "RUNNING",
+            ).all()
+            for _blk in _orphaned:
+                _pl = get_block_payload(_blk)
+                _run_uuid = _pl.get("run_uuid", "")
+                # Also check inner job_status — if it already says COMPLETED/FAILED
+                # the block is just stale; mark it done without re-polling.
+                _inner = _pl.get("job_status", {}).get("status", "")
+                if not _run_uuid:
+                    continue
+                if _inner in ("COMPLETED", "FAILED"):
+                    _blk.status = "DONE" if _inner == "COMPLETED" else "FAILED"
+                    _recovery_session.commit()
+                    logger.info("Startup recovery: marked stale RUNNING block as done",
+                                 run_uuid=_run_uuid, inner_status=_inner)
+                else:
+                    asyncio.create_task(
+                        poll_job_status(_blk.project_id, _blk.id, _run_uuid)
+                    )
+                    logger.info("Startup recovery: resumed polling for orphaned job",
+                                 run_uuid=_run_uuid, block_id=_blk.id)
+        finally:
+            _recovery_session.close()
+    except Exception as _rec_err:
+        logger.warning("Startup recovery failed", error=str(_rec_err))
+
 # --- SCHEMAS ---
 class ChatRequest(BaseModel):
     project_id: str
@@ -699,10 +734,19 @@ def _validate_llm_output(
         cleaned = cleaned[:_first_pos] + cleaned[_first_pos:].replace("[[APPROVAL_NEEDED]]", "")
 
     # 3. SKILL_SWITCH during active job (block status=RUNNING)
+    # Guard only fires if the job is genuinely still running.  The block.status
+    # field may lag after a server restart (the background poll task was killed),
+    # so we double-check the nested job_status payload before blocking.
     _has_switch = "[[SKILL_SWITCH_TO:" in cleaned
     if _has_switch and history_blocks:
         for blk in reversed(history_blocks):
             if blk.type == "EXECUTION_JOB" and blk.status == "RUNNING":
+                _blk_pl = get_block_payload(blk)
+                _inner_status = _blk_pl.get("job_status", {}).get("status", "")
+                if _inner_status in ("COMPLETED", "FAILED"):
+                    # Block status is stale (likely due to server restart).
+                    # Job is actually done — allow the skill switch.
+                    break
                 violations.append("SKILL_SWITCH attempted during running job — stripped")
                 cleaned = re.sub(r'\[\[SKILL_SWITCH_TO:\s*\w+\]\]', '', cleaned)
                 break
@@ -806,9 +850,14 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
             return "ENCODE_Search"
 
     # --- Signals for analyze_job_results ---
-    _results_words = ["qc report", "quality control", "parse the",
-                      "read the output", "show me the results",
-                      "check the bed", "analyze results", "job results"]
+    _results_words = [
+        "qc report", "quality control", "parse the",
+        "read the output", "show me the results", "show the results",
+        "check the bed", "analyze results", "analyze the result",
+        "analyse the result", "analyse results",
+        "view the result", "view results", "show result",
+        "job results", "the results", "see the result",
+    ]
     if current_skill != "analyze_job_results":
         if any(w in msg_lower for w in _results_words):
             return "analyze_job_results"

@@ -1,5 +1,30 @@
 # Changelog - February 2026
 
+## [3.0.1] - 2026-02-24
+
+### Fixed — Cortex Restart Kills Job Monitoring (Startup Recovery)
+
+When Cortex was restarted while a Dogme job was running, the background `poll_job_status` asyncio task was silently killed. The `EXECUTION_JOB` block stayed permanently stuck in `RUNNING`, which had two cascading effects: `_auto_trigger_analysis` never fired (no analysis result appeared after job completion) and any subsequent skill switch was stripped by the output validator.
+
+- **Startup recovery**: on every Cortex startup, orphaned `EXECUTION_JOB` blocks still marked `RUNNING` are detected. If their inner `job_status.status` payload already shows `COMPLETED`/`FAILED`, the block is immediately marked done. Otherwise, `poll_job_status` is re-spawned to resume monitoring — including triggering auto-analysis on completion.
+- Files changed: `cortex/app.py` (`startup_event`)
+
+### Fixed — SKILL_SWITCH Incorrectly Blocked on Post-Restart Stale Blocks
+
+The output validator's guard against skill switches during active jobs compared only `block.status`, which could be `RUNNING` even after job completion if the server had restarted. This caused legitimate skill switches (e.g., switching to `run_dogme_rna` to show analysis results) to be stripped, leaving the user stuck on the `welcome` skill with a blank response.
+
+- Guard now cross-checks the nested `job_status.status` in the block payload before stripping. If the inner status is `COMPLETED` or `FAILED`, the block is treated as done and the switch is allowed.
+- Files changed: `cortex/app.py` (`_validate_llm_output`)
+
+### Fixed — "analyze the result" Not Routing to analyze_job_results Skill
+
+The pre-LLM skill router only matched `"analyze results"` exactly. Phrases with articles or singular forms ("analyze the result", "show me the results", "see the result") did not match, so the `welcome` skill was used and the `auto_skill_detected` debug field showed `null`.
+
+- Expanded `_results_words` keyword list to include: `"analyze the result"`, `"analyse the result"`, `"analyse results"`, `"show the results"`, `"view the result"`, `"view results"`, `"show result"`, `"see the result"`, `"the results"`
+- Files changed: `cortex/app.py` (`_auto_detect_skill_switch`)
+
+---
+
 ## [3.0.0] - 2026-02-24
 
 ### Added — Run Dogme from Downloaded BAM Files

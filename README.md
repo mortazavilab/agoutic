@@ -588,7 +588,7 @@ pylint cortex launchpad
 
 ## 📦 Version Information
 
-- **Release**: 3.0.0 — BAM-to-Dogme remap pipeline, skill routing fixes
+- **Release**: 3.0.1 — Job monitoring recovery after restart, skill routing fixes
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
