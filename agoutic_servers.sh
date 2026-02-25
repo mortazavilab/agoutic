@@ -20,7 +20,7 @@
 # Don't use set -e — helper functions return nonzero legitimately
 
 # --- Configuration ---
-AGOUTIC_VERSION="3.0.0"
+AGOUTIC_VERSION="3.0.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export AGOUTIC_CODE="${AGOUTIC_CODE:-$SCRIPT_DIR}"
 export AGOUTIC_DATA="${AGOUTIC_DATA:-$AGOUTIC_CODE/data}"

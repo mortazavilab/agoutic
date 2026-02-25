@@ -451,6 +451,24 @@ def _correct_tool_routing(tool: str, params: dict, user_message: str,
                     ),
                 }
 
+    # ── Redirect search_by_biosample → search_by_assay ──────────────────
+    # When alias resolution mapped "search" → "search_by_biosample" but the
+    # LLM actually provided assay-style params (assay_title, organism) with
+    # no search_term, the correct tool is search_by_assay.
+    if tool == "search_by_biosample" and "search_term" not in params:
+        assay_val = params.get("assay_title", "")
+        if assay_val and _looks_like_assay(assay_val):
+            new_params: dict = {"assay_title": assay_val}
+            if "organism" in params:
+                new_params["organism"] = params["organism"]
+            if "target" in params:
+                new_params["target"] = params["target"]
+            logger.warning(
+                "Rerouted search_by_biosample → search_by_assay (no search_term, has assay_title)",
+                original_params=params, new_params=new_params,
+            )
+            return "search_by_assay", new_params
+
     return tool, params
 
 
@@ -760,6 +778,8 @@ def _validate_llm_output(
         "get_files_summary", "get_file_metadata", "get_file_url",
         "get_available_output_types", "get_all_metadata", "list_experiments",
         "get_cache_stats", "get_server_info",
+        # Common aliases that are resolved downstream — not violations
+        "search",
         # Launchpad (Dogme)
         "submit_dogme_job", "check_nextflow_status", "get_dogme_report",
         "submit_dogme_nextflow", "find_pod5_directory", "generate_dogme_config",
@@ -4730,6 +4750,61 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                             })
                             continue
 
+                    # --- ENCODE search retry: biosample ↔ assay swap on 0 results ---
+                    # When a search returns zero results, the term might have been
+                    # classified wrong (biosample vs assay).  Try the alternate tool.
+                    if source_key == "encode" \
+                            and isinstance(result_data, dict) \
+                            and result_data.get("total", -1) == 0 \
+                            and tool_name in ("search_by_biosample", "search_by_assay"):
+                        _swap_tool = None
+                        _swap_params: dict = {}
+
+                        if tool_name == "search_by_biosample":
+                            # The search_term might actually be an assay name
+                            _st = params.get("search_term", "")
+                            if _st and _looks_like_assay(_st):
+                                _swap_tool = "search_by_assay"
+                                _swap_params = {"assay_title": _st}
+                                if "organism" in params:
+                                    _swap_params["organism"] = params["organism"]
+                            elif _st:
+                                # Even if it doesn't look like an assay, try anyway
+                                _swap_tool = "search_by_assay"
+                                _swap_params = {"assay_title": _st}
+                                if "organism" in params:
+                                    _swap_params["organism"] = params["organism"]
+
+                        elif tool_name == "search_by_assay":
+                            # The assay_title might actually be a biosample name
+                            _at = params.get("assay_title", "")
+                            if _at and not _looks_like_assay(_at):
+                                _swap_tool = "search_by_biosample"
+                                _swap_params = {"search_term": _at}
+                                if "organism" in params:
+                                    _swap_params["organism"] = params["organism"]
+
+                        if _swap_tool:
+                            logger.warning(
+                                "ENCODE search returned 0 results — retrying with alternate tool",
+                                original_tool=tool_name, swap_tool=_swap_tool,
+                                original_params=params, swap_params=_swap_params,
+                            )
+                            try:
+                                _swap_result = await mcp_client.call_tool(_swap_tool, **_swap_params)
+                                if isinstance(_swap_result, dict) and _swap_result.get("total", 0) > 0:
+                                    result_data = _swap_result
+                                    tool_name = _swap_tool
+                                    params = _swap_params
+                                    logger.info("Alternate tool returned results",
+                                               tool=_swap_tool, total=_swap_result.get("total"))
+                                else:
+                                    logger.info("Alternate tool also returned 0 results",
+                                               tool=_swap_tool)
+                            except Exception as _swap_err:
+                                logger.warning("Alternate tool call failed",
+                                              tool=_swap_tool, error=str(_swap_err))
+
                     try:
                         source_results.append({
                             "tool": tool_name,
@@ -5195,12 +5270,14 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         #         how many rows the LLM saw.
         _SEARCH_TOOLS = {
             "search_by_biosample", "search_by_target",
-            "search_by_organism", "list_experiments",
+            "search_by_organism", "search_by_assay", "list_experiments",
         }
         _FILE_TOOLS = {"get_files_by_type"}
         _embedded_dataframes = {}
         for _src_key, _src_results in all_results.items():
-            _reg_entry = SERVICE_REGISTRY.get(_src_key) or {}
+            _reg_entry = (SERVICE_REGISTRY.get(_src_key)
+                         or CONSORTIUM_REGISTRY.get(_src_key)
+                         or {})
             _table_cols = _reg_entry.get("table_columns", [])  # [(header, field_key), ...]
             for _r in _src_results:
                 _tool = _r.get("tool", "")
@@ -5267,7 +5344,25 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                                 }
                 elif _tool in _SEARCH_TOOLS and "data" in _r:
                     _rd = _r["data"]
-                    if isinstance(_rd, list) and _rd and isinstance(_rd[0], dict):
+                    # Normalise to a flat list of experiment dicts.
+                    # search_by_assay returns a dict with "experiments",
+                    # "human", or "mouse" sub-lists; other search tools
+                    # return a plain list directly.
+                    _experiment_list: list[dict] = []
+                    if isinstance(_rd, list):
+                        _experiment_list = _rd
+                    elif isinstance(_rd, dict):
+                        if "experiments" in _rd and isinstance(_rd["experiments"], list):
+                            _experiment_list = _rd["experiments"]
+                        else:
+                            # Merge human + mouse sub-lists (search_by_assay
+                            # without organism filter)
+                            for _sub_key in ("human", "mouse"):
+                                _sub = _rd.get(_sub_key)
+                                if isinstance(_sub, list):
+                                    _experiment_list.extend(_sub)
+
+                    if _experiment_list and isinstance(_experiment_list[0], dict):
                         # Derive column list from registry table_columns or first row keys
                         if _table_cols:
                             _cols = [h for h, _ in _table_cols]
@@ -5275,24 +5370,26 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                                 {h: (item.get(k) if not isinstance(item.get(k), list)
                                      else ", ".join(str(v) for v in item.get(k, [])))
                                  for h, k in _table_cols}
-                                for item in _rd
+                                for item in _experiment_list
                             ]
                         else:
-                            _cols = list(_rd[0].keys())
-                            _rows = _rd
+                            _cols = list(_experiment_list[0].keys())
+                            _rows = _experiment_list
                         _params = _r.get("params", {})
                         _label = _tool.replace("_", " ").title()
                         if _params.get("search_term"):
                             _label = _params["search_term"]
+                        elif _params.get("assay_title"):
+                            _label = _params["assay_title"]
                         elif _params.get("target"):
                             _label = _params["target"]
                         elif _params.get("organism"):
                             _label = _params["organism"]
-                        _fname = f"{_label} ({len(_rd)} results)"
+                        _fname = f"{_label} ({len(_experiment_list)} results)"
                         _embedded_dataframes[_fname] = {
                             "columns": _cols,
                             "data": _rows,
-                            "row_count": len(_rd),
+                            "row_count": len(_experiment_list),
                             "metadata": {"visible": True},
                         }
 

@@ -1,5 +1,36 @@
 # Changelog - February 2026
 
+## [3.0.2] - 2026-02-25
+
+### Fixed — ENCODE `search_by_assay` Missing from Tool Routing & DataFrame Pipeline
+
+When the LLM generated `tool=search` (a generic alias) with assay-style params like `assay_title=long read RNA-seq, organism=Mus musculus`, the alias resolved to `search_by_biosample` which requires `search_term`. With no `search_term`, the call returned 0 results.
+
+- **Pre-call routing**: `_correct_tool_routing` now detects `search_by_biosample` called without `search_term` but with a valid `assay_title`, and reroutes to `search_by_assay`
+- **Alias validation**: Added `"search"` to `_known_tools` in `_validate_llm_output` so it no longer triggers a false "Unknown tool" violation
+- Files changed: `cortex/app.py` (`_correct_tool_routing`, `_validate_llm_output`)
+
+### Fixed — ENCODE Search Retry on 0 Results (Biosample ↔ Assay Swap)
+
+When a search term is ambiguous (could be a biosample name or an assay type), the LLM may pick the wrong tool. If the first call returns 0 results, the system now automatically retries with the alternate tool.
+
+- `search_by_biosample` returns 0 → retry as `search_by_assay` (term treated as assay)
+- `search_by_assay` returns 0 and term doesn't look like an assay → retry as `search_by_biosample` (term treated as biosample)
+- If both return 0, original empty result is kept
+- Files changed: `cortex/app.py` (MCP call execution loop)
+
+### Fixed — `search_by_assay` Results Not Rendered as DataFrames
+
+`search_by_assay` was missing from `_SEARCH_TOOLS`, so its results were never converted to interactive DataFrames in the UI — they showed as raw JSON in the query details instead.
+
+- Added `search_by_assay` to `_SEARCH_TOOLS` set
+- Added dict-format normalisation: `search_by_assay` returns `{"total", "experiments": [...]}` or `{"human": [...], "mouse": [...]}`, unlike other search tools that return a plain list. Both formats are now extracted to a flat experiment list before DataFrame creation
+- Fixed registry lookup for table columns: was only checking `SERVICE_REGISTRY` (Launchpad/Analyzer), now also checks `CONSORTIUM_REGISTRY` (ENCODE) so the configured column set (Accession, Assay, Biosample, Target) is used
+- Added `assay_title` as a DataFrame label source (e.g. "long read RNA-seq (72 results)")
+- Files changed: `cortex/app.py` (DataFrame extraction in step 7)
+
+---
+
 ## [3.0.1] - 2026-02-24
 
 ### Fixed — Cortex Restart Kills Job Monitoring (Startup Recovery)

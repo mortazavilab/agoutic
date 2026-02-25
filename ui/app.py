@@ -15,7 +15,7 @@ from auth import require_auth, logout_button, make_authenticated_request, get_se
 # Use environment variable or default to localhost
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 
-st.set_page_config(page_title="AGOUTIC v3.0.0", layout="wide")
+st.set_page_config(page_title="AGOUTIC v3.0.2", layout="wide")
 
 # --- AUTHENTICATION ---
 # Require authentication before showing any UI
@@ -151,7 +151,7 @@ if st.session_state.get("_last_rendered_project") != st.session_state.active_pro
 # --- 2. SIDEBAR ---
 with st.sidebar:
     st.title("🧬 AGOUTIC")
-    st.caption("v3.0.0")
+    st.caption("v3.0.2")
     
     # User info
     st.caption(f"👤 {user.get('display_name', user.get('email'))}")
