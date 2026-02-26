@@ -1,8 +1,22 @@
 # Changelog - February 2026
 
-## [3.0.2] - 2026-02-25
+## [3.0.3] - 2026-02-25
+
+### Changed — Centralised Version Number
+
+Version was hardcoded in 5 separate places (`agoutic_servers.sh`, `ui/app.py` ×2,
+`cortex/app.py` health endpoint, `README.md`) and frequently fell out of sync.
+
+- **Single source of truth**: New `VERSION` file at repo root contains the version string.
+- `ui/app.py` reads `VERSION` via `pathlib` and uses it in the page title and sidebar caption.
+- `cortex/app.py` reads `VERSION` the same way; the `/health` endpoint now returns the live value.
+- `agoutic_servers.sh` reads `VERSION` via `cat` instead of a hardcoded variable.
+- `README.md` updated to 3.0.3.
+- Files changed: `VERSION` (new), `ui/app.py`, `cortex/app.py`, `agoutic_servers.sh`, `README.md`
 
 ### Fixed — Chat Messages Disappearing from UI
+
+_(carried forward from 3.0.2 development)_
 
 Messages and results would silently vanish from the chat during auto-refresh cycles.
 Root cause: `get_sanitized_blocks()` caught ALL exceptions and returned `[]`, and
@@ -22,6 +36,8 @@ transient fetch failure (timeout, server busy) wiped the displayed conversation.
   instead of being silently swallowed.
 - Files changed: `ui/app.py` (`get_sanitized_blocks`, `_render_chat`),
   `cortex/app.py` (`get_blocks` endpoint)
+
+## [3.0.2] - 2026-02-25
 
 ### Fixed — ENCODE `search_by_assay` Missing from Tool Routing & DataFrame Pipeline
 

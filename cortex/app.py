@@ -21,6 +21,10 @@ from cortex.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES, AG
 from cortex.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
 from cortex.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess, Project
 from cortex.middleware import AuthMiddleware
+
+# --- VERSION (single source of truth: VERSION file at repo root) ---
+_VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
+AGOUTIC_VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
 from cortex.auth import router as auth_router
 from cortex.admin import router as admin_router
 from cortex.dependencies import require_project_access, require_run_uuid_access
@@ -2335,7 +2339,7 @@ def _create_block_internal(session, project_id, block_type, payload, status="NEW
 @app.get("/health")
 async def health_check():
     """Health check endpoint (no auth required)"""
-    return {"status": "ok", "service": "cortex", "version": "3.0.0"}
+    return {"status": "ok", "service": "cortex", "version": AGOUTIC_VERSION}
 
 @app.get("/skills")
 async def get_available_skills():

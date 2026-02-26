@@ -5,17 +5,22 @@ import requests
 import datetime
 import os
 from datetime import timedelta
+from pathlib import Path as _Path
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from auth import require_auth, logout_button, make_authenticated_request, get_session_cookie
 
+# --- VERSION (single source of truth: VERSION file at repo root) ---
+_VERSION_FILE = _Path(__file__).resolve().parent.parent / "VERSION"
+AGOUTIC_VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
+
 # --- CONFIG ---
 # Use environment variable or default to localhost
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 
-st.set_page_config(page_title="AGOUTIC v3.0.2", layout="wide")
+st.set_page_config(page_title=f"AGOUTIC v{AGOUTIC_VERSION}", layout="wide")
 
 # --- AUTHENTICATION ---
 # Require authentication before showing any UI
@@ -151,7 +156,7 @@ if st.session_state.get("_last_rendered_project") != st.session_state.active_pro
 # --- 2. SIDEBAR ---
 with st.sidebar:
     st.title("🧬 AGOUTIC")
-    st.caption("v3.0.2")
+    st.caption(f"v{AGOUTIC_VERSION}")
     
     # User info
     st.caption(f"👤 {user.get('display_name', user.get('email'))}")
