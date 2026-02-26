@@ -413,14 +413,19 @@ def get_sanitized_blocks(target_project_id):
     """
     Fetch blocks from server, but SCRUB any block that doesn't match the target ID.
     This guarantees no 'ghost' messages from other projects can appear.
+
+    Returns (blocks_list, fetch_ok) so callers can distinguish an empty project
+    from a transient server failure and avoid wiping session-state blocks.
     """
     try:
         # 1. Ask Server with authentication
+        #    Fetch up to 500 blocks (was 100 — caused silent truncation in
+        #    long conversations) and use a generous timeout.
         resp = make_authenticated_request(
             "GET",
             f"{API_URL}/blocks",
-            params={"project_id": target_project_id, "since_seq": 0, "limit": 100},
-            timeout=5,
+            params={"project_id": target_project_id, "since_seq": 0, "limit": 500},
+            timeout=10,
         )
         if resp.status_code == 200:
             raw_blocks = resp.json().get("blocks", [])
@@ -432,10 +437,21 @@ def get_sanitized_blocks(target_project_id):
                 b for b in raw_blocks 
                 if b.get("project_id") == target_project_id
             ]
-            return clean_blocks
-    except Exception:
-        pass
-    return []
+            return clean_blocks, True
+        else:
+            # Non-200 response — treat as transient failure
+            import logging
+            logging.getLogger("agoutic.ui").warning(
+                "Block fetch returned status %s for project %s",
+                resp.status_code, target_project_id,
+            )
+            return [], False
+    except Exception as exc:
+        import logging
+        logging.getLogger("agoutic.ui").warning(
+            "Block fetch failed for project %s: %s", target_project_id, exc
+        )
+        return [], False
 
 def get_job_debug_info(run_uuid):
     """Fetch detailed debug information for a failed job via Cortex proxy."""
@@ -1586,9 +1602,19 @@ def _render_chat():
     _active_id = st.session_state.active_project_id
 
     # 1. Fetch & Sanitize
-    blocks = get_sanitized_blocks(_active_id)
-    blocks = [b for b in blocks if b.get("project_id") == _active_id]
-    st.session_state.blocks = blocks
+    fetched_blocks, _fetch_ok = get_sanitized_blocks(_active_id)
+    fetched_blocks = [b for b in fetched_blocks if b.get("project_id") == _active_id]
+
+    # Only update session-state blocks when the fetch actually succeeded.
+    # A transient server error / timeout should NOT wipe the displayed chat.
+    if _fetch_ok:
+        blocks = fetched_blocks
+        st.session_state.blocks = blocks
+    else:
+        # Keep whatever was previously in session state so the chat stays visible.
+        blocks = st.session_state.get("blocks", [])
+        if blocks:
+            st.caption("⚠️ Could not refresh — showing cached messages")
 
     if not blocks:
         st.session_state["_has_running_job"] = False

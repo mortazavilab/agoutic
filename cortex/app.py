@@ -2407,16 +2407,37 @@ async def create_block(block_in: BlockCreate, request: Request):
         session.close()
 
 @app.get("/blocks", response_model=BlockStreamOut)
-async def get_blocks(project_id: str, request: Request, since_seq: int = 0, limit: int = 100):
+async def get_blocks(project_id: str, request: Request, since_seq: int = 0, limit: int = 500):
     user = request.state.user
     require_project_access(project_id, user, min_role="viewer")
     session = SessionLocal()
     try:
-        query = select(ProjectBlock)\
+        # Count total blocks for this project above since_seq
+        total_query = select(func.count(ProjectBlock.id))\
             .where(ProjectBlock.project_id == project_id)\
-            .where(ProjectBlock.seq > since_seq)\
-            .order_by(ProjectBlock.seq.asc())\
-            .limit(limit)
+            .where(ProjectBlock.seq > since_seq)
+        total_count = session.execute(total_query).scalar() or 0
+
+        if total_count <= limit:
+            # Everything fits — simple ascending query
+            query = select(ProjectBlock)\
+                .where(ProjectBlock.project_id == project_id)\
+                .where(ProjectBlock.seq > since_seq)\
+                .order_by(ProjectBlock.seq.asc())\
+                .limit(limit)
+        else:
+            # More blocks than the limit — fetch the NEWEST `limit` blocks
+            # using a DESC sub-query, then re-sort ASC so callers get
+            # chronological order.
+            subq = select(ProjectBlock)\
+                .where(ProjectBlock.project_id == project_id)\
+                .where(ProjectBlock.seq > since_seq)\
+                .order_by(ProjectBlock.seq.desc())\
+                .limit(limit)\
+                .subquery()
+            query = select(ProjectBlock)\
+                .join(subq, ProjectBlock.id == subq.c.id)\
+                .order_by(ProjectBlock.seq.asc())
         
         result = session.execute(query)
         blocks = result.scalars().all()
@@ -3949,6 +3970,12 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     "role": "assistant",
                     "content": _md
                 })
+
+        # Trim conversation history to last MAX_HISTORY_TURNS pairs to
+        # prevent context overflow causing LLM timeouts on long conversations.
+        MAX_HISTORY_TURNS = 20  # 20 user+assistant pairs = 40 messages
+        if len(conversation_history) > MAX_HISTORY_TURNS * 2:
+            conversation_history = conversation_history[-(MAX_HISTORY_TURNS * 2):]
         
         # 2. Run the Brain (in a thread so it doesn't block the server)
         # Initialize engine with the selected model (from UI request)

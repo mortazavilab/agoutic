@@ -2,6 +2,27 @@
 
 ## [3.0.2] - 2026-02-25
 
+### Fixed — Chat Messages Disappearing from UI
+
+Messages and results would silently vanish from the chat during auto-refresh cycles.
+Root cause: `get_sanitized_blocks()` caught ALL exceptions and returned `[]`, and
+`_render_chat()` unconditionally overwrote `st.session_state.blocks` — so a single
+transient fetch failure (timeout, server busy) wiped the displayed conversation.
+
+- **Resilient block fetch**: `get_sanitized_blocks` now returns `(blocks, fetch_ok)`;
+  on failure, `_render_chat` keeps the cached session-state blocks instead of blanking
+  the chat. A "⚠️ Could not refresh" indicator is shown when falling back to cache.
+- **Increased fetch limit**: 100 → 500 blocks (long conversations were silently
+  truncated — oldest-first ordering missed the newest messages)
+- **Newest-first for large projects**: When the block count exceeds the limit, the
+  server now fetches the *newest* N blocks via a DESC sub-query, re-sorted to ASC
+  for chronological display.
+- **Longer timeout**: Block fetch timeout 5 s → 10 s to reduce transient failures.
+- **Error logging**: Failures are now logged with status code / exception detail
+  instead of being silently swallowed.
+- Files changed: `ui/app.py` (`get_sanitized_blocks`, `_render_chat`),
+  `cortex/app.py` (`get_blocks` endpoint)
+
 ### Fixed — ENCODE `search_by_assay` Missing from Tool Routing & DataFrame Pipeline
 
 When the LLM generated `tool=search` (a generic alias) with assay-style params like `assay_title=long read RNA-seq, organism=Mus musculus`, the alias resolved to `search_by_biosample` which requires `search_term`. With no `search_term`, the call returned 0 results.
