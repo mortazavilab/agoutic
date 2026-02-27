@@ -250,7 +250,7 @@ The summary includes the job's **mode** (DNA, RNA, or CDNA). Based on the mode, 
 **Mode → Analysis skill:**
 - CDNA → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`  ← Check CDNA first
 - DNA or Fiber-seq → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
-- RNA (direct RNA) → `[[SKILL_SWITCH_TO: run_dogme_rrun_dogme_rna]]`
+- RNA (direct RNA) → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
 
 Each of these skills contains mode-specific guidance on:
 - What output files to look for

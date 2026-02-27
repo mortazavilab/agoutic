@@ -2,6 +2,9 @@
 
 ## [3.0.6] - 2026-02-27
 
+### Fixed - Typo in Analyze_Job_Results.md RNA routing
+No change to python code, so no change to version.
+
 ### Fixed - Modified Dogme_RNA.md to reflect bedMethyl file structure
 
 The skills file only focused on m6A and pseudouridine. Added m5C, Nm and Inosine.
