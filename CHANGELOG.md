@@ -1,5 +1,24 @@
 # Changelog - February 2026
 
+## [3.0.4] - 2026-02-26
+
+### Fixed — Nextflow Task Names Missing for Non-Main Entry Points
+
+When analysing a BAM file (remap entry point), the job progress UI showed "0/1
+completed" without any task names. The same applied to `basecall`, `modkit`,
+`annotateRNA`, and `reports` entry points.
+
+Root cause: both the `trace.txt` parser and the `stdout` parser in
+`nextflow_executor.py` were hardcoded to only accept tasks prefixed with
+`mainWorkflow:`. Alternate entry points produce tasks like `remap:minimapTask`
+which were silently skipped.
+
+- Changed filter from `task_name.startswith('mainWorkflow:')` to `':' in task_name`
+  — this accepts tasks from **all** Nextflow workflow entry points while still
+  filtering out internal Nextflow tasks (which have no colon).
+- Applied the same fix in the stdout running-task parser.
+- Files changed: `launchpad/nextflow_executor.py` (trace parser + stdout parser)
+
 ## [3.0.3] - 2026-02-25
 
 ### Changed — Centralised Version Number

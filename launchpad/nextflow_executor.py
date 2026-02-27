@@ -726,20 +726,21 @@ class NextflowExecutor:
             "failed_count": 0
         }
         
-        # Parse trace.txt file for completed tasks - tab-separated with columns:
+        # Parse trace file for completed tasks - tab-separated with columns:
         # task_id hash native_id name status exit submit duration realtime %cpu peak_rss peak_vmem rchar wchar
-        # Find trace file - it might be named trace.txt or {sample_name}_trace.txt
-        trace_file = work_dir / "trace.txt"
-        if not trace_file.exists():
-            # Try to find any *_trace.txt file
-            trace_files = list(work_dir.glob("*_trace.txt"))
-            if trace_files:
-                trace_file = trace_files[0]
+        # Nextflow writes {sample}_trace.txt (via -with-trace flag).
+        # Prefer the sample-specific file; fall back to generic trace.txt.
+        trace_file = None
+        sample_traces = list(work_dir.glob("*_trace.txt"))
+        if sample_traces:
+            trace_file = sample_traces[0]
+        elif (work_dir / "trace.txt").exists():
+            trace_file = work_dir / "trace.txt"
         
         completed_tasks = []
         failed_tasks = []
         
-        if trace_file.exists():
+        if trace_file and trace_file.exists():
             try:
                 with open(trace_file, 'r', encoding='utf-8', errors='ignore') as f:
                     lines = f.readlines()
@@ -758,8 +759,12 @@ class NextflowExecutor:
                         task_name = parts[3].strip()
                         status = parts[4].strip()
                         
-                        # Only track mainWorkflow tasks
-                        if not task_name.startswith('mainWorkflow:'):
+                        # Only track workflow tasks (contain ':' in the name,
+                        # e.g. mainWorkflow:doradoTask, remap:minimapTask).
+                        # This filters out Nextflow internal tasks while
+                        # supporting all entry points (remap, basecall, modkit,
+                        # annotateRNA, reports).
+                        if ':' not in task_name:
                             continue
                         
                         # Categorize by status
@@ -796,8 +801,10 @@ class NextflowExecutor:
                             except:
                                 pass
                         
-                        # Look for task lines: [hash] taskName
-                        if line.startswith('[') and ']' in line and 'mainWorkflow:' in line:
+                        # Look for task lines: [hash] workflowName:taskName
+                        # Accept any workflow prefix (mainWorkflow, remap,
+                        # basecall, modkit, annotateRNA, reports).
+                        if line.startswith('[') and ']' in line and ':' in line.split(']', 1)[-1]:
                             # Extract hash
                             hash_part = line.split(']')[0] + ']'
                             
@@ -809,7 +816,7 @@ class NextflowExecutor:
                             rest = line.split(']', 1)[1] if ']' in line else ''
                             task_name = rest.strip().split()[0] if rest.strip() else ''
                             
-                            # Add number if present: mainWorkflow:doradoTask (1)
+                            # Add number if present: workflow:taskName (1)
                             if '(' in rest and ')' in rest:
                                 task_num = rest[rest.find('('):rest.find(')')+1]
                                 if task_num not in task_name:
