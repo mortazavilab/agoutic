@@ -597,14 +597,24 @@ class NextflowExecutor:
                 failed_marker = work_dir / ".nextflow_failed"
                 error_file = work_dir / ".nextflow_error"
                 
-                # Try to extract error from stderr log
+                # Try to extract error from stderr log (strip ANSI codes
+                # and harmless "update available" nag messages)
                 stderr_file = self.logs_dir / f"{run_uuid}_stderr.log"
                 error_msg = f"Process exited with code {returncode}"
                 if stderr_file.exists():
                     with open(stderr_file) as f:
                         stderr_content = f.read()
                         if stderr_content:
-                            error_msg = stderr_content[-500:]  # Last 500 chars
+                            import re as _re
+                            stderr_content = _re.sub(r'\x1b\[[0-9;]*m', '', stderr_content)
+                            _lines = [
+                                l for l in stderr_content.splitlines()
+                                if l.strip()
+                                and 'is available' not in l
+                                and 'consider updating' not in l.lower()
+                            ]
+                            if _lines:
+                                error_msg = '\n'.join(_lines)[-500:]
                 
                 failed_marker.write_text(f"Failed at {datetime.utcnow().isoformat()}\n")
                 error_file.write_text(error_msg)
@@ -689,19 +699,76 @@ class NextflowExecutor:
                     is_running = False
                 
                 if not is_running and running_marker.exists():
-                    # Process died unexpectedly
+                    # Process is gone. But did it actually succeed?
+                    # After a server restart we lose the process handle, so
+                    # _monitor_process never writes .nextflow_success.  Check
+                    # the trace file: if every task status is COMPLETED (and
+                    # there is at least one task), the job finished fine.
+                    _job_actually_succeeded = False
+                    _trace_files = list(work_dir.glob("*_trace.txt"))
+                    if not _trace_files and (work_dir / "trace.txt").exists():
+                        _trace_files = [work_dir / "trace.txt"]
+                    if _trace_files:
+                        try:
+                            with open(_trace_files[0], 'r', encoding='utf-8', errors='ignore') as _tf:
+                                _tlines = _tf.readlines()
+                            if len(_tlines) > 1:
+                                _all_done = True
+                                for _tl in _tlines[1:]:
+                                    if not _tl.strip():
+                                        continue
+                                    _parts = _tl.split('\t')
+                                    if len(_parts) >= 5:
+                                        _st = _parts[4].strip()
+                                        if _st not in ('COMPLETED', 'CACHED'):
+                                            _all_done = False
+                                            break
+                                _task_count = len([l for l in _tlines[1:] if l.strip()])
+                                if _all_done and _task_count > 0:
+                                    _job_actually_succeeded = True
+                        except Exception:
+                            pass
+
                     running_marker.unlink()
+
+                    if _job_actually_succeeded:
+                        # Recover: write the success marker that _monitor_process
+                        # would have written had the server not been restarted.
+                        success_marker = work_dir / ".nextflow_success"
+                        success_marker.write_text(
+                            f"Recovered at {datetime.utcnow().isoformat()} "
+                            f"(process exited while server was down)\n"
+                        )
+                        logger.info("Recovered successful job after server restart",
+                                    run_uuid=run_uuid)
+                        # Re-enter check_status — it will now find .nextflow_success
+                        return await self.check_status(run_uuid, work_dir)
+
+                    # Genuinely failed — write markers
                     failed_marker = work_dir / ".nextflow_failed"
                     failed_marker.write_text(f"Process died unexpectedly at {datetime.utcnow().isoformat()}\n")
                     
-                    # Try to get error from stderr
+                    # Try to get error from stderr (filter out ANSI and
+                    # Nextflow version-update nag messages)
                     stderr_file = self.logs_dir / f"{run_uuid}_stderr.log"
                     error_msg = "Process died unexpectedly"
                     if stderr_file.exists():
                         with open(stderr_file) as f:
                             content = f.read()
                             if content:
-                                error_msg = content[-200:]  # Last 200 chars
+                                import re as _re
+                                # Strip ANSI escape codes
+                                content = _re.sub(r'\x1b\[[0-9;]*m', '', content)
+                                # Drop harmless "update available" lines
+                                _lines = [
+                                    l for l in content.splitlines()
+                                    if l.strip()
+                                    and 'is available' not in l
+                                    and 'consider updating' not in l.lower()
+                                ]
+                                if _lines:
+                                    error_msg = '\n'.join(_lines)[-200:]
+                                # If only version nag remains, keep default msg
                     
                     error_file = work_dir / ".nextflow_error"
                     error_file.write_text(error_msg)

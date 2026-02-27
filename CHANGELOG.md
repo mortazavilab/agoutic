@@ -1,5 +1,38 @@
 # Changelog - February 2026
 
+## [3.0.5] - 2026-02-26
+
+### Fixed — Successful Nextflow Jobs Marked as Failed After Server Restart
+
+When Launchpad (server3) was restarted while a Nextflow job was running, the
+in-memory `_monitor_process` coroutine was lost. On the next `check_status`
+call, the code saw the PID was gone and `.nextflow_running` still existed, so
+it declared "Process died unexpectedly" — even though Nextflow had finished
+successfully with all tasks COMPLETED.
+
+- **Trace-based recovery**: Before declaring failure, `check_status` now reads
+  the trace file and checks whether every task has status `COMPLETED` or
+  `CACHED`. If so, it writes `.nextflow_success` ("Recovered at …") and
+  returns success instead of failure.
+- **ANSI / version-nag filtering**: Nextflow prints `\e[33mNextflow 25.10.4
+  is available - Please consider updating\e[m` to stderr. This was being
+  captured verbatim as the "error" message. Both `_monitor_process` and the
+  `check_status` dead-process handler now strip ANSI escape codes and drop
+  lines containing "is available" / "consider updating" before writing
+  `.nextflow_error`.
+- Files changed: `launchpad/nextflow_executor.py` (`check_status`,
+  `_monitor_process`)
+
+### Fixed — Trace File Lookup Preferred Wrong Filename
+
+The progress parser tried `trace.txt` first, then fell back to `*_trace.txt`.
+Since Nextflow's config sets `trace.enabled = true` with
+`file = "${params.sample}_trace.txt"`, an empty `trace.txt` could shadow the
+real sample-specific file (e.g. `C2C12r1_trace.txt`).
+
+- Reversed lookup order: glob `*_trace.txt` first, fall back to `trace.txt`.
+- Files changed: `launchpad/nextflow_executor.py` (trace file discovery)
+
 ## [3.0.4] - 2026-02-26
 
 ### Fixed — Nextflow Task Names Missing for Non-Main Entry Points
