@@ -7,7 +7,7 @@ This skill provides **downstream analysis interpretation** for completed Dogme D
 ## Skill Scope & Routing
 
 ### ✅ This Skill Handles:
-- Interpreting RNA modifications (m6A, pseudouridine, inosine)
+- Interpreting RNA modifications (m6A, pseudouridine, inosine, m5C, and Nm)
 - RNA modification frequency and stoichiometry analysis
 - Direct RNA alignment and mapping quality assessment
 - Transcript quantification from direct RNA reads
@@ -53,11 +53,10 @@ This skill provides **downstream analysis interpretation** for completed Dogme D
 ## Direct RNA Pipeline Overview
 
 The Dogme RNA pipeline performs:
-1. **Basecalling** (pod5 → fastq) — using Dorado with RNA modification-aware models
-2. **Alignment** (fastq → bam) — mapping to transcriptome + genome reference
-3. **RNA modification calling** — detecting m6A, pseudouridine (Ψ), and other RNA modifications
-4. **Transcript quantification** — counting reads per gene/transcript
-5. **Poly(A) tail length estimation** (if applicable)
+1. **Basecalling** (pod5 → unmapped bam) — using Dorado with RNA modification-aware models
+2. **Alignment** (unmapped bam → mapped bam) — mapping to transcriptome + genome reference
+3. **RNA modification calling** — detecting m6A, pseudouridine (pseU), inosine, m5C and Nm separately for plus and minus strand
+4. **Transcript quantification** — counting reads per gene/transcript in `annot/` folder
 6. **QC and summary reports**
 
 ## Key Output Files to Examine
@@ -68,23 +67,18 @@ The Dogme RNA pipeline performs:
 - `*.mapping_stats.txt` — read length and mapping quality distributions
 
 ### Modification Files (RNA has modifications)
-- `*.modkit_summary.txt` — overall RNA modification summary from modkit
-- `*.m6A.bed` — m6A modification calls with per-site frequencies
-- `*.pseudoU.bed` — pseudouridine modification calls (if model supports)
-- `*.modkit_pileup.bed` — per-position modification pileup across all mod types
-- `*.mod_freq.csv` — modification frequency statistics
+- `*.m6A.filtered.bed` — m6A modification calls with per-site frequencies
+- `*.pseU.filtered.bed` — pseudouridine modification calls (if model supports)
+- `*.m5C.filtered.bed` — m6A modification calls with per-site frequencies
+- `*.inosine.filtered.bed` — inosine modification calls with per-site frequencies
+- `*.Nm.filtered.bed` — Nm modification calls with per-site frequencies
 
-### Transcript/Gene Counts
-- `*.counts.csv` or `*.gene_counts.csv` — gene-level expression counts
-- `*.transcript_counts.csv` — transcript-level isoform quantification
-- `*.junctions.bed` — splice junction support (for isoform analysis)
-
-### Poly(A) Tail
-- `*.polya.csv` — per-read poly(A) tail length estimates
-- `*.polya_summary.csv` — summary statistics for tail lengths
+### Transcript/Gene Counts in `annot/` folder
+- `*_qc_summary.csv` — gene-level expression counts
+- `*dogme_abundance.tsv` — transcript-level isoform quantification
 
 ### QC Reports
-- `*qc_summary*` — comprehensive QC metrics
+- `qc_summary.summary` — comprehensive QC metrics
 - `*.html` — visual QC reports (if generated)
 
 ## How to Interpret Results
@@ -124,31 +118,27 @@ That guide includes:
 - **Directory prefix requirement** (critical for success)
 
 **RNA-specific tools:**
-- Modification sites: `parse_bed_file` for `*.m6A.bed`, `*.pseudoU.bed`
+- Modification sites: `parse_bed_file` for `*.m6A.filtered.bed`, `*.pseU.filtered.bed`
 - Gene counts: `parse_csv_file` for expression data
-- Poly(A) tails: `parse_csv_file` for tail length distributions
 - Summaries: `read_file_content` for `*.modkit_summary.txt`
 
 ### RNA-Specific Notes
 
 **Files to search for:**
-- Modification sites: `find_file(work_dir=..., file_name=m6A)` or `modkit`
+- Modification sites: `find_file(work_dir=..., file_name=m6A)` or `modifications`
 - Gene expression: `find_file(work_dir=..., file_name=gene_counts)` or `transcript`
-- Poly(A) tails: `find_file(work_dir=..., file_name=polya)`
 - Alignment stats: `find_file(work_dir=..., file_name=stats)` or `flagstat`
 
 **Typical directories:**
-- `modkit/` — RNA modification calls and pileup data
-- `counts/` — gene and transcript quantification
-- `annot/` — alignment statistics and summaries
+- `bedMethyl/` — RNA modification calls
+- `counts/` — 
+- `annot/` — alignment statistics, gene and transcript quantification 
 
 **Parsing and interpreting RNA results:**
 - Modification BED → use `parse_bed_file` → shows m6A, pseudouridine sites with frequencies
 - Gene counts CSV → use `parse_csv_file` → shows transcript abundance
-- Poly(A) data → use `parse_csv_file` → shows tail length distributions
 - Alignment stats → use `read_file_content` → shows mapping quality and coverage
 - m6A sites enriched at DRACH motifs indicate authentic modification sites
-- Poly(A) tail length correlates with stability and translation
 
 ---
 
@@ -201,7 +191,8 @@ When user says "analyze the results":
 
 **STEP 6:** Parse modification BED files to get detailed m6A and other modification locations from STEP 3
 ```
-[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.mod.bed]]
+[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.genomeRef.plus.mod.filtered.bed]]
+[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.genomeRef.minus.mod.filtered.bed]]
 ```
 
-**STEP 7:** Present results with RNA-specific interpretation (modification sites, expression levels, poly(A) analysis)
+**STEP 7:** Present results with RNA-specific interpretation (modification sites, expression levels)
