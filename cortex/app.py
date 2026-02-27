@@ -108,6 +108,16 @@ async def startup_event():
                     _recovery_session.commit()
                     logger.info("Startup recovery: marked stale RUNNING block as done",
                                  run_uuid=_run_uuid, inner_status=_inner)
+                    # Trigger auto-analysis that was missed when polling died
+                    if _inner == "COMPLETED":
+                        asyncio.create_task(
+                            _auto_trigger_analysis(
+                                _blk.project_id, _run_uuid,
+                                _pl, _blk.owner_id,
+                            )
+                        )
+                        logger.info("Startup recovery: triggered auto-analysis",
+                                     run_uuid=_run_uuid)
                 else:
                     asyncio.create_task(
                         poll_job_status(_blk.project_id, _blk.id, _run_uuid)
@@ -1366,6 +1376,23 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                         "_chain": _pick_file_tool(_resolved_file),
                     })
 
+        # --- Catch-all for analyze_job_results: if the LLM narrated steps
+        # instead of emitting a DATA_CALL, auto-generate get_analysis_summary
+        # so the analysis actually executes. ---
+        if not calls and skill_key == "analyze_job_results" and (work_dir or run_uuid):
+            _summary_params: dict = {}
+            if work_dir:
+                _summary_params["work_dir"] = work_dir
+            if run_uuid:
+                _summary_params["run_uuid"] = run_uuid
+            calls.append({
+                "source_type": "service", "source_key": "analyzer",
+                "tool": "get_analysis_summary",
+                "params": _summary_params,
+            })
+            logger.warning("Auto-generated get_analysis_summary for analyze_job_results skill",
+                          work_dir=work_dir, run_uuid=run_uuid)
+
     return calls
 
 
@@ -1511,6 +1538,40 @@ def _build_conversation_state(
                                 state.known_dataframes.append(
                                     f"{_patched} ({_bdf_label}, {_bdf_rows} rows)"
                                 )
+                    # Fast-path fix: re-extract collected_params from the LATEST
+                    # user messages so they reflect the current request, not a
+                    # stale cached state from a previous submission cycle.
+                    if conversation_history and active_skill == "analyze_local_sample":
+                        _sample_re2 = re.compile(r'(?:called?|named?|sample[_ ]?name)\s+["\']?(\w+)', re.I)
+                        _path_re2 = re.compile(r'(?:path|directory|folder)\s*[:=]?\s*(/\S+)', re.I)
+                        _type_re2 = re.compile(r'\b(cdna|c-dna|cDNA|rna|dna)\b', re.I)
+                        _genome_re2 = re.compile(r'\b(GRCh38|mm39|hg38|mm10)\b', re.I)
+                        _fresh_params: dict[str, str] = {}
+                        for _msg in reversed(conversation_history):
+                            if _msg.get("role") != "user":
+                                continue
+                            _cnt = _msg.get("content", "")
+                            if "sample_name" not in _fresh_params:
+                                _sm = _sample_re2.search(_cnt)
+                                if _sm:
+                                    _fresh_params["sample_name"] = _sm.group(1)
+                            if "path" not in _fresh_params:
+                                _pm = _path_re2.search(_cnt)
+                                if _pm:
+                                    _fresh_params["path"] = _pm.group(1)
+                            if "sample_type" not in _fresh_params:
+                                _tm = _type_re2.search(_cnt)
+                                if _tm:
+                                    _fresh_params["sample_type"] = _tm.group(1).upper()
+                            if "reference_genome" not in _fresh_params:
+                                _gm = _genome_re2.search(_cnt)
+                                if _gm:
+                                    _fresh_params["reference_genome"] = _gm.group(1)
+                        if _fresh_params:
+                            state.collected_params.update(_fresh_params)
+                            # Also update top-level sample_name if overridden
+                            if "sample_name" in _fresh_params:
+                                state.sample_name = _fresh_params["sample_name"]
                     return state
                 break  # only check the most recent AGENT_PLAN
 
@@ -1575,12 +1636,14 @@ def _build_conversation_state(
             state.latest_dataframe = state.known_dataframes[-1].split(" ")[0]  # e.g. "DF8"
 
     # --- Extract collected parameters (for analyze_local_sample) ---
+    # Iterate in REVERSE so the most-recent user message wins when multiple
+    # messages mention different sample names (e.g. C2C12r1 then C2C12r2).
     if conversation_history and active_skill == "analyze_local_sample":
         _sample_re = re.compile(r'(?:called?|named?|sample[_ ]?name)\s+["\']?(\w+)', re.I)
         _path_re = re.compile(r'(?:path|directory|folder)\s*[:=]?\s*(/\S+)', re.I)
         _type_re = re.compile(r'\b(cdna|c-dna|cDNA|rna|dna)\b', re.I)
         _genome_re = re.compile(r'\b(GRCh38|mm39|hg38|mm10)\b', re.I)
-        for msg in conversation_history:
+        for msg in reversed(conversation_history):
             if msg.get("role") != "user":
                 continue
             content = msg.get("content", "")
@@ -3317,71 +3380,84 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
     Continues until job is completed or failed.
     """
     
-    poll_interval = 3  # seconds
-    max_polls = 600  # 30 minutes max
+    # Adaptive polling: fast at first (3 s) then slow down to 30 s.
+    # Total coverage: ~10 h, which is enough for the longest pipelines.
+    _POLL_SCHEDULE = [
+        (120,   3),    # first 6 min  → every 3 s  (120 polls)
+        (120,  10),    # next 20 min  → every 10 s
+        (120,  30),    # next 60 min  → every 30 s
+        (960,  30),    # next ~8 h    → every 30 s  (960 polls)
+    ]
+    _job_done = False
     
-    for poll_num in range(max_polls):
-        await asyncio.sleep(poll_interval)
+    for _batch_polls, _interval in _POLL_SCHEDULE:
+        if _job_done:
+            break
+        for _ in range(_batch_polls):
+            if _job_done:
+                break
+            await asyncio.sleep(_interval)
         
-        session = SessionLocal()
-        try:
-            # Get current status from Launchpad via MCP
-            launchpad_url = get_service_url("launchpad")
-            client = MCPHttpClient(name="launchpad", base_url=launchpad_url)
-            await client.connect()
+            session = SessionLocal()
             try:
-                status_data = await client.call_tool("check_nextflow_status", run_uuid=run_uuid)
-                logs_data = await client.call_tool("get_job_logs", run_uuid=run_uuid, limit=50)
-            finally:
-                await client.disconnect()
+                # Get current status from Launchpad via MCP
+                launchpad_url = get_service_url("launchpad")
+                client = MCPHttpClient(name="launchpad", base_url=launchpad_url)
+                await client.connect()
+                try:
+                    status_data = await client.call_tool("check_nextflow_status", run_uuid=run_uuid)
+                    logs_data = await client.call_tool("get_job_logs", run_uuid=run_uuid, limit=50)
+                finally:
+                    await client.disconnect()
             
-            if not isinstance(status_data, dict):
-                logger.warning("Failed to get status", run_uuid=run_uuid)
-                continue
+                if not isinstance(status_data, dict):
+                    logger.warning("Failed to get status", run_uuid=run_uuid)
+                    continue
             
-            logs = logs_data.get("logs", []) if isinstance(logs_data, dict) else []
+                logs = logs_data.get("logs", []) if isinstance(logs_data, dict) else []
             
-            # Update the block with new data
-            block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
-            if block:
-                # Create new payload dict to ensure SQLAlchemy detects the change
-                payload = get_block_payload(block)
-                payload["job_status"] = status_data
-                payload["logs"] = logs
-                payload["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
+                # Update the block with new data
+                block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
+                if block:
+                    # Create new payload dict to ensure SQLAlchemy detects the change
+                    payload = get_block_payload(block)
+                    payload["job_status"] = status_data
+                    payload["logs"] = logs
+                    payload["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
                 
-                # Update block status based on job status
-                job_status = status_data.get("status", "UNKNOWN")
-                if job_status == "COMPLETED":
-                    block.status = "DONE"
-                elif job_status == "FAILED":
-                    block.status = "FAILED"
-                else:
-                    block.status = "RUNNING"
-                
-                # Reassign payload_json to trigger SQLAlchemy update
-                block.payload_json = json.dumps(payload)
-                session.commit()
-                session.refresh(block)
-                
-                logger.info("Job status updated", run_uuid=run_uuid, job_status=job_status, progress=status_data.get('progress_percent', 0))
-                
-                # Stop polling if job is done
-                if job_status in ("COMPLETED", "FAILED"):
-                    logger.info("Job finished", run_uuid=run_uuid, job_status=job_status)
-                    
-                    # On completion, auto-trigger analysis
+                    # Update block status based on job status
+                    job_status = status_data.get("status", "UNKNOWN")
                     if job_status == "COMPLETED":
-                        await _auto_trigger_analysis(
-                            project_id, run_uuid, payload, block.owner_id
-                        )
+                        block.status = "DONE"
+                    elif job_status == "FAILED":
+                        block.status = "FAILED"
+                    else:
+                        block.status = "RUNNING"
+                
+                    # Reassign payload_json to trigger SQLAlchemy update
+                    block.payload_json = json.dumps(payload)
+                    session.commit()
+                    session.refresh(block)
+                
+                    logger.info("Job status updated", run_uuid=run_uuid, job_status=job_status, progress=status_data.get('progress_percent', 0))
+                
+                    # Stop polling if job is done
+                    if job_status in ("COMPLETED", "FAILED"):
+                        logger.info("Job finished", run_uuid=run_uuid, job_status=job_status)
                     
-                    break
+                        # On completion, auto-trigger analysis
+                        if job_status == "COMPLETED":
+                            await _auto_trigger_analysis(
+                                project_id, run_uuid, payload, block.owner_id
+                            )
+                    
+                        _job_done = True
+                        break
         
-        except Exception as e:
-            logger.warning("Error polling job", run_uuid=run_uuid, error=str(e))
-        finally:
-            session.close()
+            except Exception as e:
+                logger.warning("Error polling job", run_uuid=run_uuid, error=str(e))
+            finally:
+                session.close()
     
     logger.info("Stopped polling job", run_uuid=run_uuid)
 
@@ -4139,6 +4215,37 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             corrected_response = re.sub(pattern, replacement, corrected_response, flags=re.IGNORECASE)
             if before != corrected_response:
                 fallback_fixes_applied += 1
+
+        # FALLBACK: Convert [[TOOL_CALL: GET /analysis/...]] REST-style tags
+        # the LLM sometimes emits instead of proper DATA_CALL tags.
+        # Pattern: [[TOOL_CALL: GET /analysis/jobs/{work_dir}/summary?work_dir=...]]
+        _tool_call_pattern = r'\[\[TOOL_CALL:\s*(?:GET\s+)?/analysis/[^?]*\?([^\]]+)\]\]'
+        def _convert_tool_call_to_data_call(m: re.Match) -> str:
+            query_string = m.group(1)
+            # Parse query params: "work_dir=/path&foo=bar" → {work_dir: /path, foo: bar}
+            params = {}
+            for part in query_string.split("&"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    params[k.strip()] = v.strip()
+            # Determine tool from the URL path
+            url_path = m.group(0).lower()
+            if "summary" in url_path:
+                tool = "get_analysis_summary"
+            elif "categori" in url_path:
+                tool = "categorize_job_files"
+            elif "file" in url_path:
+                tool = "list_job_files"
+            else:
+                tool = "get_analysis_summary"  # default
+            param_str = ", ".join(f"{k}={v}" for k, v in params.items())
+            return f"[[DATA_CALL: service=analyzer, tool={tool}, {param_str}]]"
+
+        _before_tc = corrected_response
+        corrected_response = re.sub(_tool_call_pattern, _convert_tool_call_to_data_call, corrected_response)
+        if corrected_response != _before_tc:
+            fallback_fixes_applied += 1
+            logger.warning("Converted [[TOOL_CALL:...]] to [[DATA_CALL:...]]")
         
         if fallback_fixes_applied > 0:
             logger.warning("Applied fallback tag fixes to LLM response", count=fallback_fixes_applied)

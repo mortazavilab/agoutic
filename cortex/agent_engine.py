@@ -158,12 +158,15 @@ class AgentEngine:
             elif source_key == "analyzer":
                 examples = f"""
         ✅ CORRECT EXAMPLES:
-        [[DATA_CALL: service=analyzer, tool=get_analysis_summary, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]
-        [[DATA_CALL: service=analyzer, tool=categorize_job_files, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]
-        [[DATA_CALL: service=analyzer, tool=list_job_files, run_uuid=4d9376a5-5a4b-4642-86cd-78f7a63fab3d]]
+        [[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=/path/to/workflow]]
+        [[DATA_CALL: service=analyzer, tool=list_job_files, work_dir=/path/to/workflow, extensions=.csv,.tsv,.bed,.txt]]
+        [[DATA_CALL: service=analyzer, tool=parse_csv_file, work_dir=/path/to/workflow, file_name=final_stats.csv]]
+        [[DATA_CALL: service=analyzer, tool=find_file, work_dir=/path/to/workflow, file_name=final_stats]]
         
         ❌ FORBIDDEN - NEVER WRITE THESE:
-        Get Analysis Summary (run_uuid=...)           ❌ NO BRACKETS - WILL NOT EXECUTE"""
+        Get Analysis Summary (run_uuid=...)           ❌ NO BRACKETS - WILL NOT EXECUTE
+        [[TOOL_CALL: GET /analysis/jobs/...]]         ❌ WRONG TAG NAME - WILL NOT EXECUTE
+        STEP 1: Get the summary...                    ❌ NARRATION - JUST EMIT THE TAG"""
             else:
                 examples = f"""
         ✅ CORRECT EXAMPLE:

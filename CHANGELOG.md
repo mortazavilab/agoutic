@@ -1,5 +1,76 @@
 # Changelog - February 2026
 
+## [3.0.6] - 2026-02-27
+
+### Fixed — Polling Timeout Too Short for Long-Running Pipelines
+
+The `poll_job_status` background task used a flat loop of 600 polls × 3 s =
+30 minutes. RNA BAM remap jobs can take ~2.5 hours, so the poller would give
+up long before the job finished, silently preventing auto-analysis.
+
+- **Adaptive polling schedule**: Replaced the flat loop with a 4-tier schedule:
+  120 × 3 s (6 min), 120 × 10 s (20 min), 120 × 30 s (60 min), 960 × 30 s
+  (~8 h). Total coverage: ~10 hours — enough for the longest pipelines.
+- **Nested loop break fix**: The initial implementation used nested `for` loops
+  but `break` only exited the inner loop. Added a `_job_done` sentinel flag
+  checked by both loops.
+- Files changed: `cortex/app.py` (`poll_job_status`)
+
+### Fixed — Auto-Analysis Not Triggered After Server Restart Recovery
+
+When Cortex was restarted while a Nextflow job was running, the startup
+recovery code correctly detected the completed job and marked the block as
+DONE, but it did not call `_auto_trigger_analysis`. The user had to manually
+request analysis.
+
+- Startup recovery now fires `_auto_trigger_analysis` via `asyncio.create_task`
+  for any orphaned RUNNING block whose inner status is already COMPLETED.
+- Files changed: `cortex/app.py` (startup recovery in `@app.on_event("startup")`)
+
+### Fixed — LLM Displayed Wrong Sample Name from Conversation History
+
+When submitting a second sample (e.g. C2C12r2) in the same project after a
+previous sample (C2C12r1), the LLM echoed the old sample name in its plan
+text. The actual job execution used the correct name (the parameter extraction
+pipeline was fine), but the display confused users.
+
+Root cause: two code paths fed stale sample names to the LLM:
+1. `_build_conversation_state` fast path restored the cached `[STATE]` from the
+   previous AGENT_PLAN block, which contained `sample_name: "C2C12r1"`.
+2. The slow-path `collected_params` extraction iterated conversation history
+   **forward**, so the first (older) match won.
+
+- Fast path now re-extracts `collected_params` from the most recent user
+  messages, overriding stale cached values for sample_name, path, sample_type,
+  and reference_genome.
+- Slow path now iterates conversation history in **reverse** (most recent
+  first), matching the same pattern used by `extract_job_parameters_from_conversation`.
+- Files changed: `cortex/app.py` (`_build_conversation_state`)
+
+### Fixed — LLM Emitted `[[TOOL_CALL:...]]` Instead of `[[DATA_CALL:...]]` for Analyzer
+
+When asked to analyse job results, the LLM sometimes emitted
+`[[TOOL_CALL: GET /analysis/jobs/{work_dir}/summary?work_dir=...]]` — a
+REST-style tag that the system doesn't recognise — instead of the correct
+`[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=...]]`.
+The result: the analysis tool was never called, `auto_calls_count: 0`, and the
+LLM's narrated "STEP 1 / STEP 2" plan was displayed without any data.
+
+- **Fallback converter**: Added a regex in the fallback-fix pipeline that
+  catches `[[TOOL_CALL: GET /analysis/...?param=val]]` and converts it to a
+  proper `[[DATA_CALL: service=analyzer, tool=..., param=val]]` tag.
+- **System prompt fix**: Updated the analyzer examples in
+  `construct_system_prompt` to use `work_dir=` (the preferred parameter)
+  instead of the legacy `run_uuid=`, and added explicit "FORBIDDEN" examples
+  for the TOOL_CALL and STEP-narration anti-patterns.
+- **Auto-generation safety net**: `_auto_generate_data_calls` now has a
+  catch-all for the `analyze_job_results` skill: when no tags are parsed and
+  a `work_dir` or `run_uuid` is available from context, it auto-generates a
+  `get_analysis_summary` call so the analysis executes even if the LLM
+  produces no usable tags.
+- Files changed: `cortex/app.py` (fallback pipeline, `_auto_generate_data_calls`),
+  `cortex/agent_engine.py` (`construct_system_prompt` analyzer examples)
+
 ## [3.0.5] - 2026-02-26
 
 ### Fixed — Successful Nextflow Jobs Marked as Failed After Server Restart
