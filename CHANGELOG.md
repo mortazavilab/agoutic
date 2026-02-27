@@ -1,5 +1,27 @@
 # Changelog - February 2026
 
+## [3.0.7] - 2026-02-27
+
+### Fixed — LLM Context Window Stuck at 4,096 Tokens (ROOT CAUSE)
+
+Every Ollama API call was using the default context window (4,096 tokens), even
+though devstral supports 256k. The system prompt alone can exceed 4k tokens once
+skill definitions, tool contracts, DATA_CALL format instructions, and examples
+are included — meaning the LLM was seeing a truncated prompt on every call.
+
+This was the root cause of multiple symptoms:
+- LLM emitting `[[TOOL_CALL:...]]` instead of `[[DATA_CALL:...]]`
+- Narrating "STEP 1 / STEP 2" instead of executing tool calls
+- Hallucinating data instead of querying real services
+- Ignoring format instructions and conversation history
+
+**Fix:** Pass `extra_body={"options": {"num_ctx": LLM_NUM_CTX}}` to both
+`client.chat.completions.create()` calls in `agent_engine.py`. The value
+defaults to 131,072 (128k) and is configurable via the `LLM_NUM_CTX`
+environment variable.
+
+- Files changed: `cortex/agent_engine.py`, `cortex/config.py`
+
 ## [3.0.6] - 2026-02-27
 
 ### Fixed - Typo in Analyze_Job_Results.md RNA routing

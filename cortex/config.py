@@ -49,11 +49,16 @@ SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 # Check environment variable first; fallback to localhost default if missing
 LLM_URL = os.getenv("LLM_URL", "http://localhost:11434/v1")
 
+# Context window size for LLM calls (tokens).
+# Ollama defaults to a tiny 2048-4096 unless told otherwise.
+# devstral supports 256k; we default to 131072 (128k) for safety.
+LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "32768"))
+
 # The available models on your local machine
 # Keys are the "nicknames" you use in code; Values are the exact Ollama tags.
 LLM_MODELS = {
-    "default": "devstral-2:latest",       # Your main high-IQ brain (74GB)
-    "fast": "devstral-small-2:latest",    # Faster, lighter checks (15GB)
+    "heavy": "devstral-2:latest",       # Your main high-IQ brain (74GB)
+    "default": "devstral-small-2:latest",    # Faster, lighter checks (15GB)
     "coder": "qwen3-coder:latest",        # Specialized for writing code
     "backup": "gpt-oss:120b",             # Alternative heavy model
 }

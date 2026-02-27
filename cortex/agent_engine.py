@@ -1,7 +1,7 @@
 import os
 import re
 from openai import OpenAI
-from cortex.config import SKILLS_DIR, SKILLS_REGISTRY, LLM_URL, LLM_MODELS
+from cortex.config import SKILLS_DIR, SKILLS_REGISTRY, LLM_URL, LLM_MODELS, LLM_NUM_CTX
 from cortex.config import get_source_for_skill, SERVICE_REGISTRY
 from cortex.tool_contracts import format_tool_contract
 from atlas.config import CONSORTIUM_REGISTRY
@@ -16,6 +16,7 @@ client = OpenAI(
     api_key="ollama",  # Required by the library, but ignored by Ollama
     timeout=240.0,  # Must finish before UI's 300s timeout
 )
+logger.info("LLM connection configured", llm_url=LLM_URL, num_ctx=LLM_NUM_CTX)
 
 
 def _usage_to_dict(usage_obj) -> dict:
@@ -387,7 +388,8 @@ OUTPUT FORMATTING RULES:
             response = client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                temperature=0.1  # Low temp = more obedient to instructions
+                temperature=0.1,  # Low temp = more obedient to instructions
+                extra_body={"options": {"num_ctx": LLM_NUM_CTX}},
             )
 
             return response.choices[0].message.content, _usage_to_dict(response.usage)
@@ -487,6 +489,7 @@ The raw rows are in the interactive dataframe below.
                 model=self.model_name,
                 messages=messages,
                 temperature=0.1,
+                extra_body={"options": {"num_ctx": LLM_NUM_CTX}},
             )
             return response.choices[0].message.content, _usage_to_dict(response.usage)
         except Exception as e:
