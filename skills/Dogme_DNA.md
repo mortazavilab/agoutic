@@ -110,8 +110,8 @@ That guide includes:
 - **Directory prefix requirement** (critical for success)
 
 **DNA-specific tools:**
-- Methylation data: `parse_bed_file` for `*.5mC.bed` or `*.CpG.bed`
-- Fiber-seq data: `parse_bed_file` for `*.fiberseq.bed` or `*.m6A.bed`  
+- Methylation data: `parse_bed_file` for `*.5mCG.filtered.bed` or `*.5hmCG.filtered.bed`
+- Fiber-seq data: `parse_bed_file` for `*.m6Aopen.bed` or `*.m6A.filtered.bed`  
 - Alignment stats: `parse_csv_file` for `*.stats.csv` or `read_file_content` for `*.flagstat.txt`
 
 ### DNA-Specific Notes
@@ -124,7 +124,7 @@ That guide includes:
 **Typical directories:**
 - `bedMethyl/` — methylation calls and CpG frequencies
 - `annot/` — alignment statistics and summaries
-- `modkit/` — raw modification pileup data
+- `openChromatin/` — modkit region bed file and bg profile
 
 **Parsing and interpreting DNA results:**
 - Methylation BED → use `parse_bed_file` → shows CpG modification frequencies
@@ -132,6 +132,8 @@ That guide includes:
 - Alignment stats → use `parse_csv_file` or `read_file_content` → shows mapping quality and coverage
 - Global methylation patterns indicate imprinting status, tissue type, disease state
 - Hypomethylated regions often indicate active regulatory elements
+- 5mCG is generally repressive 
+- 5hmCG can be found at active elements
 
 ---
 

@@ -2,6 +2,11 @@
 
 ## [3.0.7] - 2026-02-27
 
+### Fixed - Modified Dogme_DNA.md and DOGME_QUick_WORKFLOW_GUIDE.md to reflect bedMethyl and openChromatin file structure
+
+The skills file only focused on m6A and 5mCG. Added 5hmCG.
+Also cleaned up several paths. No change to python code, so no change to version.
+
 ### Fixed — LLM Context Window Stuck at 4,096 Tokens (ROOT CAUSE)
 
 Every Ollama API call was using the default context window (4,096 tokens), even

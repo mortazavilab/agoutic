@@ -48,11 +48,11 @@ The system automatically injects workflow directory paths. If present, use the `
 
 **Filtering rules:**
 - ✅ **Include final result files:**
+  - Files in `bams/` (unmapped and mapped bams)
   - Files in `annot/` (annotations, final stats)
-  - Files in `counts/` (gene/transcript counts)
+  - Files in `kallisto/{sample}/` (gene/transcript counts)
   - Files in `bedMethyl/` (methylation/modification data)
-  - Files in `modkit/` (modification pileup data)
-  - Files in `fiberseq/` (chromatin accessibility data)
+  - Files in `openChromatin/` (chromatin accessibility data)
 
 - ❌ **Exclude work/intermediate files:**
   - Files in `work/` directory (Nextflow intermediate files)
@@ -202,9 +202,9 @@ Summary:
 ```
 Here's the genomic data from {filename}:
 
-| Chromosome | Start | End | Name | Feature | Value |
-|-----------|-------|-----|------|---------|-------|
-| {chr}     | {s}   | {e} | {n}  | {feat}  | {val} |
+| Chromosome | Start | End | Name | Feature | Value | ... |
+|-----------|-------|-----|------|---------|-------|-----|
+| {chr}     | {s}   | {e} | {n}  | {feat}  | {val} | ... |
 (show all records)
 
 Summary:
@@ -287,7 +287,7 @@ The system handles these commands automatically — just respond naturally to th
 Each Dogme skill documents the specific files and tools for its mode:
 
 - **Dogme_cDNA**: Uses `parse_csv_file` for gene counts, `bedMethyl/` and `annot/` directories
-- **Dogme_DNA**: Uses `parse_bed_file` for modification calls, `bedMethyl/` directories
-- **Dogme_RNA**: Uses `parse_csv_file` and `read_file_content`, `modkit/` and `counts/` directories
+- **Dogme_DNA**: Uses `parse_bed_file` for modification calls, `bedMethyl/` and  `openChromatin/` directories
+- **Dogme_RNA**: Uses `parse_csv_file` and `read_file_content`, `bedMethyl/` and `annot/` directories
 
 See the mode-specific skill file for which files to search for and how to interpret the results.
