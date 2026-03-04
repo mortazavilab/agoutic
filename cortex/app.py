@@ -921,6 +921,7 @@ _ENCODE_STOP_WORDS = frozenset([
     "need", "look", "up", "any", "all", "some",
     # Referential / pronoun words — should not be treated as search terms
     "them", "they", "those", "these", "their", "its", "ones", "samples",
+    "accessions", "accession",
     # Visualization / follow-up — not search terms
     "plot", "chart", "graph", "histogram", "scatter", "visualize", "visualise",
     "heatmap", "pie", "bar", "box", "distribution", "summarize", "summarise",
@@ -2042,6 +2043,10 @@ def _inject_job_context(user_message: str, active_skill: str,
             r'\bthese\b',               # "filter these"
             r'\bthe\s+results?\b',     # "the results"
             r'\bthe\s+data\b',         # "the data"
+            r'\bthe\s+accessions?\b',  # "the accessions"
+            r'\bthe\s+samples?\b',     # "the samples"
+            r'\bthe\s+experiments?\b', # "the experiments"
+            r'\bwhich\s+(?:are|is|were|have)\b', # "which are long read..."
             r'\bfrom\s+(?:the\s+)?(?:previous|last|above)\b',
             r'\bDF\s*\d+\b',          # explicit DF reference
             r'\bamong\s+them\b',       # "among them"
@@ -2053,9 +2058,11 @@ def _inject_job_context(user_message: str, active_skill: str,
 
         # Also check: does the message mention a term that is NOT present in
         # any previous dataframe labels?  If so, it's a new search subject.
+        # BUT: assay names ("long read RNA-seq", "ATAC-seq", etc.) are NOT
+        # new search subjects — they're filters on existing data.
         if not _is_new_query and not has_accession and not _is_followup:
             _extracted_term = _extract_encode_search_term(user_message)
-            if _extracted_term:
+            if _extracted_term and not _looks_like_assay(_extracted_term):
                 _prev_labels_lower = set()
                 if history_blocks:
                     for _hblk in reversed(history_blocks[-4:]):
@@ -2074,6 +2081,11 @@ def _inject_job_context(user_message: str, active_skill: str,
                         "Detected new ENCODE search subject (not in prev DFs)",
                         term=_extracted_term, prev_labels=_prev_labels_lower,
                     )
+            elif _extracted_term and _looks_like_assay(_extracted_term):
+                logger.info(
+                    "Extracted term looks like an assay — treating as follow-up filter, not new query",
+                    term=_extracted_term,
+                )
 
         if not has_accession and not _is_new_query:
             # No new subject in message — this is a follow-up question.

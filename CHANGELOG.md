@@ -1,3 +1,39 @@
+# Changelog - March 2026
+
+## [3.0.8] - 2026-03-03
+
+### Fixed — ENCODE Follow-Up Questions Not Injecting Previous Data
+
+When asking "what are the accessions for the long read RNA-seq samples?" after
+a C2C12 search (58 results), the system returned 9 wrong file accessions (ENCFF...)
+from a single experiment instead of the 3 correct experiment accessions (ENCSR...).
+
+**Root cause (two issues):**
+
+1. **`_followup_signals` too narrow**: The `_inject_job_context` ENCODE branch
+   didn't recognise "the accessions", "the samples", "the experiments", or
+   "which are/is..." as follow-up language. The parallel `_ref_words` list (used
+   for auto-generation) *did* include "the accessions", creating an inconsistency.
+   Result: the message was not flagged as a follow-up, so no data was injected.
+
+2. **Assay terms triggered "new query" detection**: `_extract_encode_search_term`
+   extracted "accessions long read RNA-seq". Since that didn't match any previous
+   DF label ("c2c12"), the code set `_is_new_query = True` and skipped injection
+   entirely. Assay names are filters on existing data, not new search subjects.
+
+**Fixes:**
+
+- Added 4 new follow-up signal patterns to `_followup_signals`:
+  `the accessions?`, `the samples?`, `the experiments?`, `which are|is|were|have`
+- Added `_looks_like_assay()` guard in the "new search subject" detection — if
+  the extracted term contains assay indicators (e.g. "long read", "rna-seq"), it
+  is treated as a follow-up filter, not a new query
+- Added "accessions" / "accession" to `_ENCODE_STOP_WORDS` so the fallback
+  tokenizer doesn't treat them as biosample search terms
+- Updated `ENCODE_Search.md` skill example to cover this exact failure scenario
+
+Files changed: `cortex/app.py`, `skills/ENCODE_Search.md`
+
 # Changelog - February 2026
 
 ## [3.0.7] - 2026-02-27

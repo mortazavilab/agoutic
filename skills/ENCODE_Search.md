@@ -108,11 +108,12 @@ User asks: "how many are long read RNA-seq?" or "give me their accessions"
 
 ### Example: Small result set (full data available)
 ```
-Previous response showed 4 long read RNA-seq K562 experiments with columns: Accession, Assay, Biosample, Target
-User asks: "what are their accessions?"
+Previous response showed 58 C2C12 experiments with columns: Accession, Assay, Biosample, Target
+User asks: "what are the accessions for the long read RNA-seq samples?"
 
-❌ WRONG: Make a new API call
-✅ RIGHT: Read your previous response and list the accessions directly
+❌ WRONG: Make a new API call (get_files_by_type, get_experiment, etc.)
+❌ WRONG: Return ENCFF file accessions — those are files, not experiments
+✅ RIGHT: Read your previous response, filter to "long read RNA-seq" assay, list the ENCSR experiment accessions
 ```
 
 **If [PREVIOUS QUERY DATA:] is injected at the start of your message, the answer is almost certainly in there. READ IT FIRST.**
