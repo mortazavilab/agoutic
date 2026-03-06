@@ -14,7 +14,7 @@ import json
 import pytest
 from unittest.mock import MagicMock
 
-from cortex.app import _build_conversation_state, _extract_job_context_from_history
+from cortex.conversation_state import _build_conversation_state, _extract_job_context_from_history
 
 
 # ---------------------------------------------------------------------------

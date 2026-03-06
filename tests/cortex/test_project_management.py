@@ -194,6 +194,7 @@ class TestDiskUsage:
         (pdir / "file2.txt").write_text("world!")
 
         with patch("cortex.app._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir), \
              patch("cortex.config.AGOUTIC_DATA", tmp_path):
             resp = client.get("/user/disk-usage")
         assert resp.status_code == 200
@@ -257,7 +258,9 @@ class TestPermanentDeleteProject:
         pdir.mkdir()
         (pdir / "file.txt").write_text("data")
 
-        with patch("cortex.app._resolve_project_dir", return_value=pdir):
+        with patch("cortex.app._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir):
             resp = client.delete(f"/projects/{pid}/permanent")
         assert resp.status_code == 200
         body = resp.json()
@@ -298,7 +301,9 @@ class TestProjectFiles:
         (pdir / "sub").mkdir()
         (pdir / "sub" / "nested.txt").write_text("nested")
 
-        with patch("cortex.app._resolve_project_dir", return_value=pdir):
+        with patch("cortex.app._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir):
             resp = client.get(f"/projects/{data['project_id']}/files")
         assert resp.status_code == 200
         body = resp.json()
@@ -335,6 +340,7 @@ class TestProjectStats:
         pdir.mkdir()
 
         with patch("cortex.app._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir), \
              patch("cortex.config.AGOUTIC_DATA", tmp_path):
             resp = client.get(f"/projects/{pid}/stats")
         assert resp.status_code == 200
@@ -356,7 +362,9 @@ class TestDownloadEndpoints:
         pdir.mkdir()
 
         with patch("cortex.app._resolve_project_dir", return_value=pdir), \
-             patch("cortex.app.asyncio") as mock_asyncio:
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir), \
+             patch("cortex.app.asyncio"), \
+             patch("cortex.routes.files.asyncio") as mock_asyncio:
             mock_asyncio.create_task = MagicMock()
             resp = client.post(
                 f"/projects/{data['project_id']}/downloads",
@@ -389,7 +397,9 @@ class TestDownloadEndpoints:
         s = SL()
         pdir = tmp_path / "dl_status"
         pdir.mkdir()
-        with patch("cortex.app._resolve_project_dir", return_value=pdir):
+        with patch("cortex.app._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir):
             blk = _create_block_internal(s, pid, "DOWNLOAD_TASK", {
                 "download_id": "dl-1", "status": "RUNNING", "downloaded": 0,
             }, status="RUNNING", owner_id=data["user_id"])
@@ -441,8 +451,10 @@ class TestUploadFiles:
         pdir.mkdir()
 
         with patch("cortex.app._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir), \
              patch("cortex.user_jail.get_user_project_dir", return_value=pdir), \
-             patch("cortex.app._post_download_suggestions", new_callable=AsyncMock):
+             patch("cortex.app._post_download_suggestions", new_callable=AsyncMock), \
+             patch("cortex.routes.files._post_download_suggestions", new_callable=AsyncMock):
             resp = client.post(
                 f"/projects/{data['project_id']}/upload",
                 files={"file1": ("test.txt", b"hello world", "text/plain")},
@@ -459,7 +471,9 @@ class TestUploadFiles:
         pdir = tmp_path / "upload_empty"
         pdir.mkdir()
 
-        with patch("cortex.app._resolve_project_dir", return_value=pdir):
+        with patch("cortex.app._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir):
             resp = client.post(
                 f"/projects/{data['project_id']}/upload",
                 data={"no_file_field": "value"},
@@ -478,7 +492,9 @@ class TestAnalyzerLaunchpadHelpers:
         mock_client.call_tool.return_value = {"status": "ok", "data": [1, 2, 3]}
 
         with patch("cortex.app.get_service_url", return_value="http://analyzer:8000"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client):
+             patch("cortex.config.get_service_url", return_value="http://analyzer:8000"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("common.MCPHttpClient", return_value=mock_client):
             from cortex.app import _call_analyzer_tool
             result = await _call_analyzer_tool("get_analysis_summary", run_uuid="abc-123")
 
@@ -493,7 +509,9 @@ class TestAnalyzerLaunchpadHelpers:
         mock_client.call_tool.return_value = {"success": False, "error": "Not found"}
 
         with patch("cortex.app.get_service_url", return_value="http://analyzer:8000"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client):
+             patch("cortex.config.get_service_url", return_value="http://analyzer:8000"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("common.MCPHttpClient", return_value=mock_client):
             from cortex.app import _call_analyzer_tool
             from fastapi import HTTPException
             with pytest.raises(HTTPException) as exc_info:
@@ -507,7 +525,9 @@ class TestAnalyzerLaunchpadHelpers:
         mock_client.connect.side_effect = ConnectionError("refused")
 
         with patch("cortex.app.get_service_url", return_value="http://analyzer:8000"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client):
+             patch("cortex.config.get_service_url", return_value="http://analyzer:8000"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("common.MCPHttpClient", return_value=mock_client):
             from cortex.app import _call_analyzer_tool
             from fastapi import HTTPException
             with pytest.raises(HTTPException) as exc_info:
@@ -520,7 +540,9 @@ class TestAnalyzerLaunchpadHelpers:
         mock_client.call_tool.return_value = {"run_uuid": "x-y-z"}
 
         with patch("cortex.app.get_service_url", return_value="http://launchpad:8000"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client):
+             patch("cortex.config.get_service_url", return_value="http://launchpad:8000"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("common.MCPHttpClient", return_value=mock_client):
             from cortex.app import _call_launchpad_tool
             result = await _call_launchpad_tool("check_nextflow_status", run_uuid="x-y-z")
         assert result["run_uuid"] == "x-y-z"
@@ -531,7 +553,9 @@ class TestAnalyzerLaunchpadHelpers:
         mock_client.call_tool.return_value = {"success": False, "error": "timeout", "detail": "worker hung"}
 
         with patch("cortex.app.get_service_url", return_value="http://launchpad:8000"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client):
+             patch("cortex.config.get_service_url", return_value="http://launchpad:8000"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("common.MCPHttpClient", return_value=mock_client):
             from cortex.app import _call_launchpad_tool
             from fastapi import HTTPException
             with pytest.raises(HTTPException) as exc_info:
@@ -650,7 +674,9 @@ class TestAnalyzerProxyEndpoints:
         mock_client.call_tool.return_value = {"summary": "Great results"}
 
         with patch("cortex.app.get_service_url", return_value="http://a:8000"), \
+             patch("cortex.config.get_service_url", return_value="http://a:8000"), \
              patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("common.MCPHttpClient", return_value=mock_client), \
              patch("cortex.app.require_run_uuid_access", lambda run_uuid, user: None):
             resp = client.get("/analysis/jobs/run-abc/summary")
         assert resp.status_code == 200
@@ -675,7 +701,9 @@ class TestAnalyzerProxyEndpoints:
         mock_client.call_tool.return_value = {"files": ["a.csv", "b.bed"]}
 
         with patch("cortex.app.get_service_url", return_value="http://a:8000"), \
+             patch("cortex.config.get_service_url", return_value="http://a:8000"), \
              patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("common.MCPHttpClient", return_value=mock_client), \
              patch("cortex.app.require_run_uuid_access", lambda run_uuid, user: None):
             resp = client.get("/analysis/jobs/run-files/files")
         assert resp.status_code == 200

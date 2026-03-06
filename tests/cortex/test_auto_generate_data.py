@@ -18,7 +18,7 @@ the LLM fails to emit them.  It handles:
 import pytest
 from unittest.mock import MagicMock
 
-from cortex.app import _auto_generate_data_calls
+from cortex.data_call_generator import _auto_generate_data_calls
 
 
 # ---------------------------------------------------------------------------

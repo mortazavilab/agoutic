@@ -16,8 +16,8 @@ import pytest
 from cortex.app import (
     _emit_progress,
     _chat_progress,
-    _validate_analyzer_params,
 )
+from cortex.data_call_generator import _validate_analyzer_params
 from cortex.encode_helpers import _find_experiment_for_file
 from cortex.analysis_helpers import (
     _build_auto_analysis_context,

@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.0.9  
+**Version:** 3.1.0  
 **Status:** Active Prototype 
 
 ## 🧬 Overview

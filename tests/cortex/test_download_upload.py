@@ -93,7 +93,9 @@ def client(session_factory, seed_data, tmp_path):
          patch("cortex.config.AGOUTIC_DATA", tmp_path), \
          patch("cortex.user_jail.AGOUTIC_DATA", tmp_path), \
          patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"), \
-         patch("cortex.app.asyncio") as mock_asyncio:
+         patch("cortex.db_helpers._resolve_project_dir", return_value=tmp_path / "proj"), \
+         patch("cortex.app.asyncio"), \
+         patch("cortex.routes.files.asyncio") as mock_asyncio:
         # Prevent actual background tasks from running
         mock_asyncio.create_task = lambda coro: None
         c = TestClient(app, raise_server_exceptions=False)

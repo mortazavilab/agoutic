@@ -107,7 +107,9 @@ def client(session_factory, seed_data, mock_mcp, tmp_path):
          patch("cortex.dependencies.require_run_uuid_access", _noop_run_uuid_access), \
          patch("cortex.app.require_run_uuid_access", _noop_run_uuid_access), \
          patch("cortex.app.MCPHttpClient", return_value=mock_mcp), \
-         patch("cortex.app.get_service_url", return_value="http://localhost:9999"):
+         patch("common.MCPHttpClient", return_value=mock_mcp), \
+         patch("cortex.app.get_service_url", return_value="http://localhost:9999"), \
+         patch("cortex.config.get_service_url", return_value="http://localhost:9999"):
         c = TestClient(app, raise_server_exceptions=False)
         c.cookies.set("session", "az-session")
         yield c
@@ -251,7 +253,9 @@ class TestMCPHelpers:
         mock_client.disconnect = AsyncMock()
 
         with patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.get_service_url", return_value="http://localhost:9999"):
+             patch("common.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.get_service_url", return_value="http://localhost:9999"), \
+             patch("cortex.config.get_service_url", return_value="http://localhost:9999"):
             result = await _call_analyzer_tool("get_analysis_summary", run_uuid="u1")
         assert result == {"success": True, "data": "ok"}
 
@@ -265,7 +269,9 @@ class TestMCPHelpers:
         mock_client.disconnect = AsyncMock()
 
         with patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.get_service_url", return_value="http://localhost:9999"):
+             patch("common.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.get_service_url", return_value="http://localhost:9999"), \
+             patch("cortex.config.get_service_url", return_value="http://localhost:9999"):
             from fastapi import HTTPException
             with pytest.raises(HTTPException) as exc_info:
                 await _call_analyzer_tool("get_analysis_summary", run_uuid="bad")
@@ -279,7 +285,9 @@ class TestMCPHelpers:
         mock_client.disconnect = AsyncMock()
 
         with patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.get_service_url", return_value="http://localhost:9999"):
+             patch("common.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.get_service_url", return_value="http://localhost:9999"), \
+             patch("cortex.config.get_service_url", return_value="http://localhost:9999"):
             from fastapi import HTTPException
             with pytest.raises(HTTPException) as exc_info:
                 await _call_analyzer_tool("get_analysis_summary", run_uuid="u1")
@@ -293,7 +301,9 @@ class TestMCPHelpers:
         mock_client.disconnect = AsyncMock()
 
         with patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.get_service_url", return_value="http://localhost:9999"):
+             patch("common.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.get_service_url", return_value="http://localhost:9999"), \
+             patch("cortex.config.get_service_url", return_value="http://localhost:9999"):
             result = await _call_launchpad_tool("check_nextflow_status", run_uuid="u1")
         assert result == {"status": "COMPLETED"}
 
@@ -305,7 +315,9 @@ class TestMCPHelpers:
         mock_client.disconnect = AsyncMock()
 
         with patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.get_service_url", return_value="http://localhost:9999"):
+             patch("common.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.get_service_url", return_value="http://localhost:9999"), \
+             patch("cortex.config.get_service_url", return_value="http://localhost:9999"):
             from fastapi import HTTPException
             with pytest.raises(HTTPException) as exc_info:
                 await _call_launchpad_tool("check_nextflow_status", run_uuid="u1")

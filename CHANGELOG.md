@@ -1,5 +1,93 @@
 # Changelog - March 2026
 
+## [3.1.0] - 2026-03-06
+
+### Refactor — Tier 3: Extract Route Handlers & Shared DB Helpers
+
+`cortex/app.py` reduced from **5,087 → 3,451 lines** (-1,636 lines, -32%) by
+extracting all REST endpoints (except chat/block/approval) and shared database
+helpers into focused modules. All 865 tests pass. Zero behavioral change.
+
+**New modules:**
+
+- **`cortex/db_helpers.py`** (194 lines) — Shared database utilities used by
+  multiple route modules: `_resolve_project_dir`, `_create_block_internal`,
+  `save_conversation_message`, `track_project_access`
+
+- **`cortex/routes/projects.py`** (844 lines) — Project management endpoints:
+  create/list/update/delete projects, project stats, file listing, token usage,
+  disk usage, soft & permanent delete. Includes `_slugify`, `_dedup_slug`.
+
+- **`cortex/routes/conversations.py`** (173 lines) — Conversation/job endpoints:
+  list conversations, fetch messages, list jobs, link job to conversation.
+
+- **`cortex/routes/files.py`** (398 lines) — File download/upload endpoints:
+  initiate download, get status, cancel, background download task, upload files.
+
+- **`cortex/routes/analyzer_proxy.py`** (210 lines) — Analyzer/Launchpad MCP
+  proxy endpoints: analysis summary, job files, file content, CSV/BED parsing.
+
+**Import pattern:** Route modules use module-level imports (`import cortex.db as _db`)
+so that existing test patches on `cortex.db.SessionLocal` propagate automatically.
+
+**Test files updated (3):** `test_analyzer_proxy.py`, `test_download_upload.py`,
+`test_project_management.py` — added companion patches for new module paths.
+
+**Result: 865/865 passing on macOS.**
+
+### Refactor — Tier 2: Extract Stateful Helpers from cortex/app.py
+
+`cortex/app.py` reduced from **6,575 → 5,252 lines** (-1,323 lines, -20%) by
+extracting session-aware and LLM-dependent helper functions into three new modules.
+All 865 tests pass. Zero behavioral change.
+
+**New modules:**
+
+- **`cortex/conversation_state.py`** (270 lines) — Conversation state management:
+  `_build_conversation_messages`, `_get_project_context`, `_inject_recent_results`
+
+- **`cortex/context_injection.py`** (671 lines) — Context injection and skill routing:
+  `_inject_context_for_skill`, `_maybe_switch_skill`, `_build_system_prompt`
+
+- **`cortex/data_call_generator.py`** (459→~600 lines) — Data call automation:
+  `_auto_generate_data_calls`, `_validate_analyzer_params`
+
+**Test files updated (1):** `test_pure_helpers2.py` — updated import for
+`_validate_analyzer_params` now in `data_call_generator`.
+
+**Result: 865/865 passing on macOS.**
+
+### Refactor — Tier 1: Extract Pure Functions from cortex/app.py
+
+`cortex/app.py` reduced from **7,412 → 6,575 lines** (-837 lines, -11%) by
+extracting all pure, zero-coupling functions into four new focused modules.
+All 865 tests pass on macOS and Watson. Zero behavioral change.
+
+**New modules:**
+
+- **`cortex/encode_helpers.py`** (475 lines) — ENCODE constants and routing logic:
+  `_ENCODE_ASSAY_ALIASES`, `_looks_like_assay`, `_correct_tool_routing`,
+  `_validate_encode_params`, `_find_experiment_for_file`, `_extract_encode_search_term`
+
+- **`cortex/llm_validators.py`** (220 lines) — LLM output validation and skill detection:
+  `get_block_payload`, `_parse_tag_params`, `_validate_llm_output`,
+  `_auto_detect_skill_switch`
+
+- **`cortex/analysis_helpers.py`** (125 lines) — Analysis context/summary builders:
+  `_build_auto_analysis_context`, `_build_static_analysis_summary`
+
+- **`cortex/path_helpers.py`** (102 lines) — File/workflow path resolution:
+  `_pick_file_tool`, `_resolve_workflow_path`, `_resolve_file_path`
+
+**Dependency chain:** `encode_helpers` ← `llm_validators` ← `app.py`
+(no circular imports, no DB deps in any extracted module)
+
+**Test files updated (8):** `test_block_endpoints.py`, `test_chat_edge_cases.py`,
+`test_encode_helpers.py`, `test_pure_helpers.py`, `test_pure_helpers2.py`,
+`test_skill_detection.py`, `test_tool_routing.py`, `test_validation.py`
+
+**Result: 865/865 passing on macOS and Watson.**
+
 ## [3.0.9] - 2026-03-05
 
 ### Added — Comprehensive Test Suite for Pre-Refactor Safety Net

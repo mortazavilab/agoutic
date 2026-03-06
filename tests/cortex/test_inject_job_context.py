@@ -18,7 +18,7 @@ import json
 import pytest
 from unittest.mock import MagicMock
 
-from cortex.app import _inject_job_context
+from cortex.context_injection import _inject_job_context
 
 
 # ---------------------------------------------------------------------------
