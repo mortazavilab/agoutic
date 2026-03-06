@@ -37,6 +37,17 @@ on the Cortex engine (up from 0% at start of effort).
 
 Files changed: `tests/` (34 cortex test files + conftest + component tests), `pytest.ini`
 
+### Fixed — test_approval_suppressed_non_job_skill mock
+
+`_make_client` in `test_chat_flow.py` was not setting `analyze_results` on
+the mocked `AgentEngine`, causing a `ValueError` when the ENCODE_Search
+suppression path fell through to the second-pass LLM call. Added default
+`analyze_results` lambda to return `(str, dict)`. Also patched
+`require_run_uuid_access` in `TestAnalyzerProxyEndpoints` to bypass the
+real DB lookup during tests.
+
+**Result: 865/865 passing, 0 failures.** Validated on both macOS and Watson.
+
 ### Fixed - Removed Accidental Python Bytecode Files From Version Control
 
 Cleaned up accidentally committed Python cache artifacts and added generic ignore

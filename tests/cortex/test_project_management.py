@@ -650,7 +650,8 @@ class TestAnalyzerProxyEndpoints:
         mock_client.call_tool.return_value = {"summary": "Great results"}
 
         with patch("cortex.app.get_service_url", return_value="http://a:8000"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client):
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.require_run_uuid_access", lambda run_uuid, user: None):
             resp = client.get("/analysis/jobs/run-abc/summary")
         assert resp.status_code == 200
         assert resp.json()["summary"] == "Great results"
@@ -674,7 +675,8 @@ class TestAnalyzerProxyEndpoints:
         mock_client.call_tool.return_value = {"files": ["a.csv", "b.bed"]}
 
         with patch("cortex.app.get_service_url", return_value="http://a:8000"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client):
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.require_run_uuid_access", lambda run_uuid, user: None):
             resp = client.get("/analysis/jobs/run-files/files")
         assert resp.status_code == 200
         assert resp.json()["files"] == ["a.csv", "b.bed"]

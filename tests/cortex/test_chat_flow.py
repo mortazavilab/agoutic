@@ -101,6 +101,8 @@ def _make_client(session_factory, seed_user, tmp_path, think_fn):
     inst = mock_engine_cls.return_value
     inst.model_name = "test-model"
     inst.think = think_fn
+    # Default analyze_results so second-pass LLM calls don't crash
+    inst.analyze_results = lambda *a, **kw: ("Analysis complete.", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
 
     c = TestClient(app, raise_server_exceptions=False)
     c.cookies.set("session", "flow-session")

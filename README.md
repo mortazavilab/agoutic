@@ -604,7 +604,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.0.9 — Comprehensive test suite (865 tests, 82% cortex/app.py coverage)
+- **Release**: 3.0.9 — Comprehensive test suite (865 tests, 0 failures, 82% cortex/app.py coverage)
 - **Python**: 3.11+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
