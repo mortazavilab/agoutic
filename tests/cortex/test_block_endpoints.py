@@ -32,10 +32,11 @@ from cortex.models import (
     ProjectBlock, Conversation, ConversationMessage, JobResult,
 )
 from cortex.app import (
-    app, get_block_payload, _create_block_internal,
+    app, _create_block_internal,
     track_project_access, _slugify, _dedup_slug,
     _chat_progress,
 )
+from cortex.llm_validators import get_block_payload
 
 try:
     from launchpad.models import Base as LaunchpadBase

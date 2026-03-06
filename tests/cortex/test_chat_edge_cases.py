@@ -891,7 +891,7 @@ class TestChatProgressTracking:
 class TestGetBlockPayload:
     def test_get_block_payload_valid_json(self):
         """get_block_payload returns parsed dict."""
-        from cortex.app import get_block_payload
+        from cortex.llm_validators import get_block_payload
         blk = MagicMock()
         blk.payload_json = '{"markdown": "hello", "score": 42}'
         result = get_block_payload(blk)
@@ -899,7 +899,7 @@ class TestGetBlockPayload:
 
     def test_get_block_payload_none(self):
         """get_block_payload with None returns empty dict."""
-        from cortex.app import get_block_payload
+        from cortex.llm_validators import get_block_payload
         blk = MagicMock()
         blk.payload_json = None
         result = get_block_payload(blk)

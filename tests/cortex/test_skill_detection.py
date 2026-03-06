@@ -9,7 +9,7 @@ Verifies skill routing logic for all supported skills:
 """
 
 import pytest
-from cortex.app import _auto_detect_skill_switch
+from cortex.llm_validators import _auto_detect_skill_switch
 
 
 class TestAnalyzeLocalSample:

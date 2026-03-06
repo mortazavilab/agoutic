@@ -9,7 +9,7 @@ Covers the tool routing logic that fixes common LLM misrouting mistakes:
 """
 
 import pytest
-from cortex.app import _correct_tool_routing
+from cortex.encode_helpers import _correct_tool_routing
 
 
 class TestCorrectToolRouting:

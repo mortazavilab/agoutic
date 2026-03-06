@@ -11,7 +11,7 @@ Covers the output contract validator that checks LLM responses for:
 
 import json
 import pytest
-from cortex.app import _validate_llm_output
+from cortex.llm_validators import _validate_llm_output
 from tests.conftest import FakeBlock
 
 

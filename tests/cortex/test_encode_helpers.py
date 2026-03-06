@@ -5,7 +5,7 @@ Covers: _extract_encode_search_term, _validate_encode_params
 """
 
 import pytest
-from cortex.app import _extract_encode_search_term, _validate_encode_params
+from cortex.encode_helpers import _extract_encode_search_term, _validate_encode_params
 
 
 # =========================================================================
