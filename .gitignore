@@ -54,3 +54,11 @@ server3/__pycache__/nextflow_executor.cpython-313.pyc
 server3/exampleConfigs/CDNAmicro-local-docker.conf
 server3/exampleConfigs/DRNAmicro-local-docker.conf
 server3/exampleConfigs/GDNAmicro-local-docker.conf
+tests/__pycache__/conftest.cpython-311-pytest-8.4.2.pyc
+tests/__pycache__/__init__.cpython-311.pyc
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
