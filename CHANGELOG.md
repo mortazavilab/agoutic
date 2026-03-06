@@ -37,6 +37,13 @@ on the Cortex engine (up from 0% at start of effort).
 
 Files changed: `tests/` (34 cortex test files + conftest + component tests), `pytest.ini`
 
+### Fixed - Removed Accidental Python Bytecode Files From Version Control
+
+Cleaned up accidentally committed Python cache artifacts and added generic ignore
+rules so compiled files are no longer tracked.
+
+Files changed: `.gitignore`
+
 ## [3.0.8] - 2026-03-03
 
 ### Fixed — ENCODE Follow-Up Questions Not Injecting Previous Data
