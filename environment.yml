@@ -42,4 +42,8 @@ dependencies:
     # --- Testing ---
     - pytest>=7.0
     - pytest-asyncio>=0.21.0   # Async test support
-    - aiohttp>=3.8.0      # Async HTTP client for tests
+    - pytest-cov>=4.0          # Coverage reporting
+    - pytest-mock>=3.12        # Cleaner mocking with mocker fixture
+    - respx>=0.21              # httpx request mocking
+    - factory-boy>=3.3         # Test data factories
+    - aiohttp>=3.8.0           # Async HTTP client for tests

@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.0.3  
+**Version:** 3.0.9  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -487,16 +487,32 @@ curl http://localhost:8001/jobs/{run_uuid}
 
 ### Run All Tests
 
+The project has **865 tests** providing comprehensive coverage before refactoring.
+
 ```bash
-# Launchpad tests
-pytest launchpad/test_launchpad.py -v
+# Run the full test suite (865 tests)
+pytest tests/ -q
 
-# Cortex tests
-pytest cortex/test_chat.py -v
+# Cortex tests only (690 tests, 82% coverage on app.py)
+pytest tests/cortex/ -q
 
-# Integration tests
-pytest launchpad/test_integration.py -v
+# With coverage report
+pytest tests/cortex/ --cov=cortex/app --cov-report=term-missing
+
+# Other components (175 tests)
+pytest tests/atlas/ tests/common/ tests/analyzer/ tests/launchpad/ tests/ui/ -q
+
+# Single test file
+pytest tests/cortex/test_chat_data_calls.py -x -q
 ```
+
+### Test Architecture
+
+- **In-memory SQLite** with `StaticPool` for fast, isolated tests
+- **Mocked LLM** via `AgentEngine` patches (no real model calls)
+- **Mocked MCP** via `MCPHttpClient` patches (no real service connections)
+- **34 cortex test files** covering: chat endpoint, approval gates, background tasks, project management, block endpoints, conversations, auth, admin, downloads, uploads, pure helpers, tool routing, skill detection, validation
+- **Shared fixtures** in `tests/conftest.py` for DB engine, sessions, mock users
 
 ### Run Demo
 
@@ -573,11 +589,11 @@ Pre-defined bioinformatics workflows are available in `skills/`:
 ### Testing Requirements
 
 ```bash
-# Run full test suite
-pytest --cov=cortex --cov=launchpad --cov-report=html
+# Run full test suite (865 tests)
+pytest tests/ -q
 
-# Check code quality
-pylint cortex launchpad
+# With coverage
+pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 ```
 
 ## 📞 Support
@@ -588,12 +604,13 @@ pylint cortex launchpad
 
 ## 📦 Version Information
 
-- **Release**: 3.0.1 — Job monitoring recovery after restart, skill routing fixes
-- **Python**: 3.12+
+- **Release**: 3.0.9 — Comprehensive test suite (865 tests, 82% cortex/app.py coverage)
+- **Python**: 3.11+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
 - **Nextflow**: >= 23.0
-- **Status**: Active Development
+- **Test Coverage**: 865 tests, cortex/app.py at 82%
+- **Status**: Active Development — preparing for cortex/app.py refactor
 
 ## 🗓️ Development Timeline
 

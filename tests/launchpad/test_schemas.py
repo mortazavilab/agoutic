@@ -1,0 +1,146 @@
+"""
+Tests for launchpad/schemas.py — Pydantic request/response validation.
+"""
+
+import pytest
+from pydantic import ValidationError
+
+from launchpad.schemas import (
+    SubmitJobRequest,
+    JobStatusResponse,
+    JobDetailsResponse,
+    JobSubmitResponse,
+)
+
+
+class TestSubmitJobRequest:
+    def test_minimal_valid(self):
+        req = SubmitJobRequest(
+            project_id="proj-1",
+            sample_name="sample1",
+            mode="DNA",
+            input_directory="/data/pod5",
+        )
+        assert req.project_id == "proj-1"
+        assert req.sample_name == "sample1"
+        assert req.mode == "DNA"
+        assert req.input_type == "pod5"  # default
+
+    def test_genome_string_normalised_to_list(self):
+        req = SubmitJobRequest(
+            project_id="p", sample_name="s", mode="DNA",
+            input_directory="/d", reference_genome="GRCh38",
+        )
+        assert req.reference_genome == ["GRCh38"]
+
+    def test_genome_list_passthrough(self):
+        req = SubmitJobRequest(
+            project_id="p", sample_name="s", mode="DNA",
+            input_directory="/d", reference_genome=["GRCh38", "mm39"],
+        )
+        assert req.reference_genome == ["GRCh38", "mm39"]
+
+    def test_empty_project_id_rejected(self):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="", sample_name="s", mode="DNA",
+                input_directory="/d",
+            )
+
+    def test_empty_sample_name_rejected(self):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p", sample_name="", mode="DNA",
+                input_directory="/d",
+            )
+
+    def test_invalid_input_type_rejected(self):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p", sample_name="s", mode="DNA",
+                input_directory="/d", input_type="invalid",
+            )
+
+    def test_all_optional_fields(self):
+        req = SubmitJobRequest(
+            project_id="p",
+            sample_name="MySample",
+            mode="RNA",
+            input_directory="/data/pod5",
+            user_id="user-1",
+            username="testuser",
+            project_slug="my-project",
+            modifications="m6A",
+            entry_point="remap",
+            parent_block_id="blk-abc",
+            modkit_filter_threshold=0.75,
+            min_cov=3,
+            per_mod=10,
+            accuracy="hac",
+            max_gpu_tasks=2,
+        )
+        assert req.accuracy == "hac"
+        assert req.min_cov == 3
+        assert req.modifications == "m6A"
+
+    def test_default_values(self):
+        req = SubmitJobRequest(
+            project_id="p", sample_name="s", mode="DNA",
+            input_directory="/d",
+        )
+        assert req.modkit_filter_threshold == 0.9
+        assert req.per_mod == 5
+        assert req.accuracy == "sup"
+        assert req.max_gpu_tasks == 1
+
+
+class TestJobStatusResponse:
+    def test_valid(self):
+        resp = JobStatusResponse(
+            run_uuid="abc-123",
+            status="RUNNING",
+            progress_percent=45,
+            message="Processing...",
+        )
+        assert resp.progress_percent == 45
+
+    def test_with_tasks(self):
+        resp = JobStatusResponse(
+            run_uuid="abc",
+            status="RUNNING",
+            progress_percent=50,
+            message="ok",
+            tasks={"basecall": "COMPLETED", "align": "RUNNING"},
+        )
+        assert resp.tasks["basecall"] == "COMPLETED"
+
+
+class TestJobDetailsResponse:
+    def test_minimal(self):
+        resp = JobDetailsResponse(
+            run_uuid="abc",
+            project_id="proj-1",
+            sample_name="s1",
+            mode="DNA",
+            status="COMPLETED",
+            progress_percent=100,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+            output_directory=None,
+            error_message=None,
+            report=None,
+        )
+        assert resp.status == "COMPLETED"
+        assert resp.error_message is None
+
+
+class TestJobSubmitResponse:
+    def test_valid(self):
+        resp = JobSubmitResponse(
+            run_uuid="abc",
+            sample_name="test",
+            status="PENDING",
+            work_directory="/data/work/test",
+        )
+        assert resp.work_directory == "/data/work/test"

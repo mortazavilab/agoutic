@@ -1,5 +1,42 @@
 # Changelog - March 2026
 
+## [3.0.9] - 2026-03-05
+
+### Added — Comprehensive Test Suite for Pre-Refactor Safety Net
+
+Built a full black-box test suite to enable safe refactoring of `cortex/app.py`
+(7,412-line monolith). **865 tests** across all components, with **82% coverage**
+on the Cortex engine (up from 0% at start of effort).
+
+**Cortex tests (690 across 34 files):**
+- Pure helper functions: `_parse_tag_params`, `_looks_like_assay`, `_pick_file_tool`, `_validate_llm_output`, `_correct_tool_routing`, `_emit_progress`, `_resolve_workflow_path`, `_resolve_file_path`
+- Chat endpoint: entry validation, skill detection, DATA_CALL execution, ENCODE search swap retry, browsing tool bypass, download workflow, plot tag parsing (key-value, natural language, code fallback, command override), hallucination detection, chain recovery, large result truncation, token tracking
+- Approval gate: creation, suppression for non-job skills, parameter extraction
+- Background tasks: `poll_job_status`, `_auto_trigger_analysis`, `_post_download_suggestions`
+- Project management: CRUD, stats dashboard, files listing, disk usage, token usage, permanent delete cascade, upload with filename sanitization
+- Block endpoints: create, read, update, sequence numbering
+- Conversation: save/load messages, state building, inject job context
+- Auth & admin: login/logout, session management, user CRUD, admin token usage
+- Analyzer/Launchpad proxy: MCP helper calls, connection error handling
+- Download endpoints: initiate, status, cancel, background task, `_update_download_block`
+
+**Other component tests (175):**
+- Atlas: result formatter, tool schemas
+- Common: MCP client
+- Analyzer: analysis engine
+- Launchpad: models, config
+- UI: app configuration
+
+**Test infrastructure:**
+- In-memory SQLite with `StaticPool` for isolation
+- `_patch_session` context manager patching `SessionLocal` across 6 modules
+- `_make_client` pattern with mocked `AgentEngine` (`.think`, `.analyze_results`)
+- `MCPHttpClient` mocking for all external service calls
+- `pytest.ini` with `--cov` across all components
+- Shared fixtures in `tests/conftest.py`
+
+Files changed: `tests/` (34 cortex test files + conftest + component tests), `pytest.ini`
+
 ## [3.0.8] - 2026-03-03
 
 ### Fixed — ENCODE Follow-Up Questions Not Injecting Previous Data
