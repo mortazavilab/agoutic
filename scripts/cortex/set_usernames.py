@@ -6,11 +6,11 @@ Runs directly against the SQLite database — no authentication required.
 Intended for server administrators working from the command line.
 
 Usage:
-    python -m cortex.set_usernames list                          # list all users
-    python -m cortex.set_usernames set <email> <username>        # set username for one user
-    python -m cortex.set_usernames auto                          # auto-generate all missing usernames
-    python -m cortex.set_usernames slugify-projects              # auto-generate slugs for all projects
-    python -m cortex.set_usernames migrate-dirs                  # create new dir structure + move data
+    python scripts/cortex/set_usernames.py list                  # list all users
+    python scripts/cortex/set_usernames.py set <email> <username>
+    python scripts/cortex/set_usernames.py auto
+    python scripts/cortex/set_usernames.py slugify-projects
+    python scripts/cortex/set_usernames.py migrate-dirs
 """
 
 import re
@@ -18,6 +18,8 @@ import shutil
 import sqlite3
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from cortex.config import AGOUTIC_DATA, DB_FILE
 

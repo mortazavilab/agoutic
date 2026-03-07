@@ -1,5 +1,23 @@
 # Changelog - March 2026
 
+## [3.1.2] - 2026-03-07
+
+### Cleanup
+
+- Removed deprecated manual test and migration scripts that were superseded by
+  the consolidated `tests/` suite and current runtime/bootstrap workflow,
+  including the old in-package `test_*.py` helpers, `migrate_*.py` scripts,
+  and the root-level `test_*.sh` shell scripts.
+
+- Moved the remaining manual admin and operational utilities into a dedicated
+  `scripts/` tree:
+  `scripts/cortex/init_db.py`, `scripts/cortex/set_usernames.py`,
+  `scripts/launchpad/debug_job.py`, and
+  `scripts/launchpad/submit_real_job.py`.
+
+- Updated the active README and quickstart documentation to point at the
+  `scripts/` locations and the current pytest-based test commands.
+
 ## [3.1.1] - 2026-03-07
 
 ### Fixes

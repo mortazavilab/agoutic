@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.1.0  
+**Version:** 3.1.2  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -24,7 +24,7 @@ AGOUTIC enforces access control at every layer:
 - **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{user_id}/{project_id}/`) with input sanitization and jail-escape guards.
 - **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
 - **Project management**: Full dashboard for browsing projects, viewing stats/files/jobs, renaming, archiving, and permanent deletion with cascading cleanup.
-- **Migration**: Run `python cortex/migrate_hardening.py` to add hardening columns. Run `python cortex/migrate_token_tracking.py` to add token tracking columns. Run `python cortex/migrate_usernames.py` to add the `username` column, then `python cortex/set_usernames.py auto` to derive usernames from email addresses. All scripts respect `$AGOUTIC_DATA` and are safe to re-run.
+- **Bootstrap & admin scripts**: Run `python scripts/cortex/init_db.py` for a fresh database bootstrap, and `python scripts/cortex/set_usernames.py auto` to derive usernames from email addresses on an existing instance.
 - **Username paths**: User-jailed filesystem paths use `$AGOUTIC_DATA/users/{username}/{project-slug}/` instead of raw IDs, giving human-readable directory trees.
 
 ## 🚀 Quick Start
@@ -198,12 +198,7 @@ agoutic/
 │   ├── schemas.py               # Request/response schemas
 │   ├── config.py                # Configuration
 │   ├── db.py                    # Database connection
-│   ├── init_db.py               # Full schema creation (fresh install)
-│   ├── migrate_hardening.py     # Migration for hardening sprint columns
-│   ├── migrate_token_tracking.py # Migration for token tracking columns
-│   ├── migrate_usernames.py     # Migration for username column
-│   ├── set_usernames.py         # CLI: derive/assign usernames and slugify projects
-│   └── test_chat.py             # Tests
+│   └── routes/                  # Extracted REST route modules
 │
 ├── launchpad/                      # Execution Engine
 │   ├── README.md                # Launchpad documentation
@@ -215,12 +210,17 @@ agoutic/
 │   ├── schemas.py              # Request/response schemas
 │   ├── config.py               # Configuration
 │   ├── db.py                   # Database connection
-│   ├── demo_launchpad.py         # Demo script
 │   ├── quickstart.sh           # Quick start setup
-│   ├── test_launchpad.py         # Tests
-│   ├── test_integration.py     # Integration tests
 │   ├── DUAL_INTERFACE.md       # REST + MCP architecture
 │   └── IMPLEMENTATION_SUMMARY.md # Implementation details
+│
+├── scripts/                     # Manual admin and operational utilities
+│   ├── cortex/
+│   │   ├── init_db.py           # Fresh database bootstrap utility
+│   │   └── set_usernames.py     # Username/slug admin CLI
+│   └── launchpad/
+│       ├── debug_job.py         # Job inspection helper
+│       └── submit_real_job.py   # Manual job submission helper
 │
 ├── ui/                          # Web Interface
 │   ├── README.md               # UI documentation

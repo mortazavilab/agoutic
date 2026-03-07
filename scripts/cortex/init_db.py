@@ -19,8 +19,8 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime, timedelta
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add repo root to path for imports when run from scripts/
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from cortex.config import DB_FOLDER, AGOUTIC_DATA
 

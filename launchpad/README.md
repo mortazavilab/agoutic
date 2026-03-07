@@ -80,12 +80,13 @@ Launchpad provides **both** interfaces, allowing flexible integration patterns:
 
 ### Running Tests
 ```bash
-pytest launchpad/test_launchpad.py
-pytest launchpad/test_integration.py
+pytest tests/launchpad -q
 ```
 
-### Running the Demo
-A standalone demo script submits a mock job and polls for completion:
+### Manual Ops Scripts
+Manual Launchpad helpers now live under `scripts/launchpad/`:
+
 ```bash
-python launchpad/demo_launchpad.py
+python scripts/launchpad/submit_real_job.py --url http://localhost:8001 --input /path/to/data --mode DNA
+python scripts/launchpad/debug_job.py <run_uuid>
 ```

@@ -24,3 +24,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+data/logs/agoutic.jsonl
+data/logs/encode-mcp.jsonl
+data/logs/cortex.jsonl
+data/logs/analyzer-rest.jsonl

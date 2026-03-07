@@ -2,7 +2,7 @@
 """
 Script to submit a REAL job to Launchpad.
 Usage:
-    python launchpad/submit_real_job.py --url http://localhost:8001 --input /path/to/data --mode DNA
+    python scripts/launchpad/submit_real_job.py --url http://localhost:8001 --input /path/to/data --mode DNA
 """
 
 import argparse

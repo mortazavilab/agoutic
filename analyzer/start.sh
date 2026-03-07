@@ -58,7 +58,7 @@ case $MODE in
     test)
         echo "Running test suite..."
         echo ""
-        python3 analyzer/test_analysis.py
+        python3 -m pytest tests/analyzer -q
         ;;
     
     dev)

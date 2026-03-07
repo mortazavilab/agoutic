@@ -390,7 +390,7 @@ uvicorn cortex.app:app --port 8000
 ### Run Tests
 
 ```bash
-pytest cortex/test_chat.py -v
+pytest tests/cortex -q
 ```
 
 ### Manual Testing

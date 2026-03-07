@@ -2,8 +2,8 @@
 """
 Script to debug a submitted job and check what's actually happening.
 Usage:
-    python launchpad/debug_job.py <run_uuid>
-    python launchpad/debug_job.py --work-dir /path/to/work/dir
+    python scripts/launchpad/debug_job.py <run_uuid>
+    python scripts/launchpad/debug_job.py --work-dir /path/to/work/dir
 """
 
 import argparse
