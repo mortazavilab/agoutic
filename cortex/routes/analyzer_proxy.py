@@ -6,6 +6,7 @@ via MCP over HTTP. The Analyzer MCP server must be running.
 Also includes the Launchpad proxy endpoints.
 """
 
+import sys
 from typing import Optional
 
 import httpx
@@ -20,6 +21,15 @@ from common.logging_config import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def _require_run_uuid_access(run_uuid: str, user) -> None:
+    """Honor legacy `cortex.app.require_run_uuid_access` test patches."""
+    app_mod = sys.modules.get("cortex.app")
+    override = getattr(app_mod, "require_run_uuid_access", None) if app_mod else None
+    if callable(override):
+        return override(run_uuid, user)
+    return _deps.require_run_uuid_access(run_uuid, user)
 
 
 # --- MCP tool call helpers ---
@@ -82,7 +92,7 @@ async def get_job_analysis_summary(run_uuid: str, request: Request):
     Proxies to Analyzer analysis engine via MCP.
     """
     user = request.state.user
-    _deps.require_run_uuid_access(run_uuid, user)
+    _require_run_uuid_access(run_uuid, user)
     return await _call_analyzer_tool("get_analysis_summary", run_uuid=run_uuid)
 
 
@@ -94,7 +104,7 @@ async def list_job_files(run_uuid: str, extensions: Optional[str] = None, reques
       - extensions: Comma-separated list (e.g., ".csv,.txt")
     """
     user = request.state.user
-    _deps.require_run_uuid_access(run_uuid, user)
+    _require_run_uuid_access(run_uuid, user)
     kwargs = {"run_uuid": run_uuid}
     if extensions:
         kwargs["extensions"] = extensions
@@ -107,7 +117,7 @@ async def categorize_job_files(run_uuid: str, request: Request):
     Categorize job files by type (csv, txt, bed, other).
     """
     user = request.state.user
-    _deps.require_run_uuid_access(run_uuid, user)
+    _require_run_uuid_access(run_uuid, user)
     return await _call_analyzer_tool("categorize_job_files", run_uuid=run_uuid)
 
 
@@ -122,7 +132,7 @@ async def read_file_content(
     Read content of a specific file.
     """
     user = request.state.user
-    _deps.require_run_uuid_access(run_uuid, user)
+    _require_run_uuid_access(run_uuid, user)
     return await _call_analyzer_tool(
         "read_file_content",
         run_uuid=run_uuid,
@@ -143,7 +153,7 @@ async def parse_csv_file(
     Returns column stats, dtypes, and row data.
     """
     user = request.state.user
-    _deps.require_run_uuid_access(run_uuid, user)
+    _require_run_uuid_access(run_uuid, user)
     return await _call_analyzer_tool(
         "parse_csv_file",
         run_uuid=run_uuid,
@@ -163,7 +173,7 @@ async def parse_bed_file(
     Parse BED genomic file.
     """
     user = request.state.user
-    _deps.require_run_uuid_access(run_uuid, user)
+    _require_run_uuid_access(run_uuid, user)
     return await _call_analyzer_tool(
         "parse_bed_file",
         run_uuid=run_uuid,
@@ -183,7 +193,7 @@ async def proxy_download_file(
     Streams the file through Cortex so the UI never contacts Analyzer directly.
     """
     user = request.state.user
-    _deps.require_run_uuid_access(run_uuid, user)
+    _require_run_uuid_access(run_uuid, user)
     try:
         analyzer_rest = _cfg.SERVICE_REGISTRY["analyzer"]["rest_url"]
         async with httpx.AsyncClient(timeout=120.0) as client:

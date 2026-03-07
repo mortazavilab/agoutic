@@ -1,5 +1,39 @@
 # Changelog - March 2026
 
+## [3.1.1] - 2026-03-07
+
+### Fixes
+
+- Fixed permanent project deletion so user project directories are resolved
+  before the database row is removed, which now cleans up slug-based project
+  folders under `AGOUTIC_DATA/users/...` instead of leaving them behind.
+
+- Restored analyzer proxy compatibility after the route extraction by making
+  the extracted proxy endpoints honor the legacy `cortex.app`
+  `require_run_uuid_access` override used by older tests, which fixes the
+  `GET /analysis/jobs/{run_uuid}/summary` and
+  `GET /analysis/jobs/{run_uuid}/files` pytest failures seen on Watson.
+
+- Preserved token accounting after permanent project deletion by archiving each
+  deleted project's lifetime and daily token totals in new Cortex models and
+  folding those archived totals back into the user and admin token-usage
+  endpoints.
+
+- Added deleted-project token archive support to the manual database bootstrap
+  script so fresh databases can create the new accounting tables.
+
+### Tests
+
+- Added new Cortex regression tests covering permanent project deletion cleanup,
+  preservation of deleted-project token accounting in user and admin usage
+  endpoints, and analyzer proxy endpoint compatibility after the route
+  extraction.
+
+- Added new unit-test coverage in this release cycle for Launchpad Nextflow
+  config generation, Launchpad DB/MCP helpers, logging middleware behavior,
+  Atlas config and launcher branches, Analyzer app error handling, and UI
+  helper functions.
+
 ## [3.1.0] - 2026-03-06
 
 ### Refactor — Tier 3: Extract Route Handlers & Shared DB Helpers

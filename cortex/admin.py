@@ -18,7 +18,13 @@ from sqlalchemy import select, text
 
 from cortex.config import AGOUTIC_DATA
 from cortex.db import SessionLocal
-from cortex.models import User, Conversation, ConversationMessage
+from cortex.models import (
+    User,
+    Conversation,
+    ConversationMessage,
+    DeletedProjectTokenUsage,
+    DeletedProjectTokenDaily,
+)
 from cortex.dependencies import require_admin
 from cortex.user_jail import rename_user_dir
 
@@ -383,6 +389,21 @@ async def admin_token_usage_summary(admin: User = Depends(require_admin)):
             """)
         ).fetchall()
 
+        archived_user_rows = session.execute(
+            text(
+                """
+                SELECT
+                    user_id,
+                    COALESCE(SUM(prompt_tokens), 0)             AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0)         AS completion_tokens,
+                    COALESCE(SUM(total_tokens), 0)              AS total_tokens,
+                    COALESCE(SUM(assistant_message_count), 0)   AS message_count
+                FROM deleted_project_token_usage
+                GROUP BY user_id
+                """
+            )
+        ).fetchall()
+
         # Global daily time-series
         daily_rows = session.execute(
             text("""
@@ -399,28 +420,79 @@ async def admin_token_usage_summary(admin: User = Depends(require_admin)):
             """)
         ).fetchall()
 
+        archived_daily_rows = session.execute(
+            text(
+                """
+                SELECT
+                    usage_date,
+                    COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(total_tokens), 0)      AS total_tokens
+                FROM deleted_project_token_daily
+                GROUP BY usage_date
+                ORDER BY usage_date ASC
+                """
+            )
+        ).fetchall()
+
+        users_map = {
+            r[0]: {
+                "user_id": r[0],
+                "email": r[1],
+                "display_name": r[2],
+                "prompt_tokens": int(r[3] or 0),
+                "completion_tokens": int(r[4] or 0),
+                "total_tokens": int(r[5] or 0),
+                "message_count": int(r[6] or 0),
+            }
+            for r in user_rows
+        }
+        for row in archived_user_rows:
+            user_obj = users_map.get(row[0])
+            if not user_obj:
+                user = session.execute(select(User).where(User.id == row[0])).scalar_one_or_none()
+                users_map[row[0]] = {
+                    "user_id": row[0],
+                    "email": user.email if user else None,
+                    "display_name": user.display_name if user else None,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "message_count": 0,
+                }
+                user_obj = users_map[row[0]]
+            user_obj["prompt_tokens"] += int(row[1] or 0)
+            user_obj["completion_tokens"] += int(row[2] or 0)
+            user_obj["total_tokens"] += int(row[3] or 0)
+            user_obj["message_count"] += int(row[4] or 0)
+
+        daily_map = {
+            str(r[0]): {
+                "date": str(r[0]),
+                "prompt_tokens": int(r[1] or 0),
+                "completion_tokens": int(r[2] or 0),
+                "total_tokens": int(r[3] or 0),
+            }
+            for r in daily_rows
+        }
+        for row in archived_daily_rows:
+            key = str(row[0])
+            entry = daily_map.setdefault(
+                key,
+                {
+                    "date": key,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            )
+            entry["prompt_tokens"] += int(row[1] or 0)
+            entry["completion_tokens"] += int(row[2] or 0)
+            entry["total_tokens"] += int(row[3] or 0)
+
         return {
-            "users": [
-                {
-                    "user_id": r[0],
-                    "email": r[1],
-                    "display_name": r[2],
-                    "prompt_tokens": r[3],
-                    "completion_tokens": r[4],
-                    "total_tokens": r[5],
-                    "message_count": r[6],
-                }
-                for r in user_rows
-            ],
-            "daily": [
-                {
-                    "date": str(r[0]),
-                    "prompt_tokens": r[1],
-                    "completion_tokens": r[2],
-                    "total_tokens": r[3],
-                }
-                for r in daily_rows
-            ],
+            "users": sorted(users_map.values(), key=lambda row: row["total_tokens"], reverse=True),
+            "daily": [daily_map[key] for key in sorted(daily_map.keys())],
         }
     finally:
         session.close()
@@ -491,31 +563,117 @@ async def admin_token_usage(
             params
         ).fetchall()
 
+        archive_filters = []
+        archive_params: dict = {}
+        if user_id:
+            archive_filters.append("user_id = :user_id")
+            archive_params["user_id"] = user_id
+        if project_id:
+            archive_filters.append("project_id = :project_id")
+            archive_params["project_id"] = project_id
+        archive_where = ""
+        if archive_filters:
+            archive_where = "WHERE " + " AND ".join(archive_filters)
+
+        archived_conv_rows = session.execute(
+            text(
+                f"""
+                SELECT
+                    d.project_id,
+                    d.project_name,
+                    u.email,
+                    u.display_name,
+                    d.prompt_tokens,
+                    d.completion_tokens,
+                    d.total_tokens,
+                    d.deleted_at
+                FROM deleted_project_token_usage d
+                LEFT JOIN users u ON u.id = d.user_id
+                {archive_where}
+                ORDER BY d.deleted_at DESC
+                """
+            ),
+            archive_params,
+        ).fetchall()
+
+        archived_daily_rows = session.execute(
+            text(
+                f"""
+                SELECT
+                    usage_date,
+                    COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(total_tokens), 0)      AS total_tokens
+                FROM deleted_project_token_daily
+                {archive_where}
+                GROUP BY usage_date
+                ORDER BY usage_date ASC
+                """
+            ),
+            archive_params,
+        ).fetchall()
+
+        by_conversation = [
+            {
+                "conversation_id": r[0],
+                "project_id": r[1],
+                "title": r[2],
+                "email": r[3],
+                "display_name": r[4],
+                "prompt_tokens": r[5],
+                "completion_tokens": r[6],
+                "total_tokens": r[7],
+                "last_message_at": str(r[8]) if r[8] else None,
+            }
+            for r in conv_rows
+        ]
+        by_conversation.extend(
+            {
+                "conversation_id": None,
+                "project_id": r[0],
+                "title": r[1] or "Deleted project",
+                "email": r[2],
+                "display_name": r[3],
+                "prompt_tokens": int(r[4] or 0),
+                "completion_tokens": int(r[5] or 0),
+                "total_tokens": int(r[6] or 0),
+                "last_message_at": str(r[7]) if r[7] else None,
+            }
+            for r in archived_conv_rows
+        )
+        by_conversation.sort(
+            key=lambda row: row["last_message_at"] or "",
+            reverse=True,
+        )
+
+        daily_map = {
+            str(r[0]): {
+                "date": str(r[0]),
+                "prompt_tokens": int(r[1] or 0),
+                "completion_tokens": int(r[2] or 0),
+                "total_tokens": int(r[3] or 0),
+            }
+            for r in daily_rows
+        }
+        for row in archived_daily_rows:
+            key = str(row[0])
+            entry = daily_map.setdefault(
+                key,
+                {
+                    "date": key,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            )
+            entry["prompt_tokens"] += int(row[1] or 0)
+            entry["completion_tokens"] += int(row[2] or 0)
+            entry["total_tokens"] += int(row[3] or 0)
+
         return {
             "filters": {"user_id": user_id, "project_id": project_id},
-            "by_conversation": [
-                {
-                    "conversation_id": r[0],
-                    "project_id": r[1],
-                    "title": r[2],
-                    "email": r[3],
-                    "display_name": r[4],
-                    "prompt_tokens": r[5],
-                    "completion_tokens": r[6],
-                    "total_tokens": r[7],
-                    "last_message_at": str(r[8]) if r[8] else None,
-                }
-                for r in conv_rows
-            ],
-            "daily": [
-                {
-                    "date": str(r[0]),
-                    "prompt_tokens": r[1],
-                    "completion_tokens": r[2],
-                    "total_tokens": r[3],
-                }
-                for r in daily_rows
-            ],
+            "by_conversation": by_conversation,
+            "daily": [daily_map[key] for key in sorted(daily_map.keys())],
         }
     finally:
         session.close()

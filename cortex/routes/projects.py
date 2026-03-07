@@ -550,6 +550,20 @@ async def get_user_token_usage(request: Request):
     user = request.state.user
     session = _db.SessionLocal()
     try:
+        archived_lifetime_row = session.execute(
+            text(
+                """
+                SELECT
+                    COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(total_tokens), 0)      AS total_tokens
+                FROM deleted_project_token_usage
+                WHERE user_id = :uid
+                """
+            ),
+            {"uid": user.id}
+        ).fetchone()
+
         # Lifetime totals
         lifetime_row = session.execute(
             text("""
@@ -565,6 +579,13 @@ async def get_user_token_usage(request: Request):
             """),
             {"uid": user.id}
         ).fetchone()
+
+        live_prompt_tokens = int(lifetime_row[0] or 0) if lifetime_row else 0
+        live_completion_tokens = int(lifetime_row[1] or 0) if lifetime_row else 0
+        live_total_tokens = int(lifetime_row[2] or 0) if lifetime_row else 0
+        archived_prompt_tokens = int(archived_lifetime_row[0] or 0) if archived_lifetime_row else 0
+        archived_completion_tokens = int(archived_lifetime_row[1] or 0) if archived_lifetime_row else 0
+        archived_total_tokens = int(archived_lifetime_row[2] or 0) if archived_lifetime_row else 0
 
         # Per-conversation totals
         conv_rows = session.execute(
@@ -588,6 +609,24 @@ async def get_user_token_usage(request: Request):
             {"uid": user.id}
         ).fetchall()
 
+        archived_conv_rows = session.execute(
+            text(
+                """
+                SELECT
+                    project_id,
+                    project_name,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    deleted_at
+                FROM deleted_project_token_usage
+                WHERE user_id = :uid
+                ORDER BY deleted_at DESC
+                """
+            ),
+            {"uid": user.id}
+        ).fetchall()
+
         # Daily time-series (SQLite date() function)
         daily_rows = session.execute(
             text("""
@@ -607,6 +646,23 @@ async def get_user_token_usage(request: Request):
             {"uid": user.id}
         ).fetchall()
 
+        archived_daily_rows = session.execute(
+            text(
+                """
+                SELECT
+                    usage_date,
+                    COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(total_tokens), 0)      AS total_tokens
+                FROM deleted_project_token_daily
+                WHERE user_id = :uid
+                GROUP BY usage_date
+                ORDER BY usage_date ASC
+                """
+            ),
+            {"uid": user.id}
+        ).fetchall()
+
         # Earliest tracked message
         tracking_since_row = session.execute(
             text("""
@@ -620,34 +676,85 @@ async def get_user_token_usage(request: Request):
             {"uid": user.id}
         ).fetchone()
 
+        archived_tracking_row = session.execute(
+            text(
+                """
+                SELECT MIN(usage_date)
+                FROM deleted_project_token_daily
+                WHERE user_id = :uid
+                """
+            ),
+            {"uid": user.id}
+        ).fetchone()
+
+        by_conversation = [
+            {
+                "conversation_id": r[0],
+                "project_id": r[1],
+                "title": r[2],
+                "prompt_tokens": r[3],
+                "completion_tokens": r[4],
+                "total_tokens": r[5],
+                "last_message_at": str(r[6]) if r[6] else None,
+            }
+            for r in conv_rows
+        ]
+        by_conversation.extend(
+            {
+                "conversation_id": None,
+                "project_id": r[0],
+                "title": r[1] or "Deleted project",
+                "prompt_tokens": int(r[2] or 0),
+                "completion_tokens": int(r[3] or 0),
+                "total_tokens": int(r[4] or 0),
+                "last_message_at": str(r[5]) if r[5] else None,
+            }
+            for r in archived_conv_rows
+        )
+        by_conversation.sort(
+            key=lambda row: row["last_message_at"] or "",
+            reverse=True,
+        )
+
+        daily_map = {}
+        for row in daily_rows:
+            key = str(row[0])
+            daily_map[key] = {
+                "date": key,
+                "prompt_tokens": int(row[1] or 0),
+                "completion_tokens": int(row[2] or 0),
+                "total_tokens": int(row[3] or 0),
+            }
+        for row in archived_daily_rows:
+            key = str(row[0])
+            entry = daily_map.setdefault(
+                key,
+                {
+                    "date": key,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            )
+            entry["prompt_tokens"] += int(row[1] or 0)
+            entry["completion_tokens"] += int(row[2] or 0)
+            entry["total_tokens"] += int(row[3] or 0)
+
+        tracking_candidates = []
+        if tracking_since_row and tracking_since_row[0]:
+            tracking_candidates.append(str(tracking_since_row[0]))
+        if archived_tracking_row and archived_tracking_row[0]:
+            tracking_candidates.append(str(archived_tracking_row[0]))
+
         return {
             "lifetime": {
-                "prompt_tokens": lifetime_row[0] if lifetime_row else 0,
-                "completion_tokens": lifetime_row[1] if lifetime_row else 0,
-                "total_tokens": lifetime_row[2] if lifetime_row else 0,
+                "prompt_tokens": live_prompt_tokens + archived_prompt_tokens,
+                "completion_tokens": live_completion_tokens + archived_completion_tokens,
+                "total_tokens": live_total_tokens + archived_total_tokens,
             },
-            "by_conversation": [
-                {
-                    "conversation_id": r[0],
-                    "project_id": r[1],
-                    "title": r[2],
-                    "prompt_tokens": r[3],
-                    "completion_tokens": r[4],
-                    "total_tokens": r[5],
-                    "last_message_at": str(r[6]) if r[6] else None,
-                }
-                for r in conv_rows
-            ],
-            "daily": [
-                {
-                    "date": str(r[0]),
-                    "prompt_tokens": r[1],
-                    "completion_tokens": r[2],
-                    "total_tokens": r[3],
-                }
-                for r in daily_rows
-            ],
-            "tracking_since": str(tracking_since_row[0]) if tracking_since_row and tracking_since_row[0] else None,
+            "by_conversation": by_conversation,
+            "daily": [daily_map[key] for key in sorted(daily_map.keys())],
+            "tracking_since": min(tracking_candidates) if tracking_candidates else None,
             "token_limit": user.token_limit,
         }
     finally:
@@ -773,6 +880,21 @@ async def delete_project_permanent(project_id: str, request: Request):
 
     session = _db.SessionLocal()
     try:
+        project = session.execute(
+            select(Project).where(Project.id == project_id)
+        ).scalar_one_or_none()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        project_dir = _dbh._resolve_project_dir(session, user, project_id)
+
+        _dbh.archive_deleted_project_token_usage(
+            session,
+            project_id=project_id,
+            user_id=user.id,
+            project_name=project.name,
+        )
+
         # 1. Delete conversation messages (via conversation ids)
         conv_ids = [r[0] for r in session.execute(
             select(Conversation.id).where(Conversation.project_id == project_id)
@@ -824,7 +946,6 @@ async def delete_project_permanent(project_id: str, request: Request):
 
         # 7. Remove on-disk directory (best-effort)
         import shutil
-        project_dir = _dbh._resolve_project_dir(session, user, project_id)
         if project_dir.exists():
             shutil.rmtree(project_dir, ignore_errors=True)
         # Also try legacy UUID path

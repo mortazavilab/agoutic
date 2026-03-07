@@ -135,6 +135,40 @@ class JobResult(Base):
         nullable=False,
     )
 
+
+class DeletedProjectTokenUsage(Base):
+    """Lifetime token totals preserved after permanent project deletion."""
+    __tablename__ = "deleted_project_token_usage"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    project_id: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    project_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    conversation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    assistant_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    deleted_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class DeletedProjectTokenDaily(Base):
+    """Daily token aggregates preserved after permanent project deletion."""
+    __tablename__ = "deleted_project_token_daily"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    project_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    usage_date: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    assistant_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
 class ProjectBlock(Base):
     __tablename__ = "project_blocks"
 

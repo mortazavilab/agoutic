@@ -11,13 +11,13 @@ import json
 import uuid
 
 from pathlib import Path
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, text
 
 import cortex.config as _cfg
 import cortex.db as _db
 from cortex.models import (
     ProjectBlock, Project, Conversation, ConversationMessage,
-    User, ProjectAccess,
+    User, ProjectAccess, DeletedProjectTokenUsage, DeletedProjectTokenDaily,
 )
 from common.logging_config import get_logger
 
@@ -46,6 +46,102 @@ def _resolve_project_dir(session, user, project_id: str) -> Path:
         return _cfg.AGOUTIC_DATA / "users" / username / slug
     # Legacy fallback
     return _cfg.AGOUTIC_DATA / "users" / user.id / project_id
+
+
+def archive_deleted_project_token_usage(
+    session,
+    *,
+    project_id: str,
+    user_id: str,
+    project_name: str | None,
+) -> None:
+    """Persist project token totals before conversations/messages are deleted."""
+    existing = session.execute(
+        select(DeletedProjectTokenUsage).where(DeletedProjectTokenUsage.project_id == project_id)
+    ).scalar_one_or_none()
+    if existing:
+        return
+
+    totals = session.execute(
+        text(
+            """
+            SELECT
+                COUNT(DISTINCT c.id)                          AS conversation_count,
+                COUNT(cm.id)                                  AS assistant_message_count,
+                COALESCE(SUM(cm.prompt_tokens), 0)            AS prompt_tokens,
+                COALESCE(SUM(cm.completion_tokens), 0)        AS completion_tokens,
+                COALESCE(SUM(cm.total_tokens), 0)             AS total_tokens
+            FROM conversations c
+            LEFT JOIN conversation_messages cm
+                ON cm.conversation_id = c.id
+               AND cm.role = 'assistant'
+               AND cm.total_tokens IS NOT NULL
+            WHERE c.project_id = :project_id
+              AND c.user_id = :user_id
+            """
+        ),
+        {"project_id": project_id, "user_id": user_id},
+    ).fetchone()
+
+    conversation_count = int(totals[0] or 0)
+    assistant_message_count = int(totals[1] or 0)
+    prompt_tokens = int(totals[2] or 0)
+    completion_tokens = int(totals[3] or 0)
+    total_tokens = int(totals[4] or 0)
+
+    if conversation_count == 0 and total_tokens == 0:
+        return
+
+    session.add(
+        DeletedProjectTokenUsage(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            project_id=project_id,
+            project_name=project_name,
+            conversation_count=conversation_count,
+            assistant_message_count=assistant_message_count,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            deleted_at=datetime.datetime.utcnow(),
+        )
+    )
+
+    daily_rows = session.execute(
+        text(
+            """
+            SELECT
+                DATE(cm.created_at)                           AS usage_date,
+                COUNT(cm.id)                                  AS assistant_message_count,
+                COALESCE(SUM(cm.prompt_tokens), 0)            AS prompt_tokens,
+                COALESCE(SUM(cm.completion_tokens), 0)        AS completion_tokens,
+                COALESCE(SUM(cm.total_tokens), 0)             AS total_tokens
+            FROM conversations c
+            JOIN conversation_messages cm ON cm.conversation_id = c.id
+            WHERE c.project_id = :project_id
+              AND c.user_id = :user_id
+              AND cm.role = 'assistant'
+              AND cm.total_tokens IS NOT NULL
+            GROUP BY DATE(cm.created_at)
+            ORDER BY DATE(cm.created_at) ASC
+            """
+        ),
+        {"project_id": project_id, "user_id": user_id},
+    ).fetchall()
+
+    for row in daily_rows:
+        session.add(
+            DeletedProjectTokenDaily(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                project_id=project_id,
+                usage_date=str(row[0]),
+                assistant_message_count=int(row[1] or 0),
+                prompt_tokens=int(row[2] or 0),
+                completion_tokens=int(row[3] or 0),
+                total_tokens=int(row[4] or 0),
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

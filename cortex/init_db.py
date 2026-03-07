@@ -230,6 +230,42 @@ def create_tables(db_path: Path):
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_msg_conv ON conversation_messages(conversation_id)")
 
+    # 8b. Deleted-project token archive tables
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS deleted_project_token_usage (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            project_id TEXT NOT NULL UNIQUE,
+            project_name TEXT,
+            conversation_count INTEGER NOT NULL DEFAULT 0,
+            assistant_message_count INTEGER NOT NULL DEFAULT 0,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dptu_user ON deleted_project_token_usage(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dptu_project ON deleted_project_token_usage(project_id)")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS deleted_project_token_daily (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            usage_date TEXT NOT NULL,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            assistant_message_count INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dptd_user ON deleted_project_token_daily(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dptd_project ON deleted_project_token_daily(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dptd_usage_date ON deleted_project_token_daily(usage_date)")
+
     # 9. Job results table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS job_results (

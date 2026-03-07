@@ -26,6 +26,7 @@ from sqlalchemy.pool import StaticPool
 from cortex.models import (
     Base, User, Session as SessionModel, Project, ProjectAccess,
     ProjectBlock, Conversation, ConversationMessage,
+    DeletedProjectTokenUsage, DeletedProjectTokenDaily,
 )
 from cortex.app import app
 
@@ -290,6 +291,50 @@ class TestUserTokenUsage:
         data = resp.json()
         assert data["lifetime"]["total_tokens"] >= 110
         assert len(data["by_conversation"]) >= 1
+
+    def test_includes_deleted_project_archive(self, client, test_session_factory):
+        _seed_conversation(
+            test_session_factory,
+            messages=[("assistant", "Live", {"prompt": 20, "completion": 5, "total": 25})],
+        )
+
+        sess = test_session_factory()
+        sess.add(
+            DeletedProjectTokenUsage(
+                id="archive-1",
+                user_id="user-1",
+                project_id="deleted-proj",
+                project_name="Deleted Project",
+                conversation_count=1,
+                assistant_message_count=2,
+                prompt_tokens=80,
+                completion_tokens=20,
+                total_tokens=100,
+                deleted_at=datetime.datetime(2026, 3, 8, 12, 0, 0),
+            )
+        )
+        sess.add(
+            DeletedProjectTokenDaily(
+                id="archive-day-1",
+                user_id="user-1",
+                project_id="deleted-proj",
+                usage_date="2026-03-08",
+                prompt_tokens=80,
+                completion_tokens=20,
+                total_tokens=100,
+                assistant_message_count=2,
+            )
+        )
+        sess.commit()
+        sess.close()
+
+        resp = client.get("/user/token-usage")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["lifetime"]["total_tokens"] == 125
+        assert any(row["project_id"] == "deleted-proj" for row in data["by_conversation"])
+        daily = {row["date"]: row["total_tokens"] for row in data["daily"]}
+        assert daily["2026-03-08"] == 100
 
 
 # ---------------------------------------------------------------------------

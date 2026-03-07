@@ -172,11 +172,11 @@ class TestPermanentDelete:
         proj_dir.mkdir(parents=True, exist_ok=True)
         (proj_dir / "file.txt").write_text("x")
 
-        with patch("cortex.app._resolve_project_dir", return_value=proj_dir):
-            resp = client.delete("/projects/proj-1/permanent")
+        resp = client.delete("/projects/proj-1/permanent")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "deleted"
+        assert not proj_dir.exists()
 
         # Verify everything is gone
         sess = test_session_factory()
@@ -184,6 +184,54 @@ class TestPermanentDelete:
         assert sess.execute(select(ProjectBlock).where(ProjectBlock.project_id == "proj-1")).scalar_one_or_none() is None
         assert sess.execute(select(Conversation).where(Conversation.id == "conv-del")).scalar_one_or_none() is None
         sess.close()
+
+    def test_permanent_delete_preserves_user_token_accounting(self, client, test_session_factory, tmp_path):
+        sess = test_session_factory()
+        conv = Conversation(id="conv-archive", project_id="proj-1", user_id="user-1", title="Usage")
+        sess.add(conv)
+        sess.flush()
+        sess.add(
+            ConversationMessage(
+                id="msg-archive",
+                conversation_id="conv-archive",
+                role="assistant",
+                content="tracked",
+                seq=1,
+                prompt_tokens=120,
+                completion_tokens=30,
+                total_tokens=150,
+                created_at=datetime.datetime(2026, 3, 7, 12, 0, 0),
+            )
+        )
+        sess.commit()
+        sess.close()
+
+        proj_dir = tmp_path / "users" / "miscuser" / "my-project"
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        (proj_dir / "tracked.txt").write_text("hello")
+
+        resp = client.delete("/projects/proj-1/permanent")
+        assert resp.status_code == 200
+
+        usage = client.get("/user/token-usage")
+        assert usage.status_code == 200
+        data = usage.json()
+        assert data["lifetime"]["prompt_tokens"] == 120
+        assert data["lifetime"]["completion_tokens"] == 30
+        assert data["lifetime"]["total_tokens"] == 150
+        assert data["tracking_since"] == "2026-03-07"
+        assert data["by_conversation"][0]["conversation_id"] is None
+        assert data["by_conversation"][0]["project_id"] == "proj-1"
+        assert data["by_conversation"][0]["title"] == "My Project"
+        assert data["daily"] == [
+            {
+                "date": "2026-03-07",
+                "prompt_tokens": 120,
+                "completion_tokens": 30,
+                "total_tokens": 150,
+            }
+        ]
+        assert not proj_dir.exists()
 
     def test_no_access(self, client):
         resp = client.delete("/projects/other-project/permanent")

@@ -26,6 +26,7 @@ from sqlalchemy.pool import StaticPool
 from cortex.models import (
     Base, User, Session as SessionModel,
     Conversation, ConversationMessage,
+    DeletedProjectTokenUsage, DeletedProjectTokenDaily,
 )
 from cortex.app import app
 
@@ -441,6 +442,52 @@ class TestTokenUsageSummary:
         assert len(admin_entry) == 1
         assert admin_entry[0]["total_tokens"] >= 150
 
+    def test_summary_includes_deleted_project_archives(self, admin_client, test_session_factory, seed_admin):
+        sess = test_session_factory()
+        sess.add(
+            DeletedProjectTokenUsage(
+                id="archived-usage-1",
+                user_id="admin-uid",
+                project_id="deleted-proj",
+                project_name="Deleted Project",
+                conversation_count=1,
+                assistant_message_count=3,
+                prompt_tokens=90,
+                completion_tokens=10,
+                total_tokens=100,
+                deleted_at=datetime.datetime(2026, 3, 7, 9, 0, 0),
+            )
+        )
+        sess.add(
+            DeletedProjectTokenDaily(
+                id="archived-daily-1",
+                user_id="admin-uid",
+                project_id="deleted-proj",
+                usage_date="2026-03-07",
+                prompt_tokens=90,
+                completion_tokens=10,
+                total_tokens=100,
+                assistant_message_count=3,
+            )
+        )
+        sess.commit()
+        sess.close()
+
+        resp = admin_client.get("/admin/token-usage/summary")
+        assert resp.status_code == 200
+        data = resp.json()
+        admin_entry = [u for u in data["users"] if u["user_id"] == "admin-uid"]
+        assert len(admin_entry) == 1
+        assert admin_entry[0]["total_tokens"] == 100
+        assert data["daily"] == [
+            {
+                "date": "2026-03-07",
+                "prompt_tokens": 90,
+                "completion_tokens": 10,
+                "total_tokens": 100,
+            }
+        ]
+
 
 # ---------------------------------------------------------------------------
 # GET /admin/token-usage
@@ -472,6 +519,54 @@ class TestTokenUsageDetailed:
         data = resp.json()
         assert data["filters"]["user_id"] == "admin-uid"
         assert len(data["by_conversation"]) >= 1
+
+    def test_includes_deleted_project_breakdown(self, admin_client, test_session_factory, seed_admin):
+        sess = test_session_factory()
+        sess.add(
+            DeletedProjectTokenUsage(
+                id="archived-usage-2",
+                user_id="admin-uid",
+                project_id="deleted-proj-2",
+                project_name="Deleted Project Two",
+                conversation_count=2,
+                assistant_message_count=4,
+                prompt_tokens=40,
+                completion_tokens=20,
+                total_tokens=60,
+                deleted_at=datetime.datetime(2026, 3, 9, 9, 0, 0),
+            )
+        )
+        sess.add(
+            DeletedProjectTokenDaily(
+                id="archived-daily-2",
+                user_id="admin-uid",
+                project_id="deleted-proj-2",
+                usage_date="2026-03-09",
+                prompt_tokens=40,
+                completion_tokens=20,
+                total_tokens=60,
+                assistant_message_count=4,
+            )
+        )
+        sess.commit()
+        sess.close()
+
+        resp = admin_client.get("/admin/token-usage", params={"user_id": "admin-uid"})
+        assert resp.status_code == 200
+        data = resp.json()
+        archived_rows = [row for row in data["by_conversation"] if row["project_id"] == "deleted-proj-2"]
+        assert len(archived_rows) == 1
+        assert archived_rows[0]["conversation_id"] is None
+        assert archived_rows[0]["title"] == "Deleted Project Two"
+        assert archived_rows[0]["total_tokens"] == 60
+        assert data["daily"] == [
+            {
+                "date": "2026-03-09",
+                "prompt_tokens": 40,
+                "completion_tokens": 20,
+                "total_tokens": 60,
+            }
+        ]
 
     def test_non_admin_forbidden(self, non_admin_client):
         resp = non_admin_client.get("/admin/token-usage")
