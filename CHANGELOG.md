@@ -1,5 +1,65 @@
 # Changelog - March 2026
 
+## [3.2.0] - 2026-03-09
+
+### Features — Job Lifecycle Management
+
+- **Chat stop button** — cancel in-flight LLM requests with stage-aware
+  messages ("Stopped during planning", "Stopped during data retrieval", etc.).
+  Uses cooperative `ChatCancelled` exception with cancellation checkpoints
+  throughout the chat pipeline.
+
+- **Download cancel + cleanup** — per-chunk cancellation check during file
+  downloads; partial files are automatically deleted on cancel with an
+  informative message.
+
+- **Nextflow job cancellation** — Cancel button on RUNNING jobs sends SIGTERM
+  to the Nextflow process. A `.nextflow_cancelled` marker file prevents the
+  background monitor from overwriting the status with FAILED. The UI correctly
+  shows CANCELLED with task progress at time of cancellation.
+
+- **Post-cancel Delete / Resubmit** — CANCELLED job blocks show two action
+  buttons:
+  - 🗑️ **Delete** — two-click confirmation, calls `DELETE /jobs/{uuid}`,
+    removes the workflow folder via `shutil.rmtree`, sets Launchpad DB status
+    to DELETED, and updates the Cortex EXECUTION_JOB block immediately so the
+    UI renders the deleted state without stale RUNNING artifacts.
+  - 🔄 **Resubmit** — creates a pre-populated APPROVAL_GATE with the original
+    job parameters. After approval, submits with Nextflow `-resume` flag
+    pointing at the same workflow directory, so cached tasks (e.g. basecalling)
+    are skipped.
+
+- **Chat-based deletion** — users can say "delete workflow1" in chat; the
+  Welcome skill routes to the `delete_job_data` MCP tool on Launchpad.
+
+- **DELETED status enum** — new `JobStatus.DELETED` across Launchpad config,
+  models, and UI rendering. `check_status()` returns DELETED when the work
+  directory no longer exists. `get_job_status` short-circuits for all terminal
+  DB states (DELETED, COMPLETED, FAILED, CANCELLED) without hitting the
+  filesystem.
+
+### Features — Download Path Fix
+
+- Fixed file downloads to go to `users/{user}/data` instead of
+  `users/{user}/{project}/data`.
+
+### Fixes
+
+- Fixed `reference_genome` deserialization crash on resubmit — the DB stores it
+  as a JSON string like `'["mm39"]'`; both the resubmit endpoint and the UI
+  multiselect widget now parse and normalize it correctly.
+
+- Fixed `resume_from_dir` being dropped on approval — the UI's `edited_params`
+  now preserves `resume_from_dir` from `extracted_params`, and
+  `submit_job_after_approval` falls back to `extracted_params` as a safety net.
+
+- Fixed MCP server `submit_dogme_job` missing `resume_from_dir` parameter that
+  caused a Pydantic validation error on resubmit.
+
+### Tests
+
+- All 771 tests passing (718 cortex + 53 launchpad).
+
 ## [3.1.2] - 2026-03-07
 
 ### Cleanup

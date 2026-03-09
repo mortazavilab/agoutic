@@ -1091,8 +1091,20 @@ def render_block(block, expected_project_id: str = ""):
                         # Reference genomes (multi-select)
                         genome_options = ["GRCh38", "mm39"]  # TODO: fetch from /genomes endpoint
                         current_genomes = extracted_params.get("reference_genome", ["mm39"])
+                        # Handle stringified JSON lists from DB (e.g. '["mm39"]')
                         if isinstance(current_genomes, str):
-                            current_genomes = [current_genomes]
+                            if current_genomes.startswith("["):
+                                try:
+                                    import json as _json
+                                    current_genomes = _json.loads(current_genomes)
+                                except (ValueError, TypeError):
+                                    current_genomes = [current_genomes]
+                            else:
+                                current_genomes = [current_genomes]
+                        # Filter to only valid options
+                        current_genomes = [g for g in current_genomes if g in genome_options]
+                        if not current_genomes:
+                            current_genomes = ["mm39"]
                         reference_genomes = st.multiselect(
                             "Reference Genome(s)",
                             genome_options,
@@ -1196,6 +1208,9 @@ def render_block(block, expected_project_id: str = ""):
                                 "accuracy": accuracy,
                                 "max_gpu_tasks": max_gpu_tasks,
                             }
+                            # Preserve resume_from_dir for resubmit-resume flow
+                            if extracted_params.get("resume_from_dir"):
+                                edited_params["resume_from_dir"] = extracted_params["resume_from_dir"]
                             
                             # Update block with edited params and approved status
                             payload_update = dict(content)
@@ -1401,6 +1416,72 @@ def render_block(block, expected_project_id: str = ""):
                                     else:
                                         st.text(f"[{timestamp}] {msg}")
                     
+                elif status_str == "CANCELLED":
+                    st.warning(f"🛑 {message}")
+                    # Show what was running at cancel time
+                    if tasks and isinstance(tasks, dict):
+                        completed = tasks.get("completed", [])
+                        completed_count = tasks.get("completed_count", len(completed))
+                        total = tasks.get("total", 0)
+                        if completed_count or total:
+                            st.caption(f"Completed {completed_count}/{total} tasks before cancellation.")
+
+                    # Post-cancel actions: Delete folder / Resubmit
+                    st.divider()
+                    _work_dir_name = ""
+                    if work_directory:
+                        import pathlib as _pl
+                        _work_dir_name = _pl.PurePosixPath(work_directory).name
+                    _del_col, _resub_col = st.columns(2)
+                    with _del_col:
+                        _del_key = f"del_{block_id}"
+                        _confirm_key = f"del_confirm_{block_id}"
+                        if st.session_state.get(_confirm_key):
+                            st.warning(f"⚠️ This will permanently delete `{_work_dir_name or 'workflow folder'}` and all its files.")
+                            _yes_col, _no_col = st.columns(2)
+                            with _yes_col:
+                                if st.button("Yes, delete", key=f"del_yes_{block_id}", type="primary"):
+                                    try:
+                                        _del_resp = make_authenticated_request(
+                                            "DELETE", f"{API_URL}/jobs/{run_uuid}", timeout=30
+                                        )
+                                        if _del_resp.status_code == 200:
+                                            _del_data = _del_resp.json()
+                                            st.success(_del_data.get("message", "Deleted."))
+                                            st.session_state.pop(_confirm_key, None)
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Delete failed: {_del_resp.status_code} — {_del_resp.text[:200]}")
+                                    except Exception as _e:
+                                        st.error(f"Error: {_e}")
+                            with _no_col:
+                                if st.button("No, keep it", key=f"del_no_{block_id}"):
+                                    st.session_state.pop(_confirm_key, None)
+                                    st.rerun()
+                        else:
+                            if st.button(f"🗑️ Delete {_work_dir_name or 'Workflow Folder'}", key=_del_key):
+                                st.session_state[_confirm_key] = True
+                                st.rerun()
+                    with _resub_col:
+                        if st.button("🔄 Resubmit Job", key=f"resub_{block_id}"):
+                            try:
+                                _resub_resp = make_authenticated_request(
+                                    "POST", f"{API_URL}/jobs/{run_uuid}/resubmit", timeout=15
+                                )
+                                if _resub_resp.status_code == 200:
+                                    st.success("Approval gate created — scroll down to review and approve.")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Resubmit failed: {_resub_resp.status_code} — {_resub_resp.text[:200]}")
+                            except Exception as _e:
+                                st.error(f"Error: {_e}")
+
+                elif status_str == "DELETED":
+                    st.info(f"🗑️ {message or 'Workflow folder deleted.'}")
+                    if work_directory:
+                        import pathlib as _pl
+                        st.caption(f"Folder `{_pl.PurePosixPath(work_directory).name}` has been removed.")
+
                 elif status_str == "RUNNING":
                     st.info(f"🔄 {message}")
                     
@@ -1483,6 +1564,23 @@ def render_block(block, expected_project_id: str = ""):
                                     else:
                                         instances_sorted = sorted(instances)
                                         st.text(f"✔ {base_name} ({len(instances)}/{max(instances_sorted)})")
+                    # Cancel button
+                    st.divider()
+                    if st.button("🛑 Cancel Job", type="primary", key=f"cancel_job_{block_id}"):
+                        try:
+                            _cancel_resp = make_authenticated_request(
+                                "POST", f"{API_URL}/jobs/{run_uuid}/cancel", timeout=15
+                            )
+                            if _cancel_resp.status_code == 200:
+                                _cancel_data = _cancel_resp.json()
+                                st.success(_cancel_data.get("message", "Job cancelled successfully."))
+                                st.rerun()
+                            elif _cancel_resp.status_code == 400:
+                                st.warning(_cancel_resp.json().get("detail", "Cannot cancel job."))
+                            else:
+                                st.error(f"Cancel failed: {_cancel_resp.status_code} — {_cancel_resp.text[:200]}")
+                        except Exception as _ce:
+                            st.error(f"Error cancelling job: {_ce}")
                 else:
                     st.warning(f"⏳ Status: {status_str}")
                     if message:
@@ -1570,7 +1668,12 @@ def render_block(block, expected_project_id: str = ""):
                 msg = content.get("message", "Unknown error")
                 st.error(f"❌ **Download failed** — {msg}")
             elif dl_status == "CANCELLED":
-                st.warning(f"⚠️ **Download cancelled** ({downloaded}/{total} files completed)")
+                _cancel_msg = content.get("message", f"{downloaded}/{total} files completed")
+                _deleted = content.get("deleted_partial")
+                _warn_text = f"⚠️ **Download cancelled** — {_cancel_msg}"
+                if _deleted:
+                    _warn_text += f" Deleted partial file: `{_deleted}`"
+                st.warning(_warn_text)
 
     else:
         with st.chat_message("system", avatar="⚙️"):
@@ -1744,12 +1847,100 @@ with st.expander("📎 Upload files", expanded=False):
         except Exception as e:
             st.error(f"Upload error: {e}")
 
+# --- Handle in-flight chat request (non-blocking polling with stop support) ---
+_active_chat = st.session_state.get("_active_chat")
+if _active_chat is not None:
+    _ac_thread = _active_chat["thread"]
+    _ac_request_id = _active_chat["request_id"]
+    _ac_result = _active_chat["result_holder"]
+    _ac_start = _active_chat["start_time"]
+    _ac_session_token = _active_chat["session_token"]
+    _stage_icons = {
+        "waiting": "⏳", "thinking": "🧠", "switching": "🔄",
+        "context": "📋", "tools": "🔌", "analyzing": "📊",
+        "done": "✅", "cancelled": "⏹️",
+    }
+
+    if _ac_thread.is_alive():
+        # Thread still running — show progress and stop button
+        with st.chat_message("assistant"):
+            status_box = st.status("🧠 Processing...", expanded=True)
+            elapsed = time.time() - _ac_start
+            # Poll backend for stage
+            try:
+                _cookies = {"session": _ac_session_token} if _ac_session_token else {}
+                sr = requests.get(
+                    f"{API_URL}/chat/status/{_ac_request_id}",
+                    cookies=_cookies, timeout=3,
+                )
+                if sr.status_code == 200:
+                    info = sr.json()
+                    stage = info.get("stage", "thinking")
+                    detail = info.get("detail", "")
+                    icon = _stage_icons.get(stage, "⏳")
+                    display = detail or "Processing..."
+                    status_box.update(label=f"{icon} {display}")
+                    status_box.caption(f"⏱️ {elapsed:.0f}s elapsed")
+            except Exception:
+                status_box.caption(f"⏱️ {elapsed:.0f}s elapsed")
+
+            if st.button("⏹️ Stop", key="_stop_chat_btn"):
+                try:
+                    _cookies = {"session": _ac_session_token} if _ac_session_token else {}
+                    requests.post(
+                        f"{API_URL}/chat/cancel/{_ac_request_id}",
+                        cookies=_cookies, timeout=5,
+                    )
+                except Exception:
+                    pass  # Best-effort cancel
+                status_box.update(label="⏹️ Stopping...", state="error")
+
+        time.sleep(1.5)
+        st.rerun()
+    else:
+        # Thread finished — process the result
+        _ac_thread.join()
+        elapsed = time.time() - _ac_start
+        del st.session_state["_active_chat"]
+
+        with st.chat_message("assistant"):
+            if _ac_result["error"]:
+                st.error(f"Failed to send message: {_ac_result['error']}")
+            elif _ac_result["response"] is not None and _ac_result["response"].status_code == 429:
+                try:
+                    _detail = _ac_result["response"].json().get("detail", {})
+                    _used = _detail.get("tokens_used", 0)
+                    _limit = _detail.get("token_limit", 0)
+                    st.warning(
+                        f"**🪙 Token quota exceeded.**\n\n"
+                        f"You have used **{_used:,}** of your **{_limit:,}** token limit. "
+                        "Please contact an admin to increase your quota."
+                    )
+                except Exception:
+                    st.warning("🪙 You have reached your token limit. Please contact an admin.")
+            elif _ac_result["response"] is not None and _ac_result["response"].status_code != 200:
+                st.error(
+                    f"Chat request failed: {_ac_result['response'].status_code} "
+                    f"- {_ac_result['response'].text}"
+                )
+            else:
+                # Success or cancelled — the agent block message will be rendered
+                # by the normal block rendering loop after rerun
+                _resp_json = _ac_result["response"].json() if _ac_result["response"] else {}
+                _status = _resp_json.get("status", "")
+                if _status == "cancelled":
+                    st.info("⏹️ Stopped by user.")
+                else:
+                    st.empty()  # Agent block will be rendered by block loop
+            time.sleep(0.3)
+            st.rerun()
+
 # 3. Chat Input
 if prompt := st.chat_input("Ask Agoutic to do something..."):
     with st.chat_message("user"):
         st.write(prompt)
 
-    # --- Threaded request with real-time progress polling ---
+    # --- Start threaded request and store in session state ---
     request_id = str(uuid.uuid4())
     session_token = get_session_cookie()
     _result_holder = {"response": None, "error": None}
@@ -1775,81 +1966,15 @@ if prompt := st.chat_input("Ask Agoutic to do something..."):
     thread = threading.Thread(target=_send_chat_request, daemon=True)
     thread.start()
 
-    # Stage emoji map for nice display
-    _stage_icons = {
-        "waiting": "⏳",
-        "thinking": "🧠",
-        "switching": "🔄",
-        "context": "📋",
-        "tools": "🔌",
-        "analyzing": "📊",
-        "done": "✅",
+    st.session_state["_active_chat"] = {
+        "thread": thread,
+        "request_id": request_id,
+        "result_holder": _result_holder,
+        "start_time": time.time(),
+        "session_token": session_token,
     }
-
-    with st.chat_message("assistant"):
-        status_box = st.status("🧠 Thinking...", expanded=True)
-        status_text = status_box.empty()
-        start_time = time.time()
-        last_detail = ""
-
-        while thread.is_alive():
-            elapsed = time.time() - start_time
-            # Poll the backend for current processing stage
-            try:
-                cookies = {"session": session_token} if session_token else {}
-                sr = requests.get(
-                    f"{API_URL}/chat/status/{request_id}",
-                    cookies=cookies,
-                    timeout=3,
-                )
-                if sr.status_code == 200:
-                    info = sr.json()
-                    stage = info.get("stage", "thinking")
-                    detail = info.get("detail", "")
-                    icon = _stage_icons.get(stage, "⏳")
-                    display = detail or "Processing..."
-                    if detail != last_detail:
-                        last_detail = detail
-                    status_box.update(label=f"{icon} {display}")
-                    status_text.caption(f"⏱️ {elapsed:.0f}s elapsed")
-            except Exception:
-                status_text.caption(f"⏱️ {elapsed:.0f}s elapsed")
-
-            thread.join(timeout=1.5)
-
-        thread.join()
-        elapsed = time.time() - start_time
-
-        if _result_holder["error"]:
-            status_box.update(label="❌ Error", state="error", expanded=True)
-            st.error(f"Failed to send message: {_result_holder['error']}")
-        elif _result_holder["response"] is not None and _result_holder["response"].status_code == 429:
-            status_box.update(label="🪙 Token Limit Reached", state="error", expanded=True)
-            try:
-                _detail = _result_holder["response"].json().get("detail", {})
-                _used = _detail.get("tokens_used", 0)
-                _limit = _detail.get("token_limit", 0)
-                st.warning(
-                    f"**🪙 Token quota exceeded.**\n\n"
-                    f"You have used **{_used:,}** of your **{_limit:,}** token limit. "
-                    "Please contact an admin to increase your quota."
-                )
-            except Exception:
-                st.warning("🪙 You have reached your token limit. Please contact an admin.")
-        elif _result_holder["response"] is not None and _result_holder["response"].status_code != 200:
-            status_box.update(label="❌ Error", state="error", expanded=True)
-            st.error(
-                f"Chat request failed: {_result_holder['response'].status_code} "
-                f"- {_result_holder['response'].text}"
-            )
-        else:
-            status_box.update(
-                label=f"✅ Done ({elapsed:.0f}s)",
-                state="complete",
-                expanded=False,
-            )
-            time.sleep(0.3)
-            st.rerun()
+    time.sleep(0.5)
+    st.rerun()
 
 # 4. Auto-Refresh (only for general "Live Stream" toggle, NOT for job monitoring)
 # Job monitoring is handled by the @st.fragment(run_every=...) above — no

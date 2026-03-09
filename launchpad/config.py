@@ -59,6 +59,7 @@ class JobStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    DELETED = "DELETED"
 
 # --- REFERENCE GENOMES ---
 REFERENCE_GENOMES = {

@@ -316,6 +316,31 @@ with tab_jobs:
                     if st.button("📊 View Results"):
                         # Open results page with pre-filled UUID via query params
                         st.switch_page("pages/results.py")
+
+                # Cancel button for RUNNING jobs
+                running_jobs = [j for j in jobs if j.get("status") in ("RUNNING", "PENDING")]
+                if running_jobs:
+                    st.divider()
+                    st.subheader("🛑 Cancel a Running Job")
+                    cancel_options = {
+                        f"⏳ {j.get('sample_name', 'Unknown')} ({j.get('run_uuid', '')[:8]}…)": j.get("run_uuid")
+                        for j in running_jobs
+                    }
+                    cancel_label = st.selectbox("Select job to cancel", list(cancel_options.keys()), key="cancel_sel")
+                    cancel_uuid = cancel_options[cancel_label]
+                    if st.button("🛑 Cancel Job", type="primary", key="cancel_btn"):
+                        try:
+                            _resp = make_authenticated_request(
+                                "POST", f"{API_URL}/jobs/{cancel_uuid}/cancel", timeout=15
+                            )
+                            if _resp.status_code == 200:
+                                _data = _resp.json()
+                                st.success(_data.get("message", "Job cancelled successfully."))
+                                st.rerun()
+                            else:
+                                st.error(f"Cancel failed: {_resp.status_code} — {_resp.text[:200]}")
+                        except Exception as _e:
+                            st.error(f"Error cancelling job: {_e}")
             else:
                 st.info("No jobs in this project yet.")
         else:

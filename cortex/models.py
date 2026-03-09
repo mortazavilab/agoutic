@@ -1,5 +1,5 @@
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Integer, Text, DateTime, Boolean, func
+from sqlalchemy import String, Integer, Text, DateTime, Boolean, Float, func
 
 class Base(DeclarativeBase):
     pass
@@ -136,6 +136,56 @@ class JobResult(Base):
     )
 
 
+class UserFile(Base):
+    """Central file registry — one row per physical file in the user's data folder.
+
+    Stores provenance (source URL, ENCODE accession), content hash for dedup,
+    and user-editable metadata (sample_name, organism, tissue, freeform tags).
+    Disk path points to ``AGOUTIC_DATA/users/{username}/data/{filename}``.
+    """
+    __tablename__ = "user_files"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    md5_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # "encode", "url", "upload", "local_intake"
+    source: Mapped[str] = mapped_column(String, nullable=False, default="url")
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encode_accession: Mapped[str | None] = mapped_column(String, nullable=True)  # ENCFF...
+    # User-editable metadata
+    sample_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    organism: Mapped[str | None] = mapped_column(String, nullable=True)
+    tissue: Mapped[str | None] = mapped_column(String, nullable=True)
+    tags_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # freeform {"key":"val",...}
+    # Absolute path on disk
+    disk_path: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class UserFileProjectLink(Base):
+    """Junction table: which projects reference a central UserFile via symlink."""
+    __tablename__ = "user_file_project_links"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_file_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    project_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    symlink_path: Mapped[str] = mapped_column(Text, nullable=False)  # absolute symlink path
+    linked_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
 class DeletedProjectTokenUsage(Base):
     """Lifetime token totals preserved after permanent project deletion."""
     __tablename__ = "deleted_project_token_usage"

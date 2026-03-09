@@ -75,6 +75,7 @@ from cortex.routes.analyzer_proxy import (
     router as analyzer_proxy_router,
     _call_analyzer_tool, _call_launchpad_tool,
 )
+from cortex.routes.user_data import router as user_data_router
 
 # --- LOGGING ---
 setup_logging("cortex")
@@ -111,6 +112,7 @@ app.include_router(projects_router)
 app.include_router(conversations_router)
 app.include_router(files_router)
 app.include_router(analyzer_proxy_router)
+app.include_router(user_data_router)
 
 # Initialize database on startup
 @app.on_event("startup")
@@ -183,20 +185,36 @@ class ChatRequest(BaseModel):
 import time as _time
 _chat_progress: dict[str, dict] = {}  # request_id -> {"stage": str, "detail": str, "ts": float}
 
+class ChatCancelled(Exception):
+    """Raised when user cancels an in-progress chat request."""
+    def __init__(self, stage: str, detail: str = ""):
+        self.stage = stage
+        self.detail = detail
+        super().__init__(f"Chat cancelled at stage={stage}: {detail}")
+
 def _emit_progress(request_id: str, stage: str, detail: str = ""):
     """Record a processing stage for a chat request."""
     if not request_id:
         return
+    # Preserve the cancelled flag across progress updates
+    _cancelled = _chat_progress.get(request_id, {}).get("cancelled", False)
     _chat_progress[request_id] = {
         "stage": stage,
         "detail": detail,
         "ts": _time.time(),
+        "cancelled": _cancelled,
     }
     # Housekeeping: remove entries older than 5 minutes
     cutoff = _time.time() - 300
     stale = [k for k, v in _chat_progress.items() if v["ts"] < cutoff]
     for k in stale:
         del _chat_progress[k]
+
+def _is_cancelled(request_id: str) -> bool:
+    """Check whether the user has requested cancellation for this chat request."""
+    if not request_id:
+        return False
+    return _chat_progress.get(request_id, {}).get("cancelled", False)
 
 # --- ENDPOINTS ---
 
@@ -243,6 +261,184 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
                        run_uuid=run_uuid, error=str(e))
         raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
 
+
+@app.post("/jobs/{run_uuid}/cancel")
+async def cancel_job_proxy(run_uuid: str, request: Request):
+    """
+    Cancel a running Nextflow job.
+    Proxies to Launchpad REST API (same pattern as /jobs/{run_uuid}/status).
+    """
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
+
+    from cortex.config import INTERNAL_API_SECRET
+    launchpad_rest = SERVICE_REGISTRY.get("launchpad", {}).get(
+        "rest_url", os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
+    )
+    headers = {}
+    if INTERNAL_API_SECRET:
+        headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{launchpad_rest}/jobs/{run_uuid}/cancel",
+                headers=headers,
+            )
+        if resp.status_code == 400:
+            raise HTTPException(status_code=400, detail=resp.json().get("detail", "Cannot cancel job"))
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Job not found")
+        resp.raise_for_status()
+        return resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Failed to proxy job cancel to Launchpad",
+                       run_uuid=run_uuid, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
+
+@app.delete("/jobs/{run_uuid}")
+async def delete_job_proxy(run_uuid: str, request: Request):
+    """
+    Delete workflow folder for a terminal-state job.
+    Proxies to Launchpad REST API.
+    """
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
+
+    from cortex.config import INTERNAL_API_SECRET
+    launchpad_rest = SERVICE_REGISTRY.get("launchpad", {}).get(
+        "rest_url", os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
+    )
+    headers = {}
+    if INTERNAL_API_SECRET:
+        headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.delete(
+                f"{launchpad_rest}/jobs/{run_uuid}",
+                headers=headers,
+            )
+        if resp.status_code == 400:
+            raise HTTPException(status_code=400, detail=resp.json().get("detail", "Cannot delete job"))
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Job not found")
+        resp.raise_for_status()
+        result = resp.json()
+
+        # Update the EXECUTION_JOB block so the UI shows DELETED immediately
+        try:
+            session = SessionLocal()
+            blocks = session.query(ProjectBlock).filter(
+                ProjectBlock.block_type == "EXECUTION_JOB",
+            ).all()
+            for blk in blocks:
+                p = get_block_payload(blk)
+                if p.get("run_uuid") == run_uuid:
+                    p["job_status"] = {
+                        "status": "DELETED",
+                        "progress_percent": 0,
+                        "message": result.get("message", "Workflow folder deleted."),
+                        "tasks": {},
+                    }
+                    blk.payload = json.dumps(p) if isinstance(p, dict) else p
+                    blk.status = "DELETED"
+                    session.commit()
+                    break
+            session.close()
+        except Exception as _e:
+            logger.warning("Failed to update block after delete", error=str(_e))
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Failed to proxy job delete to Launchpad",
+                       run_uuid=run_uuid, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
+
+@app.post("/jobs/{run_uuid}/resubmit")
+async def resubmit_job(run_uuid: str, request: Request):
+    """
+    Create a pre-populated APPROVAL_GATE block from a cancelled/failed job's parameters.
+    The user can then edit and approve to resubmit with the same (or modified) settings.
+    """
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
+
+    # Look up the original job params from dogme_jobs
+    from launchpad.models import DogmeJob as LaunchpadDogmeJob
+    from cortex.config import DATABASE_URL
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session as SyncSession
+
+    sync_url = DATABASE_URL.replace("sqlite+aiosqlite://", "sqlite://")
+    engine = create_engine(sync_url, connect_args={"check_same_thread": False})
+
+    with SyncSession(engine) as db:
+        job = db.execute(
+            select(LaunchpadDogmeJob).where(LaunchpadDogmeJob.run_uuid == run_uuid)
+        ).scalar_one_or_none()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job.status not in ("COMPLETED", "FAILED", "CANCELLED", "DELETED"):
+            raise HTTPException(status_code=400, detail=f"Cannot resubmit a {job.status} job")
+
+        # Reconstruct the original parameters
+        _ref_genome = job.reference_genome
+        # DB may store as JSON string like '["mm39"]' — normalize to a plain list
+        if _ref_genome and _ref_genome.startswith("["):
+            try:
+                _ref_genome = json.loads(_ref_genome)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if isinstance(_ref_genome, str):
+            _ref_genome = [_ref_genome]
+
+        extracted_params = {
+            "sample_name": job.sample_name,
+            "mode": job.mode,
+            "input_directory": job.input_directory,
+            "reference_genome": _ref_genome,
+        }
+        if job.modifications:
+            extracted_params["modifications"] = job.modifications
+        # Include the old work directory so Nextflow can resume with -resume
+        if job.nextflow_work_dir:
+            extracted_params["resume_from_dir"] = job.nextflow_work_dir
+
+        # Find the project this job belongs to
+        project_id = job.project_id
+
+    # Create approval gate block in the same project
+    session = SessionLocal()
+    try:
+        gate_block = _create_block_internal(
+            session,
+            project_id,
+            "APPROVAL_GATE",
+            {
+                "label": f"Resubmit job (previously {job.status.lower()})? Review and edit parameters:",
+                "extracted_params": extracted_params,
+                "gate_action": "job",
+                "attempt_number": 1,
+                "rejection_history": [],
+                "skill": "analyze_local_sample",
+                "model": "default",
+                "resubmit_from": run_uuid,
+            },
+            status="PENDING",
+            owner_id=user.id,
+        )
+        return {
+            "status": "ok",
+            "block_id": gate_block.id,
+            "message": "Approval gate created. Edit parameters and approve to resubmit.",
+        }
+    finally:
+        session.close()
 
 @app.get("/jobs/{run_uuid}/debug")
 async def get_job_debug_info(run_uuid: str, request: Request):
@@ -859,9 +1055,10 @@ Please use the parameter editing form below to make corrections.""",
 async def download_after_approval(project_id: str, gate_block_id: str):
     """Background task to start downloading files after approval.
 
-    If the gate extracted_params contains a 'files' list (set by the download
-    chain), use those directly.  Otherwise falls back to scanning conversation
-    blocks for HTTP/HTTPS URLs.
+    Downloads are written to the user's **central data folder** and symlinked
+    into the project.  If the gate extracted_params contains a 'files' list
+    (set by the download chain), use those directly.  Otherwise falls back to
+    scanning conversation blocks for HTTP/HTTPS URLs.
     """
     session = SessionLocal()
     try:
@@ -924,18 +1121,22 @@ async def download_after_approval(project_id: str, gate_block_id: str):
             )
             return
 
-        # Resolve target directory from gate params or project directory
-        if _target_dir_str:
+        # Resolve target directory — prefer user's central data folder
+        owner_user = session.execute(select(User).where(User.id == owner_id)).scalar_one_or_none()
+        project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
+        _username = getattr(owner_user, "username", None) if owner_user else None
+        _slug = project_obj.slug if project_obj else None
+
+        if _username:
+            from cortex.user_jail import get_user_data_dir
+            target_dir = get_user_data_dir(_username)
+        elif _target_dir_str:
             target_dir = Path(_target_dir_str)
         else:
-            owner_user = session.execute(select(User).where(User.id == owner_id)).scalar_one_or_none()
-            project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
-
-            if owner_user and owner_user.username and project_obj and project_obj.slug:
-                project_dir = Path(AGOUTIC_DATA) / "users" / owner_user.username / project_obj.slug
+            if _username and _slug:
+                project_dir = Path(AGOUTIC_DATA) / "users" / _username / _slug
             else:
                 project_dir = Path(AGOUTIC_DATA) / "users" / owner_id / project_id
-
             target_dir = project_dir / "data"
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -971,6 +1172,9 @@ async def download_after_approval(project_id: str, gate_block_id: str):
                 owner_id=owner_id,
                 files=urls,
                 target_dir=target_dir,
+                username=_username,
+                project_slug=_slug,
+                source="conversation",
             )
         )
 
@@ -1058,6 +1262,12 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "accuracy": job_params.get("accuracy") or "sup",
             "max_gpu_tasks": job_params.get("max_gpu_tasks") or 1,
         }
+
+        # If this is a resume (resubmit from cancelled/failed), pass the old work directory
+        # Check both edited_params and extracted_params since resume_from_dir is internal
+        _resume_dir = job_params.get("resume_from_dir") or gate_payload.get("extracted_params", {}).get("resume_from_dir")
+        if _resume_dir:
+            job_data["resume_from_dir"] = _resume_dir
 
         # For BAM remap: if no valid input_directory was found, resolve to project data/ dir
         # This handles "run dogme from downloaded BAM" where BAMs are in projectdir/data/
@@ -1467,8 +1677,25 @@ async def chat_status(request_id: str):
     """Return the current processing stage for a chat request (used by UI polling)."""
     entry = _chat_progress.get(request_id)
     if entry:
-        return {"stage": entry["stage"], "detail": entry["detail"]}
-    return {"stage": "waiting", "detail": ""}
+        return {"stage": entry["stage"], "detail": entry["detail"], "cancelled": entry.get("cancelled", False)}
+    return {"stage": "waiting", "detail": "", "cancelled": False}
+
+
+@app.post("/chat/cancel/{request_id}")
+async def cancel_chat(request_id: str):
+    """Cancel an in-progress chat request."""
+    entry = _chat_progress.get(request_id)
+    if entry:
+        entry["cancelled"] = True
+        return {"status": "cancelling", "request_id": request_id}
+    # Even if we don't have a progress entry yet, create one with the cancelled flag
+    _chat_progress[request_id] = {
+        "stage": "cancelling",
+        "detail": "",
+        "ts": _time.time(),
+        "cancelled": True,
+    }
+    return {"status": "cancelling", "request_id": request_id}
 
 
 # --- CHAT & AGENT LOGIC ---
@@ -1808,6 +2035,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         # 'think' talks to Ollama using the active skill and conversation history
         # Returns (content, usage_dict) — capture tokens for this turn
         _think_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        if _is_cancelled(req.request_id):
+            raise ChatCancelled("thinking", "Cancelled before the model started thinking.")
         raw_response, _think_usage = await run_in_threadpool(
             engine.think, 
             augmented_message, 
@@ -1845,6 +2074,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             if new_skill in SKILLS_REGISTRY:
                 logger.info("Agent switching skill", from_skill=active_skill, to_skill=new_skill)
                 _emit_progress(req.request_id, "switching", f"Switching to {new_skill} skill...")
+                if _is_cancelled(req.request_id):
+                    raise ChatCancelled("thinking", f"Cancelled before re-thinking with {new_skill} skill.")
                 # Re-run with the new skill, injecting context for the new skill
                 engine = AgentEngine(model_key=req.model)
                 augmented_message, _injected_dfs, _inject_debug = _inject_job_context(
@@ -2542,6 +2773,10 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     tool_name = call["tool"]
                     params = call["params"]
 
+                    # Check for user cancellation before each tool call
+                    if _is_cancelled(req.request_id):
+                        raise ChatCancelled("tools", f"Cancelled before running {tool_name} on {_source_label}.")
+
                     # Check for routing errors (e.g. missing parent experiment)
                     if "__routing_error__" in params:
                         error_msg = params.pop("__routing_error__")
@@ -3066,6 +3301,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
 
                 # Second-pass: send data to LLM for analysis/filtering/summarization
                 logger.info("Running second-pass LLM analysis", data_size=len(formatted_data))
+                if _is_cancelled(req.request_id):
+                    raise ChatCancelled("analyzing", "Tool calls completed but cancelled before generating the summary. You can re-send your message to see the results.")
                 _emit_progress(req.request_id, "analyzing", "Analyzing results...")
                 analyzed_response, _analyze_usage = await run_in_threadpool(
                     engine.analyze_results,
@@ -3401,7 +3638,8 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             if gate_action == "download" and _pending_download_files:
                 # Download gate: show the files to be downloaded, not Dogme params
                 _total_dl_bytes = sum(f.get("size_bytes") or 0 for f in _pending_download_files)
-                _dl_target = str(_resolve_project_dir(session, user, req.project_id) / "data")
+                from cortex.user_jail import get_user_data_dir
+                _dl_target = str(get_user_data_dir(user.username))
                 extracted_params = {
                     "gate_action": "download",
                     "files": _pending_download_files,
@@ -3440,6 +3678,35 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             "plot_blocks": [row_to_dict(pb) for pb in plot_blocks] if plot_blocks else None
         }
         
+    except ChatCancelled as cc:
+        logger.info("Chat cancelled by user", stage=cc.stage, detail=cc.detail,
+                     request_id=req.request_id)
+        # Build stage-aware user message
+        if cc.stage == "thinking":
+            _cancel_msg = "⏹️ **Stopped** — cancelled while the model was thinking. No tools were called."
+        elif cc.stage == "tools":
+            _cancel_msg = f"⏹️ **Stopped** — {cc.detail} No partial results were saved."
+        elif cc.stage == "analyzing":
+            _cancel_msg = "⏹️ **Stopped** — tool calls completed but cancelled before generating the summary. You can re-send your message to see the results."
+        else:
+            _cancel_msg = "⏹️ **Stopped** by user."
+        _emit_progress(req.request_id, "cancelled", _cancel_msg)
+        # Save a minimal agent block so the conversation shows what happened
+        agent_block = _create_block_internal(
+            session,
+            req.project_id,
+            "AGENT_PLAN",
+            {"markdown": _cancel_msg, "skill": active_skill, "model": "system", "cancelled": True},
+            status="DONE",
+            owner_id=user.id,
+        )
+        return {
+            "status": "cancelled",
+            "user_block": row_to_dict(user_block),
+            "agent_block": row_to_dict(agent_block),
+            "gate_block": None,
+            "plot_blocks": None,
+        }
     except Exception as e:
         import traceback
         error_detail = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"

@@ -449,10 +449,15 @@ class TestUploadFiles:
         engine, SL, data, client = setup
         pdir = tmp_path / "upload_proj"
         pdir.mkdir()
+        central = tmp_path / "users" / "testuser" / "data"
+        central.mkdir(parents=True, exist_ok=True)
+        (pdir / "data").mkdir(parents=True, exist_ok=True)
 
-        with patch("cortex.app._resolve_project_dir", return_value=pdir), \
-             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir), \
-             patch("cortex.user_jail.get_user_project_dir", return_value=pdir), \
+        with patch("cortex.routes.files._resolve_user_and_project",
+                   return_value=("testuser", "upload-proj", pdir)), \
+             patch("cortex.routes.files.get_user_data_dir", return_value=central), \
+             patch("cortex.routes.files.create_project_file_symlink",
+                   return_value=pdir / "data" / "test.txt"), \
              patch("cortex.app._post_download_suggestions", new_callable=AsyncMock), \
              patch("cortex.routes.files._post_download_suggestions", new_callable=AsyncMock):
             resp = client.post(
@@ -463,8 +468,8 @@ class TestUploadFiles:
         body = resp.json()
         assert body["count"] == 1
         assert body["uploaded"][0]["filename"] == "test.txt"
-        # Verify file on disk
-        assert (pdir / "data" / "test.txt").exists()
+        # File now lives in central data dir
+        assert (central / "test.txt").exists()
 
     def test_upload_no_files(self, setup, tmp_path):
         engine, SL, data, client = setup

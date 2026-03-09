@@ -3,6 +3,7 @@ Launchpad: FastAPI application for Dogme/Nextflow job execution.
 Receives job submissions from Cortex and manages pipeline execution.
 """
 import asyncio
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -306,12 +307,20 @@ async def submit_job(req: SubmitJobRequest):
                 project_id=req.project_id,
                 username=req.username,
                 project_slug=req.project_slug,
+                resume_from_dir=req.resume_from_dir,
             )
             
             # Update job with work directory info
             job.nextflow_work_dir = str(work_dir)
             job.status = JobStatus.RUNNING
             job.started_at = datetime.utcnow()
+            # Persist the Nextflow process PID for cancellation support
+            _pid_file = work_dir / ".nextflow_pid"
+            if _pid_file.exists():
+                try:
+                    job.nextflow_process_id = int(_pid_file.read_text().strip())
+                except (ValueError, OSError):
+                    pass
             await session.commit()
             
             # Start background monitoring task
@@ -391,6 +400,16 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         job = await get_job(session, run_uuid)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+        
+        # For terminal DB states, return directly without checking work dir
+        if job.status in (JobStatus.DELETED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+            return {
+                "run_uuid": run_uuid,
+                "status": job.status,
+                "progress_percent": 100 if job.status == JobStatus.COMPLETED else 0,
+                "message": job.error_message or f"Job {job.status.lower()}.",
+                "tasks": {},
+            }
         
         # Get detailed status including tasks from check_status
         executor = NextflowExecutor()
@@ -473,6 +492,7 @@ async def list_jobs(
 @app.post("/jobs/{run_uuid}/cancel")
 async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
     """Cancel a running job."""
+    import signal
     session = SessionLocal()
     
     try:
@@ -492,6 +512,40 @@ async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             if isinstance(task, asyncio.Task):
                 task.cancel()
         
+        # Kill the Nextflow process (SIGTERM for graceful cleanup)
+        _pid = job.nextflow_process_id
+        _process_killed = False
+        _kill_message = ""
+        if not _pid and job.nextflow_work_dir:
+            # Fallback: read PID from file
+            _pid_file = Path(job.nextflow_work_dir) / ".nextflow_pid"
+            if _pid_file.exists():
+                try:
+                    _pid = int(_pid_file.read_text().strip())
+                except (ValueError, OSError):
+                    _pid = None
+
+        if _pid:
+            try:
+                os.kill(_pid, signal.SIGTERM)
+                _process_killed = True
+                _kill_message = f"Job cancelled. Nextflow process (PID {_pid}) terminated."
+                logger.info("Killed Nextflow process", run_uuid=run_uuid, pid=_pid)
+            except ProcessLookupError:
+                _kill_message = "Job cancelled. Nextflow process had already exited."
+                logger.info("Nextflow process already exited", run_uuid=run_uuid, pid=_pid)
+            except PermissionError:
+                _kill_message = f"Job cancelled. Could not terminate process (PID {_pid}): permission denied."
+                logger.warning("Permission denied killing Nextflow process", run_uuid=run_uuid, pid=_pid)
+        else:
+            _kill_message = "Job cancelled. Could not find process to terminate (monitoring stopped)."
+
+        # Write cancellation marker so the process monitor doesn't
+        # overwrite this with .nextflow_failed when it sees exit code 143
+        if job.nextflow_work_dir:
+            _cancel_marker = Path(job.nextflow_work_dir) / ".nextflow_cancelled"
+            _cancel_marker.write_text(f"Cancelled at {datetime.utcnow().isoformat()}\n{_kill_message}\n")
+
         # Update status
         await update_job_status(session, run_uuid, JobStatus.CANCELLED)
         
@@ -499,12 +553,79 @@ async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             session,
             run_uuid,
             "WARNING",
-            "Job cancelled by user",
+            _kill_message,
             source="api",
         )
         
-        return {"status": "cancelled", "run_uuid": run_uuid}
+        return {
+            "status": "cancelled",
+            "run_uuid": run_uuid,
+            "message": _kill_message,
+            "process_killed": _process_killed,
+        }
     
+    finally:
+        await session.close()
+
+# --- DELETE JOB ---
+@app.delete("/jobs/{run_uuid}")
+async def delete_job(run_uuid: str = FastAPIPath(..., min_length=1)):
+    """Delete workflow folder for a terminal-state job and archive the DB record."""
+    import shutil
+    session = SessionLocal()
+
+    try:
+        job = await get_job(session, run_uuid)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        _terminal = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        if job.status not in _terminal:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot delete job with status {job.status}. "
+                       f"Only {', '.join(s.value for s in _terminal)} jobs can be deleted.",
+            )
+
+        _work_dir = Path(job.nextflow_work_dir) if job.nextflow_work_dir else None
+        _deleted_path = None
+        _folder_name = None
+        _file_count = 0
+
+        if _work_dir and _work_dir.exists():
+            _folder_name = _work_dir.name  # e.g. "workflow6"
+            # Count files before deleting
+            for _root, _dirs, _files in os.walk(_work_dir):
+                _file_count += len(_files)
+            shutil.rmtree(_work_dir)
+            _deleted_path = str(_work_dir)
+            logger.info("Deleted workflow folder", run_uuid=run_uuid,
+                        path=_deleted_path, files=_file_count)
+
+        # Archive the DB record
+        job.status = JobStatus.DELETED
+        job.report_json = None  # Free space
+        await session.commit()
+
+        await add_log_entry(
+            session, run_uuid, "WARNING",
+            f"Job data deleted. Folder {_folder_name or '(none)'} removed ({_file_count} files).",
+            source="api",
+        )
+
+        _msg = (
+            f"Workflow folder `{_folder_name}` deleted ({_file_count} files removed)."
+            if _deleted_path
+            else "Job archived (no workflow folder found on disk)."
+        )
+        return {
+            "status": "deleted",
+            "run_uuid": run_uuid,
+            "message": _msg,
+            "deleted_path": _deleted_path,
+            "file_count": _file_count,
+        }
+
     finally:
         await session.close()
 

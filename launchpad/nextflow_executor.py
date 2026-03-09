@@ -270,6 +270,7 @@ class NextflowExecutor:
         project_id: Optional[str] = None,
         username: Optional[str] = None,
         project_slug: Optional[str] = None,
+        resume_from_dir: Optional[str] = None,
     ) -> tuple[str, Path]:
         """
         Submit a Dogme/Nextflow job.
@@ -290,26 +291,45 @@ class NextflowExecutor:
             Tuple of (run_uuid, work_directory)
         """
         # Determine work directory:
+        #   Resume: reuse the previous workflow directory (with -resume flag)
         #   New: AGOUTIC_DATA/users/{username}/{project_slug}/workflow{N}/
         #   Fallback (legacy): AGOUTIC_DATA/users/{user_id}/{project_id}/{run_uuid}/
         #   Fallback (flat):   LAUNCHPAD_WORK_DIR/{run_uuid}/
-        if username and project_slug:
-            # Human-readable path — compute next workflow number
-            project_dir = AGOUTIC_DATA / "users" / username / project_slug
-            project_dir.mkdir(parents=True, exist_ok=True)
-            next_n = self._next_workflow_number(project_dir)
-            work_dir = project_dir / f"workflow{next_n}"
-            work_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Using workflow directory", work_dir=str(work_dir),
-                       username=username, project_slug=project_slug, workflow_n=next_n)
-        elif user_id and project_id:
-            work_dir = AGOUTIC_DATA / "users" / user_id / project_id / run_uuid
-            work_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Using jailed work directory (legacy UUID)", work_dir=str(work_dir),
-                       user_id=user_id, project_id=project_id)
-        else:
-            work_dir = self.work_dir / run_uuid
-            work_dir.mkdir(parents=True, exist_ok=True)
+        is_resume = False
+        if resume_from_dir:
+            resume_path = Path(resume_from_dir)
+            if resume_path.exists() and resume_path.is_dir():
+                work_dir = resume_path
+                is_resume = True
+                # Clean up old cancellation/failure markers so the run starts fresh
+                for marker in (".nextflow_cancelled", ".nextflow_failed", ".nextflow_running"):
+                    marker_file = work_dir / marker
+                    if marker_file.exists():
+                        marker_file.unlink()
+                logger.info("Resuming in existing workflow directory",
+                           work_dir=str(work_dir), run_uuid=run_uuid)
+            else:
+                logger.warning("resume_from_dir does not exist, creating new workflow dir",
+                              resume_from_dir=resume_from_dir)
+
+        if not is_resume:
+            if username and project_slug:
+                # Human-readable path — compute next workflow number
+                project_dir = AGOUTIC_DATA / "users" / username / project_slug
+                project_dir.mkdir(parents=True, exist_ok=True)
+                next_n = self._next_workflow_number(project_dir)
+                work_dir = project_dir / f"workflow{next_n}"
+                work_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Using workflow directory", work_dir=str(work_dir),
+                           username=username, project_slug=project_slug, workflow_n=next_n)
+            elif user_id and project_id:
+                work_dir = AGOUTIC_DATA / "users" / user_id / project_id / run_uuid
+                work_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Using jailed work directory (legacy UUID)", work_dir=str(work_dir),
+                           user_id=user_id, project_id=project_id)
+            else:
+                work_dir = self.work_dir / run_uuid
+                work_dir.mkdir(parents=True, exist_ok=True)
         
         # Setup input files based on entry point and input type
         if entry_point == "basecall":
@@ -522,6 +542,11 @@ class NextflowExecutor:
             "-with-trace", str(work_dir / f"{sample_name}_trace.txt"),
         ])
         
+        # Add -resume flag when resuming from a cancelled/failed job
+        if is_resume:
+            cmd.append("-resume")
+            logger.info("Adding -resume flag for job resumption", work_dir=str(work_dir))
+        
         # Validate prerequisites before attempting launch
         if not self.nextflow_bin.exists():
             raise RuntimeError(f"Nextflow binary not found at: {self.nextflow_bin}")
@@ -593,6 +618,10 @@ class NextflowExecutor:
                 success_marker = work_dir / ".nextflow_success"
                 success_marker.write_text(f"Completed at {datetime.utcnow().isoformat()}\n")
                 logger.info("Job completed successfully", run_uuid=run_uuid)
+            elif (work_dir / ".nextflow_cancelled").exists():
+                # Job was cancelled via the API — don't overwrite with FAILED
+                logger.info("Job was cancelled (SIGTERM), skipping failed marker",
+                            run_uuid=run_uuid, returncode=returncode)
             else:
                 failed_marker = work_dir / ".nextflow_failed"
                 error_file = work_dir / ".nextflow_error"
@@ -629,14 +658,40 @@ class NextflowExecutor:
         
         Returns dict with keys: status, progress_percent, message, tasks (optional)
         """
+        # If work directory was deleted (e.g. by delete-job API), report as DELETED
+        if not work_dir.exists():
+            return {
+                "status": JobStatus.DELETED,
+                "progress_percent": 0,
+                "message": "Workflow folder has been deleted.",
+                "tasks": {},
+            }
+
         # Check for completion markers
         success_marker = work_dir / ".nextflow_success"
         failed_marker = work_dir / ".nextflow_failed"
         running_marker = work_dir / ".nextflow_running"
         pid_file = work_dir / ".nextflow_pid"
         
+        cancelled_marker = work_dir / ".nextflow_cancelled"
+
         # Check completion markers first
-        if success_marker.exists():
+        if cancelled_marker.exists():
+            _cancel_detail = ""
+            try:
+                _cancel_detail = cancelled_marker.read_text().strip()
+            except OSError:
+                pass
+            # Second line of the marker contains the kill message
+            _cancel_lines = _cancel_detail.splitlines()
+            _cancel_msg = _cancel_lines[1] if len(_cancel_lines) > 1 else "Job was cancelled by user."
+            return {
+                "status": JobStatus.CANCELLED,
+                "progress_percent": 0,
+                "message": _cancel_msg,
+                "tasks": {},
+            }
+        elif success_marker.exists():
             # Parse final task summary from trace file
             completed_tasks = []
             total = 0

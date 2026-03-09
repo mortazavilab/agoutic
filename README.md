@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.1.2  
+**Version:** 3.2.0  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -111,7 +111,9 @@ python cortex/atlas_mcp_client.py
   - Chat interface with skill-based workflows
   - Coordinates Atlas, 3, and 4
   - Block-based project timeline
-  - Background job monitoring
+  - Background job monitoring with **stop/cancel** buttons
+  - **Download cancellation** with partial-file cleanup
+  - **Post-cancel workflow management** — Delete / Resubmit buttons on cancelled jobs; chat-based deletion via natural language
   - User authentication
   - Role-based authorization gates on all endpoints
   - Server-side project CRUD (`POST/GET/PATCH /projects`)
@@ -147,6 +149,10 @@ python cortex/atlas_mcp_client.py
   - Real-time job monitoring
   - Log streaming
   - User-jailed working directories
+  - **Job cancellation** — SIGTERM-based cancel with cooperative `.nextflow_cancelled` marker; properly displays CANCELLED (not FAILED) in UI
+  - **Workflow folder deletion** — DELETE endpoint removes work directory and sets status to DELETED; block status updated immediately so UI reflects deletion
+  - **Job resume** — resubmit cancelled/failed jobs with Nextflow `-resume` flag to reuse cached task results in the same workflow directory instead of starting fresh
+  - **`delete_job_data` MCP tool** — enables chat-based deletion ("delete workflow1")
 - **Docs:** [launchpad/README.md](launchpad/README.md)
 
 ### Analyzer: Analysis Engine (Port 8002)

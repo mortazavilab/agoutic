@@ -123,6 +123,57 @@ def get_user_home_dir(username: str) -> Path:
     return user_dir
 
 
+def get_user_data_dir(username: str) -> Path:
+    """
+    Get the central data directory for a user.
+
+    All downloaded, uploaded, and locally-intaked files live here once.
+    Individual projects reference them via symlinks.
+    Layout: AGOUTIC_DATA/users/{username}/data/
+    Creates the directory if it doesn't exist.
+    """
+    _validate_slug(username, "username")
+
+    data_dir = AGOUTIC_DATA / "users" / username / "data"
+    _ensure_within_jail(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def create_project_file_symlink(
+    username: str,
+    project_slug: str,
+    filename: str,
+    central_path: Path,
+) -> Path:
+    """
+    Create a symlink inside a project's data/ directory pointing to
+    a file in the user's central data folder.
+
+    Args:
+        username:      User slug
+        project_slug:  Project slug
+        filename:      Filename for the symlink (same basename)
+        central_path:  Absolute path to the real file in central data/
+
+    Returns:
+        The absolute path of the created symlink.
+    """
+    _validate_slug(username, "username")
+    _validate_slug(project_slug, "project_slug")
+
+    project_data_dir = AGOUTIC_DATA / "users" / username / project_slug / "data"
+    project_data_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_within_jail(project_data_dir)
+
+    symlink_path = project_data_dir / filename
+    # Remove existing symlink or file before creating
+    if symlink_path.is_symlink() or symlink_path.exists():
+        symlink_path.unlink()
+    symlink_path.symlink_to(central_path.resolve())
+    return symlink_path
+
+
 # ---------------------------------------------------------------------------
 # Legacy UUID-based paths (kept for backward compatibility)
 # ---------------------------------------------------------------------------

@@ -62,6 +62,7 @@ async def submit_dogme_job(
     per_mod: int | None = None,
     accuracy: str | None = None,
     max_gpu_tasks: int | None = None,
+    resume_from_dir: str | None = None,
 ) -> str:
     """Submit a DOGME job for processing. Input can be pod5, bam, or fastq files. Supports multiple reference genomes in parallel."""
     import uuid as _uuid
@@ -83,6 +84,7 @@ async def submit_dogme_job(
         per_mod=per_mod,
         accuracy=accuracy,
         max_gpu_tasks=max_gpu_tasks,
+        resume_from_dir=resume_from_dir,
     )
     return json.dumps(result, indent=2)
 
@@ -165,6 +167,16 @@ async def get_job_debug(
 ) -> str:
     """Get detailed debug information for troubleshooting a job."""
     result = await tools.get_job_debug(
+        run_uuid=run_uuid,
+    )
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
+async def delete_job_data(
+    run_uuid: str,
+) -> str:
+    """Delete the workflow folder and archive a completed, failed, or cancelled job."""
+    result = await tools.delete_job_data(
         run_uuid=run_uuid,
     )
     return json.dumps(result, indent=2)

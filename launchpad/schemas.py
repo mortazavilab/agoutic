@@ -20,6 +20,9 @@ class SubmitJobRequest(BaseModel):
     entry_point: Optional[str] = None  # Dogme entry point (e.g., "remap", "basecall")
     parent_block_id: Optional[str] = None
     
+    # Resume support
+    resume_from_dir: Optional[str] = None  # Path to previous workflow dir to resume with -resume
+
     # Advanced parameters (optional)
     modkit_filter_threshold: Optional[float] = 0.9  # Modification calling threshold
     min_cov: Optional[int] = None  # Minimum coverage (defaults: 1 for DNA, 3 for RNA/CDNA)

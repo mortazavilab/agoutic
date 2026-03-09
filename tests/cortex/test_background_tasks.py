@@ -462,7 +462,7 @@ class TestDownloadAfterApproval:
             mock_aio.create_task = MagicMock()
             await download_after_approval("proj-bg", gate.id)
 
-        # Should have used users/bguser/bg-proj/data as target
+        # Should have used users/bguser/data as central target
         sess = session_factory()
         dl_blocks = sess.query(ProjectBlock).filter(
             ProjectBlock.type == "DOWNLOAD_TASK"
@@ -470,7 +470,8 @@ class TestDownloadAfterApproval:
         assert len(dl_blocks) == 1
         dl_payload = get_block_payload(dl_blocks[0])
         assert "bguser" in dl_payload["target_dir"]
-        assert "bg-proj" in dl_payload["target_dir"]
+        # Central data folder — no project slug in the path
+        assert dl_payload["target_dir"].endswith("/data") or "/data" in dl_payload["target_dir"]
         sess.close()
         _active_downloads.clear()
 

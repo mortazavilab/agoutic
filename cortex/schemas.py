@@ -71,3 +71,43 @@ class BlockStreamOut(BaseModel):
 class BlockUpdate(BaseModel):
     status: Optional[str] = None
     payload: Optional[Any] = None
+
+
+# ==================== User Data / Central File Schemas ====================
+
+class UserFileOut(BaseModel):
+    """Response model for a file in the user's central data folder."""
+    id: str
+    filename: str
+    md5_hash: Optional[str] = None
+    size_bytes: Optional[int] = None
+    source: str
+    source_url: Optional[str] = None
+    encode_accession: Optional[str] = None
+    sample_name: Optional[str] = None
+    organism: Optional[str] = None
+    tissue: Optional[str] = None
+    tags: Optional[dict] = None
+    disk_path: str
+    created_at: str
+    updated_at: str
+    # populated at query time
+    projects: list[dict] = Field(default_factory=list)  # [{"project_id": ..., "project_name": ...}]
+
+
+class UserFileUpdate(BaseModel):
+    """Partial update for user file metadata."""
+    sample_name: Optional[str] = None
+    organism: Optional[str] = None
+    tissue: Optional[str] = None
+    tags: Optional[dict] = None
+
+
+class UserFileLinkRequest(BaseModel):
+    """Request to link a central file to a project."""
+    project_id: str
+
+
+class UserFileRedownloadRequest(BaseModel):
+    """Request to force re-download a file from its original source."""
+    force: bool = True

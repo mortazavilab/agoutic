@@ -21,14 +21,17 @@ This is a unified entry point for analyzing local data. It acts as an intake wiz
 
 ## Running Dogme from Downloaded BAM Files
 
-When users have **downloaded BAM files** (e.g., from ENCODE) in their project's `data/` directory, Dogme can run starting from the **remap** stage instead of the full pipeline:
+When users have **downloaded BAM files** (e.g., from ENCODE), those files live in the
+user's **central data folder** (`AGOUTIC_DATA/users/{username}/data/`) and are
+symlinked into the project's `data/` directory.  Dogme can run starting from the
+**remap** stage instead of the full pipeline:
 
-1. **Input**: BAM files in `projectdir/data/` (the default download location)
+1. **Input**: BAM files in `projectdir/data/` (symlinks to the central data folder)
 2. **Symlink**: The system automatically symlinks the BAM into the workflow's `bams/` folder as `{sample_name}.unmapped.bam`
 3. **Entry point**: The pipeline runs with `-entry remap`, skipping basecalling
 4. **Detection**: If the user mentions "downloaded BAM", "from BAM", "BAM files in data", or provides a `.bam` path, the system automatically sets `input_type=bam` and `entry_point=remap`
 
-**If the user has BAM files but no explicit path**, the system resolves the project's `data/` directory automatically.
+**If the user has BAM files but no explicit path**, the system resolves the project's `data/` directory automatically (which contains symlinks to the real files).
 
 **Example:**
 ```

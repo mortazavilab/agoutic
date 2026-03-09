@@ -14,7 +14,7 @@ import json
 import uuid
 
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -22,7 +22,7 @@ from sqlalchemy.pool import StaticPool
 
 from cortex.models import (
     Base, User, Session as SessionModel, Project, ProjectAccess,
-    ProjectBlock,
+    ProjectBlock, UserFile, UserFileProjectLink,
 )
 from cortex.app import app, _active_downloads
 
@@ -86,18 +86,28 @@ def seed_data(session_factory):
 def client(session_factory, seed_data, tmp_path):
     # Clean any leftover active downloads from other tests
     _active_downloads.clear()
+
+    # Return (username, slug, project_dir) for the test user/project
+    _mock_resolve = MagicMock(return_value=("dluser", "dl-project", tmp_path / "proj"))
+
     with patch("cortex.db.SessionLocal", session_factory), \
          patch("cortex.app.SessionLocal", session_factory), \
          patch("cortex.dependencies.SessionLocal", session_factory), \
          patch("cortex.middleware.SessionLocal", session_factory), \
          patch("cortex.config.AGOUTIC_DATA", tmp_path), \
          patch("cortex.user_jail.AGOUTIC_DATA", tmp_path), \
+         patch("cortex.routes.files._resolve_user_and_project", _mock_resolve), \
+         patch("cortex.routes.files.get_user_data_dir", return_value=tmp_path / "users" / "dluser" / "data"), \
+         patch("cortex.routes.files.create_project_file_symlink", side_effect=lambda u, s, fn, cp: tmp_path / "proj" / "data" / fn), \
          patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"), \
          patch("cortex.db_helpers._resolve_project_dir", return_value=tmp_path / "proj"), \
          patch("cortex.app.asyncio"), \
          patch("cortex.routes.files.asyncio") as mock_asyncio:
         # Prevent actual background tasks from running
         mock_asyncio.create_task = lambda coro: None
+        # Ensure central data dir exists
+        (tmp_path / "users" / "dluser" / "data").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "proj" / "data").mkdir(parents=True, exist_ok=True)
         c = TestClient(app, raise_server_exceptions=False)
         c.cookies.set("session", "dl-session")
         yield c
@@ -235,7 +245,6 @@ class TestCancelDownload:
 # ---------------------------------------------------------------------------
 class TestUploadFile:
     def test_basic_upload(self, client, tmp_path):
-        (tmp_path / "proj" / "data").mkdir(parents=True, exist_ok=True)
         resp = client.post(
             "/projects/proj-dl/upload",
             files={"file1": ("sample.bam", b"fake bam content", "application/octet-stream")},
@@ -247,7 +256,6 @@ class TestUploadFile:
         assert data["uploaded"][0]["size_bytes"] == len(b"fake bam content")
 
     def test_multiple_upload(self, client, tmp_path):
-        (tmp_path / "proj" / "data").mkdir(parents=True, exist_ok=True)
         resp = client.post(
             "/projects/proj-dl/upload",
             files=[
@@ -259,7 +267,6 @@ class TestUploadFile:
         assert resp.json()["count"] == 2
 
     def test_filename_sanitized(self, client, tmp_path):
-        (tmp_path / "proj" / "data").mkdir(parents=True, exist_ok=True)
         resp = client.post(
             "/projects/proj-dl/upload",
             files={"f": ("my file (1).bam", b"data", "application/octet-stream")},
@@ -278,15 +285,13 @@ class TestUploadFile:
         assert resp.status_code == 422
 
     def test_file_written_to_disk(self, client, tmp_path):
-        data_dir = tmp_path / "proj" / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
         content = b"Real file content here"
         resp = client.post(
             "/projects/proj-dl/upload",
             files={"f": ("test.txt", content, "text/plain")},
         )
         assert resp.status_code == 200
-        # Verify file actually exists on disk
-        written = data_dir / "test.txt"
-        assert written.exists()
-        assert written.read_bytes() == content
+        # File should be written to central data dir
+        central = tmp_path / "users" / "dluser" / "data" / "test.txt"
+        assert central.exists()
+        assert central.read_bytes() == content

@@ -45,6 +45,7 @@ class LaunchpadMCPTools:
         user_id: Optional[str] = None,
         username: Optional[str] = None,
         project_slug: Optional[str] = None,
+        resume_from_dir: Optional[str] = None,
     ) -> dict:
         """
         Submit a Dogme/Nextflow analysis job to Launchpad.
@@ -107,6 +108,8 @@ class LaunchpadMCPTools:
             payload["username"] = username
         if project_slug is not None:
             payload["project_slug"] = project_slug
+        if resume_from_dir is not None:
+            payload["resume_from_dir"] = resume_from_dir
         
         try:
             async with httpx.AsyncClient() as client:
@@ -400,6 +403,39 @@ class LaunchpadMCPTools:
         except Exception as e:
             raise RuntimeError(f"Failed to get logs: {str(e)}")
 
+    async def delete_job_data(
+        self,
+        run_uuid: str,
+    ) -> dict:
+        """
+        Delete the workflow folder and archive the DB record for a completed,
+        failed, or cancelled job.
+
+        Args:
+            run_uuid: The job UUID
+
+        Returns:
+            {"status": "deleted", "run_uuid": str, "message": str, "deleted_path": str|None, "file_count": int}
+
+        Raises:
+            Exception: If job not found or still running
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(
+                    f"{self.server_url}/jobs/{run_uuid}",
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                )
+                if response.status_code == 404:
+                    raise RuntimeError(f"Job {run_uuid} not found")
+                if response.status_code == 400:
+                    raise RuntimeError(response.json().get("detail", "Cannot delete job"))
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to delete job data: {str(e)}")
+
     async def get_job_debug(
         self,
         run_uuid: str,
@@ -552,6 +588,17 @@ TOOL_REGISTRY = {
             "type": "object",
             "properties": {
                 "run_uuid": {"type": "string", "description": "Job UUID"},
+            },
+            "required": ["run_uuid"],
+        }
+    },
+    "delete_job_data": {
+        "description": "Delete the workflow folder and archive a completed, failed, or cancelled job. Use when the user asks to delete or clean up a workflow/job.",
+        "tool_function": "delete_job_data",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_uuid": {"type": "string", "description": "Job UUID to delete"},
             },
             "required": ["run_uuid"],
         }

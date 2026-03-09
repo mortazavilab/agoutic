@@ -4,6 +4,11 @@
 
 This skill handles **downloading and processing ENCODE long-read sequencing data** through the Dogme pipeline. Long-read experiments include direct RNA sequencing, long-read RNA-seq, and whole-genome nanopore sequencing.
 
+Downloaded ENCODE files are stored in the user's **central data folder**
+(`AGOUTIC_DATA/users/{username}/data/`) and symlinked into the project.
+If the same ENCFF file has already been downloaded, the download is skipped
+automatically. Users can force a re-download from the **My Data** UI page.
+
 **Long-read experiments do NOT have targets** (no ChIP-seq, no TF binding). They produce raw sequencing reads (pod5, fastq) that need basecalling, alignment, and analysis.
 
 ## When to Use This Skill

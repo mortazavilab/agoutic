@@ -6,7 +6,11 @@ This skill handles **downloading files** into the user's project from two source
 1. **ENCODE files** — given an experiment accession and file type, resolve URLs via Atlas and download.
 2. **Arbitrary URLs** — direct HTTP/HTTPS links to files.
 
-Files are saved into `AGOUTIC_DATA/users/{username}/{project_slug}/data/` (or a user-specified subfolder).
+Files are saved into the user's **central data folder** at
+`AGOUTIC_DATA/users/{username}/data/` and symlinked into the project's
+`data/` directory.  If the identical file already exists (same name + MD5),
+the download is skipped and a symlink is created automatically.  Users can
+force a re-download from the **My Data** UI page if needed.
 
 After downloads complete, the skill suggests next steps based on file types.
 
@@ -173,4 +177,5 @@ You need to set a username before downloading files. Please set one in your prof
 3. **Let the user choose** which file types to download — don't auto-select.
 4. **Show file sizes** whenever available so the user knows what to expect.
 5. **After download, suggest next steps** based on file types (Dogme, dataframes, etc.).
-6. **Files go into data/** by default under the user's project directory.
+6. **Files go into the user's central data folder** and are symlinked into the project's `data/`.  Duplicate downloads are automatically skipped.
+7. **Re-downloads** require explicit user authorisation from the My Data page.

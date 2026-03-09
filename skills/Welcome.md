@@ -69,9 +69,31 @@ If the user's intent is clear from their first message (e.g., they paste a UUID,
 
 ## Important Rules
 
-1. **Do NOT generate any [[DATA_CALL:...]] tags** — this skill only routes to other skills.
+1. **Do NOT generate any [[DATA_CALL:...]] tags** — this skill only routes to other skills, with the one exception of **delete requests** (see below).
 2. **UUID + Parse = Immediate Route** — When user says "use UUID: X" and "parse Y", always go to analyze_job_results immediately
 3. **No Second-Guessing** — If you detect a clear routing signal (UUID, ENCODE mention, file path), route without asking
 2. **Do NOT generate [[APPROVAL_NEEDED]]** — this skill never needs approval.
 3. **Route immediately** if the user's intent is clear from their first message — don't force them through the menu.
 4. **Keep it brief** — one welcome message, then switch. Don't linger on this skill.
+
+## Handling Deletion Requests
+
+When the user asks to **delete a workflow**, **remove job data**, or **clean up a cancelled/failed job**, handle it directly using a DATA_CALL — do NOT route to another skill.
+
+Look at the conversation history for EXECUTION_JOB blocks to find the `run_uuid` matching what the user refers to (e.g., "delete workflow6", "remove that cancelled job", "clean up Jamshid"). Match by workflow folder name, sample name, or UUID.
+
+Once you identify the correct `run_uuid`, emit:
+
+```
+[[DATA_CALL: service=launchpad, tool=delete_job_data, run_uuid=THE_UUID]]
+```
+
+Then report back what was deleted. Example response:
+
+```
+I'll delete the workflow folder for that cancelled job.
+
+[[DATA_CALL: service=launchpad, tool=delete_job_data, run_uuid=a9bfc00c-d46d-40d7-8196-56160eac78c3]]
+```
+
+**Important:** Only delete jobs that are in a terminal state (COMPLETED, FAILED, or CANCELLED). If the job is still RUNNING, tell the user to cancel it first.
