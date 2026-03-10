@@ -1,5 +1,29 @@
 # Changelog - March 2026
 
+## [3.3.0] - 2026-03-09
+
+### Features — Universal Cancel & User Data
+
+- **Download cancel button** — new "🛑 Cancel Download" button appears on all
+  running `DOWNLOAD_TASK` blocks. Calls `DELETE /projects/{pid}/downloads/{did}`
+  to set the `cancelled` flag; the background streaming task checks this flag
+  every 64 KB chunk, deletes partial files, and updates the block to CANCELLED.
+  Handles stale downloads (server restart) gracefully with a 404 warning instead
+  of crashing.
+
+- **"List my data" chat command** — users can now say "list my data",
+  "list my files", "show my data", or "what files do I have" in the chat to
+  see all files in their central data folder. The feature queries the
+  `user_files` DB table first (rich metadata: source, accession, sample name),
+  with a disk-scan fallback for files not yet registered in the DB.
+  Results are rendered as a markdown table directly — no LLM round-trip needed.
+
+- **Improved skill routing** — `_auto_detect_skill_switch()` now routes
+  "list files", "show files", "list workflows" to `analyze_job_results` for
+  job file browsing, while "list my data" / "list my files" are handled
+  directly by the user-data override in the chat handler (no skill switch).
+  Welcome.md updated with file-browsing routing signals.
+
 ## [3.2.0] - 2026-03-09
 
 ### Features — Job Lifecycle Management

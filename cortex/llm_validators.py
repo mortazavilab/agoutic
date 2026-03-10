@@ -203,6 +203,8 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
         "analyse the result", "analyse results",
         "view the result", "view results", "show result",
         "job results", "the results", "see the result",
+        "list files", "show files",
+        "list workflow", "list workflows", "show workflow",
     ]
     if current_skill != "analyze_job_results":
         if any(w in msg_lower for w in _results_words):

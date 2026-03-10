@@ -134,6 +134,33 @@ class TestAnalyzeJobResults:
         result = _auto_detect_skill_switch("analyze results", "analyze_job_results")
         assert result is None
 
+    def test_list_files(self):
+        result = _auto_detect_skill_switch("list files", "welcome")
+        assert result == "analyze_job_results"
+
+    def test_list_workflows(self):
+        result = _auto_detect_skill_switch("list workflows", "welcome")
+        assert result == "analyze_job_results"
+
+    def test_show_files(self):
+        result = _auto_detect_skill_switch("show files", "welcome")
+        assert result == "analyze_job_results"
+
+    def test_list_my_data_no_skill_switch(self):
+        """'list my data' is handled directly in chat handler, not via skill routing."""
+        result = _auto_detect_skill_switch("list my data", "welcome")
+        assert result is None
+
+    def test_list_my_files_no_skill_switch(self):
+        """'list my files' is handled directly in chat handler, not via skill routing."""
+        result = _auto_detect_skill_switch("list my files", "welcome")
+        assert result is None
+
+    def test_what_files_no_skill_switch(self):
+        """'what files do I have' is handled directly in chat handler, not via skill routing."""
+        result = _auto_detect_skill_switch("what files do I have?", "welcome")
+        assert result is None
+
 
 class TestDownloadFiles:
     """Tests for routing to download_files skill."""

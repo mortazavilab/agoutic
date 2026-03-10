@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.0  
+**Version:** 3.3.0  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -112,7 +112,8 @@ python cortex/atlas_mcp_client.py
   - Coordinates Atlas, 3, and 4
   - Block-based project timeline
   - Background job monitoring with **stop/cancel** buttons
-  - **Download cancellation** with partial-file cleanup
+  - **Download cancel button** — "🛑 Cancel Download" on running downloads with partial-file cleanup
+  - **"List my data" command** — chat-based central data folder listing (DB + disk fallback)
   - **Post-cancel workflow management** — Delete / Resubmit buttons on cancelled jobs; chat-based deletion via natural language
   - User authentication
   - Role-based authorization gates on all endpoints
@@ -176,6 +177,7 @@ python cortex/atlas_mcp_client.py
   └── workflow2/         # Second job's output
   ```
 - **Agent Commands** (handled automatically by Cortex's safety net):
+  - `list my data` / `list my files` — lists all files in your central data folder
   - `list workflows` — lists all workflow folders in the project
   - `list files` / `list files in workflow2/annot` — lists files in a workflow or subfolder
   - `parse annot/File.csv` — finds and parses a file by relative path

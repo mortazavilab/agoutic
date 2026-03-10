@@ -1650,6 +1650,26 @@ def render_block(block, expected_project_id: str = ""):
                 else:
                     st.info(f"⬇️ **Downloading** ({downloaded}/{total} files) — `{cur}`")
                     st.progress(downloaded / max(total, 1))
+
+                # Cancel download button
+                _dl_id = content.get("download_id")
+                if _dl_id:
+                    if st.button("🛑 Cancel Download", type="primary", key=f"cancel_dl_{block_id}"):
+                        try:
+                            _cancel_resp = make_authenticated_request(
+                                "DELETE",
+                                f"{API_URL}/projects/{active_id}/downloads/{_dl_id}",
+                                timeout=15,
+                            )
+                            if _cancel_resp.status_code == 200:
+                                st.success("Download cancellation requested.")
+                                st.rerun()
+                            elif _cancel_resp.status_code == 404:
+                                st.warning("Download not found — it may have already finished or the server was restarted.")
+                            else:
+                                st.error(f"Cancel failed: {_cancel_resp.status_code} — {_cancel_resp.text[:200]}")
+                        except Exception as _ce:
+                            st.error(f"Error cancelling download: {_ce}")
             elif dl_status == "DONE":
                 mb = round(total_bytes / (1024 * 1024), 2) if total_bytes else 0
                 st.success(f"✅ **Download complete** — {downloaded} file(s), {mb} MB")

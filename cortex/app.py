@@ -19,7 +19,7 @@ from cortex.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from cortex.agent_engine import AgentEngine
 from cortex.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES, AGOUTIC_DATA
 from cortex.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
-from cortex.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess, Project
+from cortex.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess, Project, UserFile
 from cortex.middleware import AuthMiddleware
 
 # --- VERSION (single source of truth: VERSION file at repo root) ---
@@ -2450,6 +2450,102 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         _msg_lower = req.message.lower()
         _has_referential = any(w in _msg_lower for w in _ref_words)
 
+        # --- User-data listing override ---
+        # "list my data", "list my files", "show my data", etc. query the
+        # user's central data folder, not job outputs.  Detect this BEFORE
+        # the browsing-command override to avoid mis-routing to analyzer.
+        _is_user_data_override = False
+        _user_data_patterns = [
+            r'\b(?:list|show|what)\s+(?:my\s+)?(?:data|data\s+files?)\b',
+            r'\b(?:list|show)\s+my\s+files?\b',
+            r'\bwhat\s+(?:data\s+)?files?\s+do\s+I\s+have\b',
+        ]
+        if any(re.search(p, _msg_lower) for p in _user_data_patterns):
+            _emit_progress(req.request_id, "tools", "Listing your data files...")
+            _ud_session = SessionLocal()
+            _ud_file_count = 0
+            try:
+                _ud_rows = _ud_session.execute(
+                    select(UserFile)
+                    .where(UserFile.user_id == user.id)
+                    .order_by(UserFile.filename)
+                ).scalars().all()
+                if _ud_rows:
+                    _ud_file_count = len(_ud_rows)
+                    _ud_lines = [f"📂 **Your Data Files** ({_ud_file_count} file{'s' if _ud_file_count != 1 else ''})\n"]
+                    _ud_lines.append("| File | Size | Source | Accession | Sample | Added |")
+                    _ud_lines.append("|------|------|--------|-----------|--------|-------| ")
+                    for _uf in _ud_rows:
+                        _sz = _uf.size_bytes or 0
+                        if _sz >= 1024 * 1024 * 1024:
+                            _sz_str = f"{_sz / (1024**3):.2f} GB"
+                        elif _sz >= 1024 * 1024:
+                            _sz_str = f"{_sz / (1024**2):.1f} MB"
+                        elif _sz > 0:
+                            _sz_str = f"{_sz / 1024:.0f} KB"
+                        else:
+                            _sz_str = "—"
+                        _src = _uf.source or "—"
+                        _acc = _uf.encode_accession or "—"
+                        _samp = _uf.sample_name or "—"
+                        _date = str(_uf.created_at)[:10] if _uf.created_at else "—"
+                        _ud_lines.append(
+                            f"| `{_uf.filename}` | {_sz_str} | {_src} | {_acc} | {_samp} | {_date} |"
+                        )
+                    clean_markdown = "\n".join(_ud_lines)
+                else:
+                    # DB has no records — fall back to scanning disk
+                    _disk_files = []
+                    if hasattr(user, "username") and user.username:
+                        try:
+                            from cortex.user_jail import get_user_data_dir
+                            _data_dir = get_user_data_dir(user.username)
+                            if _data_dir.is_dir():
+                                _disk_files = sorted([
+                                    f for f in _data_dir.iterdir()
+                                    if f.is_file() and not f.name.startswith(".")
+                                ])
+                        except Exception:
+                            pass
+                    if _disk_files:
+                        _ud_file_count = len(_disk_files)
+                        _ud_lines = [f"📂 **Your Data Files** ({_ud_file_count} file{'s' if _ud_file_count != 1 else ''})\n"]
+                        _ud_lines.append("| File | Size |")
+                        _ud_lines.append("|------|------|")
+                        for _df in _disk_files:
+                            _sz = _df.stat().st_size
+                            if _sz >= 1024 * 1024 * 1024:
+                                _sz_str = f"{_sz / (1024**3):.2f} GB"
+                            elif _sz >= 1024 * 1024:
+                                _sz_str = f"{_sz / (1024**2):.1f} MB"
+                            elif _sz > 0:
+                                _sz_str = f"{_sz / 1024:.0f} KB"
+                            else:
+                                _sz_str = "—"
+                            _ud_lines.append(f"| `{_df.name}` | {_sz_str} |")
+                        clean_markdown = "\n".join(_ud_lines)
+                    else:
+                        clean_markdown = (
+                            "📂 **Your Data Files**\n\n"
+                            "No data files found yet. You can download files from ENCODE "
+                            "or upload your own to get started."
+                        )
+            finally:
+                _ud_session.close()
+            _is_user_data_override = True
+            # Suppress LLM-generated tags — we have the answer
+            data_call_matches = []
+            legacy_encode_matches = []
+            legacy_analysis_matches = []
+            has_any_tags = False
+            needs_approval = False
+            plot_specs = []
+            _injected_dfs = {}
+            _injected_previous_data = False
+            auto_calls = []
+            logger.info("User-data listing override: showing central data files",
+                       file_count=_ud_file_count)
+
         # --- Browsing-command override ---
         # "list workflows", "list files", etc. must always route to analyzer,
         # regardless of the active skill.  When the skill is ENCODE_Search the
@@ -2460,7 +2556,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
             r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',
             r'\b(?:list|show)\s+(?:the\s+)?(?:project\s+)?files?\b',
         ]
-        if any(re.search(p, _msg_lower) for p in _browsing_patterns):
+        if not _is_user_data_override and any(re.search(p, _msg_lower) for p in _browsing_patterns):
             _browse_calls = _auto_generate_data_calls(
                 req.message, active_skill,
                 conversation_history, history_blocks=history_blocks,
@@ -2489,7 +2585,7 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     skill=active_skill, calls=len(auto_calls),
                 )
 
-        if not _is_browsing_override and not has_any_tags and (not _injected_previous_data or _injected_was_capped):
+        if not _is_user_data_override and not _is_browsing_override and not has_any_tags and (not _injected_previous_data or _injected_was_capped):
             # Case 1: LLM produced no tags at all — auto-generate
             auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history,
                                                      history_blocks=history_blocks,

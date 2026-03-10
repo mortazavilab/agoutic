@@ -27,7 +27,7 @@ What would you like to do?
 
 Based on the user's answer, switch to the appropriate skill:
 
-**Analyzing an existing completed job** (mentions "use UUID", "UUID:", "parse", "analyze results", "job results", "check results", "completed job", or option 4):
+**Analyzing an existing completed job or browsing files** (mentions "use UUID", "UUID:", "parse", "analyze results", "job results", "check results", "completed job", "list files", "list data", "show files", "show my files", "list workflows", or option 4):
 ```
 [[SKILL_SWITCH_TO: analyze_job_results]]
 ```
