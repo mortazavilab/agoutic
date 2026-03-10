@@ -1,6 +1,6 @@
 # Changelog - March 2026
 
-## [3.3.0] - 2026-03-09
+## [3.1.3] - 2026-03-09
 
 ### Features — Universal Cancel & User Data
 
@@ -24,7 +24,7 @@
   directly by the user-data override in the chat handler (no skill switch).
   Welcome.md updated with file-browsing routing signals.
 
-## [3.2.0] - 2026-03-09
+## [3.1.2] - 2026-03-09
 
 ### Features — Job Lifecycle Management
 
