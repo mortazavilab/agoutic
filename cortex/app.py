@@ -192,6 +192,96 @@ class ChatCancelled(Exception):
         self.detail = detail
         super().__init__(f"Chat cancelled at stage={stage}: {detail}")
 
+
+def _detect_prompt_request(message: str) -> str | None:
+    """Detect whether the user is asking to inspect the current system prompt."""
+    msg = (message or "").lower()
+    prompt_phrases = [
+        "system prompt",
+        "current prompt",
+        "your prompt",
+        "show prompt",
+        "show me the prompt",
+        "show me your prompt",
+        "show me the system prompt",
+        "what is your system prompt",
+        "report your system prompt",
+    ]
+    if not any(phrase in msg for phrase in prompt_phrases):
+        return None
+
+    if any(phrase in msg for phrase in ["first pass", "first-pass", "planning prompt", "planning system prompt"]):
+        return "first_pass"
+    if any(phrase in msg for phrase in ["second pass", "second-pass", "analysis prompt", "summary prompt"]):
+        return "second_pass"
+    return "ambiguous"
+
+
+def _format_prompt_report(prompt_type: str, skill_key: str, model_name: str, prompt_text: str) -> str:
+    """Format a rendered prompt for chat display without losing its exact text."""
+    label = "First-pass system prompt" if prompt_type == "first_pass" else "Second-pass system prompt"
+    return (
+        f"### {label}\n\n"
+        f"- Skill: **{skill_key}**\n"
+        f"- Model: **{model_name}**\n\n"
+        "`````text\n"
+        f"{prompt_text}\n"
+        "`````"
+    )
+
+
+async def _create_prompt_response(
+    session,
+    req: ChatRequest,
+    user_block,
+    user_id: str,
+    active_skill: str,
+    model_name: str,
+    markdown: str,
+    prompt_type: str | None = None,
+):
+    """Create a deterministic AGENT_PLAN response for prompt inspection or clarification."""
+    payload = {
+        "markdown": markdown,
+        "skill": active_skill or req.skill or "welcome",
+        "model": model_name,
+        "tokens": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "model": model_name,
+        },
+        "_debug": {
+            "prompt_inspection": True,
+            "prompt_type": prompt_type,
+            "requested_skill": req.skill,
+            "active_skill": active_skill,
+        },
+    }
+    agent_block = _create_block_internal(
+        session,
+        req.project_id,
+        "AGENT_PLAN",
+        payload,
+        status="DONE",
+        owner_id=user_id,
+    )
+    await save_conversation_message(
+        session,
+        req.project_id,
+        user_id,
+        "assistant",
+        markdown,
+        token_data=payload["tokens"],
+        model_name=model_name,
+    )
+    return {
+        "status": "ok",
+        "user_block": row_to_dict(user_block),
+        "agent_block": row_to_dict(agent_block),
+        "gate_block": None,
+    }
+
 def _emit_progress(request_id: str, stage: str, detail: str = ""):
     """Record a processing stage for a chat request."""
     if not request_id:
@@ -1912,6 +2002,46 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                 "agent_block": row_to_dict(agent_block),
                 "gate_block": None
             }
+
+        prompt_request = _detect_prompt_request(req.message)
+        if prompt_request:
+            if prompt_request == "ambiguous":
+                clarification = (
+                    "I can show either the first-pass planning prompt or the second-pass analysis prompt. "
+                    "Ask for \"first-pass system prompt\" or \"second-pass system prompt\"."
+                )
+                return await _create_prompt_response(
+                    session,
+                    req,
+                    user_block,
+                    user.id,
+                    active_skill,
+                    req.model or "default",
+                    clarification,
+                    prompt_type="ambiguous",
+                )
+
+            engine = AgentEngine(model_key=req.model)
+            rendered_prompt = engine.render_system_prompt(
+                skill_key=active_skill,
+                prompt_type=prompt_request,
+            )
+            markdown = _format_prompt_report(
+                prompt_request,
+                active_skill,
+                engine.model_name,
+                rendered_prompt,
+            )
+            return await _create_prompt_response(
+                session,
+                req,
+                user_block,
+                user.id,
+                active_skill,
+                engine.model_name,
+                markdown,
+                prompt_type=prompt_request,
+            )
         
         # Build conversation history for the LLM
         # Get all USER_MESSAGE and AGENT_PLAN blocks for this project

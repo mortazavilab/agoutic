@@ -253,21 +253,30 @@ from cortex.agent_engine import AgentEngine
 # Initialize agent with a specific model
 agent = AgentEngine(model_key="default")
 
-# Load skill and create system prompt
-skill_prompt = agent.construct_system_prompt("Dogme_DNA")
+# Load skill and create the rendered first-pass system prompt
+skill_prompt = agent.construct_system_prompt("run_dogme_dna")
 
-# Chat with agent
-response = agent.chat(
-    user_message="Analyze DNA sample",
-    system_prompt=skill_prompt,
-    conversation_history=[...]
+# Inspect the currently rendered prompt without calling the LLM
+prompt_preview = agent.render_system_prompt("run_dogme_dna", "first_pass")
+
+# Run the first-pass planning call
+response, usage = agent.think(
+  user_message="Analyze DNA sample",
+  skill_key="run_dogme_dna",
+  conversation_history=[...]
 )
 ```
 
 **Key Methods:**
-- `construct_system_prompt(skill_key)` - Build system prompt from skill; now includes tool parameter contracts and error-handling playbook
-- `chat(message, system_prompt, history)` - LLM interaction
+- `construct_system_prompt(skill_key)` - Render the first-pass planning prompt from Markdown templates plus dynamic skill/tool sections
+- `construct_analysis_prompt()` - Render the second-pass analysis prompt from its Markdown template
+- `render_system_prompt(skill_key, prompt_type)` - Return the exact rendered first-pass or second-pass prompt for inspection
+- `think(message, skill_key, history)` - First-pass LLM interaction
 - `_load_skill_text(skill_key)` - Load skill definition
+
+**Prompt templates:**
+- `cortex/prompt_templates/first_pass_system_prompt.md` - First-pass planning prompt template
+- `cortex/prompt_templates/second_pass_system_prompt.md` - Second-pass analysis prompt template
 
 ### 2. Tool Contracts (`tool_contracts.py`)
 

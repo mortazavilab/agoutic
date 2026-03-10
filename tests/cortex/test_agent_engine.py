@@ -112,6 +112,33 @@ class TestConstructSystemPrompt:
         prompt = engine.construct_system_prompt("welcome")
         assert "PLOT" in prompt
 
+    def test_first_pass_prompt_requires_identifier_fidelity(self):
+        engine = AgentEngine("default")
+        prompt = engine.construct_system_prompt("ENCODE_Search")
+        assert "IDENTIFIER FIDELITY" in prompt
+        assert "you MUST copy that exact text unchanged" in prompt
+
+    def test_second_pass_prompt_has_summary_rules(self):
+        engine = AgentEngine("default")
+        prompt = engine.construct_analysis_prompt()
+        assert "The full raw data table is ALREADY displayed" in prompt
+        assert "Do NOT output [[DATA_CALL:...]]" in prompt
+        assert "Identifier fidelity is mandatory" in prompt
+        assert "When the user asks about a specific accession" in prompt
+        assert "Do NOT replace it with a different accession" in prompt
+
+    def test_render_system_prompt_routes_by_type(self):
+        engine = AgentEngine("default")
+        first_pass = engine.render_system_prompt("welcome", "first_pass")
+        second_pass = engine.render_system_prompt("welcome", "second_pass")
+        assert "YOUR CURRENT SKILL: welcome" in first_pass
+        assert "You previously executed data queries" in second_pass
+
+    def test_invalid_prompt_type_raises(self):
+        engine = AgentEngine("default")
+        with pytest.raises(ValueError, match="Unknown prompt_type"):
+            engine.render_system_prompt("welcome", "invalid")
+
 
 # ---------------------------------------------------------------------------
 # AgentEngine.think — with mocked OpenAI client

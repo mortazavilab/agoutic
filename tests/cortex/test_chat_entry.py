@@ -129,9 +129,13 @@ def client(session_factory, seed_user, tmp_path):
          patch("cortex.app.AgentEngine") as MockEngine:
         inst = MockEngine.return_value
         inst.model_name = "test-model"
-        inst.think = _mock_think
+        inst.think = MagicMock(side_effect=_mock_think)
+        inst.render_system_prompt = MagicMock(
+            side_effect=lambda skill_key, prompt_type: f"Rendered {prompt_type} prompt for {skill_key}"
+        )
         c = TestClient(app, raise_server_exceptions=False)
         c.cookies.set("session", "chat-session")
+        c.mock_engine = inst
         yield c
 
 
@@ -147,9 +151,13 @@ def admin_client(session_factory, seed_admin, tmp_path):
          patch("cortex.app.AgentEngine") as MockEngine:
         inst = MockEngine.return_value
         inst.model_name = "test-model"
-        inst.think = _mock_think
+        inst.think = MagicMock(side_effect=_mock_think)
+        inst.render_system_prompt = MagicMock(
+            side_effect=lambda skill_key, prompt_type: f"Rendered {prompt_type} prompt for {skill_key}"
+        )
         c = TestClient(app, raise_server_exceptions=False)
         c.cookies.set("session", "admin-session")
+        c.mock_engine = inst
         yield c
 
 
@@ -205,6 +213,44 @@ class TestCapabilitiesResponse:
         assert resp.status_code == 200
         payload = resp.json()["agent_block"]["payload"]
         assert "Full Pipeline" in payload["markdown"]
+
+
+class TestPromptInspectionResponse:
+    def test_ambiguous_prompt_request_returns_clarification(self, client):
+        resp = client.post("/chat", json={
+            "project_id": "proj-chat",
+            "message": "Show me your system prompt",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "first-pass planning prompt" in data["agent_block"]["payload"]["markdown"]
+
+    def test_first_pass_prompt_request_bypasses_think(self, client):
+        resp = client.post("/chat", json={
+            "project_id": "proj-chat",
+            "message": "Show me the first-pass system prompt",
+            "skill": "ENCODE_Search",
+            "model": "default",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = data["agent_block"]["payload"]
+        assert "First-pass system prompt" in payload["markdown"]
+        assert "Rendered first_pass prompt for ENCODE_Search" in payload["markdown"]
+        assert payload["_debug"]["prompt_type"] == "first_pass"
+        client.mock_engine.think.assert_not_called()
+
+    def test_second_pass_prompt_request_bypasses_think(self, client):
+        resp = client.post("/chat", json={
+            "project_id": "proj-chat",
+            "message": "Show me the second-pass system prompt",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = data["agent_block"]["payload"]
+        assert "Second-pass system prompt" in payload["markdown"]
+        assert "Rendered second_pass prompt for welcome" in payload["markdown"]
+        client.mock_engine.think.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

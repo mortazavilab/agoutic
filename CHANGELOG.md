@@ -1,5 +1,23 @@
 # Changelog - March 2026
 
+## [3.1.4] - 2026-03-10
+
+### Features — Template-Based System Prompts
+
+- **Human-readable prompt templates** — moved the Cortex first-pass and
+  second-pass system prompt bodies out of inline Python strings into Markdown
+  templates under `cortex/prompt_templates/`, while preserving dynamic skill
+  injection, DATA_CALL guidance, tool contracts, and current runtime behavior.
+
+- **Prompt inspection in chat** — users can now ask to see the current system
+  prompt from chat. The server returns the exact rendered prompt directly,
+  asks whether the user wants the first-pass or second-pass prompt when the
+  request is ambiguous, and bypasses the LLM for these inspection requests.
+
+- **Prompt rendering API** — `AgentEngine` now renders prompts through a shared
+  template-backed API so the same rendered prompt text is used both for LLM
+  calls and for prompt inspection responses.
+
 ## [3.1.3] - 2026-03-09
 
 ### Features — Universal Cancel & User Data
