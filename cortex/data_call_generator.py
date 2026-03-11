@@ -600,3 +600,117 @@ def _validate_analyzer_params(
         )
 
     return params
+
+
+# ---------------------------------------------------------------------------
+# _validate_edgepython_params
+# ---------------------------------------------------------------------------
+
+def _validate_edgepython_params(
+    tool: str,
+    params: dict,
+    user_message: str,
+    conversation_history: list | None = None,
+) -> dict:
+    """
+    Fill in missing edgePython tool parameters from the user's message.
+
+    The LLM (especially smaller models) often emits DATA_CALL tags for
+    edgepython with empty or incomplete parameters.  This function
+    extracts file paths, group columns, and contrasts from the user's
+    message and conversation history, injecting them when missing.
+    """
+    params = dict(params)  # shallow copy
+    original_params = dict(params)
+
+    # Gather full text context: current message + recent user messages
+    text_pool = user_message
+    if conversation_history:
+        for msg in reversed(conversation_history[-10:]):
+            if msg.get("role") == "user":
+                text_pool = msg["content"] + "\n" + text_pool
+
+    if tool == "load_data":
+        # --- counts_path: look for a .csv/.tsv/.txt file path ---
+        if not params.get("counts_path"):
+            # Match paths containing "count" in the filename
+            count_paths = re.findall(
+                r'(/[\w/._-]+(?:count|counts|matrix)[\w._-]*\.(?:csv|tsv|txt))',
+                text_pool, re.IGNORECASE,
+            )
+            if count_paths:
+                params["counts_path"] = count_paths[0]
+            else:
+                # Fallback: any absolute path to csv/tsv
+                all_paths = re.findall(
+                    r'(/[\w/._-]+\.(?:csv|tsv|txt))',
+                    text_pool, re.IGNORECASE,
+                )
+                if all_paths:
+                    params["counts_path"] = all_paths[0]
+
+        # --- sample_info_path: look for metadata/sample_info file ---
+        if not params.get("sample_info_path"):
+            info_paths = re.findall(
+                r'(/[\w/._-]+(?:info|metadata|meta|coldata|pheno)[\w._-]*\.(?:csv|tsv|txt))',
+                text_pool, re.IGNORECASE,
+            )
+            # Exclude any path already used as counts_path
+            _used_counts = params.get("counts_path", "")
+            info_paths = [p for p in info_paths if p != _used_counts]
+            if info_paths:
+                params["sample_info_path"] = info_paths[0]
+            else:
+                # Look for "metadata:" or "sample info:" followed by a path
+                meta_match = re.search(
+                    r'(?:metadata|sample[_ ]?info|coldata)\s*[=:]\s*(/[\w/._-]+\.(?:csv|tsv|txt))',
+                    text_pool, re.IGNORECASE,
+                )
+                if meta_match:
+                    params["sample_info_path"] = meta_match.group(1)
+
+        # --- group_column ---
+        if not params.get("group_column"):
+            gc_match = re.search(
+                r'(?:group\s*(?:column|col|factor)|group_column)\s*[=:]\s*(\w+)',
+                text_pool, re.IGNORECASE,
+            )
+            if gc_match:
+                params["group_column"] = gc_match.group(1)
+
+    elif tool == "test_contrast":
+        # --- contrast: e.g. "treated - control" ---
+        if not params.get("contrast"):
+            ct_match = re.search(
+                r'(?:contrast)\s*[=:]\s*([\w][\w\s]*-\s*[\w]+)',
+                text_pool, re.IGNORECASE,
+            )
+            if ct_match:
+                params["contrast"] = ct_match.group(1).strip()
+
+    elif tool == "set_design":
+        # --- formula: look for R-style formula ---
+        if not params.get("formula"):
+            fm_match = re.search(
+                r'(?:formula|design)\s*[=:]\s*(~[^,\]]+)',
+                text_pool, re.IGNORECASE,
+            )
+            if fm_match:
+                params["formula"] = fm_match.group(1).strip()
+            else:
+                # Default formula when group_column is known
+                params.setdefault("formula", "~ 0 + group")
+
+    elif tool == "exact_test":
+        if not params.get("pair"):
+            ct_match = re.search(
+                r'(?:contrast|compare|pair)\s*[=:]\s*([\w]+)\s*(?:vs?\.?|-)\s*([\w]+)',
+                text_pool, re.IGNORECASE,
+            )
+            if ct_match:
+                params["pair"] = [ct_match.group(1).strip(), ct_match.group(2).strip()]
+
+    if params != original_params:
+        logger.info("edgepython param extraction filled missing params",
+                    tool=tool, original=original_params, filled=params)
+    return params

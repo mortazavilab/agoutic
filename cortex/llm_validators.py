@@ -112,6 +112,11 @@ def _validate_llm_output(
         "list_job_files", "find_file", "read_file_content",
         "parse_csv_file", "parse_bed_file", "get_analysis_summary",
         "categorize_job_files",
+        # edgePython (Differential Expression)
+        "load_data", "load_data_auto", "filter_genes", "normalize",
+        "normalize_chip", "set_design", "set_design_matrix",
+        "estimate_dispersion", "fit_model", "test_contrast",
+        "exact_test", "get_top_genes", "generate_plot",
     }
     for _dc_m in re.finditer(r'\[\[DATA_CALL:.*?tool=(\w+)', cleaned):
         _tool = _dc_m.group(1)
@@ -147,6 +152,16 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
     """
     msg_lower = user_message.lower()
 
+    # --- Early DE pre-check ---
+    # Catch obvious DE requests before the local_sample check can steal them.
+    # A standalone "de"/"deg" word + a counts file (.csv/.tsv) is never a
+    # sequencing-data submission — it's always differential expression.
+    if current_skill != "differential_expression":
+        _has_de_word_early = bool(re.search(r'\b(de|deg|degs)\b', msg_lower))
+        _has_counts_file_early = bool(re.search(r'counts?\.(csv|tsv|txt)\b', msg_lower))
+        if _has_de_word_early and _has_counts_file_early:
+            return "differential_expression"
+
     # --- Signals for analyze_local_sample ---
     # User mentions a local file path + analysis intent
     _has_local_path = bool(re.search(r'(/[a-z_][\w/.-]+|~[\w/.-]+)', user_message))
@@ -160,7 +175,7 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
     _data_type_words = ["cdna", "dna", "rna", "fiber-seq", "fiberseq"]
     _has_data_type = any(w in msg_lower for w in _data_type_words)
 
-    if current_skill not in ("analyze_local_sample",):
+    if current_skill not in ("analyze_local_sample", "differential_expression"):
         # Strong signal: path + (analysis verb OR sample keyword OR data type)
         # Even from Dogme analysis skills (run_dogme_*), a message like
         # "Analyze the local CDNA sample at /path" is clearly a NEW submission,
@@ -218,5 +233,45 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
     if current_skill != "download_files":
         if _has_download and (_has_file_accession or _has_url):
             return "download_files"
+
+    # --- Signals for differential_expression ---
+    _de_words = [
+        "differential expression", "differentially expressed",
+        "de analysis", "de genes", "deg", "degs", "edgepython", "edger",
+        "count matrix", "counts table", "counts matrix",
+        "volcano plot", "ma plot", "md plot", "bcv plot",
+        "fold change", "log fold change", "logfc",
+        "nebula", "single-cell de", "single cell de",
+        "dtu", "differential transcript usage",
+        "chip-seq enrichment", "chip enrichment",
+    ]
+    _de_action_words = [
+        "compare", "contrast", "test", "run de", "find de",
+    ]
+    _de_context_words = [
+        "treated vs control", "treatment vs control",
+        "knockout vs wildtype", "ko vs wt",
+        "mutant vs wildtype", "condition",
+        "fdr", "p-value", "pvalue",
+    ]
+    _has_de = any(w in msg_lower for w in _de_words)
+    # Standalone "de" / "DE" as a word (not part of "decode", "define", etc.)
+    _has_de_standalone = bool(re.search(r'\bde\b', msg_lower))
+    # File path containing "counts" + .csv/.tsv extension → likely a count matrix
+    _has_counts_file = bool(re.search(r'counts?\.(csv|tsv|txt)\b', msg_lower))
+    _has_de_action = any(w in msg_lower for w in _de_action_words)
+    _has_de_context = any(w in msg_lower for w in _de_context_words)
+
+    if current_skill != "differential_expression":
+        if _has_de:
+            return "differential_expression"
+        # "DE" standalone + a counts file path is a strong signal
+        if _has_de_standalone and _has_counts_file:
+            return "differential_expression"
+        # "DE" standalone + any known DE action or context word
+        if _has_de_standalone and (_has_de_action or _has_de_context):
+            return "differential_expression"
+        if _has_de_action and _has_de_context:
+            return "differential_expression"
 
     return None

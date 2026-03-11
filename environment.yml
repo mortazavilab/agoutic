@@ -39,6 +39,9 @@ dependencies:
     # --- Visualization ---
     - plotly>=5.18.0           # Interactive charts (st.plotly_chart)
 
+    # --- Differential Expression ---
+    - edgepython[all]          # edgeR-style DE analysis (bulk + single-cell)
+
     # --- Testing ---
     - pytest>=7.0
     - pytest-asyncio>=0.21.0   # Async test support

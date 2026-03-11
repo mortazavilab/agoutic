@@ -58,7 +58,7 @@ from cortex.conversation_state import (
     _build_conversation_state, _extract_job_context_from_history,
 )
 from cortex.context_injection import _inject_job_context
-from cortex.data_call_generator import _auto_generate_data_calls, _validate_analyzer_params
+from cortex.data_call_generator import _auto_generate_data_calls, _validate_analyzer_params, _validate_edgepython_params
 from cortex.db_helpers import (
     _resolve_project_dir, _create_block_internal,
     save_conversation_message, track_project_access,
@@ -1936,52 +1936,18 @@ async def chat_with_agent(req: ChatRequest, request: Request):
         # Check if user is asking for capabilities
         user_msg_lower = req.message.lower()
         if any(phrase in user_msg_lower for phrase in ["what can you do", "what are your capabilities", "help", "what can i do", "list features", "show capabilities"]):
-            # Return capabilities list
-            capabilities_text = """### 🧬 AGOUTIC Capabilities
+            # Return the same welcome menu defined in skills/Welcome.md
+            capabilities_text = """👋 Welcome to **Agoutic** — your autonomous bioinformatics agent for long-read sequencing data.
 
-I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's what I can do:
+Here's what I can help you with:
 
-#### **📊 Full Analysis Workflows**
-- **DNA Analysis**: Genomic DNA with modification calling (5mCG, 5hmCG, 6mA)
-- **RNA Analysis**: Direct RNA with modification detection (m6A, pseudouridine, m5C)
-- **cDNA Analysis**: cDNA sequencing with transcript quantification
+1. **Analyze a new local dataset** — Run the Dogme pipeline on pod5, bam, or fastq files on your machine
+2. **Download & analyze ENCODE data** — Search the ENCODE portal for long-read experiments, download files, and process them
+3. **Download files from URLs** — Grab files from any URL into your project
+4. **Check results from a completed job** — View QC reports, alignment stats, modification calls, and expression data
+5. **Differential expression analysis** — Run DE analysis on count matrices using edgePython (bulk, single-cell, DTU, ChIP-seq)
 
-#### **🔄 Flexible Entry Points**
-- **Full Pipeline** (pod5 → results): Complete analysis from raw data
-- **Basecalling Only**: Convert pod5 files to unmapped BAM
-- **Remap**: Start from unmapped BAM files
-- **Modification Calling**: Run modkit on mapped BAMs
-- **Transcript Annotation**: Annotate RNA/cDNA BAMs with transcript info
-- **Report Generation**: Create summary reports from existing outputs
-
-#### **🧬 Multi-Genome Support**
-- Map to multiple reference genomes in one run
-- Supported genomes: **GRCh38** (human), **mm39** (mouse)
-- Example: "Analyze against both human and mouse genomes"
-
-#### **📁 Input Flexibility**
-- **pod5 files**: Raw nanopore data
-- **Unmapped BAM**: Already basecalled data
-- **Mapped BAM**: For modification calling or annotation
-
-#### **🎛️ Parameter Control**
-- Interactive parameter editing before job submission
-- Specify sample names, reference genomes, modifications
-- Advanced settings: modkit threshold, min coverage, accuracy mode
-- Reject and revise plans up to 3 times
-- Manual parameter override available
-
-#### **💬 Example Requests**
-```
-"Analyze mouse cDNA sample named Ali1 at /path/to/pod5"
-"Remap this unmapped BAM file: /path/to/sample.bam"
-"Only basecall pod5 files in /path/to/data"
-"Call modifications on mapped BAM at /path/to/aligned.bam"
-"Generate report for job in /path/to/work_dir"
-"Map sample to both human and mouse genomes"
-```
-
-**Ready to start? Just describe what you want to analyze!**
+What would you like to do?
 """
             agent_block = _create_block_internal(
                 session,
@@ -2294,6 +2260,33 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
         if corrected_response != _before_tc:
             fallback_fixes_applied += 1
             logger.warning("Converted [[TOOL_CALL:...]] to [[DATA_CALL:...]]")
+
+        # FALLBACK: Convert Mistral-native [TOOL_CALLS]DATA_CALL[ARGS]{json} format
+        # devstral-small-2 sometimes uses its native tool-calling syntax instead
+        # of our custom [[DATA_CALL:...]] tags.
+        _mistral_tc_pattern = r'\[TOOL_CALLS\]\s*DATA_CALL\s*\[ARGS\]\s*(\{[^}]+\})'
+        def _convert_mistral_tool_call(m: re.Match) -> str:
+            try:
+                payload = json.loads(m.group(1))
+                source = payload.pop("service", payload.pop("consortium", "edgepython"))
+                tool = payload.pop("tool", "")
+                if not tool:
+                    return m.group(0)  # can't convert without a tool name
+                source_type = "consortium" if source == "encode" else "service"
+                param_str = ", ".join(f"{k}={v}" for k, v in payload.items())
+                tag = f"[[DATA_CALL: {source_type}={source}, tool={tool}"
+                if param_str:
+                    tag += f", {param_str}"
+                tag += "]]"
+                return tag
+            except (json.JSONDecodeError, TypeError):
+                return m.group(0)
+
+        _before_mistral = corrected_response
+        corrected_response = re.sub(_mistral_tc_pattern, _convert_mistral_tool_call, corrected_response)
+        if corrected_response != _before_mistral:
+            fallback_fixes_applied += 1
+            logger.warning("Converted [TOOL_CALLS]...[ARGS]{json} to [[DATA_CALL:...]]")
         
         if fallback_fixes_applied > 0:
             logger.warning("Applied fallback tag fixes to LLM response", count=fallback_fixes_applied)
@@ -2878,6 +2871,13 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     project_dir=_project_dir_str,
                 )
 
+            # Validate/fix edgePython params (fill from user message)
+            if source_key == "edgepython":
+                params = _validate_edgepython_params(
+                    corrected_tool, params, req.message,
+                    conversation_history=conversation_history,
+                )
+
             calls_by_source.setdefault(source_key, []).append({
                 "tool": corrected_tool,
                 "params": params,
@@ -3003,6 +3003,18 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                     if _is_cancelled(req.request_id):
                         raise ChatCancelled("tools", f"Cancelled before running {tool_name} on {_source_label}.")
 
+                    # For sequential pipelines (edgepython), stop on first failure.
+                    # Each step depends on the previous one; continuing wastes time.
+                    if source_key == "edgepython" and source_results and "error" in source_results[-1]:
+                        logger.info("Skipping remaining edgepython calls after pipeline failure",
+                                   skipped_tool=tool_name)
+                        source_results.append({
+                            "tool": tool_name,
+                            "params": params,
+                            "error": "Skipped — previous pipeline step failed",
+                        })
+                        continue
+
                     # Check for routing errors (e.g. missing parent experiment)
                     if "__routing_error__" in params:
                         error_msg = params.pop("__routing_error__")
@@ -3035,6 +3047,16 @@ I can help you analyze nanopore sequencing data using the Dogme pipeline. Here's
                                 "error": f"Connection failed after retry: {_retry_err}",
                             })
                             continue
+                    except RuntimeError as _mcp_err:
+                        # MCP tool-level errors (e.g. server returned an error response)
+                        logger.error("MCP tool error", source=source_key,
+                                    tool=tool_name, error=str(_mcp_err))
+                        source_results.append({
+                            "tool": tool_name,
+                            "params": params,
+                            "error": f"MCP tool error: {_mcp_err}",
+                        })
+                        continue
 
                     # --- ENCODE search retry: biosample ↔ assay swap on 0 results ---
                     # When a search returns zero results, the term might have been

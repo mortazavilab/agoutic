@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.3.0  
+**Version:** 3.2.0  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -12,6 +12,7 @@ The system is composed of:
 - **Atlas**: ENCODE Integration - Public data retrieval via ENCODELIB
 - **Launchpad**: Execution Engine - Dogme/Nextflow pipeline management
 - **Analyzer**: Analysis Engine - Results analysis and QC reporting
+- **edgePython**: Differential Expression - Bulk/single-cell RNA-seq DE via edgePython
 - **UI**: Web interface for monitoring and control
 
 ## 🔒 Security & Multi-User Isolation
@@ -156,6 +157,18 @@ python cortex/atlas_mcp_client.py
   - **`delete_job_data` MCP tool** — enables chat-based deletion ("delete workflow1")
 - **Docs:** [launchpad/README.md](launchpad/README.md)
 
+### edgePython: Differential Expression (Port 8007)
+- **Role:** Bulk and single-cell RNA-seq differential expression analysis
+- **Tech:** FastMCP + edgePython
+- **Features:**
+  - Full DE pipeline: load → filter → normalize → design → dispersion → fit → test → results → plots
+  - 30+ MCP tools (bulk DE, single-cell DE, ChIP-seq enrichment, DTU/splice)
+  - Stateful pipeline — each step builds on previous results within a session
+  - Volcano, MDS, MA, BCV, heatmap plot generation
+  - TSV/CSV/JSON result export
+  - JSON Schema tool contracts via `/tools/schema`
+- **Docs:** [edgepython_mcp/](edgepython_mcp/)
+
 ### Analyzer: Analysis Engine (Port 8002)
 - **Role:** Results analysis, QC reporting, and workflow file browsing
 - **Tech:** fastmcp + Python analysis tools
@@ -245,10 +258,18 @@ agoutic/
 │   ├── config.py               # Atlas configuration
 │   └── result_formatter.py     # Result formatting helpers
 │
+├── edgepython_mcp/              # edgePython DE Server
+│   ├── edgepython_server.py    # FastMCP tool definitions (30+ tools)
+│   ├── mcp_server.py           # Server wrapper + /tools/schema endpoint
+│   ├── launch_edgepython.py    # HTTP launcher
+│   ├── tool_schemas.py         # JSON Schema contracts for all tools
+│   └── config.py               # Configuration
+│
 ├── skills/                      # Workflow Definitions
 │   ├── Dogme_DNA.md            # DNA pipeline definition
 │   ├── Dogme_RNA.md            # RNA pipeline definition
 │   ├── Dogme_cDNA.md           # cDNA pipeline definition
+│   ├── Differential_Expression.md # edgePython DE skill
 │   ├── ENCODE_LongRead.md      # ENCODE pipeline definition
 │   ├── ENCODE_Search.md        # ENCODE search skill + routing rules
 │   ├── Local_Sample_Intake.md  # Sample intake workflow

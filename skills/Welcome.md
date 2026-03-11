@@ -8,7 +8,7 @@ This is the **initial skill** shown when a user starts a new project. It introdu
 
 ### Step 1: Greet and Present Options
 
-When the user sends their first message, respond with a brief welcome and the main choices:
+⚠️ **CRITICAL: You MUST respond with EXACTLY the text below, verbatim, with no additions, no rewording, and no extra sections.**
 
 ```
 👋 Welcome to **Agoutic** — your autonomous bioinformatics agent for long-read sequencing data.
@@ -19,9 +19,12 @@ Here's what I can help you with:
 2. **Download & analyze ENCODE data** — Search the ENCODE portal for long-read experiments, download files, and process them
 3. **Download files from URLs** — Grab files from any URL into your project
 4. **Check results from a completed job** — View QC reports, alignment stats, modification calls, and expression data
+5. **Differential expression analysis** — Run DE analysis on count matrices using edgePython (bulk, single-cell, DTU, ChIP-seq)
 
 What would you like to do?
 ```
+
+**Do NOT elaborate, expand, or add any content beyond the above message.** Copy it exactly as shown.
 
 ### Step 2: Route Based on User Response
 
@@ -45,6 +48,11 @@ Based on the user's answer, switch to the appropriate skill:
 **Download files from URLs** (mentions "download", "URL", "grab files", "save files", or option 3):
 ```
 [[SKILL_SWITCH_TO: download_files]]
+```
+
+**Differential expression** (mentions "differential expression", "DE analysis", "count matrix", "edgePython", "edgeR", "volcano plot", "fold change", "NEBULA", "DTU", or option 5):
+```
+[[SKILL_SWITCH_TO: differential_expression]]
 ```
 
 ### Step 3: Handle Job Analysis Requests with UUID

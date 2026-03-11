@@ -205,6 +205,76 @@ class TestNoSwitch:
         result = _auto_detect_skill_switch("hello how are you", "welcome")
         assert result is None
 
+
+class TestDifferentialExpression:
+    """Tests for routing to differential_expression skill."""
+
+    def test_de_analysis_from_welcome(self):
+        result = _auto_detect_skill_switch(
+            "run differential expression on my count matrix", "welcome"
+        )
+        assert result == "differential_expression"
+
+    def test_de_genes_from_welcome(self):
+        result = _auto_detect_skill_switch(
+            "what genes are differentially expressed?", "welcome"
+        )
+        assert result == "differential_expression"
+
+    def test_volcano_plot_from_results(self):
+        result = _auto_detect_skill_switch(
+            "generate a volcano plot of the DE results", "analyze_job_results"
+        )
+        assert result == "differential_expression"
+
+    def test_edgepython_mention(self):
+        result = _auto_detect_skill_switch(
+            "use edgepython to analyze my data", "welcome"
+        )
+        assert result == "differential_expression"
+
+    def test_edger_mention(self):
+        result = _auto_detect_skill_switch(
+            "I want to run edgeR-style analysis", "welcome"
+        )
+        assert result == "differential_expression"
+
+    def test_count_matrix_mention(self):
+        result = _auto_detect_skill_switch(
+            "I have a count matrix and want to find DE genes", "welcome"
+        )
+        assert result == "differential_expression"
+
+    def test_fold_change_mention(self):
+        result = _auto_detect_skill_switch(
+            "show me the log fold change for treated vs control", "welcome"
+        )
+        assert result == "differential_expression"
+
+    def test_nebula_mention(self):
+        result = _auto_detect_skill_switch(
+            "run single-cell DE with NEBULA", "welcome"
+        )
+        assert result == "differential_expression"
+
+    def test_dtu_mention(self):
+        result = _auto_detect_skill_switch(
+            "test for differential transcript usage", "welcome"
+        )
+        assert result == "differential_expression"
+
+    def test_compare_treated_vs_control(self):
+        result = _auto_detect_skill_switch(
+            "compare treated vs control samples", "welcome"
+        )
+        assert result == "differential_expression"
+
+    def test_already_on_skill_no_switch(self):
+        result = _auto_detect_skill_switch(
+            "run differential expression", "differential_expression"
+        )
+        assert result is None
+
     def test_followup_question(self):
         result = _auto_detect_skill_switch(
             "what assay types are there?", "ENCODE_Search"

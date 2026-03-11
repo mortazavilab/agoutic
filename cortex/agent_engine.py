@@ -173,6 +173,29 @@ class AgentEngine:
         Get Analysis Summary (run_uuid=...)           ❌ NO BRACKETS - WILL NOT EXECUTE
         [[TOOL_CALL: GET /analysis/jobs/...]]         ❌ WRONG TAG NAME - WILL NOT EXECUTE
         STEP 1: Get the summary...                    ❌ NARRATION - JUST EMIT THE TAG"""
+        elif source_key == "edgepython":
+            examples = """
+        ✅ CORRECT EXAMPLES — fill in actual values from the user's message:
+        [[DATA_CALL: service=edgepython, tool=load_data, counts_path=/path/to/counts.csv, sample_info_path=/path/to/sample_info.csv, group_column=condition]]
+        [[DATA_CALL: service=edgepython, tool=filter_genes, min_count=10, min_total_count=15]]
+        [[DATA_CALL: service=edgepython, tool=normalize, method=TMM]]
+        [[DATA_CALL: service=edgepython, tool=set_design, formula=~ 0 + group]]
+        [[DATA_CALL: service=edgepython, tool=estimate_dispersion, robust=true]]
+        [[DATA_CALL: service=edgepython, tool=fit_model, robust=true]]
+        [[DATA_CALL: service=edgepython, tool=test_contrast, contrast=treated - control]]
+        [[DATA_CALL: service=edgepython, tool=get_top_genes, n=20, fdr_threshold=0.05]]
+        [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano]]
+
+        🚨 CRITICAL: You MUST substitute actual values from the user's message into the parameters.
+        For example, if the user says "counts at /data/counts.csv", write counts_path=/data/counts.csv.
+        Do NOT write counts_path=<path> — that will fail.
+
+        🚨 CRITICAL: The pipeline is SEQUENTIAL. Each step depends on the previous one.
+        Emit ALL DATA_CALL tags at once — the system executes them in order.
+
+        ❌ FORBIDDEN - NEVER WRITE THESE:
+        Load Data (counts_path=...)                   ❌ NO BRACKETS - WILL NOT EXECUTE
+        [[DATA_CALL: service=edgepython, tool=load_data]]  ❌ MISSING REQUIRED counts_path - WILL FAIL"""
         else:
             examples = f"""
         ✅ CORRECT EXAMPLE:

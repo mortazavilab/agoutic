@@ -101,6 +101,18 @@ SERVICE_REGISTRY = {
         ],
         "fallback_patterns": {},
     },
+    "edgepython": {
+        "url": os.getenv("EDGEPYTHON_MCP_URL", "http://localhost:8007"),
+        "display_name": "Differential Expression (edgePython)",
+        "emoji": "\U0001f4c8",
+        "table_columns": [],
+        "count_field": None,
+        "count_label": None,
+        "skills": [
+            "differential_expression",
+        ],
+        "fallback_patterns": {},
+    },
 }
 
 
@@ -170,5 +182,8 @@ SKILLS_REGISTRY = {
     "analyze_job_results": "Analyze_Job_Results.md",
     
     # Download / File Intake Skill
-    "download_files": "Download_Files.md"
+    "download_files": "Download_Files.md",
+    
+    # Differential Expression (edgePython)
+    "differential_expression": "Differential_Expression.md",
 }

@@ -1,5 +1,59 @@
 # Changelog - March 2026
 
+## [3.2.0] - 2026-03-10
+
+### Features — edgePython Differential Expression Pipeline
+
+- **edgePython MCP server** (`edgepython_mcp/`, port 8007) — new FastMCP service
+  wrapping edgePython for bulk RNA-seq differential expression analysis. Exposes
+  30+ tools for the full DE workflow: `load_data` → `filter_genes` → `normalize`
+  → `set_design` → `estimate_dispersion` → `fit_model` → `test_contrast` →
+  `get_top_genes` → `generate_plot` → `save_results`. Also supports single-cell
+  DE, ChIP-seq enrichment, DTU/splice analysis, and voom-limma.
+
+- **`differential_expression` skill** — new skill definition
+  (`skills/Differential_Expression.md`) routes DE/DEG requests to the edgePython
+  pipeline. Cortex detects keywords like "DE", "DEG", "differential expression"
+  and auto-switches to this skill.
+
+- **Skill routing for DE** — early pre-check in `_auto_detect_skill_switch()`
+  ensures DE requests with CSV file paths are not hijacked by
+  `analyze_local_sample`.
+
+- **JSON Schema tool contracts** — `edgepython_mcp/tool_schemas.py` provides
+  proper JSON Schema format for all 30 tools (with `properties`, `required`,
+  `type`). Cortex fetches these at startup for param validation.
+
+- **Server-side param extraction** — `_validate_edgepython_params()` in
+  `data_call_generator.py` fills missing DE params (counts path, metadata path,
+  group column, contrast, formula) from the user message via regex.
+
+- **Mistral `[TOOL_CALLS]` format converter** — fallback parser in `cortex/app.py`
+  handles devstral-small-2's native `[TOOL_CALLS]DATA_CALL[ARGS]{json}` format,
+  converting it to standard `[[DATA_CALL:...]]` tags.
+
+### Fixes
+
+- **`save_results` FunctionTool crash** — `save_results` called the
+  `@mcp.tool()`-decorated `get_result_table` directly, which became a
+  `FunctionTool` object after decoration and was not callable. Extracted shared
+  logic into `_get_result_table_impl()` so both tools call a plain function.
+
+- **MCP tool errors killing all tool calls** — `RuntimeError` from
+  `mcp_client.call_tool()` was not caught by the inner error handler (only
+  `ConnectionError`/`TimeoutError`/`OSError` were caught), so it bubbled up to
+  the outer `except` which applied the same error to ALL tool calls. Added
+  `except RuntimeError` to isolate per-tool MCP errors and trigger edgepython
+  early-stop correctly.
+
+- **edgePython early-stop** — sequential pipeline steps now stop on first
+  failure instead of re-running all 10+ steps with the same error.
+
+### Tests
+
+- 21 new DE tests: 8 routing, 8 param extraction, 2 schema format, 3 Mistral
+  conversion.
+
 ## [3.1.4] - 2026-03-10
 
 ### Features — Template-Based System Prompts
