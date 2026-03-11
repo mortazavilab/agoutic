@@ -3,6 +3,7 @@ import threading
 import uuid
 import requests
 import datetime
+import json
 import os
 from datetime import timedelta
 from pathlib import Path as _Path
@@ -457,6 +458,141 @@ def get_sanitized_blocks(target_project_id):
             "Block fetch failed for project %s: %s", target_project_id, exc
         )
         return [], False
+
+
+def get_project_tasks(project_id: str):
+    """Fetch grouped persistent project tasks for the active project."""
+    try:
+        resp = make_authenticated_request(
+            "GET",
+            f"{API_URL}/projects/{project_id}/tasks",
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("sections", {})
+    except Exception:
+        pass
+    return {}
+
+
+def apply_task_action(project_id: str, task_id: str, action: str) -> bool:
+    """Apply a backend task action and report success."""
+    try:
+        resp = make_authenticated_request(
+            "PATCH",
+            f"{API_URL}/projects/{project_id}/tasks/{task_id}",
+            json={"action": action},
+            timeout=8,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _handle_task_action(task: dict):
+    target_raw = task.get("action_target") or ""
+    try:
+        target = json.loads(target_raw) if target_raw else {}
+    except (TypeError, ValueError):
+        target = {}
+
+    target_type = target.get("type")
+    run_uuid = target.get("run_uuid")
+    block_id = target.get("block_id")
+
+    if target_type == "results" and run_uuid:
+        if task.get("kind") == "result_review":
+            apply_task_action(st.session_state.active_project_id, task["id"], "complete")
+        st.session_state["selected_job_run_uuid"] = run_uuid
+        st.switch_page("pages/results.py")
+        return
+
+    if target_type == "block" and block_id:
+        st.session_state["_max_visible_blocks"] = max(
+            len(st.session_state.get("blocks", [])),
+            st.session_state.get("_max_visible_blocks", 30),
+        )
+        st.session_state["_task_focus_block_id"] = block_id
+        st.rerun()
+
+
+def _render_single_task(task: dict, project_id: str, *, is_child: bool = False):
+    meta = task.get("metadata", {})
+    extra = []
+    if meta.get("sample_name"):
+        extra.append(meta["sample_name"])
+    if meta.get("progress_percent") not in (None, "") and task.get("status") == "RUNNING":
+        extra.append(f"{meta['progress_percent']}%")
+    if meta.get("total_files") and task.get("kind") == "download":
+        extra.append(f"{meta.get('downloaded', 0)}/{meta['total_files']} files")
+
+    title = task.get("title", "Task")
+    if is_child:
+        title = f"↳ {title}"
+
+    left, action_col, extra_col = st.columns([5, 1, 1])
+    with left:
+        st.write(f"**{title}**")
+        if extra:
+            st.caption(" · ".join(str(part) for part in extra if part not in (None, "")))
+    with action_col:
+        action_label = task.get("action_label")
+        if action_label and task.get("action_target"):
+            if st.button(action_label, key=f"task_action_{task['id']}"):
+                _handle_task_action(task)
+    with extra_col:
+        status = task.get("status")
+        if task.get("kind") in {"result_review", "recovery"} and status in {"PENDING", "FOLLOW_UP"}:
+            if st.button("Done", key=f"task_done_{task['id']}"):
+                if apply_task_action(project_id, task["id"], "complete"):
+                    st.rerun()
+        elif status == "COMPLETED" and task.get("kind") in {"result_review", "recovery"}:
+            if st.button("Reopen", key=f"task_reopen_{task['id']}"):
+                if apply_task_action(project_id, task["id"], "reopen"):
+                    st.rerun()
+        elif status in {"COMPLETED", "FOLLOW_UP", "FAILED"}:
+            if st.button("Hide", key=f"task_hide_{task['id']}"):
+                if apply_task_action(project_id, task["id"], "archive"):
+                    st.rerun()
+
+
+def render_project_tasks(project_id: str):
+    """Render grouped project tasks above the chat timeline."""
+    sections = get_project_tasks(project_id)
+    section_order = [
+        ("pending", "📝 Pending"),
+        ("running", "🏃 Running"),
+        ("follow_up", "🔎 Follow-up"),
+        ("completed", "✅ Completed"),
+    ]
+    total_tasks = sum(len(sections.get(name, [])) for name, _ in section_order)
+    if total_tasks == 0:
+        return
+
+    all_tasks = []
+    for name, _label in section_order:
+        all_tasks.extend(sections.get(name, []))
+    child_ids = {task["id"] for task in all_tasks for task in task.get("children", [])}
+
+    st.subheader("Task List")
+    summary_cols = st.columns(4)
+    for idx, (name, label) in enumerate(section_order):
+        summary_cols[idx].metric(label, len(sections.get(name, [])))
+
+    for name, label in section_order:
+        tasks = sections.get(name, [])
+        if not tasks:
+            continue
+        expanded = name != "completed"
+        with st.expander(f"{label} ({len(tasks)})", expanded=expanded):
+            for task in tasks:
+                if task["id"] in child_ids:
+                    continue
+                _render_single_task(task, project_id)
+                for child in task.get("children", []):
+                    _render_single_task(child, project_id, is_child=True)
+
+    st.write("---")
 
 def get_job_debug_info(run_uuid):
     """Fetch detailed debug information for a failed job via Cortex proxy."""
@@ -1723,6 +1859,7 @@ for _p in st.session_state.get("_cached_projects", []):
         _active_project_name = _p.get("name", _active_project_name)
         break
 st.title(f"🧬 {_active_project_name}")
+render_project_tasks(active_id)
 
 # Determine if the chat area needs periodic auto-refresh.
 # This is evaluated ONCE per full script run; the fragment uses it.

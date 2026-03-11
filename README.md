@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.2  
+**Version:** 3.2.3  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -31,7 +31,7 @@ AGOUTIC enforces access control at every layer:
 - **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{user_id}/{project_id}/`) with input sanitization and jail-escape guards.
 - **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
 - **Project management**: Full dashboard for browsing projects, viewing stats/files/jobs, renaming, archiving, and permanent deletion with cascading cleanup.
-- **Bootstrap & admin scripts**: Run `python scripts/cortex/init_db.py` for a fresh database bootstrap, and `python scripts/cortex/set_usernames.py auto` to derive usernames from email addresses on an existing instance.
+- **Bootstrap & admin scripts**: Run `python scripts/cortex/init_db.py` for a fresh database bootstrap, `python scripts/cortex/set_usernames.py auto` to derive usernames from email addresses on an existing instance, and `python scripts/cortex/bootstrap_project_tasks.py` to seed persistent project tasks from existing workflow history.
 - **Username paths**: User-jailed filesystem paths use `$AGOUTIC_DATA/users/{username}/{project-slug}/` instead of raw IDs, giving human-readable directory trees.
 
 ## 🚀 Quick Start
@@ -47,20 +47,31 @@ conda activate agoutic_core
 ### Run the System
 
 ```bash
-# Terminal 1: Start Launchpad (Job Execution Engine)
-uvicorn launchpad.app:app --host 0.0.0.0 --port 8001 --reload
+# Recommended: start the full backend stack
+./agoutic_servers.sh --start
 
-# Terminal 2: Start Cortex (Agent Engine)
+# Then start the UI separately
+streamlit run ui/app.py --server.address 0.0.0.0 --server.port 8501
+```
+
+For local development, you can still run services manually:
+
+```bash
+# Terminal 1: Start Launchpad REST
+uvicorn launchpad.app:app --host 0.0.0.0 --port 8003 --reload
+
+# Terminal 2: Start Launchpad MCP
+python -m launchpad.mcp_server --host 0.0.0.0 --port 8002
+
+# Terminal 3: Start Cortex
 uvicorn cortex.app:app --host 0.0.0.0 --port 8000 --reload
 
-# Terminal 3: Start UI
-cd ui && python app.py
-
-# Optional: Atlas & 4 start automatically when needed
-# But can be started manually for testing:
-# cd /Users/eli/code/ENCODELIB && python encode_server.py  # Atlas
-# cd analyzer && uvicorn app:app --port 8002                # Analyzer
+# Terminal 4: Start UI
+cd ui && streamlit run app.py
 ```
+
+Note: running `python ui/app.py` directly will not work correctly because the UI
+auth flow depends on Streamlit request context and browser cookies.
 
 ### Verify Installation
 
@@ -75,6 +86,26 @@ curl http://localhost:8001/health
 python cortex/atlas_mcp_client.py
 
 # Expected: Connection success and K562 search results
+```
+
+## Task System
+
+AGOUTIC now maintains a persistent project task list instead of relying on a
+hard-coded checklist in the UI.
+
+- Tasks are projected from durable workflow records, mainly `ProjectBlock`
+  state plus job progress payloads.
+- The chat page groups tasks into pending, running, follow-up, and completed
+  sections.
+- Parent tasks can include child tasks for workflow stages, per-file download
+  progress, analysis completion, and result review.
+- Existing history can be backfilled safely with:
+
+```bash
+python scripts/cortex/bootstrap_project_tasks.py
+
+# Optional: seed only one project
+python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 ```
 
 ## 📋 Architecture Overview
@@ -118,6 +149,8 @@ python cortex/atlas_mcp_client.py
   - Chat interface with skill-based workflows
   - Coordinates Atlas, 3, and 4
   - Block-based project timeline
+  - Persistent project task list with child-task projection for downloads,
+    workflow stages, analysis, and follow-up review
   - Background job monitoring with **stop/cancel** buttons
   - **Download cancel button** — "🛑 Cancel Download" on running downloads with partial-file cleanup
   - **"List my data" command** — chat-based central data folder listing (DB + disk fallback)
@@ -244,7 +277,8 @@ agoutic/
 ├── scripts/                     # Manual admin and operational utilities
 │   ├── cortex/
 │   │   ├── init_db.py           # Fresh database bootstrap utility
-│   │   └── set_usernames.py     # Username/slug admin CLI
+│   │   ├── set_usernames.py     # Username/slug admin CLI
+│   │   └── bootstrap_project_tasks.py # Backfill persistent project tasks
 │   └── launchpad/
 │       ├── debug_job.py         # Job inspection helper
 │       └── submit_real_job.py   # Manual job submission helper
@@ -451,14 +485,27 @@ When servers are started or restarted via `agoutic_servers.sh`, existing log fil
 ### Development Mode
 
 ```bash
+# Recommended for a full local stack
+./agoutic_servers.sh --start
+
+# Start the UI separately
+streamlit run ui/app.py --server.port 8501
+```
+
+If you need manual development startup:
+
+```bash
 # Terminal 1: Start Launchpad
 cd /path/to/agoutic
-uvicorn launchpad.app:app --port 8001 --reload
+uvicorn launchpad.app:app --port 8003 --reload
 
-# Terminal 2: Start Cortex
+# Terminal 2: Start Launchpad MCP
+python -m launchpad.mcp_server --host 0.0.0.0 --port 8002
+
+# Terminal 3: Start Cortex
 uvicorn cortex.app:app --port 8000 --reload
 
-# Terminal 3: Start UI (if using Streamlit)
+# Terminal 4: Start UI (if using Streamlit)
 cd ui && streamlit run app.py
 ```
 
@@ -539,6 +586,9 @@ pytest tests/atlas/ tests/common/ tests/analyzer/ tests/launchpad/ tests/ui/ -q
 
 # Single test file
 pytest tests/cortex/test_chat_data_calls.py -x -q
+
+# Focused task lifecycle and hierarchy coverage
+pytest tests/cortex/test_project_endpoints.py -q
 ```
 
 ### Test Architecture
@@ -547,7 +597,22 @@ pytest tests/cortex/test_chat_data_calls.py -x -q
 - **Mocked LLM** via `AgentEngine` patches (no real model calls)
 - **Mocked MCP** via `MCPHttpClient` patches (no real service connections)
 - **34 cortex test files** covering: chat endpoint, approval gates, background tasks, project management, block endpoints, conversations, auth, admin, downloads, uploads, pure helpers, tool routing, skill detection, validation
+- **Task coverage** includes persistent task projection, task actions,
+  download-file children, and workflow-stage children in
+  `tests/cortex/test_project_endpoints.py`
 - **Shared fixtures** in `tests/conftest.py` for DB engine, sessions, mock users
+
+### Bootstrap Existing History
+
+If you deploy this release onto a server that already has projects and stored
+workflow blocks, run the task bootstrap once after the application starts:
+
+```bash
+python scripts/cortex/bootstrap_project_tasks.py
+```
+
+The script is idempotent: it reconciles the current workflow state and is safe
+to re-run.
 
 ### Run Demo
 

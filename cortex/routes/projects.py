@@ -23,6 +23,8 @@ from cortex.models import (
     Project, ProjectAccess, ProjectBlock, Conversation,
     ConversationMessage, User,
 )
+from cortex.schemas import ProjectTaskListOut, ProjectTaskOut, ProjectTaskUpdate
+from cortex.task_service import build_task_sections, sync_project_tasks, task_to_dict, update_task_action
 from common.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -333,6 +335,41 @@ async def record_project_access(project_id: str, request: Request, project_name:
     try:
         await _dbh.track_project_access(session, user.id, project_id, project_name)
         return {"status": "ok"}
+    finally:
+        session.close()
+
+
+@router.get("/projects/{project_id}/tasks", response_model=ProjectTaskListOut)
+async def get_project_tasks(project_id: str, request: Request):
+    """Return persistent project tasks grouped for the UI."""
+    user = request.state.user
+    require_project_access(project_id, user, min_role="viewer")
+
+    session = _db.SessionLocal()
+    try:
+        tasks = sync_project_tasks(session, project_id)
+        return {
+            "project_id": project_id,
+            "sections": build_task_sections(tasks),
+        }
+    finally:
+        session.close()
+
+
+@router.patch("/projects/{project_id}/tasks/{task_id}", response_model=ProjectTaskOut)
+async def patch_project_task(project_id: str, task_id: str, body: ProjectTaskUpdate, request: Request):
+    """Apply a user action to a project task."""
+    user = request.state.user
+    require_project_access(project_id, user, min_role="editor")
+
+    session = _db.SessionLocal()
+    try:
+        task = update_task_action(session, project_id, task_id, body.action)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task_to_dict(task)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     finally:
         session.close()
 

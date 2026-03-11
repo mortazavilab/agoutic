@@ -32,6 +32,7 @@ st.header("Select Job")
 # Auto-list jobs from the user's active project (if available)
 run_uuid = None
 _active_pid = st.session_state.get("active_project_id")
+_selected_task_run_uuid = st.session_state.get("selected_job_run_uuid")
 
 try:
     if _active_pid:
@@ -55,6 +56,9 @@ try:
                     run_uuid = _options[_sel]
 except Exception:
     pass
+
+if not run_uuid and _selected_task_run_uuid:
+    run_uuid = _selected_task_run_uuid
 
 # Fallback: manual UUID input
 manual_uuid = st.text_input(

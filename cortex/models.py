@@ -240,3 +240,41 @@ class ProjectBlock(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+
+class ProjectTask(Base):
+    """Persistent user-facing task rows derived from workflow state."""
+    __tablename__ = "project_tasks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+
+    project_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    owner_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+
+    kind: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, index=True, nullable=False, default="PENDING")
+    priority: Mapped[str] = mapped_column(String, nullable=False, default="normal")
+
+    source_key: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    source_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    parent_task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    action_label: Mapped[str | None] = mapped_column(String, nullable=True)
+    action_target: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    completed_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)

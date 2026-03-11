@@ -73,6 +73,43 @@ class BlockUpdate(BaseModel):
     payload: Optional[Any] = None
 
 
+class ProjectTaskOut(BaseModel):
+    id: str
+    project_id: str
+    kind: str
+    title: str
+    status: str
+    priority: str
+    source_key: str
+    source_type: Optional[str] = None
+    source_id: Optional[str] = None
+    parent_task_id: Optional[str] = None
+    action_label: Optional[str] = None
+    action_target: Optional[str] = None
+    metadata: dict = Field(default_factory=dict)
+    created_at: str
+    updated_at: str
+    completed_at: Optional[str] = None
+    archived_at: Optional[str] = None
+    children: list["ProjectTaskOut"] = Field(default_factory=list)
+
+
+class ProjectTaskSectionsOut(BaseModel):
+    pending: list[ProjectTaskOut] = Field(default_factory=list)
+    running: list[ProjectTaskOut] = Field(default_factory=list)
+    follow_up: list[ProjectTaskOut] = Field(default_factory=list)
+    completed: list[ProjectTaskOut] = Field(default_factory=list)
+
+
+class ProjectTaskListOut(BaseModel):
+    project_id: str
+    sections: ProjectTaskSectionsOut
+
+
+class ProjectTaskUpdate(BaseModel):
+    action: str = Field(..., min_length=1)
+
+
 # ==================== User Data / Central File Schemas ====================
 
 class UserFileOut(BaseModel):

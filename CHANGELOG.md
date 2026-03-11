@@ -1,5 +1,30 @@
 # Changelog - March 2026
 
+## [3.2.3] - 2026-03-11
+
+### Features
+
+- **Persistent task hierarchy expanded** — project tasks now project deeper child
+  tasks for per-file downloads and per-run workflow stages, in addition to the
+  earlier run → analysis/review/recovery hierarchy.
+
+- **Task bootstrap script** — added `scripts/cortex/bootstrap_project_tasks.py`
+  to seed persistent project tasks from existing `ProjectBlock` history for one
+  project or the full database.
+
+### Docs
+
+- Updated the main README with the persistent task-list overview, bootstrap
+  instructions for existing servers, and the focused task validation command.
+- Clarified the supported startup flow: use `agoutic_servers.sh` for the backend
+  stack and start the UI with `streamlit run ui/app.py` rather than running the
+  Streamlit script directly with Python.
+
+### Tests
+
+- Added focused task hierarchy coverage for download-file children and workflow
+  stage children in the Cortex project endpoint suite.
+
 ## [3.2.2] - 2026-03-11
 
 ### Features

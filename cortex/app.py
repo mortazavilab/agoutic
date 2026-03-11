@@ -76,6 +76,7 @@ from cortex.routes.analyzer_proxy import (
     _call_analyzer_tool, _call_launchpad_tool,
 )
 from cortex.routes.user_data import router as user_data_router
+from cortex.task_service import sync_project_tasks, clear_project_tasks
 
 # --- LOGGING ---
 setup_logging("cortex")
@@ -633,6 +634,7 @@ async def update_block(
             
         session.commit()
         session.refresh(block)
+        sync_project_tasks(session, block.project_id)
         
         # If an APPROVAL_GATE was just approved, trigger job submission or download
         if block.type == "APPROVAL_GATE" and old_status == "PENDING" and block.status == "APPROVED":
@@ -669,6 +671,7 @@ async def clear_project_blocks(project_id: str, request: Request):
         for b in blocks:
             session.delete(b)
         session.commit()
+        clear_project_tasks(session, project_id)
         logger.info("Cleared project blocks", project_id=project_id, count=count, user=user.email)
         return {"status": "ok", "deleted": count}
     finally:
@@ -1539,6 +1542,7 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                     block.payload_json = json.dumps(payload)
                     session.commit()
                     session.refresh(block)
+                    sync_project_tasks(session, project_id)
                 
                     logger.info("Job status updated", run_uuid=run_uuid, job_status=job_status, progress=status_data.get('progress_percent', 0))
                 

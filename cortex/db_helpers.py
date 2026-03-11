@@ -169,6 +169,12 @@ def _create_block_internal(session, project_id, block_type, payload, status="NEW
     session.add(new_block)
     session.commit()
     session.refresh(new_block)
+    try:
+        from cortex.task_service import sync_project_tasks
+        sync_project_tasks(session, project_id)
+    except Exception as exc:
+        logger.warning("Failed to sync project tasks after block creation",
+                       project_id=project_id, block_type=block_type, error=str(exc))
     return new_block
 
 
