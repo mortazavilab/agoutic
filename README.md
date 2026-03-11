@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.1  
+**Version:** 3.2.2  
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -14,6 +14,12 @@ The system is composed of:
 - **Analyzer**: Analysis Engine - Results analysis and QC reporting
 - **edgePython**: Differential Expression - Bulk/single-cell RNA-seq DE via edgePython
 - **UI**: Web interface for monitoring and control
+
+Current DE migration status: analyzer/server4 now contains the first adapter
+layer for proxying edgePython MCP calls upstream. The foundation includes
+conversation-scoped upstream client/session helpers, artifact relocation
+helpers for project-scoped DE outputs, analyzer-owned proxy tool registries,
+and unit tests. Cortex is not switched to this adapter path yet.
 
 ## 🔒 Security & Multi-User Isolation
 

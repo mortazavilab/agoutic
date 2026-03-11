@@ -5,6 +5,8 @@ Provides file discovery, reading, parsing, and analysis tools via MCP protocol.
 
 import json
 from datetime import datetime
+from functools import partial
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 from analyzer.analysis_engine import (
@@ -17,7 +19,9 @@ from analyzer.analysis_engine import (
     get_job_work_dir,
     resolve_work_dir,
 )
+from analyzer.edgepython_adapter import call_edgepython_tool, relocate_edgepython_artifact
 from analyzer.config import MAX_PREVIEW_LINES
+from edgepython_mcp.tool_schemas import TOOL_SCHEMAS as EDGEPYTHON_TOOL_SCHEMAS
 
 
 def _json_serial(obj: Any) -> str:
@@ -30,6 +34,83 @@ def _json_serial(obj: Any) -> str:
 def _dumps(obj: Any) -> str:
     """json.dumps wrapper that handles datetime serialisation."""
     return json.dumps(obj, indent=2, default=_json_serial)
+
+
+def _prefixed_edgepython_schema() -> Dict[str, Any]:
+    """Return analyzer-owned proxy schemas for edgePython tools.
+
+    The adapter adds a required conversation_id so analyzer can reuse upstream
+    MCP sessions, and project_dir for artifact-producing tools.
+    """
+    proxy_schemas: Dict[str, Any] = {}
+    for tool_name, schema in EDGEPYTHON_TOOL_SCHEMAS.items():
+        prefixed_name = f"edgepython_{tool_name}"
+        parameters = json.loads(json.dumps(schema.get("parameters", {})))
+        properties = parameters.setdefault("properties", {})
+        required = parameters.setdefault("required", [])
+        properties.setdefault(
+            "conversation_id",
+            {
+                "type": "string",
+                "description": "Conversation/session identifier used by analyzer to reuse an upstream edgePython MCP session.",
+            },
+        )
+        if "conversation_id" not in required:
+            required.append("conversation_id")
+        if tool_name in {"generate_plot", "save_results", "save_sc_results"}:
+            properties.setdefault(
+                "project_dir",
+                {
+                    "type": "string",
+                    "description": "Absolute Agoutic project directory used to relocate generated DE artifacts into project-scoped storage.",
+                },
+            )
+        proxy_schemas[prefixed_name] = {
+            "description": f"Analyzer adapter wrapper for edgePython tool '{tool_name}'.",
+            "parameters": parameters,
+        }
+    return proxy_schemas
+
+
+EDGEPYTHON_PROXY_TOOL_SCHEMAS = _prefixed_edgepython_schema()
+
+
+async def _edgepython_proxy_tool(
+    edgepython_tool_name: str,
+    *,
+    conversation_id: str,
+    project_dir: Optional[str] = None,
+    **params: Any,
+) -> Any:
+    """Proxy a DE tool call to the upstream edgePython MCP service."""
+    result = await call_edgepython_tool(
+        edgepython_tool_name,
+        conversation_id=conversation_id,
+        **params,
+    )
+
+    if (
+        isinstance(result, str)
+        and project_dir
+        and edgepython_tool_name in {"generate_plot", "save_results", "save_sc_results"}
+    ):
+        explicit_output = params.get("output_path")
+        filename = Path(explicit_output).name if explicit_output else None
+        relocated, _target_path = relocate_edgepython_artifact(
+            result,
+            project_dir=project_dir,
+            filename=filename,
+        )
+        if relocated is not None:
+            return relocated
+
+    return result
+
+
+EDGEPYTHON_PROXY_TOOL_REGISTRY = {
+    f"edgepython_{tool_name}": partial(_edgepython_proxy_tool, tool_name)
+    for tool_name in EDGEPYTHON_TOOL_SCHEMAS.keys()
+}
 
 
 # ==================== MCP Tool Definitions ====================
@@ -480,6 +561,8 @@ TOOL_REGISTRY = {
     "categorize_job_files": categorize_job_files_tool
 }
 
+TOOL_REGISTRY.update(EDGEPYTHON_PROXY_TOOL_REGISTRY)
+
 
 # Tool schemas for MCP server
 TOOL_SCHEMAS = {
@@ -643,3 +726,5 @@ TOOL_SCHEMAS = {
         }
     }
 }
+
+TOOL_SCHEMAS.update(EDGEPYTHON_PROXY_TOOL_SCHEMAS)

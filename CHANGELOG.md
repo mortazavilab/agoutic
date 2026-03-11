@@ -1,5 +1,28 @@
 # Changelog - March 2026
 
+## [3.2.2] - 2026-03-11
+
+### Features
+
+- **Analyzer-side edgePython adapter foundation** — added initial server4
+  adapter plumbing for the planned migration from the local `edgepython_mcp/`
+  package to an upstream edgePython MCP service. The new foundation includes
+  configurable upstream MCP URL/session TTL settings in `analyzer/config.py`,
+  conversation-scoped upstream client/session helpers in
+  `analyzer/edgepython_adapter.py`, and analyzer-owned proxy tool/schema
+  registries in `analyzer/mcp_tools.py`.
+
+### Notes
+
+- This is groundwork only. Cortex still routes DE traffic directly to the
+  existing `edgepython` service path; analyzer/server4 is not the live DE
+  adapter yet.
+
+### Tests
+
+- Added analyzer adapter unit tests covering upstream-session helpers,
+  artifact relocation, and proxy registry/schema generation.
+
 ## [3.2.1] - 2026-03-10
 
 ### Features

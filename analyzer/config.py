@@ -30,6 +30,12 @@ DATABASE_URL = os.getenv(
 # Launchpad configuration (for job data access)
 LAUNCHPAD_URL = os.getenv("LAUNCHPAD_URL", "http://127.0.0.1:8003")
 
+# Upstream edgePython MCP configuration.
+# Analyzer will proxy DE tool calls to this service during the adapter migration.
+EDGEPYTHON_UPSTREAM_URL = os.getenv("EDGEPYTHON_UPSTREAM_URL", "http://127.0.0.1:8007")
+DE_RESULTS_SUBDIR = os.getenv("DE_RESULTS_SUBDIR", "de_results")
+DE_SESSION_TTL_SECONDS = int(os.getenv("DE_SESSION_TTL_SECONDS", "3600"))
+
 # Work directory configuration (where job results are stored)
 AGOUTIC_WORK_DIR = Path(os.getenv("AGOUTIC_WORK_DIR", AGOUTIC_DATA / "launchpad_work"))
 
