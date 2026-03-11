@@ -953,6 +953,17 @@ def render_block(block, expected_project_id: str = ""):
                     if _dfs and isinstance(_dfs, dict):
                         _render_embedded_dataframes(_dfs, block_id)
 
+            # ── Render embedded images (DE plots, etc.) ──
+            _images = content.get("_images")
+            if _images and isinstance(_images, list):
+                import base64
+                for _img_idx, _img in enumerate(_images):
+                    _b64 = _img.get("data_b64", "")
+                    _label = _img.get("label", "Plot")
+                    if _b64:
+                        _img_bytes = base64.b64decode(_b64)
+                        st.image(_img_bytes, caption=_label, use_container_width=True)
+
             # ── Per-message token count ──
             _msg_tokens = content.get("tokens")
             if _msg_tokens and _msg_tokens.get("total_tokens"):

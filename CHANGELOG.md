@@ -1,5 +1,24 @@
 # Changelog - March 2026
 
+## [3.2.1] - 2026-03-10
+
+### Features
+
+- **DE plot images in UI** — volcano, MD, and other edgePython-generated plots
+  are now base64-embedded in the AGENT_PLAN payload and rendered inline in the
+  chat with `st.image()`. No separate file-serving endpoint needed.
+
+### Fixes
+
+- **DE outputs saved to project folder** — `generate_plot` and `save_results`
+  output files are now redirected to `{project_dir}/de_results/` instead of the
+  server CWD or the input data directory. Filenames are preserved; plots default
+  to `{plot_type}.png`. Explicit `output_path` on plots is still respected.
+
+### Tests
+
+- 6 new output path injection tests (27 total DE tests).
+
 ## [3.2.0] - 2026-03-10
 
 ### Features — edgePython Differential Expression Pipeline

@@ -3721,6 +3721,41 @@ What would you like to do?
                             "metadata": {"visible": True},
                         }
 
+        # 7b. Collect generated plot images from edgepython results.
+        #     Store as base64 PNG so the UI can render them with st.image.
+        _embedded_images = []
+        for _src_key, _src_results in all_results.items():
+            if _src_key != "edgepython":
+                continue
+            for _r in _src_results:
+                if _r.get("tool") != "generate_plot" or "error" in _r:
+                    continue
+                _data_str = _r.get("data", "")
+                if not isinstance(_data_str, str):
+                    continue
+                # Extract file path from result like "Volcano plot saved to: /path/to.png"
+                _saved_match = re.search(r'saved to:\s*(.+\.png)', _data_str, re.IGNORECASE)
+                if not _saved_match:
+                    continue
+                _img_path = Path(_saved_match.group(1).strip())
+                if not _img_path.exists():
+                    continue
+                try:
+                    import base64
+                    _img_bytes = _img_path.read_bytes()
+                    _b64 = base64.b64encode(_img_bytes).decode("ascii")
+                    _plot_type = _r.get("params", {}).get("plot_type", "plot")
+                    _embedded_images.append({
+                        "label": f"{_plot_type.replace('_', ' ').title()} Plot",
+                        "data_b64": _b64,
+                        "path": str(_img_path),
+                    })
+                    logger.info("Embedded plot image", plot_type=_plot_type,
+                               path=str(_img_path), size_kb=len(_img_bytes) // 1024)
+                except Exception as _img_err:
+                    logger.warning("Failed to embed plot image",
+                                  path=str(_img_path), error=str(_img_err))
+
         # 8. Save AGENT_PLAN (The Text)
         # Status is DONE because the text itself is just informational. 
         # The flow control happens in the gate block below.
@@ -3789,6 +3824,8 @@ What would you like to do?
         }
         if _embedded_dataframes:
             _plan_payload["_dataframes"] = _embedded_dataframes
+        if _embedded_images:
+            _plan_payload["_images"] = _embedded_images
         if _provenance:
             _plan_payload["_provenance"] = _provenance
         # Attach debug info for the UI debug panel
