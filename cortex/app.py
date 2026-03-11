@@ -3028,7 +3028,25 @@ What would you like to do?
                         continue
                     
                     logger.info("Calling tool", source=source_key, tool=tool_name, params=params)
-                    
+
+                    # --- edgepython output path injection ---
+                    # Redirect output files (plots, results) to the project folder
+                    # so they appear alongside the user's project data in the UI.
+                    if source_key == "edgepython" and _project_dir_path:
+                        _ep_output_dir = _project_dir_path / "de_results"
+                        if tool_name == "generate_plot" and not params.get("output_path"):
+                            _ep_output_dir.mkdir(parents=True, exist_ok=True)
+                            _plot_type = params.get("plot_type", "plot")
+                            _result_name = params.get("result_name", "")
+                            _suffix = f"_{_result_name}" if _result_name else ""
+                            params["output_path"] = str(_ep_output_dir / f"{_plot_type}{_suffix}.png")
+                        elif tool_name == "save_results":
+                            _ep_output_dir.mkdir(parents=True, exist_ok=True)
+                            _fmt = params.get("format", "csv")
+                            _orig = params.get("output_path", "")
+                            _fname = Path(_orig).name if _orig else f"de_results.{_fmt}"
+                            params["output_path"] = str(_ep_output_dir / _fname)
+
                     try:
                         result_data = await mcp_client.call_tool(tool_name, **params)
                     except (ConnectionError, TimeoutError, OSError) as _conn_err:

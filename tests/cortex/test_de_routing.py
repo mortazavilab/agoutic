@@ -185,5 +185,59 @@ class TestMistralToolCallConversion(unittest.TestCase):
         self.assertEqual(result, text)
 
 
+class TestEdgepythonOutputPathInjection(unittest.TestCase):
+    """Verify that edgepython output tools get redirected to the project folder."""
+
+    def _inject(self, tool_name, params, project_dir):
+        """Simulate the output path injection logic from cortex/app.py."""
+        from pathlib import Path
+        source_key = "edgepython"
+        _project_dir_path = Path(project_dir)
+        if source_key == "edgepython" and _project_dir_path:
+            _ep_output_dir = _project_dir_path / "de_results"
+            if tool_name == "generate_plot" and not params.get("output_path"):
+                _plot_type = params.get("plot_type", "plot")
+                _result_name = params.get("result_name", "")
+                _suffix = f"_{_result_name}" if _result_name else ""
+                params["output_path"] = str(_ep_output_dir / f"{_plot_type}{_suffix}.png")
+            elif tool_name == "save_results":
+                _fmt = params.get("format", "csv")
+                _orig = params.get("output_path", "")
+                _fname = Path(_orig).name if _orig else f"de_results.{_fmt}"
+                params["output_path"] = str(_ep_output_dir / _fname)
+        return params
+
+    def test_volcano_plot_redirected(self):
+        params = {"plot_type": "volcano"}
+        result = self._inject("generate_plot", params, "/data/users/eli/my-project")
+        self.assertEqual(result["output_path"], "/data/users/eli/my-project/de_results/volcano.png")
+
+    def test_md_plot_redirected(self):
+        params = {"plot_type": "md", "result_name": "treated-control"}
+        result = self._inject("generate_plot", params, "/data/users/eli/my-project")
+        self.assertEqual(result["output_path"], "/data/users/eli/my-project/de_results/md_treated-control.png")
+
+    def test_save_results_redirected(self):
+        params = {"output_path": "/media/test-edgepy/de_results.csv", "format": "csv"}
+        result = self._inject("save_results", params, "/data/users/eli/my-project")
+        self.assertEqual(result["output_path"], "/data/users/eli/my-project/de_results/de_results.csv")
+
+    def test_save_results_default_name(self):
+        params = {"format": "tsv"}
+        result = self._inject("save_results", params, "/data/users/eli/my-project")
+        self.assertEqual(result["output_path"], "/data/users/eli/my-project/de_results/de_results.tsv")
+
+    def test_load_data_not_affected(self):
+        params = {"counts_path": "/media/test/counts.csv"}
+        result = self._inject("load_data", params, "/data/users/eli/my-project")
+        self.assertNotIn("output_path", result)
+        self.assertEqual(result["counts_path"], "/media/test/counts.csv")
+
+    def test_plot_with_explicit_output_path_not_overridden(self):
+        params = {"plot_type": "volcano", "output_path": "/custom/path/volcano.png"}
+        result = self._inject("generate_plot", params, "/data/users/eli/my-project")
+        self.assertEqual(result["output_path"], "/custom/path/volcano.png")
+
+
 if __name__ == "__main__":
     unittest.main()
