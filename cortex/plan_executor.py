@@ -46,6 +46,10 @@ _SAFE_STEP_KINDS = frozenset({
     "SUMMARIZE_QC",
     "GENERATE_PLOT",
     "WRITE_SUMMARY",
+    "CHECK_EXISTING",
+    "GENERATE_DE_PLOT",
+    "INTERPRET_RESULTS",
+    "RECOMMEND_NEXT",
 })
 
 # Expensive steps require explicit approval
@@ -53,6 +57,7 @@ _APPROVAL_STEP_KINDS = frozenset({
     "SUBMIT_WORKFLOW",
     "DOWNLOAD_DATA",
     "RUN_DE_ANALYSIS",
+    "RUN_DE_PIPELINE",
     "REQUEST_APPROVAL",
 })
 
@@ -90,6 +95,12 @@ STEP_TOOL_DEFAULTS: dict[str, list[dict] | None] = {
     "GENERATE_PLOT": None,          # uses PLOT tag system
     "WRITE_SUMMARY": None,          # uses LLM analyze_results
     "REQUEST_APPROVAL": None,       # creates APPROVAL_GATE block
+    # New plan step kinds
+    "CHECK_EXISTING": [{"source_key": "analyzer", "tool": "find_file"}],
+    "RUN_DE_PIPELINE": None,        # multi-call edgepython sequence (special handling)
+    "GENERATE_DE_PLOT": [{"source_key": "edgepython", "tool": "generate_plot"}],
+    "INTERPRET_RESULTS": None,      # LLM call (special handling)
+    "RECOMMEND_NEXT": None,         # LLM call (special handling)
     # Legacy kinds (backward compat with existing WORKFLOW_PLAN):
     "copy_sample": None,
     "run": None,
@@ -174,7 +185,8 @@ async def execute_step(
         return StepResult(success=True, data={"action": "approval_required"})
 
     if kind in ("SUBMIT_WORKFLOW", "DOWNLOAD_DATA", "RUN_DE_ANALYSIS",
-                "COMPARE_SAMPLES", "GENERATE_PLOT", "WRITE_SUMMARY"):
+                "COMPARE_SAMPLES", "GENERATE_PLOT", "WRITE_SUMMARY",
+                "RUN_DE_PIPELINE", "INTERPRET_RESULTS", "RECOMMEND_NEXT"):
         # These kinds need special orchestration — mark as needing attention
         # and return a marker so the caller can handle them
         step["status"] = "WAITING_APPROVAL" if step.get("requires_approval") else "PENDING"

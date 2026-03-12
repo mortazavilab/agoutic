@@ -82,6 +82,9 @@ def replan_with_new_info(
     Examples:
       - SEARCH_ENCODE returns 0 results → skip DOWNLOAD_DATA step
       - LOCATE_DATA finds no output files → skip PARSE_OUTPUT_FILE
+      - CHECK_EXISTING finds files → convert downstream expensive step to WAITING_APPROVAL
+      - RUN_DE_PIPELINE failure → skip GENERATE_DE_PLOT and INTERPRET_RESULTS
+      - PARSE_OUTPUT_FILE empty → skip GENERATE_PLOT and COMPARE_SAMPLES
 
     Returns updated payload if changes were made, None otherwise.
     """
@@ -131,6 +134,36 @@ def replan_with_new_info(
                     logger.info("Replan: skipping PARSE_OUTPUT_FILE (no data)",
                                step_id=s["id"])
 
+    # --- CHECK_EXISTING finds files: flag downstream expensive step ---
+    if kind == "CHECK_EXISTING":
+        has_files = _has_existing_files(results_data)
+        if has_files:
+            _EXPENSIVE_KINDS = {"SUBMIT_WORKFLOW", "DOWNLOAD_DATA", "RUN_DE_PIPELINE", "RUN_DE_ANALYSIS"}
+            for s in steps:
+                if (s.get("kind") in _EXPENSIVE_KINDS
+                        and completed_step_id in s.get("depends_on", [])
+                        and s.get("status") == "PENDING"):
+                    s["status"] = "WAITING_APPROVAL"
+                    s["title"] = s.get("title", "") + " (existing results found — rerun?)"
+                    changed = True
+                    logger.info("Replan: existing results found, flagging step for approval",
+                               step_id=s["id"], step_kind=s.get("kind"))
+
+    # --- PARSE_OUTPUT_FILE empty: skip downstream GENERATE_PLOT / COMPARE_SAMPLES ---
+    if kind == "PARSE_OUTPUT_FILE":
+        empty = _is_empty_result(results_data)
+        if empty:
+            _SKIP_AFTER_EMPTY_PARSE = {"GENERATE_PLOT", "GENERATE_DE_PLOT", "COMPARE_SAMPLES"}
+            for s in steps:
+                if (s.get("kind") in _SKIP_AFTER_EMPTY_PARSE
+                        and completed_step_id in s.get("depends_on", [])
+                        and s.get("status") == "PENDING"):
+                    s["status"] = "SKIPPED"
+                    s["error"] = "Skipped — parsed data was empty"
+                    changed = True
+                    logger.info("Replan: skipping step after empty parse",
+                               step_id=s["id"], step_kind=s.get("kind"))
+
     if changed:
         workflow_block.payload_json = json.dumps(payload)
         session.commit()
@@ -164,5 +197,33 @@ def _is_empty_result(results: list | dict) -> bool:
             return True
         data = results.get("data")
         if isinstance(data, list) and len(data) == 0:
+            return True
+    return False
+
+
+def _has_existing_files(results: list | dict) -> bool:
+    """Check if a CHECK_EXISTING step result found files (non-empty)."""
+    # Inverse of empty — if not empty, we have files
+    if _is_empty_result(results):
+        return False
+    # Also check for explicit positive indicators
+    if isinstance(results, list):
+        for r in results:
+            result_data = r.get("result", {}) if isinstance(r, dict) else r
+            if isinstance(result_data, dict):
+                files = result_data.get("files")
+                if isinstance(files, list) and len(files) > 0:
+                    return True
+                if result_data.get("found"):
+                    return True
+                if result_data.get("path"):
+                    return True
+        # Non-empty list of results is a positive signal
+        return bool(results)
+    if isinstance(results, dict):
+        if results.get("found") or results.get("path"):
+            return True
+        files = results.get("files")
+        if isinstance(files, list) and len(files) > 0:
             return True
     return False

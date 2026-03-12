@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.5
+**Version:** 3.2.6
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -167,7 +167,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Error-Handling Playbook** — deterministic failure rules in the system prompt + structured `[TOOL_ERROR]` blocks + single-retry for transient failures
   - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
   - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
-  - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that decomposes complex requests (compare samples, download+analyze, run pipelines) into deterministic execution plans with dependency tracking, approval gates, and automatic replanning on failure
+  - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that decomposes complex requests into deterministic execution plans with dependency tracking, approval gates, and automatic replanning on failure. 8 plan templates covering: run workflow, compare samples, download+analyze, summarize results, run DE pipeline, parse+plot+interpret, compare workflows, and search+compare to local data. CHECK_EXISTING guards skip expensive operations when results already exist.
 
 ### Atlas: ENCODELIB (Port 8080)
 - **Role:** ENCODE Portal data retrieval

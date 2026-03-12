@@ -1,5 +1,55 @@
 # Changelog - March 2026
 
+## [3.2.6] - 2026-03-12
+
+### Features
+
+- **Expanded plan template catalog (4 → 8)** — four new deterministic plan
+  templates: `run_de_pipeline` (CHECK_EXISTING → RUN_DE_PIPELINE →
+  GENERATE_DE_PLOT → INTERPRET_RESULTS → summary), `parse_plot_interpret`
+  (locate → parse → plot → interpret), `compare_workflows` (locate × 2 →
+  parse × 2 → compare → plot → interpret → summary), and
+  `search_compare_to_local` (ENCODE search → CHECK_EXISTING → download →
+  locate local → parse × 2 → compare → plot → summary).
+
+- **5 new step types (13 → 18)** — CHECK_EXISTING (guard against redundant
+  expensive ops), RUN_DE_PIPELINE (full DE with approval gate),
+  GENERATE_DE_PLOT (volcano/heatmap from DE results), INTERPRET_RESULTS
+  (LLM explains findings), RECOMMEND_NEXT (LLM suggests follow-up).
+
+- **CHECK_EXISTING guards** — expensive steps (downloads, pipeline
+  submissions, DE runs) are now preceded by a CHECK_EXISTING step that
+  verifies whether results already exist. When they do, the replanner
+  converts the downstream step to WAITING_APPROVAL with an "(existing
+  results found — rerun?)" label.
+
+- **Plot type auto-selection** — `_select_plot_type()` heuristic picks the
+  chart type (bar, pie, histogram, scatter, box, heatmap, volcano) based on
+  request keywords, so GENERATE_PLOT steps produce the right visualization.
+
+- **Enhanced existing templates** — `run_workflow` gained a CHECK_EXISTING
+  guard before submission; `compare_samples` and `summarize_results` gained
+  an INTERPRET_RESULTS step; `download_analyze` gained a CHECK_EXISTING
+  guard before download.
+
+- **Priority-ordered plan detection** — plan type classifier checks patterns
+  from most specific (DE analysis) to least (run workflow) to avoid
+  ambiguous matches.
+
+### Changes
+
+- `cortex/planner.py` — expanded from ~540 to ~970 lines: new classifier
+  patterns, 7 pattern sets with priority detection, 4 new templates, 4
+  enhanced templates, plot selection heuristic, expanded param extraction
+- `cortex/plan_executor.py` — 5 new step kinds in safety sets and tool
+  default mappings
+- `cortex/plan_replanner.py` — 3 new replan rules (CHECK_EXISTING →
+  WAITING_APPROVAL, PARSE_OUTPUT_FILE empty → skip plots, RUN_DE_PIPELINE
+  failure → skip DE plot/interpret) and `_has_existing_files()` helper
+- `cortex/task_service.py` — new step kinds in action classification
+- `cortex/prompt_templates/planning_system_prompt.md` — updated step kinds
+  list and plan_type enum
+
 ## [3.2.5] - 2026-03-12
 
 ### Features

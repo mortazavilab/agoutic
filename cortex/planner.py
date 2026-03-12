@@ -6,11 +6,15 @@ Three request classes:
   - SINGLE_TOOL: One tool call, no plan needed (existing flow)
   - MULTI_STEP: Requires a structured plan (new flow)
 
-Four plan templates:
+Eight plan templates:
   - run_workflow: Analyze a local sample (stage → run → analyze)
   - compare_samples: Compare two or more samples
   - download_analyze: Download from ENCODE/URL, then analyze
   - summarize_results: Summarize existing completed job results
+  - run_de_pipeline: Full differential expression analysis
+  - parse_plot_interpret: Parse data, plot, and explain
+  - compare_workflows: Compare outputs from two workflow runs
+  - search_compare_to_local: Search ENCODE, download, compare to local data
 """
 
 from __future__ import annotations
@@ -46,6 +50,15 @@ _MULTI_STEP_PATTERNS: list[re.Pattern] = [
     re.compile(r"run\s+(?:the\s+)?(?:full\s+)?pipeline\s+(?:on|for)", re.I),
     re.compile(r"analyze.*then\s+compare", re.I),
     re.compile(r"process.*(?:and|then)\s+(?:summarize|compare|report)", re.I),
+    # Differential expression
+    re.compile(r"(?:run|do|perform)\s+(?:a\s+)?(?:differential\s+expression|DE\s+analysis)", re.I),
+    re.compile(r"(?:differential\s+expression|DE)\s+(?:on|for|analysis)", re.I),
+    # Parse + plot + interpret
+    re.compile(r"(?:plot|graph|chart|visuali[sz]e).*(?:from|of|for)\s+(?:my|the|last|this)\s+(?:run|results?|workflow)", re.I),
+    re.compile(r"(?:parse|read).*(?:and|then)\s+(?:plot|graph|chart|visuali[sz]e)", re.I),
+    # Search + compare to local
+    re.compile(r"(?:download|get|fetch)\s+.*encode.*(?:compare|vs)", re.I),
+    re.compile(r"compare\s+(?:my\s+)?(?:local|sample).*(?:to|with|against)\s+.*(?:encode|public)", re.I),
 ]
 
 # Patterns that signal an INFORMATIONAL request
@@ -122,7 +135,7 @@ def _make_step(
 def _template_run_workflow(params: dict) -> dict:
     """
     Deterministic plan for running a local sample through Dogme.
-    Steps: locate data → validate inputs → [approval] → submit workflow → monitor → summarize QC
+    Steps: locate → validate → CHECK_EXISTING → [approval] → submit → monitor → summarize QC
     """
     sample_name = params.get("sample_name", "sample")
     work_dir = params.get("work_dir", "")
@@ -142,8 +155,15 @@ def _template_run_workflow(params: dict) -> dict:
     steps.append(s_validate)
     idx += 1
 
+    s_check = _make_step("CHECK_EXISTING", f"Check for existing results for {sample_name}", idx,
+                         depends_on=[s_validate["id"]],
+                         tool_calls=[{"source_key": "analyzer", "tool": "find_file",
+                                      "params": {"work_dir": work_dir, "file_name": "final_stats"}}])
+    steps.append(s_check)
+    idx += 1
+
     s_approve = _make_step("REQUEST_APPROVAL", f"Approve workflow submission for {sample_name}", idx,
-                           requires_approval=True, depends_on=[s_validate["id"]])
+                           requires_approval=True, depends_on=[s_check["id"]])
     steps.append(s_approve)
     idx += 1
 
@@ -218,8 +238,13 @@ def _template_compare_samples(params: dict) -> dict:
     steps.append(s_plot)
     idx += 1
 
+    s_interpret = _make_step("INTERPRET_RESULTS", f"Interpret comparison of {s_a} vs {s_b}", idx,
+                             depends_on=[s_compare["id"]])
+    steps.append(s_interpret)
+    idx += 1
+
     s_summary = _make_step("WRITE_SUMMARY", f"Summarize comparison findings", idx,
-                           depends_on=[s_compare["id"]])
+                           depends_on=[s_plot["id"], s_interpret["id"]])
     steps.append(s_summary)
 
     return {
@@ -240,7 +265,7 @@ def _template_compare_samples(params: dict) -> dict:
 def _template_download_analyze(params: dict) -> dict:
     """
     Deterministic plan for downloading ENCODE data and running analysis.
-    Steps: search → download → submit → monitor → summarize
+    Steps: search → CHECK_EXISTING → download → submit → monitor → summarize
     """
     search_term = params.get("search_term", "data")
     sample_name = params.get("sample_name", search_term)
@@ -254,8 +279,15 @@ def _template_download_analyze(params: dict) -> dict:
     steps.append(s_search)
     idx += 1
 
+    s_check = _make_step("CHECK_EXISTING", f"Check for previously downloaded {search_term}", idx,
+                         depends_on=[s_search["id"]],
+                         tool_calls=[{"source_key": "analyzer", "tool": "find_file",
+                                      "params": {"file_name": search_term}}])
+    steps.append(s_check)
+    idx += 1
+
     s_download = _make_step("DOWNLOAD_DATA", f"Download files for {search_term}", idx,
-                            requires_approval=True, depends_on=[s_search["id"]])
+                            requires_approval=True, depends_on=[s_check["id"]])
     steps.append(s_download)
     idx += 1
 
@@ -322,8 +354,13 @@ def _template_summarize_results(params: dict) -> dict:
     steps.append(s_plot)
     idx += 1
 
+    s_interpret = _make_step("INTERPRET_RESULTS", f"Interpret results for {sample_name}", idx,
+                             depends_on=[s_qc["id"]])
+    steps.append(s_interpret)
+    idx += 1
+
     s_summary = _make_step("WRITE_SUMMARY", f"Write analysis summary", idx,
-                           depends_on=[s_plot["id"]])
+                           depends_on=[s_plot["id"], s_interpret["id"]])
     steps.append(s_summary)
 
     return {
@@ -343,6 +380,23 @@ def _template_summarize_results(params: dict) -> dict:
 # Plan-type detection
 # ---------------------------------------------------------------------------
 
+_DE_PATTERNS = [
+    re.compile(r"(?:run|do|perform)\s+(?:a\s+)?(?:differential\s+expression|DE\s+analysis)", re.I),
+    re.compile(r"(?:differential\s+expression|DE)\s+(?:on|for|analysis)", re.I),
+    re.compile(r"edger?\s+(?:analysis|pipeline)", re.I),
+]
+
+_SEARCH_COMPARE_LOCAL_PATTERNS = [
+    re.compile(r"(?:download|get|fetch)\s+.*(?:encode|public).*(?:compare|vs)", re.I),
+    re.compile(r"compare\s+(?:my\s+)?(?:local|sample).*(?:to|with|against)\s+.*(?:encode|public)", re.I),
+    re.compile(r"(?:encode|public)\s+.*compare\s+.*(?:my|local)", re.I),
+]
+
+_COMPARE_WORKFLOW_PATTERNS = [
+    re.compile(r"compare\s+(?:these|the|two|my|both|all)?\s*(?:workflows?|jobs?|runs?|pipelines?)", re.I),
+    re.compile(r"(?:differences?|diff)\s+between\s+(?:the\s+)?(?:workflows?|jobs?|runs?)", re.I),
+]
+
 _COMPARE_PATTERNS = [
     re.compile(r"compare\s+(?:these|the|two|my|both|all)?\s*(?:samples?|results?|workflows?)", re.I),
     re.compile(r"(?:differences?|diff)\s+between", re.I),
@@ -356,6 +410,12 @@ _DOWNLOAD_ANALYZE_PATTERNS = [
     re.compile(r"fetch.*(?:and|then)\s+(?:run|analyze|process)", re.I),
 ]
 
+_PARSE_PLOT_PATTERNS = [
+    re.compile(r"(?:plot|graph|chart|visuali[sz]e).*(?:from|of|for)\s+(?:my|the|last|this)\s+(?:run|results?|workflow)", re.I),
+    re.compile(r"(?:parse|read).*(?:and|then)\s+(?:plot|graph|chart|visuali[sz]e)", re.I),
+    re.compile(r"(?:show|display)\s+(?:the\s+)?(?:qc|quality|metrics?).*(?:plot|graph|chart)", re.I),
+]
+
 _RUN_WORKFLOW_PATTERNS = [
     re.compile(r"run\s+(?:the\s+)?(?:full\s+)?pipeline\s+(?:on|for)", re.I),
     re.compile(r"process\s+(?:my\s+)?(?:local\s+)?(?:sample|data|pod5|fastq|bam)", re.I),
@@ -364,13 +424,35 @@ _RUN_WORKFLOW_PATTERNS = [
 
 
 def _detect_plan_type(message: str) -> str | None:
-    """Return plan type string or None."""
+    """Return plan type string or None.
+
+    Priority ordering: most specific patterns first.
+    """
+    # 1. DE analysis (most specific)
+    for pat in _DE_PATTERNS:
+        if pat.search(message):
+            return "run_de_pipeline"
+    # 2. Search + compare to local
+    for pat in _SEARCH_COMPARE_LOCAL_PATTERNS:
+        if pat.search(message):
+            return "search_compare_to_local"
+    # 3. Compare workflows (before generic compare)
+    for pat in _COMPARE_WORKFLOW_PATTERNS:
+        if pat.search(message):
+            return "compare_workflows"
+    # 4. Compare samples
     for pat in _COMPARE_PATTERNS:
         if pat.search(message):
             return "compare_samples"
+    # 5. Download + analyze
     for pat in _DOWNLOAD_ANALYZE_PATTERNS:
         if pat.search(message):
             return "download_analyze"
+    # 6. Parse + plot + interpret
+    for pat in _PARSE_PLOT_PATTERNS:
+        if pat.search(message):
+            return "parse_plot_interpret"
+    # 7. Run workflow
     for pat in _RUN_WORKFLOW_PATTERNS:
         if pat.search(message):
             return "run_workflow"
@@ -393,6 +475,21 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             ]
         return params
 
+    if plan_type == "compare_workflows":
+        # Extract workflow names/indices from message or state
+        sample_matches = re.findall(r"(\b\w+(?:_\w+)*)\s+(?:and|vs?\.?|versus)\s+(\b\w+(?:_\w+)*)", message, re.I)
+        if sample_matches:
+            params["workflows"] = list(sample_matches[0])
+        elif conv_state.workflows and len(conv_state.workflows) >= 2:
+            params["workflows"] = [
+                conv_state.workflows[-2].get("sample_name", "workflow A"),
+                conv_state.workflows[-1].get("sample_name", "workflow B"),
+            ]
+            # Also carry work_dirs
+            params["work_dir_a"] = conv_state.workflows[-2].get("work_dir", "")
+            params["work_dir_b"] = conv_state.workflows[-1].get("work_dir", "")
+        return params
+
     if plan_type == "download_analyze":
         # Extract search term from message
         m = re.search(r"(?:download|get|fetch)\s+(.+?)(?:\s+(?:from|and|then))", message, re.I)
@@ -400,13 +497,332 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             params["search_term"] = m.group(1).strip()
         return params
 
-    # run_workflow / summarize_results
+    if plan_type == "search_compare_to_local":
+        # Extract search term and local sample from message
+        m = re.search(r"(?:download|get|fetch)\s+(.+?)(?:\s+(?:from|and|then|compare))", message, re.I)
+        if m:
+            params["search_term"] = m.group(1).strip()
+        # Local sample from state
+        if conv_state.sample_name:
+            params["local_sample"] = conv_state.sample_name
+        if conv_state.work_dir:
+            params["local_work_dir"] = conv_state.work_dir
+        return params
+
+    if plan_type == "run_de_pipeline":
+        # Extract counts path and sample info path from message
+        m = re.search(r"counts?\s+(?:at|in|from|path)?\s*[=:]?\s*(\S+\.(?:csv|tsv|txt))", message, re.I)
+        if m:
+            params["counts_path"] = m.group(1)
+        m = re.search(r"(?:sample[_ ]?info|metadata|design)\s+(?:at|in|from|path)?\s*[=:]?\s*(\S+\.(?:csv|tsv|txt))", message, re.I)
+        if m:
+            params["sample_info_path"] = m.group(1)
+        m = re.search(r"(?:group|condition)\s+(?:column)?\s*[=:]?\s*(\w+)", message, re.I)
+        if m:
+            params["group_column"] = m.group(1)
+        m = re.search(r"(\w+)\s+(?:vs?\.?|versus|compared?\s+to)\s+(\w+)", message, re.I)
+        if m:
+            params["contrast"] = f"{m.group(1)} - {m.group(2)}"
+        return params
+
+    if plan_type == "parse_plot_interpret":
+        params["plot_type"] = _select_plot_type(message)
+        # Fall through to pick up sample_name / work_dir below
+
+    # run_workflow / summarize_results / parse_plot_interpret
     if conv_state.sample_name:
         params["sample_name"] = conv_state.sample_name
     if conv_state.work_dir:
         params["work_dir"] = conv_state.work_dir
 
     return params
+
+
+# ---------------------------------------------------------------------------
+# Plot selection heuristic
+# ---------------------------------------------------------------------------
+
+def _select_plot_type(message: str) -> str:
+    """Keyword-based chart type selection from the user's request."""
+    msg = message.lower()
+    if any(w in msg for w in ("volcano", "de plot", "differential expression plot")):
+        return "volcano"
+    if any(w in msg for w in ("heatmap", "heat map", "cluster")):
+        return "heatmap"
+    if any(w in msg for w in ("box", "boxplot", "box plot", "distribution")):
+        return "box"
+    if any(w in msg for w in ("pie", "proportion", "fraction", "percentage")):
+        return "pie"
+    if any(w in msg for w in ("scatter", "correlation", "xy")):
+        return "scatter"
+    if any(w in msg for w in ("histogram", "hist", "frequency")):
+        return "histogram"
+    # Default: bar chart for categorical / count data
+    return "bar"
+
+
+# ---- Template: run_de_pipeline -------------------------------------------
+
+def _template_run_de_pipeline(params: dict) -> dict:
+    """
+    Deterministic plan for full differential expression analysis.
+    Steps: CHECK_EXISTING → RUN_DE_PIPELINE → GENERATE_DE_PLOT → INTERPRET_RESULTS → WRITE_SUMMARY
+    """
+    counts_path = params.get("counts_path", "counts.csv")
+    sample_info = params.get("sample_info_path", "sample_info.csv")
+    group_col = params.get("group_column", "condition")
+    contrast = params.get("contrast", "treated - control")
+
+    steps = []
+    idx = 0
+
+    s_check = _make_step("CHECK_EXISTING", "Check for existing DE results", idx,
+                         tool_calls=[{"source_key": "analyzer", "tool": "find_file",
+                                      "params": {"file_name": "de_results"}}])
+    steps.append(s_check)
+    idx += 1
+
+    s_de = _make_step("RUN_DE_PIPELINE", f"Run DE analysis ({contrast})", idx,
+                      requires_approval=True, depends_on=[s_check["id"]],
+                      tool_calls=[
+                          {"source_key": "edgepython", "tool": "load_data",
+                           "params": {"counts_path": counts_path, "sample_info_path": sample_info,
+                                      "group_column": group_col}},
+                          {"source_key": "edgepython", "tool": "filter_genes",
+                           "params": {"min_count": 10, "min_total_count": 15}},
+                          {"source_key": "edgepython", "tool": "normalize",
+                           "params": {"method": "TMM"}},
+                          {"source_key": "edgepython", "tool": "set_design",
+                           "params": {"formula": "~ 0 + group"}},
+                          {"source_key": "edgepython", "tool": "estimate_dispersion",
+                           "params": {"robust": True}},
+                          {"source_key": "edgepython", "tool": "fit_model",
+                           "params": {"robust": True}},
+                          {"source_key": "edgepython", "tool": "test_contrast",
+                           "params": {"contrast": contrast}},
+                      ])
+    steps.append(s_de)
+    idx += 1
+
+    s_plot = _make_step("GENERATE_DE_PLOT", "Generate volcano plot", idx,
+                        depends_on=[s_de["id"]],
+                        tool_calls=[{"source_key": "edgepython", "tool": "generate_plot",
+                                     "params": {"plot_type": "volcano"}}])
+    steps.append(s_plot)
+    idx += 1
+
+    s_interpret = _make_step("INTERPRET_RESULTS", "Interpret DE results", idx,
+                             depends_on=[s_de["id"]])
+    steps.append(s_interpret)
+    idx += 1
+
+    s_summary = _make_step("WRITE_SUMMARY", "Write DE analysis summary", idx,
+                           depends_on=[s_plot["id"], s_interpret["id"]])
+    steps.append(s_summary)
+
+    return {
+        "plan_type": "run_de_pipeline",
+        "title": f"Differential expression: {contrast}",
+        "goal": params.get("goal", f"Run DE analysis: {contrast}"),
+        "workflow_type": "de_analysis",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
+# ---- Template: parse_plot_interpret --------------------------------------
+
+def _template_parse_plot_interpret(params: dict) -> dict:
+    """
+    Deterministic plan for parsing data, plotting, and explaining.
+    Steps: LOCATE_DATA → PARSE_OUTPUT_FILE → GENERATE_PLOT → INTERPRET_RESULTS
+    """
+    sample_name = params.get("sample_name", "sample")
+    work_dir = params.get("work_dir", "")
+    plot_type = params.get("plot_type", "bar")
+
+    steps = []
+    idx = 0
+
+    s_locate = _make_step("LOCATE_DATA", f"Locate output files for {sample_name}", idx,
+                          tool_calls=[{"source_key": "analyzer", "tool": "list_job_files",
+                                       "params": {"work_dir": work_dir}}])
+    steps.append(s_locate)
+    idx += 1
+
+    s_parse = _make_step("PARSE_OUTPUT_FILE", "Parse key result files", idx,
+                         depends_on=[s_locate["id"]])
+    steps.append(s_parse)
+    idx += 1
+
+    s_plot = _make_step("GENERATE_PLOT", f"Generate {plot_type} chart", idx,
+                        depends_on=[s_parse["id"]])
+    steps.append(s_plot)
+    idx += 1
+
+    s_interpret = _make_step("INTERPRET_RESULTS", "Explain what the results mean", idx,
+                             depends_on=[s_plot["id"]])
+    steps.append(s_interpret)
+
+    return {
+        "plan_type": "parse_plot_interpret",
+        "title": f"Plot and interpret results for {sample_name}",
+        "goal": params.get("goal", f"Plot and interpret {sample_name} results"),
+        "workflow_type": "visualize",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "plot_type": plot_type,
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
+# ---- Template: compare_workflows ----------------------------------------
+
+def _template_compare_workflows(params: dict) -> dict:
+    """
+    Deterministic plan for comparing two workflow/job outputs.
+    Steps: locate(×2) → parse(×2) → compare → plot → INTERPRET_RESULTS → summary
+    """
+    workflows = params.get("workflows", ["workflow A", "workflow B"])
+    w_a, w_b = workflows[0], workflows[1] if len(workflows) >= 2 else "workflow B"
+    work_dir_a = params.get("work_dir_a", "")
+    work_dir_b = params.get("work_dir_b", "")
+
+    steps = []
+    idx = 0
+
+    s_loc_a = _make_step("LOCATE_DATA", f"Locate output for {w_a}", idx,
+                         tool_calls=[{"source_key": "analyzer", "tool": "list_job_files",
+                                      "params": {"work_dir": work_dir_a}}] if work_dir_a else [])
+    steps.append(s_loc_a)
+    idx += 1
+
+    s_loc_b = _make_step("LOCATE_DATA", f"Locate output for {w_b}", idx,
+                         tool_calls=[{"source_key": "analyzer", "tool": "list_job_files",
+                                      "params": {"work_dir": work_dir_b}}] if work_dir_b else [])
+    steps.append(s_loc_b)
+    idx += 1
+
+    s_parse_a = _make_step("PARSE_OUTPUT_FILE", f"Parse results for {w_a}", idx,
+                           depends_on=[s_loc_a["id"]])
+    steps.append(s_parse_a)
+    idx += 1
+
+    s_parse_b = _make_step("PARSE_OUTPUT_FILE", f"Parse results for {w_b}", idx,
+                           depends_on=[s_loc_b["id"]])
+    steps.append(s_parse_b)
+    idx += 1
+
+    s_compare = _make_step("COMPARE_SAMPLES", f"Compare {w_a} vs {w_b}", idx,
+                           depends_on=[s_parse_a["id"], s_parse_b["id"]])
+    steps.append(s_compare)
+    idx += 1
+
+    s_plot = _make_step("GENERATE_PLOT", "Generate comparison plots", idx,
+                        depends_on=[s_compare["id"]])
+    steps.append(s_plot)
+    idx += 1
+
+    s_interpret = _make_step("INTERPRET_RESULTS", "Interpret comparison findings", idx,
+                             depends_on=[s_compare["id"]])
+    steps.append(s_interpret)
+    idx += 1
+
+    s_summary = _make_step("WRITE_SUMMARY", "Summarize workflow comparison", idx,
+                           depends_on=[s_plot["id"], s_interpret["id"]])
+    steps.append(s_summary)
+
+    return {
+        "plan_type": "compare_workflows",
+        "title": f"Compare {w_a} and {w_b}",
+        "goal": params.get("goal", f"Compare workflows {w_a} and {w_b}"),
+        "workflow_type": "compare",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
+# ---- Template: search_compare_to_local ----------------------------------
+
+def _template_search_compare_to_local(params: dict) -> dict:
+    """
+    Deterministic plan for searching ENCODE, downloading, comparing to local data.
+    Steps: search → CHECK_EXISTING → download → locate local → parse(×2) → compare → plot → summary
+    """
+    search_term = params.get("search_term", "data")
+    local_sample = params.get("local_sample", "local sample")
+    local_work_dir = params.get("local_work_dir", "")
+
+    steps = []
+    idx = 0
+
+    s_search = _make_step("SEARCH_ENCODE", f"Search ENCODE for {search_term}", idx,
+                          tool_calls=[{"source_key": "encode", "tool": "search_by_biosample",
+                                       "params": {"search_term": search_term}}])
+    steps.append(s_search)
+    idx += 1
+
+    s_check = _make_step("CHECK_EXISTING", "Check for previously downloaded data", idx,
+                         depends_on=[s_search["id"]],
+                         tool_calls=[{"source_key": "analyzer", "tool": "find_file",
+                                      "params": {"file_name": search_term}}])
+    steps.append(s_check)
+    idx += 1
+
+    s_download = _make_step("DOWNLOAD_DATA", f"Download {search_term} from ENCODE", idx,
+                            requires_approval=True, depends_on=[s_check["id"]])
+    steps.append(s_download)
+    idx += 1
+
+    s_locate_local = _make_step("LOCATE_DATA", f"Locate local data for {local_sample}", idx,
+                                tool_calls=[{"source_key": "analyzer", "tool": "list_job_files",
+                                             "params": {"work_dir": local_work_dir}}] if local_work_dir else [])
+    steps.append(s_locate_local)
+    idx += 1
+
+    s_parse_remote = _make_step("PARSE_OUTPUT_FILE", f"Parse downloaded {search_term} data", idx,
+                                depends_on=[s_download["id"]])
+    steps.append(s_parse_remote)
+    idx += 1
+
+    s_parse_local = _make_step("PARSE_OUTPUT_FILE", f"Parse local {local_sample} data", idx,
+                               depends_on=[s_locate_local["id"]])
+    steps.append(s_parse_local)
+    idx += 1
+
+    s_compare = _make_step("COMPARE_SAMPLES", f"Compare {local_sample} vs {search_term}", idx,
+                           depends_on=[s_parse_remote["id"], s_parse_local["id"]])
+    steps.append(s_compare)
+    idx += 1
+
+    s_plot = _make_step("GENERATE_PLOT", "Generate comparison plots", idx,
+                        depends_on=[s_compare["id"]])
+    steps.append(s_plot)
+    idx += 1
+
+    s_summary = _make_step("WRITE_SUMMARY", f"Summarize {local_sample} vs {search_term}", idx,
+                           depends_on=[s_compare["id"], s_plot["id"]])
+    steps.append(s_summary)
+
+    return {
+        "plan_type": "search_compare_to_local",
+        "title": f"Compare {local_sample} to ENCODE {search_term}",
+        "goal": params.get("goal", f"Compare local {local_sample} to ENCODE {search_term}"),
+        "workflow_type": "compare",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "steps": steps,
+        "artifacts": [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +865,18 @@ def generate_plan(
     params = _extract_plan_params(message, conv_state, plan_type or "")
 
     # 1. Deterministic templates
+    if plan_type == "run_de_pipeline":
+        plan = _template_run_de_pipeline(params)
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return plan
+    if plan_type == "search_compare_to_local":
+        plan = _template_search_compare_to_local(params)
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return plan
+    if plan_type == "compare_workflows":
+        plan = _template_compare_workflows(params)
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return plan
     if plan_type == "run_workflow":
         plan = _template_run_workflow(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
@@ -459,6 +887,10 @@ def generate_plan(
         return plan
     if plan_type == "download_analyze":
         plan = _template_download_analyze(params)
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return plan
+    if plan_type == "parse_plot_interpret":
+        plan = _template_parse_plot_interpret(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return plan
 
