@@ -4,6 +4,13 @@
 
 This is a unified entry point for analyzing local data. It acts as an intake wizard that interviews the user to gather essential metadata through a multi-turn conversation. **DO NOT show approval until ALL information is collected.**
 
+For local `.pod5` intake, the execution flow is now ordered:
+1. Stage the source folder into `AGOUTIC_DATA/users/{username}/data/{sample_name_slug}` if it is not already there.
+2. Run Dogme from the staged folder.
+3. Trigger result analysis only when that analysis step becomes the next ready todo.
+
+If the staged sample folder already exists, the system pauses and asks whether to reuse the existing staged copy or replace it with a fresh copy from the original source path.
+
 **IMPORTANT:** If the user asks for analysis of a COMPLETED job (QC report, results, file analysis), switch to the `analyze_job_results` skill by outputting:
 
 ```
@@ -116,6 +123,8 @@ Display a summary and include the [[APPROVAL_NEEDED]] tag:
 
 I will submit this to the Dogme {sample_type} pipeline for analysis.
 
+Before Dogme starts, AGOUTIC will stage the local sample into your user data area if needed and track `stage -> run -> analyze` as separate todo steps.
+
 [[APPROVAL_NEEDED]]"
 
 ## Example Conversation Flow
@@ -178,3 +187,4 @@ I will submit this to the Dogme CDNA pipeline for analysis.
 6. **Do NOT generate any [[DATA_CALL:...]] tags** — after user approval, the system automatically submits the job to the Dogme pipeline using the collected parameters. Your only job is to collect the 4 fields and show [[APPROVAL_NEEDED]].
 7. **Do NOT switch to run_dogme_dna, run_dogme_rna, or run_dogme_cdna** — even if you know the data type. This skill handles ALL local sample intake. Stay on this skill until all 4 fields are collected and approval is granted.
 8. **Do NOT try to validate paths or list files** — you cannot access the filesystem. Just collect the path from the user and include it in the summary.
+9. **Do NOT promise direct execution from the original local path** — local `.pod5` intake is staged into the user's central data area first, then executed from the staged copy.

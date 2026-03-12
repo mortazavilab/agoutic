@@ -437,6 +437,79 @@ class TestProjectTasks:
         assert workflow_child_statuses["mainWorkflow:basecall (1)"] == "COMPLETED"
         assert workflow_child_statuses["mainWorkflow:align (1)"] == "RUNNING"
 
+    def test_workflow_plan_projects_ordered_steps(self, client):
+        project_id = self._create_project(client)
+
+        workflow_resp = client.post("/block", json={
+            "project_id": project_id,
+            "type": "WORKFLOW_PLAN",
+            "payload": {
+                "workflow_type": "local_sample_intake",
+                "title": "Process local sample Jamshid",
+                "sample_name": "Jamshid",
+                "status": "RUNNING",
+                "next_step": "run_dogme",
+                "run_uuid": "run-managed",
+                "steps": [
+                    {
+                        "id": "stage_input",
+                        "kind": "copy_sample",
+                        "title": "Stage Jamshid into user data",
+                        "status": "COMPLETED",
+                        "order_index": 0,
+                    },
+                    {
+                        "id": "run_dogme",
+                        "kind": "run",
+                        "title": "Run Dogme for Jamshid",
+                        "status": "RUNNING",
+                        "order_index": 1,
+                        "run_uuid": "run-managed",
+                        "block_id": "job-managed",
+                    },
+                    {
+                        "id": "analyze_results",
+                        "kind": "analysis",
+                        "title": "Analyze results for Jamshid",
+                        "status": "PENDING",
+                        "order_index": 2,
+                        "run_uuid": "run-managed",
+                    },
+                ],
+            },
+            "status": "RUNNING",
+        })
+        assert workflow_resp.status_code == 200
+        workflow_block_id = workflow_resp.json()["id"]
+
+        run_resp = client.post("/block", json={
+            "project_id": project_id,
+            "type": "EXECUTION_JOB",
+            "payload": {
+                "run_uuid": "run-managed",
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "workflow_plan_block_id": workflow_block_id,
+                "job_status": {"progress_percent": 20},
+            },
+            "status": "RUNNING",
+        })
+        assert run_resp.status_code == 200
+
+        task_resp = client.get(f"/projects/{project_id}/tasks")
+        assert task_resp.status_code == 200
+        sections = task_resp.json()["sections"]
+
+        workflow_task = next(task for task in sections["running"] if task["kind"] == "workflow_plan")
+        child_titles = [child["title"] for child in workflow_task["children"]]
+        assert child_titles == [
+            "Stage Jamshid into user data",
+            "Run Dogme for Jamshid",
+            "Analyze results for Jamshid",
+        ]
+        top_level_running = [task for task in sections["running"] if task["parent_task_id"] is None]
+        assert all(task["kind"] != "run" for task in top_level_running if task["id"] != workflow_task["id"])
+
     def test_clear_blocks_clears_tasks(self, client):
         project_id = self._create_project(client)
         client.post("/block", json={

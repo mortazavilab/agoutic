@@ -137,6 +137,52 @@ def _normalize_name(value: str) -> str:
     return "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-") or "task"
 
 
+def _workflow_action_for_step(step: dict) -> tuple[str | None, str | None]:
+    status = step.get("status", "PENDING")
+    if status == "FOLLOW_UP" and step.get("decision_gate_id"):
+        return "Review choice", _build_target("block", block_id=step["decision_gate_id"])
+    if step.get("kind") == "analysis" and step.get("run_uuid"):
+        return _action_for_status(status, pending_label="Analyzing", completed_label="Open results"), _build_target("results", run_uuid=step["run_uuid"])
+    if step.get("kind") == "run" and step.get("block_id"):
+        return _action_for_status(status, pending_label="View run", completed_label="View run"), _build_target("block", block_id=step["block_id"], run_uuid=step.get("run_uuid"))
+    if step.get("kind") == "copy_sample":
+        if status == "COMPLETED":
+            return "Staged", None
+        if status == "RUNNING":
+            return "Copying", None
+        return "Waiting", None
+    return _action_for_status(status, pending_label="Open task", completed_label="Done"), None
+
+
+def _iter_workflow_plan_specs(project_id: str, parent_task_id: str, block: ProjectBlock, payload: dict):
+    next_step = payload.get("next_step")
+    for index, step in enumerate(payload.get("steps", [])):
+        action_label, action_target = _workflow_action_for_step(step)
+        yield {
+            "project_id": project_id,
+            "source_key": f"workflow-step:{block.id}:{step.get('id', index)}",
+            "kind": step.get("kind") or "workflow_step",
+            "title": step.get("title") or step.get("id") or "Workflow step",
+            "status": step.get("status", "PENDING"),
+            "priority": "high" if step.get("status") in {"FAILED", "FOLLOW_UP"} else "normal",
+            "source_type": "block",
+            "source_id": block.id,
+            "parent_task_id": parent_task_id,
+            "action_label": action_label,
+            "action_target": action_target,
+            "metadata": {
+                "workflow_block_id": block.id,
+                "workflow_type": payload.get("workflow_type"),
+                "step_id": step.get("id"),
+                "order_index": step.get("order_index", index),
+                "is_next_step": step.get("id") == next_step,
+                "source_path": step.get("source_path"),
+                "staged_input_directory": step.get("staged_input_directory"),
+                "run_uuid": step.get("run_uuid"),
+            },
+        }
+
+
 def _iter_workflow_stage_specs(project_id: str, parent_task_id: str, block: ProjectBlock, payload: dict, *, run_uuid: str, sample_name: str):
     tasks = payload.get("job_status", {}).get("tasks", {})
     completed_names = tasks.get("completed", []) if isinstance(tasks, dict) else []
@@ -266,10 +312,45 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
 
     analyzed_samples, reviewed_samples = _collect_analysis_state(blocks)
     seen_sources: set[str] = set()
+    workflow_parent_ids: dict[str, str] = {}
+    workflow_run_ids: set[str] = set()
 
     for block in blocks:
         payload = get_block_payload(block)
         owner_id = block.owner_id
+
+        if block.type == "WORKFLOW_PLAN":
+            source_key = f"workflow-plan:{block.id}"
+            seen_sources.add(source_key)
+            plan_task = _upsert_task(
+                session,
+                existing_by_source,
+                {
+                    "project_id": project_id,
+                    "source_key": source_key,
+                    "kind": "workflow_plan",
+                    "title": payload.get("title") or f"Workflow for {payload.get('sample_name', 'sample')}",
+                    "status": payload.get("status", block.status or "PENDING"),
+                    "priority": "high" if payload.get("status") in {"FAILED", "FOLLOW_UP"} else "normal",
+                    "source_type": "block",
+                    "source_id": block.id,
+                    "action_label": None,
+                    "action_target": None,
+                    "metadata": {
+                        "workflow_type": payload.get("workflow_type"),
+                        "sample_name": payload.get("sample_name"),
+                        "next_step": payload.get("next_step"),
+                    },
+                },
+                owner_id=owner_id,
+            )
+            workflow_parent_ids[block.id] = plan_task.id
+            if payload.get("run_uuid"):
+                workflow_run_ids.add(payload["run_uuid"])
+            for child_spec in _iter_workflow_plan_specs(project_id, plan_task.id, block, payload):
+                seen_sources.add(child_spec["source_key"])
+                _upsert_task(session, existing_by_source, child_spec, owner_id=owner_id)
+            continue
 
         if block.type == "APPROVAL_GATE":
             task_status = {
@@ -277,7 +358,12 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 "APPROVED": "COMPLETED",
                 "REJECTED": "CANCELLED",
             }.get(block.status, "PENDING")
+            gate_action = payload.get("gate_action") or payload.get("extracted_params", {}).get("gate_action")
             label = payload.get("label") or "Review and approve workflow"
+            action_label = _action_for_status(task_status, pending_label="Review", completed_label="Reviewed")
+            if gate_action == "local_sample_existing":
+                label = "Decide whether to reuse the existing staged sample folder"
+                action_label = _action_for_status(task_status, pending_label="Review choice", completed_label="Resolved")
             source_key = f"approval:{block.id}"
             seen_sources.add(source_key)
             _upsert_task(
@@ -292,11 +378,13 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                     "priority": "high",
                     "source_type": "block",
                     "source_id": block.id,
-                    "action_label": _action_for_status(task_status, pending_label="Review", completed_label="Reviewed"),
+                    "parent_task_id": workflow_parent_ids.get(block.parent_id) if block.parent_id else None,
+                    "action_label": action_label,
                     "action_target": _build_target("block", block_id=block.id),
                     "metadata": {
                         "block_type": block.type,
                         "block_status": block.status,
+                        "gate_action": gate_action,
                     },
                 },
                 owner_id=owner_id,
@@ -344,6 +432,8 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             continue
 
         run_uuid = payload.get("run_uuid", "")
+        if run_uuid and (run_uuid in workflow_run_ids or payload.get("workflow_plan_block_id")):
+            continue
         sample_name = payload.get("sample_name") or "Sample"
         source_key = f"job:{block.id}"
         task_status = {
@@ -492,6 +582,9 @@ def build_task_sections(tasks: list[ProjectTask]) -> dict:
         if not parent_id:
             continue
         child_map.setdefault(parent_id, []).append(task)
+
+    for children in child_map.values():
+        children.sort(key=lambda item: item.get("metadata", {}).get("order_index", 9999))
 
     sections = {
         "pending": [],

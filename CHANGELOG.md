@@ -1,5 +1,44 @@
 # Changelog - March 2026
 
+## [3.2.4] - 2026-03-11
+
+### Features
+
+- **Bottom-pinned task dock** — moved the project task list into a dedicated
+  bottom viewport pane so the chat scrolls independently, while only rendering
+  the dock when there are active tasks to show.
+
+- **Todo-driven local sample workflow** — local `.pod5` intake now creates an
+  ordered `stage -> run -> analyze` workflow plan. Local samples are staged into
+  `AGOUTIC_DATA/users/{username}/data/{sample_slug}` before Dogme submission,
+  and analysis only auto-starts when it is the next ready workflow step.
+
+- **Existing staged-sample decision gate** — when a staged local-sample folder
+  already exists, the system now pauses and asks whether to reuse the existing
+  copy or replace it with a fresh copy from the original source path.
+
+### Fixes
+
+- **Launchpad submission payload cleanup** — stripped Cortex-only
+  `staged_input_directory` metadata from the `submit_dogme_job` MCP call so
+  staged local-sample runs submit successfully after the copy step.
+
+- **Workflow-aware task projection** — workflow plans now project as ordered
+  parent/child tasks, suppress duplicate top-level run tasks, and keep
+  follow-up decisions attached to the correct workflow in the UI.
+
+### Docs
+
+- Updated the local sample intake skill guidance to document the staged-copy
+  execution model and the reuse-versus-replace decision point for existing
+  staged folders.
+
+### Tests
+
+- Added regression coverage for local-sample staging, existing-folder decision
+  gates, workflow-plan task projection, and the rule that
+  `staged_input_directory` is never forwarded to Launchpad.
+
 ## [3.2.3] - 2026-03-11
 
 ### Features

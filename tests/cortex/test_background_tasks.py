@@ -679,6 +679,100 @@ class TestSubmitJobAfterApproval:
         assert "bguser" in submitted_dir or "bg-proj" in submitted_dir
 
     @pytest.mark.asyncio
+    async def test_local_sample_is_staged_before_submission(self, session_factory, seed_data, tmp_path):
+        """Local sample intake copies data into the user's central data folder before Dogme submission."""
+        source_dir = tmp_path / "incoming" / "pod5"
+        source_dir.mkdir(parents=True)
+        (source_dir / "reads.pod5").write_text("pod5-data")
+
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "extracted_params": {
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "input_directory": str(source_dir),
+                "reference_genome": ["mm39"],
+            },
+            "skill": "analyze_local_sample",
+            "model": "default",
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "stage-uuid",
+            "work_directory": "/work/stage-uuid",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.app.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        staged_dir = tmp_path / "users" / "bguser" / "data" / "jamshid"
+        assert staged_dir.exists()
+        assert (staged_dir / "reads.pod5").read_text() == "pod5-data"
+
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["input_directory"] == str(staged_dir)
+        assert "staged_input_directory" not in submitted
+
+        sess = session_factory()
+        workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
+        workflow_payload = get_block_payload(workflow_block)
+        assert workflow_payload["steps"][0]["status"] == "COMPLETED"
+        assert workflow_payload["steps"][1]["status"] == "RUNNING"
+        assert workflow_payload["next_step"] == "run_dogme"
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_existing_staged_dir_creates_decision_gate(self, session_factory, seed_data, tmp_path):
+        """When the staged sample folder already exists, submission pauses for a reuse-or-replace decision."""
+        source_dir = tmp_path / "incoming" / "pod5"
+        source_dir.mkdir(parents=True)
+        (source_dir / "reads.pod5").write_text("pod5-data")
+        staged_dir = tmp_path / "users" / "bguser" / "data" / "jamshid"
+        staged_dir.mkdir(parents=True)
+        (staged_dir / "reads.pod5").write_text("old-data")
+
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "extracted_params": {
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "input_directory": str(source_dir),
+                "reference_genome": ["mm39"],
+            },
+            "skill": "analyze_local_sample",
+            "model": "default",
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "should-not-submit",
+            "work_directory": "/work/should-not-submit",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.AGOUTIC_DATA", tmp_path):
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.call_count == 0
+
+        sess = session_factory()
+        gates = sess.query(ProjectBlock).filter(ProjectBlock.type == "APPROVAL_GATE").all()
+        decision_gate = next(block for block in gates if block.id != gate.id)
+        decision_payload = get_block_payload(decision_gate)
+        assert decision_payload["gate_action"] == "local_sample_existing"
+        workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
+        workflow_payload = get_block_payload(workflow_block)
+        assert workflow_payload["steps"][0]["status"] == "FOLLOW_UP"
+        assert workflow_payload["steps"][0]["decision_gate_id"] == decision_gate.id
+        sess.close()
+
+    @pytest.mark.asyncio
     async def test_polls_job_after_submission(self, session_factory, seed_data):
         """After successful submission, creates a poll task."""
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
@@ -1057,6 +1151,54 @@ class TestAutoTriggerAnalysis:
             latest = blocks[-1]
             assert get_block_payload(latest).get("skill") == expected_skill
             sess.close()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_analysis_is_not_next_todo(self, session_factory, seed_data):
+        """Workflow-managed auto-analysis only runs when analysis is the next ready todo step."""
+        sess = session_factory()
+        _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "workflow_type": "local_sample_intake",
+                "title": "Process local sample Jamshid",
+                "sample_name": "Jamshid",
+                "run_uuid": "uuid-skip",
+                "status": "FOLLOW_UP",
+                "next_step": "stage_input",
+                "steps": [
+                    {"id": "stage_input", "kind": "copy_sample", "title": "Stage Jamshid", "status": "FOLLOW_UP", "order_index": 0},
+                    {"id": "run_dogme", "kind": "run", "title": "Run Dogme", "status": "COMPLETED", "order_index": 1, "run_uuid": "uuid-skip"},
+                    {"id": "analyze_results", "kind": "analysis", "title": "Analyze results", "status": "PENDING", "order_index": 2, "run_uuid": "uuid-skip"},
+                ],
+            },
+            status="FOLLOW_UP",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.MCPHttpClient") as mock_mcp, \
+             patch("cortex.app.AgentEngine") as mock_engine, \
+             patch("cortex.app.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg",
+                "uuid-skip",
+                {"sample_name": "Jamshid", "mode": "CDNA", "model": "default"},
+                "u-bg",
+            )
+
+        assert not mock_mcp.called
+        assert not mock_engine.called
+
+        sess = session_factory()
+        agent_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "AGENT_PLAN").all()
+        assert agent_blocks == []
+        workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
+        workflow_payload = get_block_payload(workflow_block)
+        assert workflow_payload["steps"][2]["status"] == "PENDING"
+        sess.close()
 
 
 # ---------------------------------------------------------------------------

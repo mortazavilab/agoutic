@@ -4,6 +4,7 @@ import uuid
 import json
 import os
 import re
+import shutil
 import httpx
 from typing import Optional
 
@@ -646,7 +647,11 @@ async def update_block(
         
         # If an APPROVAL_GATE was rejected, trigger rejection handling
         if block.type == "APPROVAL_GATE" and old_status == "PENDING" and block.status == "REJECTED":
-            asyncio.create_task(handle_rejection(block.project_id, block_id))
+            gate_payload = get_block_payload(block)
+            if gate_payload.get("gate_action") == "local_sample_existing":
+                asyncio.create_task(submit_job_after_approval(block.project_id, block_id))
+            else:
+                asyncio.create_task(handle_rejection(block.project_id, block_id))
         
         return row_to_dict(block)
     finally:
@@ -1277,6 +1282,210 @@ async def download_after_approval(project_id: str, gate_block_id: str):
         session.close()
 
 
+_WORKFLOW_PLAN_TYPE = "WORKFLOW_PLAN"
+_LOCAL_SAMPLE_WORKFLOW = "local_sample_intake"
+
+
+def _workflow_step_index(payload: dict, step_id: str) -> int | None:
+    for idx, step in enumerate(payload.get("steps", [])):
+        if step.get("id") == step_id:
+            return idx
+    return None
+
+
+def _workflow_next_step(payload: dict) -> str | None:
+    for step in payload.get("steps", []):
+        if step.get("status") not in {"COMPLETED", "CANCELLED"}:
+            return step.get("id")
+    return None
+
+
+def _workflow_status(payload: dict) -> str:
+    steps = payload.get("steps", [])
+    if any(step.get("status") == "FAILED" for step in steps):
+        return "FAILED"
+    if any(step.get("status") == "FOLLOW_UP" for step in steps):
+        return "FOLLOW_UP"
+    if all(step.get("status") == "COMPLETED" for step in steps if step.get("id")) and steps:
+        return "COMPLETED"
+    if any(step.get("status") == "RUNNING" for step in steps):
+        return "RUNNING"
+    return "PENDING"
+
+
+def _persist_workflow_plan(session, workflow_block: ProjectBlock, payload: dict, *, status: str | None = None) -> None:
+    payload["next_step"] = _workflow_next_step(payload)
+    payload["status"] = _workflow_status(payload)
+    workflow_block.payload_json = json.dumps(payload)
+    workflow_block.status = status or payload["status"]
+    session.commit()
+    session.refresh(workflow_block)
+    sync_project_tasks(session, workflow_block.project_id)
+
+
+def _set_workflow_step_status(
+    session,
+    workflow_block: ProjectBlock,
+    step_id: str,
+    status: str,
+    *,
+    extra: dict | None = None,
+) -> dict:
+    payload = get_block_payload(workflow_block)
+    idx = _workflow_step_index(payload, step_id)
+    if idx is None:
+        return payload
+    step = dict(payload["steps"][idx])
+    step["status"] = status
+    if extra:
+        step.update(extra)
+    if status == "COMPLETED":
+        step.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+    payload["steps"][idx] = step
+    _persist_workflow_plan(session, workflow_block, payload)
+    return payload
+
+
+def _find_workflow_plan(session, project_id: str, workflow_block_id: str | None = None, run_uuid: str | None = None) -> ProjectBlock | None:
+    query = select(ProjectBlock).where(
+        ProjectBlock.project_id == project_id,
+        ProjectBlock.type == _WORKFLOW_PLAN_TYPE,
+    ).order_by(ProjectBlock.seq.desc())
+    for block in session.execute(query).scalars().all():
+        if workflow_block_id and block.id == workflow_block_id:
+            return block
+        payload = get_block_payload(block)
+        if run_uuid and payload.get("run_uuid") == run_uuid:
+            return block
+        if not workflow_block_id and not run_uuid and payload.get("workflow_type") == _LOCAL_SAMPLE_WORKFLOW:
+            return block
+    return None
+
+
+def _local_sample_dest_dir(*, username: str | None, owner_id: str, sample_name: str) -> Path:
+    user_key = username or owner_id
+    sample_slug = _slugify(sample_name or "sample")
+    return Path(AGOUTIC_DATA) / "users" / user_key / "data" / sample_slug
+
+
+def _should_stage_local_sample(gate_payload: dict, job_params: dict) -> bool:
+    skill = gate_payload.get("skill")
+    if skill != "analyze_local_sample":
+        return False
+    if job_params.get("input_type") == "bam":
+        return False
+    input_dir = str(job_params.get("input_directory") or "").strip()
+    if job_params.get("gate_action") == "local_sample_existing":
+        return True
+    return input_dir.startswith("/") and Path(input_dir).exists()
+
+
+def _build_local_sample_workflow_payload(job_data: dict, *, gate_block_id: str) -> dict:
+    sample_name = job_data["sample_name"]
+    source_path = str(job_data["input_directory"])
+    staged_path = str(job_data["staged_input_directory"])
+    return {
+        "workflow_type": _LOCAL_SAMPLE_WORKFLOW,
+        "title": f"Process local sample {sample_name}",
+        "sample_name": sample_name,
+        "mode": job_data.get("mode"),
+        "source_path": source_path,
+        "staged_input_directory": staged_path,
+        "gate_block_id": gate_block_id,
+        "run_uuid": None,
+        "steps": [
+            {
+                "id": "stage_input",
+                "kind": "copy_sample",
+                "title": f"Stage {sample_name} into user data",
+                "status": "PENDING",
+                "source_path": source_path,
+                "staged_input_directory": staged_path,
+                "order_index": 0,
+            },
+            {
+                "id": "run_dogme",
+                "kind": "run",
+                "title": f"Run Dogme for {sample_name}",
+                "status": "PENDING",
+                "order_index": 1,
+            },
+            {
+                "id": "analyze_results",
+                "kind": "analysis",
+                "title": f"Analyze results for {sample_name}",
+                "status": "PENDING",
+                "order_index": 2,
+            },
+        ],
+    }
+
+
+def _ensure_local_sample_workflow(session, project_id: str, owner_id: str, gate_block_id: str, job_data: dict, workflow_block_id: str | None = None) -> ProjectBlock:
+    workflow_block = _find_workflow_plan(session, project_id, workflow_block_id=workflow_block_id)
+    if workflow_block is not None:
+        payload = get_block_payload(workflow_block)
+        payload["sample_name"] = job_data["sample_name"]
+        payload["mode"] = job_data.get("mode")
+        payload["source_path"] = str(job_data["input_directory"])
+        payload["staged_input_directory"] = str(job_data["staged_input_directory"])
+        _persist_workflow_plan(session, workflow_block, payload)
+        return workflow_block
+
+    workflow_block = _create_block_internal(
+        session,
+        project_id,
+        _WORKFLOW_PLAN_TYPE,
+        _build_local_sample_workflow_payload(job_data, gate_block_id=gate_block_id),
+        status="PENDING",
+        owner_id=owner_id,
+    )
+    sync_project_tasks(session, project_id)
+    return workflow_block
+
+
+async def _copy_local_sample_tree(source_dir: Path, staged_dir: Path, *, replace_existing: bool) -> None:
+    def _copy():
+        staged_dir.parent.mkdir(parents=True, exist_ok=True)
+        if replace_existing and staged_dir.exists():
+            shutil.rmtree(staged_dir)
+        if not staged_dir.exists():
+            shutil.copytree(source_dir, staged_dir)
+    await run_in_threadpool(_copy)
+
+
+def _create_existing_stage_gate(session, project_id: str, owner_id: str, gate_payload: dict, job_params: dict, workflow_block: ProjectBlock, staged_dir: Path) -> ProjectBlock:
+    payload = {
+        "label": (
+            f"A staged sample folder already exists at `{staged_dir}`. "
+            "Approve to reuse the existing staged copy, or choose replace to recopy from the source path."
+        ),
+        "extracted_params": {
+            **job_params,
+            "gate_action": "local_sample_existing",
+            "workflow_block_id": workflow_block.id,
+            "staged_input_directory": str(staged_dir),
+        },
+        "gate_action": "local_sample_existing",
+        "attempt_number": 1,
+        "rejection_history": [],
+        "skill": gate_payload.get("skill"),
+        "model": gate_payload.get("model", "default"),
+    }
+    gate_block = _create_block_internal(
+        session,
+        project_id,
+        "APPROVAL_GATE",
+        payload,
+        status="PENDING",
+        owner_id=owner_id,
+    )
+    gate_block.parent_id = workflow_block.id
+    session.commit()
+    session.refresh(gate_block)
+    return gate_block
+
+
 async def submit_job_after_approval(project_id: str, gate_block_id: str):
     """
     Background task to submit a job to Launchpad after approval.
@@ -1356,6 +1565,113 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "max_gpu_tasks": job_params.get("max_gpu_tasks") or 1,
         }
 
+        workflow_block = None
+        gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
+        workflow_block_id = job_params.get("workflow_block_id")
+
+        if _should_stage_local_sample(gate_payload, job_params):
+            staged_dir = _local_sample_dest_dir(
+                username=_username,
+                owner_id=owner_id,
+                sample_name=job_data["sample_name"],
+            )
+            job_data["staged_input_directory"] = str(staged_dir)
+            workflow_block = _ensure_local_sample_workflow(
+                session,
+                project_id,
+                owner_id,
+                gate_block_id,
+                job_data,
+                workflow_block_id=workflow_block_id,
+            )
+
+            source_dir = Path(job_data["input_directory"])
+            source_real = source_dir.resolve(strict=False)
+            staged_real = staged_dir.resolve(strict=False)
+            if source_real == staged_real or staged_real in source_real.parents:
+                job_data["input_directory"] = str(staged_dir)
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    "stage_input",
+                    "COMPLETED",
+                    extra={
+                        "decision": "already_staged",
+                        "staged_input_directory": str(staged_dir),
+                    },
+                )
+            else:
+                if not source_dir.exists():
+                    raise FileNotFoundError(f"Input directory does not exist: {source_dir}")
+
+                replace_existing = False
+                if gate_action == "local_sample_existing":
+                    replace_existing = gate_block.status == "REJECTED"
+                elif staged_dir.exists():
+                    _set_workflow_step_status(
+                        session,
+                        workflow_block,
+                        "stage_input",
+                        "FOLLOW_UP",
+                        extra={
+                            "decision_gate_id": None,
+                            "staged_input_directory": str(staged_dir),
+                            "source_path": str(source_dir),
+                        },
+                    )
+                    conflict_gate = _create_existing_stage_gate(
+                        session,
+                        project_id,
+                        owner_id,
+                        gate_payload,
+                        job_params,
+                        workflow_block,
+                        staged_dir,
+                    )
+                    _set_workflow_step_status(
+                        session,
+                        workflow_block,
+                        "stage_input",
+                        "FOLLOW_UP",
+                        extra={
+                            "decision_gate_id": conflict_gate.id,
+                            "staged_input_directory": str(staged_dir),
+                            "source_path": str(source_dir),
+                        },
+                    )
+                    return
+
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    "stage_input",
+                    "RUNNING",
+                    extra={
+                        "staged_input_directory": str(staged_dir),
+                        "source_path": str(source_dir),
+                    },
+                )
+                await _copy_local_sample_tree(source_dir, staged_dir, replace_existing=replace_existing)
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    "stage_input",
+                    "COMPLETED",
+                    extra={
+                        "decision": "replace" if replace_existing else "copy",
+                        "staged_input_directory": str(staged_dir),
+                    },
+                )
+                job_data["input_directory"] = str(staged_dir)
+
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                "run_dogme",
+                "RUNNING",
+                extra={"staged_input_directory": job_data["input_directory"]},
+            )
+
         # If this is a resume (resubmit from cancelled/failed), pass the old work directory
         # Check both edited_params and extracted_params since resume_from_dir is internal
         _resume_dir = job_params.get("resume_from_dir") or gate_payload.get("extracted_params", {}).get("resume_from_dir")
@@ -1379,6 +1695,9 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         
         logger.info("Job parameters prepared", source="edited" if gate_payload.get('edited_params') else "extracted",
                     job_data=job_data)
+
+        submission_payload = dict(job_data)
+        submission_payload.pop("staged_input_directory", None)
         
         # Submit job to Launchpad via MCP (single call — Nextflow handles multi-genome)
         try:
@@ -1386,7 +1705,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             client = MCPHttpClient(name="launchpad", base_url=launchpad_url)
             await client.connect()
             try:
-                result = await client.call_tool("submit_dogme_job", **job_data)
+                result = await client.call_tool("submit_dogme_job", **submission_payload)
             finally:
                 await client.disconnect()
         except Exception as e:
@@ -1396,6 +1715,10 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         _work_directory = result.get("work_directory", "") if isinstance(result, dict) else ""
         
         if run_uuid:
+            if workflow_block is not None:
+                payload = get_block_payload(workflow_block)
+                payload["run_uuid"] = run_uuid
+                _persist_workflow_plan(session, workflow_block, payload)
             
             # Create EXECUTION_JOB block
             # Include model_name so _auto_trigger_analysis can call the same LLM
@@ -1409,6 +1732,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     "work_directory": _work_directory,
                     "sample_name": job_data["sample_name"],
                     "mode": job_data["mode"],
+                    "workflow_plan_block_id": workflow_block.id if workflow_block is not None else None,
                     "model": _gate_model,
                     "status": "SUBMITTED",
                     "message": f"Job submitted: {run_uuid}",
@@ -1423,6 +1747,15 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 status="RUNNING",
                 owner_id=owner_id
             )
+
+            if workflow_block is not None:
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    "run_dogme",
+                    "RUNNING",
+                    extra={"run_uuid": run_uuid, "block_id": job_block.id},
+                )
             
             logger.info("Job submitted", run_uuid=run_uuid, project_id=project_id)
             
@@ -1432,6 +1765,14 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             # MCP call succeeded but no run_uuid in response
             # Show the actual result for debugging
             error_detail = str(result) if result else "empty response"
+            if workflow_block is not None:
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    "run_dogme",
+                    "FAILED",
+                    extra={"error": f"No run_uuid in Launchpad response: {error_detail}"},
+                )
             _create_block_internal(
                 session,
                 project_id,
@@ -1457,6 +1798,14 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         import traceback
         error_trace = traceback.format_exc()
         error_msg = str(e)
+        if 'workflow_block' in locals() and workflow_block is not None:
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                "run_dogme",
+                "FAILED",
+                extra={"error": error_msg},
+            )
         _create_block_internal(
             session,
             project_id,
@@ -1549,6 +1898,16 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                     # Stop polling if job is done
                     if job_status in ("COMPLETED", "FAILED"):
                         logger.info("Job finished", run_uuid=run_uuid, job_status=job_status)
+
+                        workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
+                        if workflow_block is not None:
+                            _set_workflow_step_status(
+                                session,
+                                workflow_block,
+                                "run_dogme",
+                                "COMPLETED" if job_status == "COMPLETED" else "FAILED",
+                                extra={"run_uuid": run_uuid, "block_id": block_id},
+                            )
                     
                         # On completion, auto-trigger analysis
                         if job_status == "COMPLETED":
@@ -1590,6 +1949,20 @@ async def _auto_trigger_analysis(
 
     session = SessionLocal()
     try:
+        workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
+        if workflow_block is not None:
+            workflow_payload = get_block_payload(workflow_block)
+            if workflow_payload.get("next_step") != "analyze_results":
+                logger.info("Skipping auto-analysis because analysis is not the next todo", run_uuid=run_uuid)
+                return
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                "analyze_results",
+                "RUNNING",
+                extra={"run_uuid": run_uuid},
+            )
+
         # 1. Create a system message announcing the transition
         _create_block_internal(
             session,
@@ -1759,8 +2132,25 @@ async def _auto_trigger_analysis(
                     skill=analysis_skill, model=_model_name,
                     tokens=llm_usage.get("total_tokens", 0))
 
+        if workflow_block is not None:
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                "analyze_results",
+                "COMPLETED",
+                extra={"run_uuid": run_uuid},
+            )
+
     except Exception as e:
         logger.error("Auto-trigger analysis failed", run_uuid=run_uuid, error=str(e))
+        if 'workflow_block' in locals() and workflow_block is not None:
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                "analyze_results",
+                "FAILED",
+                extra={"run_uuid": run_uuid, "error": str(e)},
+            )
     finally:
         session.close()
 

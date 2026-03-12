@@ -23,6 +23,84 @@ API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title=f"AGOUTIC v{AGOUTIC_VERSION}", layout="wide")
 
+TASK_SECTION_ORDER = [
+    ("pending", "📝 Pending"),
+    ("running", "🏃 Running"),
+    ("follow_up", "🔎 Follow-up"),
+    ("completed", "✅ Completed"),
+]
+TASK_DOCK_HEIGHT_PX = 320
+TASK_DOCK_BOTTOM_REM = 5.5
+TASK_DOCK_SIDE_OFFSET_DESKTOP = "23rem"
+TASK_DOCK_SIDE_OFFSET_MOBILE = "1rem"
+
+st.markdown(
+    f"""
+    <style>
+    div[data-testid="stElementContainer"]:has(.st-key-task_dock) {{
+        position: fixed;
+        left: {TASK_DOCK_SIDE_OFFSET_DESKTOP};
+        right: 2rem;
+        bottom: calc({TASK_DOCK_BOTTOM_REM}rem + env(safe-area-inset-bottom));
+        z-index: 100;
+        margin: 0;
+    }}
+
+    .st-key-task_dock {{
+        position: relative;
+    }}
+
+    .st-key-task_dock [data-testid="stVerticalBlockBorderWrapper"] {{
+        background: color-mix(in srgb, var(--background-color) 90%, var(--secondary-background-color) 10%);
+        backdrop-filter: blur(10px);
+        border-radius: 0.9rem;
+        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
+        overflow: hidden;
+    }}
+
+    .st-key-task_dock [data-testid="stMetric"] {{
+        background: color-mix(in srgb, var(--secondary-background-color) 82%, transparent);
+        border-radius: 0.65rem;
+        padding: 0.35rem 0.5rem;
+    }}
+
+    .st-key-task_dock [data-testid="stExpander"] {{
+        border-radius: 0.65rem;
+        overflow: hidden;
+    }}
+
+    .st-key-task_dock [data-testid="stVerticalBlock"] > div {{
+        gap: 0.6rem;
+    }}
+
+    @media (max-width: 1100px) {{
+        div[data-testid="stElementContainer"]:has(.st-key-task_dock) {{
+            left: {TASK_DOCK_SIDE_OFFSET_MOBILE};
+            right: {TASK_DOCK_SIDE_OFFSET_MOBILE};
+        }}
+    }}
+
+    @supports not selector(:has(*)) {{
+        .st-key-task_dock {{
+        position: fixed;
+        left: {TASK_DOCK_SIDE_OFFSET_DESKTOP};
+        right: 2rem;
+        bottom: calc({TASK_DOCK_BOTTOM_REM}rem + env(safe-area-inset-bottom));
+        z-index: 100;
+        }}
+
+        @media (max-width: 1100px) {{
+        .st-key-task_dock {{
+                left: {TASK_DOCK_SIDE_OFFSET_MOBILE};
+                right: {TASK_DOCK_SIDE_OFFSET_MOBILE};
+            }}
+        }}
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # --- AUTHENTICATION ---
 # Require authentication before showing any UI
 user = require_auth(API_URL)
@@ -556,30 +634,28 @@ def _render_single_task(task: dict, project_id: str, *, is_child: bool = False):
                     st.rerun()
 
 
-def render_project_tasks(project_id: str):
-    """Render grouped project tasks above the chat timeline."""
-    sections = get_project_tasks(project_id)
-    section_order = [
-        ("pending", "📝 Pending"),
-        ("running", "🏃 Running"),
-        ("follow_up", "🔎 Follow-up"),
-        ("completed", "✅ Completed"),
-    ]
-    total_tasks = sum(len(sections.get(name, [])) for name, _ in section_order)
+def _count_project_tasks(sections: dict) -> int:
+    return sum(len(sections.get(name, [])) for name, _ in TASK_SECTION_ORDER)
+
+
+def render_project_tasks(project_id: str, *, sections: dict | None = None, docked: bool = False) -> int:
+    """Render grouped project tasks and return the number of visible tasks."""
+    sections = sections if sections is not None else get_project_tasks(project_id)
+    total_tasks = _count_project_tasks(sections)
     if total_tasks == 0:
-        return
+        return 0
 
     all_tasks = []
-    for name, _label in section_order:
+    for name, _label in TASK_SECTION_ORDER:
         all_tasks.extend(sections.get(name, []))
     child_ids = {task["id"] for task in all_tasks for task in task.get("children", [])}
 
     st.subheader("Task List")
     summary_cols = st.columns(4)
-    for idx, (name, label) in enumerate(section_order):
+    for idx, (name, label) in enumerate(TASK_SECTION_ORDER):
         summary_cols[idx].metric(label, len(sections.get(name, [])))
 
-    for name, label in section_order:
+    for name, label in TASK_SECTION_ORDER:
         tasks = sections.get(name, [])
         if not tasks:
             continue
@@ -592,7 +668,9 @@ def render_project_tasks(project_id: str):
                 for child in task.get("children", []):
                     _render_single_task(child, project_id, is_child=True)
 
-    st.write("---")
+    if not docked:
+        st.write("---")
+    return total_tasks
 
 def get_job_debug_info(run_uuid):
     """Fetch detailed debug information for a failed job via Cortex proxy."""
@@ -1161,7 +1239,34 @@ def render_block(block, expected_project_id: str = ""):
                 # Pending approval - show editable parameter form
                 _gate_action = extracted_params.get("gate_action") or content.get("gate_action", "job")
 
-                if _gate_action == "download" and extracted_params.get("files"):
+                if _gate_action == "local_sample_existing":
+                    _src = extracted_params.get("input_directory", "")
+                    _dst = extracted_params.get("staged_input_directory", "")
+                    if _src:
+                        st.caption(f"Source: `{_src}`")
+                    if _dst:
+                        st.caption(f"Staged folder: `{_dst}`")
+
+                    col1, col2 = st.columns(2)
+                    if col1.button("✅ Reuse Existing Copy", key=f"reuse_stage_{block_id}"):
+                        payload_update = dict(content)
+                        make_authenticated_request(
+                            "PATCH",
+                            f"{API_URL}/block/{block_id}",
+                            json={"status": "APPROVED", "payload": payload_update}
+                        )
+                        st.rerun()
+                    if col2.button("♻️ Replace With Fresh Copy", key=f"replace_stage_{block_id}"):
+                        payload_update = dict(content)
+                        payload_update["rejection_reason"] = "Replace existing staged sample folder"
+                        make_authenticated_request(
+                            "PATCH",
+                            f"{API_URL}/block/{block_id}",
+                            json={"status": "REJECTED", "payload": payload_update}
+                        )
+                        st.rerun()
+
+                elif _gate_action == "download" and extracted_params.get("files"):
                     # ── Download approval form ──
                     _dl_files = extracted_params["files"]
                     _dl_total = extracted_params.get("total_size_bytes", 0)
@@ -1375,7 +1480,7 @@ def render_block(block, expected_project_id: str = ""):
                             st.rerun()
                 
                 # Show rejection feedback form if user clicked reject
-                if st.session_state.get(f"rejecting_{block_id}", False):
+                if _gate_action != "local_sample_existing" and st.session_state.get(f"rejecting_{block_id}", False):
                     st.write("**💬 Why are you rejecting this plan?**")
                     rejection_reason = st.text_area(
                         "Feedback",
@@ -1405,6 +1510,9 @@ def render_block(block, expected_project_id: str = ""):
                         st.rerun()
 
     
+    elif btype == "WORKFLOW_PLAN":
+        return
+
     elif btype == "EXECUTION_JOB":
         # Job execution monitoring with Nextflow progress visualization
         with st.chat_message("assistant", avatar="⚙️"):
@@ -1859,7 +1967,6 @@ for _p in st.session_state.get("_cached_projects", []):
         _active_project_name = _p.get("name", _active_project_name)
         break
 st.title(f"🧬 {_active_project_name}")
-render_project_tasks(active_id)
 
 # Determine if the chat area needs periodic auto-refresh.
 # This is evaluated ONCE per full script run; the fragment uses it.
@@ -1973,6 +2080,28 @@ def _render_chat():
 
 
 _render_chat()
+
+
+@st.fragment(run_every=_refresh_interval)
+def _render_task_dock():
+    """Render a bottom-docked task pane only when the project has tasks."""
+    _active_id = st.session_state.active_project_id
+    sections = get_project_tasks(_active_id)
+    total_tasks = _count_project_tasks(sections)
+    st.session_state["_show_task_dock"] = total_tasks > 0
+    dock_padding = f"calc({TASK_DOCK_HEIGHT_PX}px + 8rem)" if total_tasks > 0 else "6rem"
+    st.markdown(
+        f"<style>.main .block-container {{ padding-bottom: {dock_padding}; }}</style>",
+        unsafe_allow_html=True,
+    )
+    if total_tasks == 0:
+        return
+
+    with st.container(border=True, height=TASK_DOCK_HEIGHT_PX, key="task_dock"):
+        render_project_tasks(_active_id, sections=sections, docked=True)
+
+
+_render_task_dock()
 
 # Bootstrap: if a running job was just detected but the fragment was NOT
 # started with run_every (because _has_running_job was False before the
