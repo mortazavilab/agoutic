@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.3  
+**Version:** 3.2.5
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -167,6 +167,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Error-Handling Playbook** — deterministic failure rules in the system prompt + structured `[TOOL_ERROR]` blocks + single-retry for transient failures
   - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
   - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
+  - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that decomposes complex requests (compare samples, download+analyze, run pipelines) into deterministic execution plans with dependency tracking, approval gates, and automatic replanning on failure
 
 ### Atlas: ENCODELIB (Port 8080)
 - **Role:** ENCODE Portal data retrieval
@@ -251,6 +252,9 @@ agoutic/
 │   ├── README.md                # Cortex documentation
 │   ├── app.py                   # FastAPI application
 │   ├── agent_engine.py          # AI agent orchestration
+│   ├── planner.py               # Request classifier + plan templates
+│   ├── plan_executor.py         # Deterministic step execution engine
+│   ├── plan_replanner.py        # Failure recovery + plan adjustment
 │   ├── dependencies.py          # Auth gates (require_project_access, require_run_uuid_access)
 │   ├── user_jail.py             # Path traversal guards & file isolation
 │   ├── auth.py                  # Google OAuth 2.0 + cookie hardening

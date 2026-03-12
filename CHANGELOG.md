@@ -1,5 +1,50 @@
 # Changelog - March 2026
 
+## [3.2.5] - 2026-03-12
+
+### Features
+
+- **Plan-Execute-Observe-Replan layer** — Cortex now decomposes complex
+  multi-step requests into structured execution plans before acting. The
+  planner classifies requests as informational, single-tool, or multi-step,
+  then generates a deterministic plan with dependency tracking, approval gates,
+  and step-by-step execution.
+
+- **Four plan templates** — deterministic, LLM-free plan generation for the
+  most common request patterns: run workflow (stage → submit → monitor →
+  summarize), compare samples (locate × 2 → parse × 2 → compare → plot →
+  summary), download + analyze (search → download → submit → monitor →
+  summarize), and summarize existing results (locate → parse → QC → plot →
+  summary).
+
+- **Automatic replanning** — when a plan step fails, all transitive dependents
+  are marked SKIPPED and a recovery note is attached. When step results
+  indicate changed conditions (e.g. ENCODE search returns zero results), the
+  downstream steps are adjusted automatically.
+
+- **Safe-step auto-execution** — read-only steps (locate, validate, parse,
+  summarize, plot) auto-execute in the background. Expensive steps (downloads,
+  pipeline submissions, DE analysis) pause at approval gates.
+
+- **Plan-aware conversation state** — `ConversationState` now tracks
+  `active_plan_id` and `active_plan_step` so the LLM and UI know when a plan
+  is in progress.
+
+### New Files
+
+- `cortex/planner.py` — request classifier, plan templates, LLM fallback planner, plan markdown renderer
+- `cortex/plan_executor.py` — deterministic step execution engine with MCP tool call mapping
+- `cortex/plan_replanner.py` — failure recovery and plan adjustment logic
+- `cortex/prompt_templates/planning_system_prompt.md` — LLM planning prompt (fallback only)
+
+### Changes
+
+- `cortex/app.py` — plan detection branch in chat endpoint, `_auto_execute_plan_steps` background task, plan resumption on approval gate approval
+- `cortex/agent_engine.py` — added `plan()` method for LLM planning pass
+- `cortex/schemas.py` — added `active_plan_id` and `active_plan_step` to `ConversationState`
+- `cortex/conversation_state.py` — extract active plan context from `WORKFLOW_PLAN` blocks
+- `cortex/task_service.py` — extended `_workflow_action_for_step()` with new plan step kinds
+
 ## [3.2.4] - 2026-03-11
 
 ### Features
