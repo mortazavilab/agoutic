@@ -644,6 +644,17 @@ async def update_block(
                 asyncio.create_task(download_after_approval(block.project_id, block_id))
             else:
                 asyncio.create_task(submit_job_after_approval(block.project_id, block_id))
+            # If this gate belongs to a plan, resume plan execution after the job
+            if block.parent_id:
+                _plan_block = _find_workflow_plan(session, block.project_id,
+                                                  workflow_block_id=block.parent_id)
+                if _plan_block:
+                    asyncio.create_task(
+                        _auto_execute_plan_steps(
+                            block.project_id, _plan_block.id,
+                            user, gate_payload.get("model", "default"),
+                        )
+                    )
         
         # If an APPROVAL_GATE was rejected, trigger rejection handling
         if block.type == "APPROVAL_GATE" and old_status == "PENDING" and block.status == "REJECTED":
@@ -1284,6 +1295,47 @@ async def download_after_approval(project_id: str, gate_block_id: str):
 
 _WORKFLOW_PLAN_TYPE = "WORKFLOW_PLAN"
 _LOCAL_SAMPLE_WORKFLOW = "local_sample_intake"
+
+
+async def _auto_execute_plan_steps(
+    project_id: str,
+    workflow_block_id: str,
+    user,
+    model_name: str,
+    *,
+    request_id: str | None = None,
+) -> None:
+    """
+    Background task: auto-execute safe initial steps of a plan.
+
+    Opens a new DB session, loads the workflow block, and runs the plan
+    executor for auto-executable steps. Stops at approval gates.
+    """
+    from cortex.plan_executor import execute_plan
+
+    session = SessionLocal()
+    try:
+        workflow_block = session.execute(
+            select(ProjectBlock).where(ProjectBlock.id == workflow_block_id)
+        ).scalar_one_or_none()
+        if not workflow_block:
+            logger.warning("Plan execution: workflow block not found",
+                          block_id=workflow_block_id)
+            return
+
+        engine = AgentEngine(model_key=model_name)
+        await execute_plan(
+            session, workflow_block,
+            engine=engine,
+            user=user,
+            project_id=project_id,
+            request_id=request_id,
+            emit_progress=_emit_progress,
+        )
+    except Exception as e:
+        logger.error("Plan auto-execution failed", error=str(e), exc_info=True)
+    finally:
+        session.close()
 
 
 def _workflow_step_index(payload: dict, step_id: str) -> int | None:
@@ -2499,6 +2551,72 @@ What would you like to do?
         _state_json = _conv_state.to_json()
         if _state_json and _state_json != "{}":
             augmented_message = f"[STATE]\n{_state_json}\n[/STATE]\n\n{augmented_message}"
+
+        # ── PLAN DETECTION ─────────────────────────────────────────────
+        # Classify the request. If it's a multi-step plan, generate a
+        # structured plan and return immediately (execution is async).
+        from cortex.planner import classify_request, generate_plan, render_plan_markdown
+
+        _request_class = classify_request(req.message, active_skill, _conv_state)
+        if _request_class == "MULTI_STEP":
+            _emit_progress(req.request_id, "planning", "Generating execution plan...")
+            _plan_payload = await run_in_threadpool(
+                generate_plan, req.message, active_skill, _conv_state,
+                engine, conversation_history,
+            )
+            if _plan_payload:
+                _workflow_block = _create_block_internal(
+                    session, req.project_id, _WORKFLOW_PLAN_TYPE,
+                    _plan_payload, status="PENDING", owner_id=user.id,
+                )
+                sync_project_tasks(session, req.project_id)
+
+                _plan_md = render_plan_markdown(_plan_payload)
+                _plan_agent_block = _create_block_internal(
+                    session, req.project_id, "AGENT_PLAN",
+                    {
+                        "markdown": _plan_md,
+                        "skill": active_skill or req.skill or "welcome",
+                        "model": engine.model_name,
+                        "plan_block_id": _workflow_block.id,
+                        "state": _conv_state.to_dict(),
+                        "tokens": {
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "model": engine.model_name,
+                        },
+                    },
+                    status="DONE", owner_id=user.id,
+                )
+
+                await save_conversation_message(
+                    session, req.project_id, user.id, "assistant",
+                    _plan_md,
+                    token_data={"prompt_tokens": 0, "completion_tokens": 0,
+                                "total_tokens": 0, "model": engine.model_name},
+                    model_name=engine.model_name,
+                )
+
+                # Auto-execute safe initial steps in the background
+                if _plan_payload.get("auto_execute_safe_steps", True):
+                    asyncio.create_task(
+                        _auto_execute_plan_steps(
+                            req.project_id, _workflow_block.id,
+                            user, engine.model_name,
+                            request_id=req.request_id,
+                        )
+                    )
+
+                _emit_progress(req.request_id, "done", "Plan generated")
+                return {
+                    "status": "ok",
+                    "user_block": row_to_dict(user_block),
+                    "agent_block": row_to_dict(_plan_agent_block),
+                    "gate_block": None,
+                    "plan_block": row_to_dict(_workflow_block),
+                }
+        # ── END PLAN DETECTION ─────────────────────────────────────────
 
         # Notify user when answering from a previously fetched dataframe
         if _injected_dfs:

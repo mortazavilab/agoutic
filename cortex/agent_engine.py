@@ -22,6 +22,7 @@ logger.info("LLM connection configured", llm_url=LLM_URL, num_ctx=LLM_NUM_CTX)
 PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parent / "prompt_templates"
 FIRST_PASS_TEMPLATE = "first_pass_system_prompt.md"
 SECOND_PASS_TEMPLATE = "second_pass_system_prompt.md"
+PLANNING_TEMPLATE = "planning_system_prompt.md"
 
 
 def _usage_to_dict(usage_obj) -> dict:
@@ -363,6 +364,40 @@ Use ONLY the parameter names listed here. Do NOT invent parameter names.
             logger.error("Second-pass analysis failed", error=str(e))
             # Fallback: return the formatted data directly
             return f"{first_pass_text}\n\n{data_results}", _usage_to_dict(None)
+
+    def plan(self, user_message: str, state_json: str, conversation_history: list = None):
+        """
+        Planning-specific LLM call: produce a structured execution plan.
+        Uses a dedicated planning prompt that constrains output to [[PLAN:{...}]] JSON.
+
+        Args:
+            user_message: The user's request to decompose into a plan
+            state_json: JSON string of current ConversationState
+            conversation_history: Previous conversation messages (only last few used)
+        """
+        logger.info("Planning pass", model=self.display_name)
+
+        system_prompt = self._render_template(PLANNING_TEMPLATE, state_json=state_json)
+
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # Include limited history for context
+        if conversation_history:
+            messages.extend(conversation_history[-6:])
+
+        messages.append({"role": "user", "content": user_message})
+
+        try:
+            response = client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=0.1,
+                extra_body={"options": {"num_ctx": LLM_NUM_CTX}},
+            )
+            return response.choices[0].message.content, _usage_to_dict(response.usage)
+        except Exception as e:
+            logger.error("Planning pass failed", error=str(e))
+            return None, _usage_to_dict(None)
 
 # --- Quick Test Block ---
 if __name__ == "__main__":

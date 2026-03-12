@@ -139,13 +139,26 @@ def _normalize_name(value: str) -> str:
 
 def _workflow_action_for_step(step: dict) -> tuple[str | None, str | None]:
     status = step.get("status", "PENDING")
+    kind = step.get("kind", "")
     if status == "FOLLOW_UP" and step.get("decision_gate_id"):
         return "Review choice", _build_target("block", block_id=step["decision_gate_id"])
-    if step.get("kind") == "analysis" and step.get("run_uuid"):
+    # --- Plan step kinds ---
+    if kind in ("LOCATE_DATA", "VALIDATE_INPUTS", "SEARCH_ENCODE",
+                "PARSE_OUTPUT_FILE", "SUMMARIZE_QC", "GENERATE_PLOT", "WRITE_SUMMARY"):
+        return _action_for_status(status, pending_label="Waiting", completed_label="Done"), None
+    if kind == "REQUEST_APPROVAL":
+        _gate_target = _build_target("block", block_id=step["gate_block_id"]) if step.get("gate_block_id") else None
+        return _action_for_status(status, pending_label="Review", completed_label="Approved"), _gate_target
+    if kind in ("DOWNLOAD_DATA", "SUBMIT_WORKFLOW", "MONITOR_WORKFLOW",
+                "RUN_DE_ANALYSIS", "COMPARE_SAMPLES"):
+        _step_target = _build_target("block", block_id=step["block_id"], run_uuid=step.get("run_uuid")) if step.get("block_id") else None
+        return _action_for_status(status, pending_label="Running", completed_label="View results"), _step_target
+    # --- Legacy step kinds ---
+    if kind == "analysis" and step.get("run_uuid"):
         return _action_for_status(status, pending_label="Analyzing", completed_label="Open results"), _build_target("results", run_uuid=step["run_uuid"])
-    if step.get("kind") == "run" and step.get("block_id"):
+    if kind == "run" and step.get("block_id"):
         return _action_for_status(status, pending_label="View run", completed_label="View run"), _build_target("block", block_id=step["block_id"], run_uuid=step.get("run_uuid"))
-    if step.get("kind") == "copy_sample":
+    if kind == "copy_sample":
         if status == "COMPLETED":
             return "Staged", None
         if status == "RUNNING":

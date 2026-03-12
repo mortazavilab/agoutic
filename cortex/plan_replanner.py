@@ -1,0 +1,168 @@
+"""
+Replanning: updates the remaining steps of a plan when conditions change.
+
+Triggers:
+  - Step failure    → mark dependent steps as SKIPPED, add recovery note
+  - New information → adjust remaining steps when results differ from expectations
+"""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+from common.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from cortex.models import ProjectBlock
+
+logger = get_logger(__name__)
+
+
+def replan_on_failure(
+    session,
+    workflow_block: "ProjectBlock",
+    failed_step_id: str,
+) -> dict:
+    """
+    When a step fails, mark all dependent steps as SKIPPED.
+
+    Returns the updated plan payload.
+    """
+    from cortex.llm_validators import get_block_payload
+
+    payload = get_block_payload(workflow_block)
+    steps = payload.get("steps", [])
+
+    # Build dependency graph: step_id -> set of step_ids that depend on it
+    dependents: dict[str, list[str]] = {}
+    for s in steps:
+        for dep in s.get("depends_on", []):
+            dependents.setdefault(dep, []).append(s["id"])
+
+    # BFS: find all transitive dependents of the failed step
+    to_skip: set[str] = set()
+    queue = [failed_step_id]
+    while queue:
+        current = queue.pop(0)
+        for dep_id in dependents.get(current, []):
+            if dep_id not in to_skip:
+                to_skip.add(dep_id)
+                queue.append(dep_id)
+
+    # Mark dependents as SKIPPED
+    skipped_count = 0
+    for s in steps:
+        if s["id"] in to_skip and s.get("status") not in ("COMPLETED", "FAILED"):
+            s["status"] = "SKIPPED"
+            s["error"] = f"Skipped — depends on failed step"
+            skipped_count += 1
+
+    if skipped_count:
+        logger.info("Replanned after failure: skipped dependent steps",
+                    failed_step=failed_step_id, skipped=skipped_count)
+
+    # Persist
+    workflow_block.payload_json = json.dumps(payload)
+    session.commit()
+    session.refresh(workflow_block)
+
+    return payload
+
+
+def replan_with_new_info(
+    session,
+    workflow_block: "ProjectBlock",
+    completed_step_id: str,
+    step_result: dict,
+) -> dict | None:
+    """
+    After a step completes, check if its results require adjusting the remaining plan.
+
+    Examples:
+      - SEARCH_ENCODE returns 0 results → skip DOWNLOAD_DATA step
+      - LOCATE_DATA finds no output files → skip PARSE_OUTPUT_FILE
+
+    Returns updated payload if changes were made, None otherwise.
+    """
+    from cortex.llm_validators import get_block_payload
+
+    payload = get_block_payload(workflow_block)
+    steps = payload.get("steps", [])
+
+    # Find the completed step
+    completed_step = None
+    for s in steps:
+        if s.get("id") == completed_step_id:
+            completed_step = s
+            break
+    if not completed_step:
+        return None
+
+    kind = completed_step.get("kind", "")
+    results_data = step_result.get("results", [])
+    changed = False
+
+    # --- SEARCH_ENCODE with 0 results: skip DOWNLOAD_DATA ---
+    if kind == "SEARCH_ENCODE":
+        empty = _is_empty_result(results_data)
+        if empty:
+            for s in steps:
+                if (s.get("kind") == "DOWNLOAD_DATA"
+                        and completed_step_id in s.get("depends_on", [])
+                        and s.get("status") == "PENDING"):
+                    s["status"] = "SKIPPED"
+                    s["error"] = "Skipped — search returned no results"
+                    changed = True
+                    logger.info("Replan: skipping DOWNLOAD_DATA (empty search)",
+                               step_id=s["id"])
+
+    # --- LOCATE_DATA with no files: skip downstream parse ---
+    if kind == "LOCATE_DATA":
+        empty = _is_empty_result(results_data)
+        if empty:
+            for s in steps:
+                if (s.get("kind") == "PARSE_OUTPUT_FILE"
+                        and completed_step_id in s.get("depends_on", [])
+                        and s.get("status") == "PENDING"):
+                    s["status"] = "SKIPPED"
+                    s["error"] = "Skipped — no data files found"
+                    changed = True
+                    logger.info("Replan: skipping PARSE_OUTPUT_FILE (no data)",
+                               step_id=s["id"])
+
+    if changed:
+        workflow_block.payload_json = json.dumps(payload)
+        session.commit()
+        session.refresh(workflow_block)
+        return payload
+
+    return None
+
+
+def _is_empty_result(results: list | dict) -> bool:
+    """Check if a tool call result indicates empty/no-data."""
+    if isinstance(results, list):
+        if not results:
+            return True
+        for r in results:
+            result_data = r.get("result", {}) if isinstance(r, dict) else r
+            if isinstance(result_data, dict):
+                # Check for explicit empty markers
+                if result_data.get("total") == 0:
+                    return True
+                if result_data.get("count") == 0:
+                    return True
+                data = result_data.get("data")
+                if isinstance(data, list) and len(data) == 0:
+                    return True
+                files = result_data.get("files")
+                if isinstance(files, list) and len(files) == 0:
+                    return True
+    elif isinstance(results, dict):
+        if results.get("total") == 0 or results.get("count") == 0:
+            return True
+        data = results.get("data")
+        if isinstance(data, list) and len(data) == 0:
+            return True
+    return False

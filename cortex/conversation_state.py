@@ -129,6 +129,16 @@ def _build_conversation_state(
             state.sample_type = latest.get("mode")
             state.active_workflow_index = len(state.workflows) - 1
 
+    # --- Extract active plan from WORKFLOW_PLAN blocks ---
+    if history_blocks:
+        for blk in reversed(history_blocks):
+            if blk.type == "WORKFLOW_PLAN":
+                _pl = get_block_payload(blk)
+                if _pl.get("status") not in ("COMPLETED", "FAILED"):
+                    state.active_plan_id = blk.id
+                    state.active_plan_step = _pl.get("current_step_id")
+                    break
+
     # --- Extract ENCSR/ENCFF accessions from conversation ---
     if conversation_history:
         _encsr_pattern = re.compile(r'ENCSR[0-9A-Z]{6}')

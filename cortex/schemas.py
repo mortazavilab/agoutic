@@ -26,6 +26,8 @@ class ConversationState:
     collected_params: dict[str, str] = field(default_factory=dict)  # partial intake fields
     workflows: list[dict] = field(default_factory=list)
     active_workflow_index: int | None = None
+    active_plan_id: str | None = None           # block ID of active WORKFLOW_PLAN
+    active_plan_step: str | None = None         # current step ID within that plan
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-safe dict, stripping None/empty values."""
