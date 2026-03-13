@@ -1,7 +1,7 @@
 """
 Gene ID annotation service for AGOUTIC.
 
-Provides offline Ensembl gene ID -> symbol translation using
+Provides offline Ensembl gene ID <-> symbol translation using
 pre-built lookup tables. Supports human (ENSG) and mouse (ENSMUSG).
 
 Usage:
@@ -9,6 +9,7 @@ Usage:
     annotator = GeneAnnotator()
     annotator.translate("ENSG00000141510")         # -> "TP53"
     annotator.translate("ENSG00000141510.17")       # -> "TP53" (version stripped)
+    annotator.reverse_translate("TP53")            # -> "ENSG00000141510"
     annotator.annotate_dataframe(df, id_column="GeneID")  # adds Symbol column
 """
 
@@ -53,6 +54,8 @@ class GeneAnnotator:
     def __init__(self, data_dir: str | Path | None = None) -> None:
         # gene_id (no version) -> {symbol, name, biotype}
         self._maps: dict[str, dict[str, dict[str, str]]] = {}
+        # symbol (upper-case) -> gene_id  (built lazily)
+        self._reverse_maps: dict[str, dict[str, str]] = {}
 
         if data_dir is None:
             data_dir = os.environ.get(
@@ -147,6 +150,74 @@ class GeneAnnotator:
                     break
 
         return {gid: self.translate(gid, organism=organism) for gid in gene_ids}
+
+    # ------------------------------------------------------------------
+    # Reverse lookup (symbol -> gene ID)
+    # ------------------------------------------------------------------
+
+    def _ensure_reverse_map(self, organism: str) -> dict[str, str]:
+        """Build the reverse map for *organism* on first access."""
+        if organism not in self._reverse_maps and organism in self._maps:
+            rev: dict[str, str] = {}
+            for gene_id, entry in self._maps[organism].items():
+                sym = entry.get("symbol")
+                if sym:
+                    rev[sym.upper()] = gene_id
+            self._reverse_maps[organism] = rev
+        return self._reverse_maps.get(organism, {})
+
+    def reverse_translate(
+        self,
+        symbol: str,
+        organism: str | None = None,
+    ) -> str | None:
+        """Translate a gene symbol to its Ensembl gene ID.
+
+        Returns ``None`` if the symbol is not found.
+        """
+        key = symbol.strip().upper()
+        if organism:
+            rev = self._ensure_reverse_map(organism)
+            if key in rev:
+                return rev[key]
+
+        for org in self._maps:
+            rev = self._ensure_reverse_map(org)
+            if key in rev:
+                return rev[key]
+        return None
+
+    def lookup(
+        self,
+        query: str,
+        organism: str | None = None,
+    ) -> dict[str, str | None] | None:
+        """Look up a gene by either Ensembl ID or symbol.
+
+        Returns a dict with ``gene_id``, ``symbol``, ``name``, ``biotype``
+        keys, or ``None`` if not found.
+        """
+        query = query.strip()
+        # Try as Ensembl ID first (reuse translate's lookup path)
+        stripped = self.strip_version(query)
+        detected_org = self.detect_organism(stripped)
+        if detected_org:
+            org = organism or detected_org
+            for org_key in ([org] + [k for k in self._maps if k != org]):
+                if org_key not in self._maps:
+                    continue
+                entry = self._maps[org_key].get(stripped)
+                if entry:
+                    return {"gene_id": stripped, **entry}
+
+        # Try as symbol (delegate to reverse_translate)
+        gene_id = self.reverse_translate(query, organism=organism)
+        if gene_id:
+            for org_map in self._maps.values():
+                entry = org_map.get(gene_id)
+                if entry:
+                    return {"gene_id": gene_id, **entry}
+        return None
 
     # ------------------------------------------------------------------
     # DataFrame annotation

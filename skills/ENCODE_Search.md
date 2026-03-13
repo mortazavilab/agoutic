@@ -146,6 +146,15 @@ Use this skill to:
 - User mentions **local data** on disk → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
 - User asks about **completed job results** → `[[SKILL_SWITCH_TO: analyze_job_results]]`
 
+## Gene ID / Symbol Lookup
+
+If the user asks for a **gene ID**, **gene symbol**, or **gene annotation** (e.g. "what is the Ensembl ID for TP53?"), use the gene lookup tool directly — it is automatically routed:
+
+```
+[[DATA_CALL: service=edgepython, tool=lookup_gene, gene_symbols=["TP53"]]]
+[[DATA_CALL: service=edgepython, tool=lookup_gene, gene_ids=["ENSG00000141510"]]]
+```
+
 ## Approval Gates
 
 **This skill does NOT need [[APPROVAL_NEEDED]] for anything.**

@@ -117,6 +117,7 @@ def _validate_llm_output(
         "normalize_chip", "set_design", "set_design_matrix",
         "estimate_dispersion", "fit_model", "test_contrast",
         "exact_test", "get_top_genes", "generate_plot",
+        "annotate_genes", "translate_gene_ids", "lookup_gene",
     }
     for _dc_m in re.finditer(r'\[\[DATA_CALL:.*?tool=(\w+)', cleaned):
         _tool = _dc_m.group(1)

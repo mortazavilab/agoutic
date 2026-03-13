@@ -3319,7 +3319,22 @@ What would you like to do?
             "analysis_summary": "get_analysis_summary",
             "job_summary": "get_analysis_summary",
         })
+        # edgePython tool aliases (hallucinated gene lookup names)
+        _tool_aliases.update({
+            "get_gene_info": "lookup_gene",
+            "gene_info": "lookup_gene",
+            "gene_lookup": "lookup_gene",
+            "get_gene": "lookup_gene",
+            "find_gene": "lookup_gene",
+        })
         _param_aliases = get_all_param_aliases()
+        # edgePython param aliases (hallucinated parameter names for lookup_gene)
+        _param_aliases.setdefault("lookup_gene", {}).update({
+            "gene_name": "gene_symbols",
+            "gene": "gene_symbols",
+            "symbols": "gene_symbols",
+            "ids": "gene_ids",
+        })
         
         # From auto-generated tags (safety net)
         if not has_any_tags and auto_calls:
@@ -3347,17 +3362,26 @@ What would you like to do?
                 calls_by_source.setdefault(_ac_source, []).append(entry)
 
         # From new DATA_CALL tags
+        # Tools that always belong to edgepython, regardless of source in tag
+        _EDGEPYTHON_ONLY_TOOLS = frozenset({"lookup_gene", "translate_gene_ids", "annotate_genes"})
         for match in data_call_matches:
             source_type = match.group(1)  # "consortium" or "service"
             source_key = match.group(2)   # e.g., "encode", "analyzer"
             tool_name = match.group(3)
             params_str = match.group(4)
-            
+
             # Fix hallucinated tool names using alias map
             corrected_tool = _tool_aliases.get(tool_name, tool_name)
             if corrected_tool != tool_name:
                 logger.warning("Corrected hallucinated tool name",
                               original=tool_name, corrected=corrected_tool)
+
+            # Cross-source re-routing: gene lookup tools belong to edgepython
+            if corrected_tool in _EDGEPYTHON_ONLY_TOOLS and source_key != "edgepython":
+                logger.warning("Re-routing tool to edgepython",
+                              tool=corrected_tool, original_source=f"{source_type}/{source_key}")
+                source_type = "service"
+                source_key = "edgepython"
             
             params = _parse_tag_params(params_str)
 

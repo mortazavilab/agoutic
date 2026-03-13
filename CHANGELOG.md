@@ -1,5 +1,45 @@
 # Changelog - March 2026
 
+## [3.2.8] - 2026-03-12
+
+### Features
+
+- **Bidirectional gene lookup** — new `lookup_gene` MCP tool in edgePython
+  accepts gene symbols *or* Ensembl IDs and returns full annotation (ID,
+  symbol, biotype, name). Answers questions like "what is the Ensembl ID
+  for TP53?" that previously caused hallucinated tool errors.
+
+- **Reverse gene ID translation** — `GeneAnnotator` now supports
+  symbol → Ensembl ID lookup via `reverse_translate()` and a unified
+  `lookup()` method for bidirectional resolution. Lazy-built reverse
+  index avoids overhead when unused.
+
+- **Tool alias safety net for gene tools** — hallucinated tool names
+  (`get_gene_info`, `gene_info`, `gene_lookup`, `find_gene`, `get_gene`)
+  are now aliased to `lookup_gene`. Parameter aliases handle common LLM
+  mistakes (`gene_name` → `gene_symbols`, `symbols` → `gene_symbols`).
+
+- **Cross-source re-routing** — gene tools (`lookup_gene`,
+  `translate_gene_ids`, `annotate_genes`) emitted under the wrong source
+  (e.g. `consortium=encode`) are automatically re-routed to edgePython.
+
+- **Skill guidance for gene queries** — ENCODE_Search and
+  Differential_Expression skills now document `lookup_gene` usage with
+  example DATA_CALL tags, reducing hallucination likelihood.
+
+### Changes
+
+- `common/gene_annotation.py` — added `_reverse_maps`, `_ensure_reverse_map()`,
+  `reverse_translate()`, `lookup()`; removed unused `reverse_translate_batch`
+- `edgepython_mcp/edgepython_server.py` — new `lookup_gene` tool
+- `edgepython_mcp/tool_schemas.py` — schema for `lookup_gene`
+- `cortex/app.py` — tool aliases, param aliases, `_EDGEPYTHON_ONLY_TOOLS`
+  re-routing frozenset
+- `cortex/llm_validators.py` — added `lookup_gene`, `translate_gene_ids`,
+  `annotate_genes` to known tools set
+- `skills/ENCODE_Search.md` — gene lookup section
+- `skills/Differential_Expression.md` — `lookup_gene` documentation
+
 ## [3.2.7] - 2026-03-12
 
 ### Features

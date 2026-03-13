@@ -69,6 +69,13 @@ To translate specific gene IDs outside a DE pipeline:
 [[DATA_CALL: service=edgepython, tool=translate_gene_ids, gene_ids=["ENSG00000141510", "ENSG00000157764"]]]
 ```
 
+To look up genes by symbol or Ensembl ID (bidirectional):
+
+```
+[[DATA_CALL: service=edgepython, tool=lookup_gene, gene_symbols=["TP53", "BRCA1"]]]
+[[DATA_CALL: service=edgepython, tool=lookup_gene, gene_ids=["ENSG00000141510"]]]
+```
+
 Or for flexible loading (kallisto, salmon, 10x, AnnData):
 
 ```

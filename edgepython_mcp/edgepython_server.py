@@ -1913,6 +1913,56 @@ def translate_gene_ids(
     return "\n".join(lines)
 
 
+@mcp.tool()
+def lookup_gene(
+    gene_symbols: Optional[list] = None,
+    gene_ids: Optional[list] = None,
+    organism: Optional[str] = None,
+) -> str:
+    """Look up genes by symbol or Ensembl ID (bidirectional).
+
+    Provide gene_symbols to get Ensembl IDs, or gene_ids to get symbols.
+    Can also provide both.
+
+    Args:
+        gene_symbols: Gene symbols (e.g. ["TP53", "BRCA1"]).
+        gene_ids: Ensembl gene IDs (e.g. ["ENSG00000141510"]).
+        organism: 'human' or 'mouse'. Auto-detected if not provided.
+    """
+    if not _annotator.is_available:
+        return "Gene annotation data not available. Place reference TSV files in data/reference/."
+
+    # Accept string arguments (LLM may pass "TP53" instead of ["TP53"])
+    if isinstance(gene_symbols, str):
+        gene_symbols = [gene_symbols]
+    if isinstance(gene_ids, str):
+        gene_ids = [gene_ids]
+
+    if not gene_symbols and not gene_ids:
+        return "Provide gene_symbols (e.g. ['TP53']) or gene_ids (e.g. ['ENSG00000141510'])."
+
+    lines = [f"{'Gene ID':<25} {'Symbol':<15} {'Biotype':<25} {'Name'}"]
+    lines.append("-" * 80)
+
+    queries = list(gene_symbols or []) + list(gene_ids or [])
+    for q in queries:
+        q_str = str(q).strip()
+        info = _annotator.lookup(q_str, organism=organism)
+        if info:
+            lines.append(
+                f"{info.get('gene_id', '—'):<25} "
+                f"{info.get('symbol', '—'):<15} "
+                f"{info.get('biotype', '—'):<25} "
+                f"{info.get('name', '—')}"
+            )
+        else:
+            lines.append(f"{q_str:<25} {'—':<15} {'—':<25} (not found)")
+
+    n_found = sum(1 for line in lines[2:] if "(not found)" not in line)
+    lines.append(f"\nFound: {n_found}/{len(queries)}")
+    return "\n".join(lines)
+
+
 # ===========================================================================
 # Single-cell tools
 # ===========================================================================

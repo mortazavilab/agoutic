@@ -436,4 +436,24 @@ TOOL_SCHEMAS = {
             "required": ["gene_ids"],
         },
     },
+    "lookup_gene": {
+        "description": "Look up genes by symbol or Ensembl ID (bidirectional). Provide gene_symbols to get Ensembl IDs, or gene_ids to get symbols.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gene_symbols": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gene symbols to look up (e.g. ['TP53', 'BRCA1']).",
+                },
+                "gene_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ensembl gene IDs to look up (e.g. ['ENSG00000141510']).",
+                },
+                "organism": {"type": "string", "description": "'human' or 'mouse'. Auto-detected if not provided."},
+            },
+            "required": [],
+        },
+    },
 }

@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.7
+**Version:** 3.2.8
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -112,7 +112,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                      AGOUTIC System v3.2.7                    │
+│                      AGOUTIC System v3.2.8                    │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -168,7 +168,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
   - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
   - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that decomposes complex requests into deterministic execution plans with dependency tracking, approval gates, and automatic replanning on failure. 8 plan templates covering: run workflow, compare samples, download+analyze, summarize results, run DE pipeline, parse+plot+interpret, compare workflows, and search+compare to local data. CHECK_EXISTING guards skip expensive operations when results already exist.
-  - **Gene Annotation & ID Translation** — offline Ensembl gene ID to symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. MCP tools: `annotate_genes`, `translate_gene_ids`.
+  - **Gene Annotation & ID Translation** — offline Ensembl gene ID ↔ symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. Bidirectional `lookup_gene` tool answers "what is the Ensembl ID for TP53?" style queries. MCP tools: `annotate_genes`, `translate_gene_ids`, `lookup_gene`.
 
 ### Atlas: ENCODELIB (Port 8080)
 - **Role:** ENCODE Portal data retrieval
@@ -313,7 +313,7 @@ agoutic/
 │   └── config.py               # Configuration
 │
 ├── common/                      # Shared Utilities
-│   ├── gene_annotation.py      # Ensembl gene ID → symbol translation
+│   ├── gene_annotation.py      # Ensembl gene ID ↔ symbol translation (bidirectional)
 │   ├── mcp_client.py           # Shared MCP HTTP client
 │   ├── logging_config.py       # Structured logging setup
 │   └── logging_middleware.py   # Request logging middleware
@@ -730,7 +730,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.2.7 — Gene annotation & ID translation, expanded plan templates, plan-execute-observe-replan
+- **Release**: 3.2.8 — Bidirectional gene lookup, gene annotation & ID translation, expanded plan templates, plan-execute-observe-replan
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
