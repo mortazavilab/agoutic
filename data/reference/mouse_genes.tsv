@@ -1,0 +1,102 @@
+gene_id	gene_symbol	gene_name	biotype
+ENSMUSG00000059552	Trp53	transformation related protein 53	protein_coding
+ENSMUSG00000002413	Braf	Braf transforming gene	protein_coding
+ENSMUSG00000057666	Gapdh	glyceraldehyde-3-phosphate dehydrogenase	protein_coding
+ENSMUSG00000029580	Actb	actin, beta	protein_coding
+ENSMUSG00000030265	Kras	Kirsten rat sarcoma virus oncogene	protein_coding
+ENSMUSG00000013663	Pten	phosphatase and tensin homolog	protein_coding
+ENSMUSG00000020122	Egfr	epidermal growth factor receptor	protein_coding
+ENSMUSG00000017146	Brca1	breast cancer 1, early onset	protein_coding
+ENSMUSG00000041147	Brca2	breast cancer 2	protein_coding
+ENSMUSG00000034218	Atm	ataxia telangiectasia mutated	protein_coding
+ENSMUSG00000024029	Myc	myelocytomatosis oncogene	protein_coding
+ENSMUSG00000022346	Ccnd1	cyclin D1	protein_coding
+ENSMUSG00000005886	Apc	adenomatous polyposis coli	protein_coding
+ENSMUSG00000020716	Nf1	neurofibromatosis 1	protein_coding
+ENSMUSG00000025746	Akt1	thymoma viral proto-oncogene 1	protein_coding
+ENSMUSG00000027398	Tgfb1	transforming growth factor, beta 1	protein_coding
+ENSMUSG00000024401	Tnf	tumor necrosis factor	protein_coding
+ENSMUSG00000047281	Htt	huntingtin	protein_coding
+ENSMUSG00000025812	Cdkn2a	cyclin dependent kinase inhibitor 2A	protein_coding
+ENSMUSG00000018102	Notch1	notch 1	protein_coding
+ENSMUSG00000019188	Jak1	Janus kinase 1	protein_coding
+ENSMUSG00000024789	Jak2	Janus kinase 2	protein_coding
+ENSMUSG00000004040	Stat3	signal transducer and activator of transcription 3	protein_coding
+ENSMUSG00000028149	Cd14	CD14 antigen	protein_coding
+ENSMUSG00000069516	Lyz2	lysozyme 2	protein_coding
+ENSMUSG00000073940	Hbb-bs	hemoglobin, beta adult s chain	protein_coding
+ENSMUSG00000069917	Hba-a1	hemoglobin alpha, adult chain 1	protein_coding
+ENSMUSG00000031628	Casp3	caspase 3	protein_coding
+ENSMUSG00000026029	Casp8	caspase 8	protein_coding
+ENSMUSG00000007659	Bax	BCL2-associated X protein	protein_coding
+ENSMUSG00000000042	Bcl2	B cell leukemia/lymphoma 2	protein_coding
+ENSMUSG00000006932	Sf3b1	splicing factor 3b, subunit 1	protein_coding
+ENSMUSG00000006932	Ctnnb1	catenin (cadherin associated protein), beta 1	protein_coding
+ENSMUSG00000032093	Cd3d	CD3 antigen, delta polypeptide	protein_coding
+ENSMUSG00000024672	Ctla4	cytotoxic T-lymphocyte-associated protein 4	protein_coding
+ENSMUSG00000026285	Pdcd1	programmed cell death 1	protein_coding
+ENSMUSG00000016496	Cd274	CD274 antigen	protein_coding
+ENSMUSG00000030779	Raf1	v-raf-leukemia viral oncogene 1	protein_coding
+ENSMUSG00000025499	Hras	Harvey rat sarcoma virus oncogene	protein_coding
+ENSMUSG00000027852	Nras	neuroblastoma ras oncogene	protein_coding
+ENSMUSG00000027665	Pik3ca	phosphatidylinositol-4,5-bisphosphate 3-kinase catalytic subunit alpha	protein_coding
+ENSMUSG00000028991	Mtor	mechanistic target of rapamycin kinase	protein_coding
+ENSMUSG00000004936	Map2k1	mitogen-activated protein kinase kinase 1	protein_coding
+ENSMUSG00000035486	Map2k2	mitogen-activated protein kinase kinase 2	protein_coding
+ENSMUSG00000063065	Mapk1	mitogen-activated protein kinase 1	protein_coding
+ENSMUSG00000063904	Jun	jun proto-oncogene	protein_coding
+ENSMUSG00000021250	Fos	FBJ osteosarcoma oncogene	protein_coding
+ENSMUSG00000032297	Sox2	SRY (sex determining region Y)-box 2	protein_coding
+ENSMUSG00000024406	Pou5f1	POU domain, class 5, transcription factor 1	protein_coding
+ENSMUSG00000012396	Nanog	Nanog homeobox	protein_coding
+ENSMUSG00000003032	Klf4	Kruppel-like factor 4	protein_coding
+ENSMUSG00000027168	Pax6	paired box gene 6	protein_coding
+ENSMUSG00000021109	Hif1a	hypoxia inducible factor 1, alpha subunit	protein_coding
+ENSMUSG00000001155	Nf2	neurofibromin 2	protein_coding
+ENSMUSG00000021466	Ptch1	patched 1	protein_coding
+ENSMUSG00000062312	Erbb2	erb-b2 receptor tyrosine kinase 2	protein_coding
+ENSMUSG00000025950	Idh1	isocitrate dehydrogenase 1 (NADP+), soluble	protein_coding
+ENSMUSG00000043456	Idh2	isocitrate dehydrogenase 2 (NADP+), mitochondrial	protein_coding
+ENSMUSG00000015749	Tp63	transformation related protein 63	protein_coding
+ENSMUSG00000033933	Vhl	von Hippel-Lindau tumor suppressor	protein_coding
+ENSMUSG00000029374	Cdk2	cyclin-dependent kinase 2	protein_coding
+ENSMUSG00000040274	Cdk4	cyclin-dependent kinase 4	protein_coding
+ENSMUSG00000028551	Cdk6	cyclin-dependent kinase 6	protein_coding
+ENSMUSG00000049313	Gata1	GATA binding protein 1	protein_coding
+ENSMUSG00000038227	Egr1	early growth response 1	protein_coding
+ENSMUSG00000046532	Ar	androgen receptor	protein_coding
+ENSMUSG00000019768	Esr1	estrogen receptor 1	protein_coding
+ENSMUSG00000039103	Grin2a	glutamate receptor, ionotropic, NMDA2A (epsilon 1)	protein_coding
+ENSMUSG00000004207	Apoe	apolipoprotein E	protein_coding
+ENSMUSG00000018411	Mapt	microtubule-associated protein tau	protein_coding
+ENSMUSG00000020524	Fyn	Fyn proto-oncogene	protein_coding
+ENSMUSG00000079523	Epcam	epithelial cell adhesion molecule	protein_coding
+ENSMUSG00000022508	Pecam1	platelet/endothelial cell adhesion molecule 1	protein_coding
+ENSMUSG00000051439	Cd19	CD19 antigen	protein_coding
+ENSMUSG00000000409	Lck	lymphocyte protein tyrosine kinase	protein_coding
+ENSMUSG00000021091	Itgam	integrin alpha M	protein_coding
+ENSMUSG00000024621	Cx3cr1	chemokine (C-X3-C motif) receptor 1	protein_coding
+ENSMUSG00000029925	P2ry12	purinergic receptor P2Y, G-protein coupled 12	protein_coding
+ENSMUSG00000036887	Tmem119	transmembrane protein 119	protein_coding
+ENSMUSG00000020932	Gfap	glial fibrillary acidic protein	protein_coding
+ENSMUSG00000057098	Aqp4	aquaporin 4	protein_coding
+ENSMUSG00000020880	Olig2	oligodendrocyte transcription factor 2	protein_coding
+ENSMUSG00000032517	Mbp	myelin basic protein	protein_coding
+ENSMUSG00000030096	Rbfox3	RNA binding protein, fox-1 homolog 3	protein_coding
+ENSMUSG00000019874	Syn1	synapsin I	protein_coding
+ENSMUSG00000033981	Nes	nestin	protein_coding
+ENSMUSG00000045545	Slc17a7	solute carrier family 17 member 7	protein_coding
+ENSMUSG00000070880	Gad2	glutamic acid decarboxylase 2	protein_coding
+ENSMUSG00000027967	Th	tyrosine hydroxylase	protein_coding
+ENSMUSG00000023328	Chat	choline acetyltransferase	protein_coding
+ENSMUSG00000020838	Trem2	triggering receptor expressed on myeloid cells 2	protein_coding
+ENSMUSG00000037071	Csf1r	colony stimulating factor 1 receptor	protein_coding
+ENSMUSG00000024397	Aif1	allograft inflammatory factor 1 (Iba1)	protein_coding
+ENSMUSG00000070691	Foxp3	forkhead box P3	protein_coding
+ENSMUSG00000000184	Ccnd2	cyclin D2	protein_coding
+ENSMUSG00000034394	Runx1	runt related transcription factor 1	protein_coding
+ENSMUSG00000016458	Tmprss2	transmembrane protease, serine 2	protein_coding
+ENSMUSG00000105261	Malat1	metastasis associated lung adenocarcinoma transcript 1	lncRNA
+ENSMUSG00000021268	Xist	X inactive specific transcript	lncRNA
+ENSMUSG00000029580	Neat1	nuclear paraspeckle assembly transcript 1	lncRNA
+ENSMUSG00000042489	Gas5	growth arrest specific 5	lncRNA

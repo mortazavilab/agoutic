@@ -50,6 +50,7 @@ _SAFE_STEP_KINDS = frozenset({
     "GENERATE_DE_PLOT",
     "INTERPRET_RESULTS",
     "RECOMMEND_NEXT",
+    "ANNOTATE_RESULTS",
 })
 
 # Expensive steps require explicit approval
@@ -101,6 +102,7 @@ STEP_TOOL_DEFAULTS: dict[str, list[dict] | None] = {
     "GENERATE_DE_PLOT": [{"source_key": "edgepython", "tool": "generate_plot"}],
     "INTERPRET_RESULTS": None,      # LLM call (special handling)
     "RECOMMEND_NEXT": None,         # LLM call (special handling)
+    "ANNOTATE_RESULTS": [{"source_key": "edgepython", "tool": "annotate_genes"}],
     # Legacy kinds (backward compat with existing WORKFLOW_PLAN):
     "copy_sample": None,
     "run": None,

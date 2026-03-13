@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.6
+**Version:** 3.2.7
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -168,6 +168,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
   - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
   - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that decomposes complex requests into deterministic execution plans with dependency tracking, approval gates, and automatic replanning on failure. 8 plan templates covering: run workflow, compare samples, download+analyze, summarize results, run DE pipeline, parse+plot+interpret, compare workflows, and search+compare to local data. CHECK_EXISTING guards skip expensive operations when results already exist.
+  - **Gene Annotation & ID Translation** — offline Ensembl gene ID to symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. MCP tools: `annotate_genes`, `translate_gene_ids`.
 
 ### Atlas: ENCODELIB (Port 8080)
 - **Role:** ENCODE Portal data retrieval

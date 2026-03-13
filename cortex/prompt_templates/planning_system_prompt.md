@@ -40,6 +40,7 @@ Each step object must have:
 - COMPARE_SAMPLES — compare metrics between samples
 - GENERATE_PLOT — create a visualization (bar/scatter/histogram/pie/heatmap/box)
 - GENERATE_DE_PLOT — create DE-specific plot (volcano/MD/heatmap)
+- ANNOTATE_RESULTS — add gene symbol annotations to loaded DE data
 - WRITE_SUMMARY — produce a final written summary
 - INTERPRET_RESULTS — explain what results mean biologically
 - RECOMMEND_NEXT — suggest what the user should do next

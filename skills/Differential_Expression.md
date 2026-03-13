@@ -56,6 +56,19 @@ The standard workflow proceeds through these steps:
 [[DATA_CALL: service=edgepython, tool=load_data, counts_path=<path>, sample_info_path=<path>, group_column=<col>]]
 ```
 
+Gene symbols are automatically annotated when data is loaded, if reference files
+are available in `data/reference/`. To manually annotate or re-annotate after loading:
+
+```
+[[DATA_CALL: service=edgepython, tool=annotate_genes]]
+```
+
+To translate specific gene IDs outside a DE pipeline:
+
+```
+[[DATA_CALL: service=edgepython, tool=translate_gene_ids, gene_ids=["ENSG00000141510", "ENSG00000157764"]]]
+```
+
 Or for flexible loading (kallisto, salmon, 10x, AnnData):
 
 ```

@@ -408,4 +408,32 @@ TOOL_SCHEMAS = {
             "required": [],
         },
     },
+    # =================================================================
+    # Gene annotation tools
+    # =================================================================
+    "annotate_genes": {
+        "description": "Add gene symbol annotations to the currently loaded dataset. Auto-detects organism from gene ID prefixes.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "organism": {"type": "string", "description": "'human' or 'mouse'. Auto-detected if not provided."},
+            },
+            "required": [],
+        },
+    },
+    "translate_gene_ids": {
+        "description": "Translate a list of Ensembl gene IDs to gene symbols.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gene_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of Ensembl gene IDs (e.g. ['ENSG00000141510']).",
+                },
+                "organism": {"type": "string", "description": "'human' or 'mouse'. Auto-detected if not provided."},
+            },
+            "required": ["gene_ids"],
+        },
+    },
 }

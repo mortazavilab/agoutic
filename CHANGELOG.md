@@ -1,5 +1,51 @@
 # Changelog - March 2026
 
+## [3.2.7] - 2026-03-12
+
+### Features
+
+- **Gene annotation & ID translation** — new `GeneAnnotator` service in
+  `common/gene_annotation.py` provides offline Ensembl gene ID to symbol
+  translation for human and mouse. Auto-annotates gene symbols when DE data
+  is loaded via `load_data()` / `load_data_auto()`. All downstream outputs
+  (top genes tables, heatmap labels, LLM summaries) now show readable gene
+  symbols (e.g. TP53) instead of raw Ensembl IDs (e.g. ENSG00000141510).
+
+- **Version stripping & organism detection** — automatically handles
+  versioned IDs (`ENSG00000141510.17` → `ENSG00000141510`) and detects
+  organism from ID prefix (ENSG → human, ENSMUSG → mouse).
+
+- **Two new MCP tools** — `annotate_genes` (annotate the loaded DGEList)
+  and `translate_gene_ids` (standalone batch ID → symbol translation).
+
+- **ANNOTATE_RESULTS plan step** — the DE pipeline plan template now
+  includes an annotation step between RUN_DE_PIPELINE and GENERATE_DE_PLOT.
+
+- **Graceful degradation** — if reference TSV files are missing, all
+  existing behavior is unchanged. No crashes, no new dependencies.
+
+### New Files
+
+- `common/gene_annotation.py` — GeneAnnotator class: strip_version,
+  detect_organism, translate, translate_batch, annotate_dataframe
+- `scripts/build_gene_reference.py` — one-time Gencode GTF → TSV builder
+- `data/reference/human_genes.tsv` — ~100 representative human genes
+- `data/reference/mouse_genes.tsv` — ~100 representative mouse genes
+- `tests/common/test_gene_annotation.py` — 40 unit tests
+
+### Changes
+
+- `common/__init__.py` — export GeneAnnotator
+- `edgepython_mcp/edgepython_server.py` — auto-annotate in load_data/
+  load_data_auto, `_gene_name()` prefers Symbol over GeneID, two new tools
+- `edgepython_mcp/tool_schemas.py` — schemas for annotate_genes,
+  translate_gene_ids
+- `cortex/planner.py` — ANNOTATE_RESULTS step in DE pipeline template
+- `cortex/plan_executor.py` — ANNOTATE_RESULTS in safe steps + defaults
+- `cortex/task_service.py` — ANNOTATE_RESULTS in action classification
+- `cortex/prompt_templates/planning_system_prompt.md` — new step kind
+- `skills/Differential_Expression.md` — annotation usage documented
+
 ## [3.2.6] - 2026-03-12
 
 ### Features

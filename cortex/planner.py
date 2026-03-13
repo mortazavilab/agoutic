@@ -566,7 +566,7 @@ def _select_plot_type(message: str) -> str:
 def _template_run_de_pipeline(params: dict) -> dict:
     """
     Deterministic plan for full differential expression analysis.
-    Steps: CHECK_EXISTING → RUN_DE_PIPELINE → GENERATE_DE_PLOT → INTERPRET_RESULTS → WRITE_SUMMARY
+    Steps: CHECK_EXISTING → RUN_DE_PIPELINE → ANNOTATE_RESULTS → GENERATE_DE_PLOT → INTERPRET_RESULTS → WRITE_SUMMARY
     """
     counts_path = params.get("counts_path", "counts.csv")
     sample_info = params.get("sample_info_path", "sample_info.csv")
@@ -604,15 +604,22 @@ def _template_run_de_pipeline(params: dict) -> dict:
     steps.append(s_de)
     idx += 1
 
+    s_annotate = _make_step("ANNOTATE_RESULTS", "Annotate gene symbols", idx,
+                            depends_on=[s_de["id"]],
+                            tool_calls=[{"source_key": "edgepython", "tool": "annotate_genes",
+                                         "params": {}}])
+    steps.append(s_annotate)
+    idx += 1
+
     s_plot = _make_step("GENERATE_DE_PLOT", "Generate volcano plot", idx,
-                        depends_on=[s_de["id"]],
+                        depends_on=[s_annotate["id"]],
                         tool_calls=[{"source_key": "edgepython", "tool": "generate_plot",
                                      "params": {"plot_type": "volcano"}}])
     steps.append(s_plot)
     idx += 1
 
     s_interpret = _make_step("INTERPRET_RESULTS", "Interpret DE results", idx,
-                             depends_on=[s_de["id"]])
+                             depends_on=[s_annotate["id"]])
     steps.append(s_interpret)
     idx += 1
 

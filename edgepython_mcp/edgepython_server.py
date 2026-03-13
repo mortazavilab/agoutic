@@ -26,6 +26,10 @@ if _edgepython_root not in sys.path:
 
 import edgepython as ep
 
+from common.gene_annotation import GeneAnnotator
+
+_annotator = GeneAnnotator()
+
 # ---------------------------------------------------------------------------
 # Server + state
 # ---------------------------------------------------------------------------
@@ -74,10 +78,12 @@ def _require(key: str, label: str):
 
 def _gene_name(row):
     """Extract gene name from a top_tags result row."""
-    # top_tags prepends gene annotation columns; check for GeneID first
-    for col in ("GeneID", "gene_id", "gene_name", "Symbol"):
+    # Prefer symbol (from annotation) over raw gene ID
+    for col in ("Symbol", "gene_name", "gene_id", "GeneID"):
         if col in row.index:
-            return str(row[col])
+            val = row[col]
+            if val is not None and str(val).strip() and str(val) != "nan":
+                return str(val)
     # Fall back to row index
     return str(row.name)
 
@@ -287,6 +293,12 @@ def load_data(
 
     genes_df = pd.DataFrame({"GeneID": gene_ids})
 
+    # Auto-annotate gene symbols if reference data is available
+    _n_annotated = 0
+    if _annotator.is_available:
+        _annotator.annotate_dataframe(genes_df, id_column="GeneID", symbol_column="Symbol")
+        _n_annotated = int(genes_df["Symbol"].notna().sum())
+
     # Read sample info if provided
     group = None
     samples_df = None
@@ -367,6 +379,8 @@ def load_data(
         lines.append(f"Feature level: {_state['feature_level']} ({_state['feature_level_note']})")
     if _state.get("analysis_context_note"):
         lines.append(f"Context: {_state['analysis_context']} ({_state['analysis_context_note']})")
+    if _n_annotated:
+        lines.append(f"Gene symbols: {_n_annotated:,}/{len(gene_ids):,} annotated")
     _append_gene_level_warning(lines)
     return "\n".join(lines)
 
@@ -448,12 +462,23 @@ def load_data_auto(
     gene_ids = None
     if dgelist.get("genes") is not None:
         gdf = dgelist["genes"]
-        for col in ("GeneID", "gene_id", "gene_name", "Symbol"):
+        for col in ("GeneID", "gene_id"):
             if col in gdf.columns:
                 gene_ids = list(gdf[col].astype(str))
                 break
     if gene_ids is not None:
         dgelist["_gene_ids"] = gene_ids
+
+    # Auto-annotate gene symbols if reference data is available
+    _n_auto_annotated = 0
+    if _annotator.is_available and dgelist.get("genes") is not None:
+        gdf = dgelist["genes"]
+        if isinstance(gdf, pd.DataFrame):
+            for id_col in ("GeneID", "gene_id"):
+                if id_col in gdf.columns:
+                    _annotator.annotate_dataframe(gdf, id_column=id_col, symbol_column="Symbol")
+                    _n_auto_annotated = int(gdf["Symbol"].notna().sum())
+                    break
 
     level, level_note = _infer_feature_level(gene_ids)
     context, context_note = _infer_analysis_context(
@@ -482,6 +507,8 @@ def load_data_auto(
         lines.append(f"Feature level: {_state['feature_level']} ({_state['feature_level_note']})")
     if _state.get("analysis_context_note"):
         lines.append(f"Context: {_state['analysis_context']} ({_state['analysis_context_note']})")
+    if _n_auto_annotated:
+        lines.append(f"Gene symbols: {_n_auto_annotated:,}/{counts.shape[0]:,} annotated")
     _append_gene_level_warning(lines)
     return "\n".join(lines)
 
@@ -1807,6 +1834,83 @@ def generate_plot(
         fig.savefig(output_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         return f"Heatmap saved to: {output_path}"
+
+
+# ===========================================================================
+# Gene annotation tools
+# ===========================================================================
+
+
+@mcp.tool()
+def annotate_genes(organism: Optional[str] = None) -> str:
+    """Add gene symbol annotations to the currently loaded dataset.
+
+    Auto-detects organism from gene ID prefixes if not specified.
+    Requires data to be loaded first (load_data or load_data_auto).
+
+    Args:
+        organism: 'human' or 'mouse'. Auto-detected if not provided.
+    """
+    _require("dgelist", "DGEList")
+    d = _state["dgelist"]
+    genes = d.get("genes")
+    if genes is None:
+        return "No gene annotation available in DGEList."
+    if not _annotator.is_available:
+        return "Gene annotation data not available. Place reference TSV files in data/reference/."
+
+    gdf = genes if isinstance(genes, pd.DataFrame) else pd.DataFrame(genes)
+
+    # Find the ID column
+    id_col = None
+    for col in ("GeneID", "gene_id"):
+        if col in gdf.columns:
+            id_col = col
+            break
+    if id_col is None:
+        return "No gene ID column found in gene annotation."
+
+    _annotator.annotate_dataframe(gdf, id_column=id_col, symbol_column="Symbol")
+    d["genes"] = gdf
+
+    n_total = len(gdf)
+    n_annotated = int(gdf["Symbol"].notna().sum())
+    organism_detected = _annotator.detect_organism(str(gdf[id_col].iloc[0])) if n_total else None
+    org_label = organism or organism_detected or "unknown"
+    return (
+        f"Annotated {n_annotated:,}/{n_total:,} genes with symbols "
+        f"(organism: {org_label})"
+    )
+
+
+@mcp.tool()
+def translate_gene_ids(
+    gene_ids: list,
+    organism: Optional[str] = None,
+) -> str:
+    """Translate a list of Ensembl gene IDs to gene symbols.
+
+    Args:
+        gene_ids: List of Ensembl gene IDs
+            (e.g. ["ENSG00000141510", "ENSG00000157764"]).
+        organism: 'human' or 'mouse'. Auto-detected from ID prefix
+            if not provided.
+    """
+    if not _annotator.is_available:
+        return "Gene annotation data not available. Place reference TSV files in data/reference/."
+
+    ids = [str(g) for g in gene_ids]
+    results = _annotator.translate_batch(ids, organism=organism)
+
+    lines = [f"{'Gene ID':<25} {'Symbol':<15}"]
+    lines.append("-" * 40)
+    for gid in ids:
+        symbol = results.get(gid) or "—"
+        lines.append(f"{gid:<25} {symbol:<15}")
+
+    n_found = sum(1 for v in results.values() if v is not None)
+    lines.append(f"\nTranslated: {n_found}/{len(ids)}")
+    return "\n".join(lines)
 
 
 # ===========================================================================

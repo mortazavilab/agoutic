@@ -1,0 +1,106 @@
+gene_id	gene_symbol	gene_name	biotype
+ENSG00000141510	TP53	tumor protein p53	protein_coding
+ENSG00000157764	BRAF	B-Raf proto-oncogene, serine/threonine kinase	protein_coding
+ENSG00000111640	GAPDH	glyceraldehyde-3-phosphate dehydrogenase	protein_coding
+ENSG00000075624	ACTB	actin beta	protein_coding
+ENSG00000133703	KRAS	KRAS proto-oncogene, GTPase	protein_coding
+ENSG00000171862	PTEN	phosphatase and tensin homolog	protein_coding
+ENSG00000146648	EGFR	epidermal growth factor receptor	protein_coding
+ENSG00000012048	BRCA1	BRCA1 DNA repair associated	protein_coding
+ENSG00000139618	BRCA2	BRCA2 DNA repair associated	protein_coding
+ENSG00000149311	ATM	ATM serine/threonine kinase	protein_coding
+ENSG00000181143	MUC16	mucin 16, cell surface associated	protein_coding
+ENSG00000055609	KMT2C	lysine methyltransferase 2C	protein_coding
+ENSG00000134982	APC	APC regulator of WNT signaling pathway	protein_coding
+ENSG00000196712	NF1	neurofibromin 1	protein_coding
+ENSG00000108091	CCND1	cyclin D1	protein_coding
+ENSG00000136997	MYC	MYC proto-oncogene, bHLH transcription factor	protein_coding
+ENSG00000181555	SETD2	SET domain containing 2, histone lysine methyltransferase	protein_coding
+ENSG00000183765	CHEK2	checkpoint kinase 2	protein_coding
+ENSG00000085224	ATRX	ATRX chromatin remodeler	protein_coding
+ENSG00000147889	CDKN2A	cyclin dependent kinase inhibitor 2A	protein_coding
+ENSG00000118058	KMT2A	lysine methyltransferase 2A	protein_coding
+ENSG00000148400	NOTCH1	notch receptor 1	protein_coding
+ENSG00000116478	HDAC1	histone deacetylase 1	protein_coding
+ENSG00000186868	MAPT	microtubule associated protein tau	protein_coding
+ENSG00000130203	APOE	apolipoprotein E	protein_coding
+ENSG00000142208	AKT1	AKT serine/threonine kinase 1	protein_coding
+ENSG00000105329	TGFB1	transforming growth factor beta 1	protein_coding
+ENSG00000232810	TNF	tumor necrosis factor	protein_coding
+ENSG00000183454	GRIN2A	glutamate ionotropic receptor NMDA type subunit 2A	protein_coding
+ENSG00000204389	HSPA1A	heat shock protein family A (Hsp70) member 1A	protein_coding
+ENSG00000197386	HTT	huntingtin	protein_coding
+ENSG00000101384	JAG1	jagged canonical Notch ligand 1	protein_coding
+ENSG00000185567	AHNAK2	AHNAK nucleoprotein 2	protein_coding
+ENSG00000010810	FYN	FYN proto-oncogene, Src family tyrosine kinase	protein_coding
+ENSG00000102145	GATA1	GATA binding protein 1	protein_coding
+ENSG00000120738	EGR1	early growth response 1	protein_coding
+ENSG00000169083	AR	androgen receptor	protein_coding
+ENSG00000091831	ESR1	estrogen receptor 1	protein_coding
+ENSG00000105397	TYK2	tyrosine kinase 2	protein_coding
+ENSG00000162434	JAK1	Janus kinase 1	protein_coding
+ENSG00000096968	JAK2	Janus kinase 2	protein_coding
+ENSG00000168610	STAT3	signal transducer and activator of transcription 3	protein_coding
+ENSG00000170458	CD14	CD14 molecule	protein_coding
+ENSG00000090382	LYZ	lysozyme	protein_coding
+ENSG00000244734	HBB	hemoglobin subunit beta	protein_coding
+ENSG00000206172	HBA1	hemoglobin subunit alpha 1	protein_coding
+ENSG00000108349	CASP3	caspase 3	protein_coding
+ENSG00000064012	CASP8	caspase 8	protein_coding
+ENSG00000168303	MPLKIP	M-phase specific PLK1 interacting protein	protein_coding
+ENSG00000164305	CASP3	caspase 3	protein_coding
+ENSG00000087088	BAX	BCL2 associated X, apoptosis regulator	protein_coding
+ENSG00000171791	BCL2	BCL2 apoptosis regulator	protein_coding
+ENSG00000115524	SF3B1	splicing factor 3b subunit 1	protein_coding
+ENSG00000168036	CTNNB1	catenin beta 1	protein_coding
+ENSG00000196230	TUBB	tubulin beta class I	protein_coding
+ENSG00000167286	CD3D	CD3 delta subunit of T-cell receptor complex	protein_coding
+ENSG00000170476	MZB1	marginal zone B and B1 cell specific protein	protein_coding
+ENSG00000010671	BTLA	B and T lymphocyte associated	protein_coding
+ENSG00000163599	CTLA4	cytotoxic T-lymphocyte associated protein 4	protein_coding
+ENSG00000188389	PDCD1	programmed cell death 1	protein_coding
+ENSG00000120217	CD274	CD274 molecule (PD-L1)	protein_coding
+ENSG00000112576	CCND3	cyclin D3	protein_coding
+ENSG00000105221	AKT2	AKT serine/threonine kinase 2	protein_coding
+ENSG00000117020	AKT3	AKT serine/threonine kinase 3	protein_coding
+ENSG00000132155	RAF1	Raf-1 proto-oncogene, serine/threonine kinase	protein_coding
+ENSG00000174775	HRAS	HRas proto-oncogene, GTPase	protein_coding
+ENSG00000213281	NRAS	NRAS proto-oncogene, GTPase	protein_coding
+ENSG00000121879	PIK3CA	phosphatidylinositol-4,5-bisphosphate 3-kinase catalytic subunit alpha	protein_coding
+ENSG00000198793	MTOR	mechanistic target of rapamycin kinase	protein_coding
+ENSG00000065559	MAP2K1	mitogen-activated protein kinase kinase 1	protein_coding
+ENSG00000126934	MAP2K2	mitogen-activated protein kinase kinase 2	protein_coding
+ENSG00000100030	MAPK1	mitogen-activated protein kinase 1	protein_coding
+ENSG00000102882	MAPK3	mitogen-activated protein kinase 3	protein_coding
+ENSG00000177606	JUN	Jun proto-oncogene, AP-1 transcription factor subunit	protein_coding
+ENSG00000170345	FOS	Fos proto-oncogene, AP-1 transcription factor subunit	protein_coding
+ENSG00000187098	MITF	melanocyte inducing transcription factor	protein_coding
+ENSG00000176871	SOX2	SRY-box transcription factor 2	protein_coding
+ENSG00000204531	POU5F1	POU class 5 homeobox 1	protein_coding
+ENSG00000111704	NANOG	Nanog homeobox	protein_coding
+ENSG00000136826	KLF4	Kruppel like factor 4	protein_coding
+ENSG00000007372	PAX6	paired box 6	protein_coding
+ENSG00000100644	HIF1A	hypoxia inducible factor 1 subunit alpha	protein_coding
+ENSG00000126012	KDM5C	lysine demethylase 5C	protein_coding
+ENSG00000186575	NF2	neurofibromin 2	protein_coding
+ENSG00000185920	PTCH1	patched 1	protein_coding
+ENSG00000065361	ERBB2	erb-b2 receptor tyrosine kinase 2	protein_coding
+ENSG00000138413	IDH1	isocitrate dehydrogenase (NADP(+)) 1	protein_coding
+ENSG00000182054	IDH2	isocitrate dehydrogenase (NADP(+)) 2	protein_coding
+ENSG00000116044	NFE2L2	NFE2 like bZIP transcription factor 2	protein_coding
+ENSG00000079102	RUNX1	RUNX family transcription factor 1	protein_coding
+ENSG00000184012	TMPRSS2	transmembrane serine protease 2	protein_coding
+ENSG00000157554	ERG	ETS transcription factor ERG	protein_coding
+ENSG00000073282	TP63	tumor protein p63	protein_coding
+ENSG00000134086	VHL	von Hippel-Lindau tumor suppressor	protein_coding
+ENSG00000134480	CCNH	cyclin H	protein_coding
+ENSG00000105810	CDK6	cyclin dependent kinase 6	protein_coding
+ENSG00000123374	CDK2	cyclin dependent kinase 2	protein_coding
+ENSG00000134058	CDK7	cyclin dependent kinase 7	protein_coding
+ENSG00000110092	CCND1	cyclin D1	protein_coding
+ENSG00000251562	MALAT1	metastasis associated lung adenocarcinoma transcript 1	lncRNA
+ENSG00000228630	HOTAIR	HOX transcript antisense RNA	lncRNA
+ENSG00000247774	XIST	X inactive specific transcript	lncRNA
+ENSG00000234741	GAS5	growth arrest specific 5	lncRNA
+ENSG00000245532	NEAT1	nuclear paraspeckle assembly transcript 1	lncRNA
+ENSG00000207392	MIR21	microRNA 21	miRNA
