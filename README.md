@@ -617,7 +617,7 @@ pytest tests/cortex/test_project_endpoints.py -q
 - **In-memory SQLite** with `StaticPool` for fast, isolated tests
 - **Mocked LLM** via `AgentEngine` patches (no real model calls)
 - **Mocked MCP** via `MCPHttpClient` patches (no real service connections)
-- **34 cortex test files** covering: chat endpoint, approval gates, background tasks, project management, block endpoints, conversations, auth, admin, downloads, uploads, pure helpers, tool routing, skill detection, validation
+- **34 cortex test files** covering: chat endpoint, approval gates, background tasks, project management, block endpoints, conversations, auth, admin, downloads, uploads, pure helpers, tool routing, skill detection, validation, planning
 - **Task coverage** includes persistent task projection, task actions,
   download-file children, and workflow-stage children in
   `tests/cortex/test_project_endpoints.py`
@@ -715,7 +715,7 @@ Pre-defined bioinformatics workflows are available in `skills/`:
 ### Testing Requirements
 
 ```bash
-# Run full test suite (865 tests)
+# Run full test suite (1040+ tests)
 pytest tests/ -q
 
 # With coverage
@@ -730,18 +730,18 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.0.9 — Comprehensive test suite (865 tests, 0 failures, 82% cortex/app.py coverage)
-- **Python**: 3.11+
+- **Release**: 3.2.7 — Gene annotation & ID translation, expanded plan templates, plan-execute-observe-replan
+- **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
 - **Nextflow**: >= 23.0
-- **Test Coverage**: 865 tests, cortex/app.py at 82%
-- **Status**: Active Development — preparing for cortex/app.py refactor
+- **Test Coverage**: 1040+ tests across 53 test files
+- **Status**: Active Development
 
 ## 🗓️ Development Timeline
 
-- complete: Core infrastructure and basic API
-- current: Complete (Current) - Dual interface, MCP integration
-- next: Integration with Cortex approval gates
-- future: Web UI job monitoring dashboard
-- future: Performance optimization & deployment
+- complete: Core infrastructure, dual interface, MCP integration
+- complete: Web UI job monitoring, approval gates, project management
+- complete: Plan-execute-observe-replan, gene annotation, expanded templates
+- current: Cortex modularisation and DE adapter integration
+- next: Production deployment preparation
