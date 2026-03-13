@@ -203,7 +203,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 - **Tech:** FastMCP + edgePython
 - **Features:**
   - Full DE pipeline: load → filter → normalize → design → dispersion → fit → test → results → plots
-  - 30+ MCP tools (bulk DE, single-cell DE, ChIP-seq enrichment, DTU/splice)
+  - 30+ MCP tools (bulk DE, single-cell DE, ChIP-seq enrichment, DTU/splice, bidirectional gene lookup)
   - Stateful pipeline — each step builds on previous results within a session
   - Volcano, MDS, MA, BCV, heatmap plot generation
   - TSV/CSV/JSON result export
