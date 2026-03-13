@@ -112,7 +112,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                       AGOUTIC System v2.5                    │
+│                      AGOUTIC System v3.2.7                    │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -263,6 +263,7 @@ agoutic/
 │   ├── schemas.py               # Request/response schemas
 │   ├── config.py                # Configuration
 │   ├── db.py                    # Database connection
+│   ├── prompt_templates/        # LLM system prompts (first-pass, planning, second-pass)
 │   └── routes/                  # Extracted REST route modules
 │
 ├── launchpad/                      # Execution Engine
@@ -284,9 +285,10 @@ agoutic/
 │   │   ├── init_db.py           # Fresh database bootstrap utility
 │   │   ├── set_usernames.py     # Username/slug admin CLI
 │   │   └── bootstrap_project_tasks.py # Backfill persistent project tasks
-│   └── launchpad/
-│       ├── debug_job.py         # Job inspection helper
-│       └── submit_real_job.py   # Manual job submission helper
+│   ├── launchpad/
+│   │   ├── debug_job.py         # Job inspection helper
+│   │   └── submit_real_job.py   # Manual job submission helper
+│   └── build_gene_reference.py  # One-time Gencode GTF → TSV builder
 │
 ├── ui/                          # Web Interface
 │   ├── README.md               # UI documentation
@@ -310,6 +312,12 @@ agoutic/
 │   ├── tool_schemas.py         # JSON Schema contracts for all tools
 │   └── config.py               # Configuration
 │
+├── common/                      # Shared Utilities
+│   ├── gene_annotation.py      # Ensembl gene ID → symbol translation
+│   ├── mcp_client.py           # Shared MCP HTTP client
+│   ├── logging_config.py       # Structured logging setup
+│   └── logging_middleware.py   # Request logging middleware
+│
 ├── skills/                      # Workflow Definitions
 │   ├── Dogme_DNA.md            # DNA pipeline definition
 │   ├── Dogme_RNA.md            # RNA pipeline definition
@@ -318,10 +326,18 @@ agoutic/
 │   ├── ENCODE_LongRead.md      # ENCODE pipeline definition
 │   ├── ENCODE_Search.md        # ENCODE search skill + routing rules
 │   ├── Local_Sample_Intake.md  # Sample intake workflow
+│   ├── Analyze_Job_Results.md  # Post-pipeline results analysis
+│   ├── Download_Files.md       # File download workflow
+│   ├── Welcome.md              # New-user onboarding
+│   ├── SKILL_ROUTING_PATTERN.md  # Skill routing reference
+│   └── DOGME_QUICK_WORKFLOW_GUIDE.md # Quick pipeline reference
 │
 └── data/                        # Data & Database (created at runtime)
     ├── database/
     │   └── agoutic_v24.sqlite
+    ├── reference/               # Gene annotation reference files
+    │   ├── human_genes.tsv
+    │   └── mouse_genes.tsv
     ├── launchpad_work/            # Job execution directories
     ├── launchpad_logs/            # Server logs
     └── users/                   # Per-user jailed project dirs
@@ -574,19 +590,19 @@ curl http://localhost:8001/jobs/{run_uuid}
 
 ### Run All Tests
 
-The project has **865 tests** providing comprehensive coverage before refactoring.
+The project has **1040+ tests** providing comprehensive coverage.
 
 ```bash
-# Run the full test suite (865 tests)
+# Run the full test suite (1040+ tests)
 pytest tests/ -q
 
-# Cortex tests only (690 tests, 82% coverage on app.py)
+# Cortex tests only
 pytest tests/cortex/ -q
 
 # With coverage report
 pytest tests/cortex/ --cov=cortex/app --cov-report=term-missing
 
-# Other components (175 tests)
+# Other components
 pytest tests/atlas/ tests/common/ tests/analyzer/ tests/launchpad/ tests/ui/ -q
 
 # Single test file
@@ -679,8 +695,13 @@ Pre-defined bioinformatics workflows are available in `skills/`:
 - **Dogme_DNA.md** - Genomic DNA analysis workflow
 - **Dogme_RNA.md** - Direct RNA-seq workflow
 - **Dogme_cDNA.md** - cDNA isoform workflow
+- **Differential_Expression.md** - edgePython DE pipeline (with gene annotation)
 - **ENCODE_LongRead.md** - ENCODE consortium workflow
+- **ENCODE_Search.md** - ENCODE search and data discovery
 - **Local_Sample_Intake.md** - Sample intake and validation
+- **Analyze_Job_Results.md** - Post-pipeline results analysis
+- **Download_Files.md** - File download orchestration
+- **Welcome.md** - New-user onboarding
 
 ## 🤝 Contributing
 
