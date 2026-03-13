@@ -14,6 +14,7 @@ from cortex.encode_helpers import (
     _ENCODE_ASSAY_ALIASES,
     _extract_encode_search_term,
     _find_experiment_for_file,
+    _looks_like_assay,
 )
 from cortex.path_helpers import (
     _pick_file_tool,
@@ -44,6 +45,37 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     """
     calls = []
     msg_lower = user_message.lower()
+    accession_matches = re.findall(r'(ENC[A-Z]{2}\d{3}[A-Z]{3})', user_message, re.IGNORECASE)
+    accessions = [a.upper() for a in accession_matches]
+    _VIZ_KEYWORDS = ("plot", "chart", "graph", "histogram", "scatter",
+                     "visualize", "visualise", "heatmap", "pie chart",
+                     "bar chart", "box plot", "distribution")
+    _has_viz_intent = any(kw in msg_lower for kw in _VIZ_KEYWORDS)
+    _encode_search_patterns = [
+        r'how\s+many\s+\S+.*experiments?',
+        r'search\s+(?:encode\s+)?for\s+\S+',
+        r'does\s+encode\s+have\s+\S+',
+        r'\S+\s+experiments?\s+(?:in|on|from)\s+encode',
+        r'(?:find|list|show|get|plot|chart|visuali[sz]e|graph|make)\s+(?:all\s+)?\S+\s+experiments?',
+    ]
+    _extracted_search_term = None
+    _compound_encode_viz_search = False
+    if skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+        _extracted_search_term = _extract_encode_search_term(user_message)
+        _compound_encode_viz_search = bool(
+            accessions
+            or any(re.search(p, msg_lower) for p in _encode_search_patterns)
+            or (
+                _extracted_search_term
+                and (
+                    "encode" in msg_lower
+                    or "experiment" in msg_lower
+                    or "experiments" in msg_lower
+                    or "biosample" in msg_lower
+                    or "assay" in msg_lower
+                )
+            )
+        )
 
     # --- DF reference / visualization follow-up: never auto-call ---
     # If the user references an existing DataFrame (DF1, DF2, ...) this is
@@ -51,10 +83,7 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     if re.search(r'\bDF\s*\d+\b', user_message, re.IGNORECASE):
         return calls
     # Pure visualization intent (no new data request)
-    _VIZ_KEYWORDS = ("plot", "chart", "graph", "histogram", "scatter",
-                     "visualize", "visualise", "heatmap", "pie chart",
-                     "bar chart", "box plot", "distribution")
-    if any(kw in msg_lower for kw in _VIZ_KEYWORDS):
+    if _has_viz_intent and not _compound_encode_viz_search:
         return calls
 
     # --- Browsing commands (highest priority, skill-independent) ---
@@ -178,9 +207,6 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
 
     # --- ENCODE patterns ---
     # Detect ENCODE accession numbers (ENCSR, ENCFF, ENCLB, etc.)
-    accession_matches = re.findall(r'(ENC[A-Z]{2}\d{3}[A-Z]{3})', user_message, re.IGNORECASE)
-    accessions = [a.upper() for a in accession_matches]
-
     # --- Download intent detection ---
     # "download ENCFF921XAH" should resolve the file URL and start a download,
     # not trigger a get_files_by_type search.
@@ -365,7 +391,7 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
         #    send it to search_by_biosample.  Let the ENCODE API decide if
         #    the term is valid — we can't enumerate every cell line / tissue.
         if not calls and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
-            _extracted = _extract_encode_search_term(user_message)
+            _extracted = _extracted_search_term or _extract_encode_search_term(user_message)
             if _extracted:
                 params = {"search_term": _extracted}
                 # Infer organism from context words

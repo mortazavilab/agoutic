@@ -129,6 +129,222 @@ def _chat(client, message, skill="welcome", project_id="proj-plot"):
 class TestPlotTagParsing:
     """Tests covering lines 4284-4497 (plot tag parsing in chat handler)."""
 
+    def test_duplicate_plot_specs_collapse_to_single_chart(self, SL, seed, tmp_path):
+        """Identical plot specs should not create duplicate overlaid traces."""
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "ENCODE_Search",
+                    "known_dataframes": ["DF1 (K562, 3 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "K562 (3 results)": {
+                        "columns": ["Assay", "Count"],
+                        "data": [
+                            {"Assay": "RNA-seq", "Count": 2},
+                            {"Assay": "ATAC-seq", "Count": 1},
+                            {"Assay": "ChIP-seq", "Count": 1},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 1, "visible": True, "label": "K562", "row_count": 3},
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the chart.\n"
+                "[[PLOT: type=bar, df=DF1, x=Assay, agg=count, title=K562 Experiments by Assay Type]]\n"
+                "[[PLOT: type=bar, df=DF1, x=Assay, agg=count, title=K562 Experiments by Assay Type]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "plot DF1 by assay type", skill="ENCODE_Search")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        charts = (plot_blocks[0].get("payload") or {}).get("charts", [])
+        assert len(charts) == 1
+
+    def test_semantically_duplicate_plot_specs_with_different_titles_collapse(self, SL, seed, tmp_path):
+        """Plot specs that differ only in non-trace metadata should still dedupe."""
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "ENCODE_Search",
+                    "known_dataframes": ["DF1 (K562, 3 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "K562 (3 results)": {
+                        "columns": ["Assay", "Count"],
+                        "data": [
+                            {"Assay": "RNA-seq", "Count": 2},
+                            {"Assay": "ATAC-seq", "Count": 1},
+                            {"Assay": "ChIP-seq", "Count": 1},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 1, "visible": True, "label": "K562", "row_count": 3},
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the chart.\n"
+                "[[PLOT: type=bar, df=DF1, x=Assay, agg=count, title=K562 Experiments by Assay Type]]\n"
+                "[[PLOT: type=bar, df=DF1, x=Assay, agg=count]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "plot DF1 by assay type", skill="ENCODE_Search")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        charts = (plot_blocks[0].get("payload") or {}).get("charts", [])
+        assert len(charts) == 1
+
+    def test_competing_plot_specs_keep_current_prompt_intent(self, SL, seed, tmp_path):
+        """When multiple plots compete, keep the one that matches the current ask."""
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "ENCODE_Search",
+                    "known_dataframes": ["DF1 (K562, 3 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "K562 (3 results)": {
+                        "columns": ["Accession", "Assay", "Count"],
+                        "data": [
+                            {"Accession": "ENCSR001AAA", "Assay": "RNA-seq", "Count": 2},
+                            {"Accession": "ENCSR002BBB", "Assay": "ATAC-seq", "Count": 1},
+                            {"Accession": "ENCSR003CCC", "Assay": "ChIP-seq", "Count": 1},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 1, "visible": True, "label": "K562", "row_count": 3},
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the chart.\n"
+                "[[PLOT: type=bar, df=DF1, x=Assay, agg=count, color=green, title=K562 Experiments by Assay Type]]\n"
+                "[[PLOT: type=bar, df=DF1, x=Accession, agg=count, title=Count by Accession]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "get the K562 experiments in ENCODE and make a plot by assay type in green", skill="ENCODE_Search")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        charts = (plot_blocks[0].get("payload") or {}).get("charts", [])
+        assert len(charts) == 1
+        assert charts[0].get("x") == "Assay"
+        assert charts[0].get("color") == "green"
+
+    def test_competing_plot_specs_drop_stale_color_when_not_requested(self, SL, seed, tmp_path):
+        """Do not keep leaked literal colors from prior context when this ask did not request one."""
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "ENCODE_Search",
+                    "known_dataframes": ["DF1 (K562, 3 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "K562 (3 results)": {
+                        "columns": ["Assay", "Count"],
+                        "data": [
+                            {"Assay": "RNA-seq", "Count": 2},
+                            {"Assay": "ATAC-seq", "Count": 1},
+                            {"Assay": "ChIP-seq", "Count": 1},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 1, "visible": True, "label": "K562", "row_count": 3},
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the chart.\n"
+                "[[PLOT: type=bar, df=DF1, x=Assay, agg=count, color=green, title=K562 Experiments by Assay Type]]\n"
+                "[[PLOT: type=bar, df=DF1, x=Assay, agg=count, title=K562 Experiments by Assay Type]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "get the K562 experiments in ENCODE and make a plot by assay type", skill="ENCODE_Search")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        charts = (plot_blocks[0].get("payload") or {}).get("charts", [])
+        assert len(charts) == 1
+        assert charts[0].get("x") == "Assay"
+        assert charts[0].get("color") is None
+
     def test_plot_tag_with_key_value(self, SL, seed, tmp_path):
         """LLM emits [[PLOT: type=scatter, df=DF1, x=score, y=enrichment]]."""
         def think(msg, skill, history):
@@ -182,6 +398,27 @@ class TestPlotTagParsing:
         # And a plot spec auto-generated
         plots = payload.get("plot_specs", [])
         # May or may not generate depending on injected DFs, but the endpoint shouldn't crash
+
+    def test_plot_code_fallback_preserves_literal_color_request(self, SL, seed, tmp_path):
+        """Malformed plot output should preserve explicit colors from the user prompt."""
+        def think(msg, skill, history):
+            return (
+                "I will help you search for the requested data and then generate a plot.\n\n"
+                "```python\nimport matplotlib.pyplot as plt\nplt.bar(df['assay'], df['count'], color='green')\n```\n\n"
+                '[PLOT: {"data": {"x": ["A"], "y": [1], "type": "bar", "marker": {"color": "green"}}}]',
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "plot DF1 by assay in green")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        charts = (plot_blocks[0].get("payload") or {}).get("charts", [])
+        assert charts
+        assert charts[0].get("df_id") == 1
+        assert charts[0].get("palette") == "green"
 
     def test_plot_command_override_suppresses_data_calls(self, SL, seed, tmp_path):
         """When user asks for plot and we have valid plot_specs,
@@ -612,6 +849,124 @@ class TestEmbeddedDataframes:
         dfs = payload.get("_dataframes", {})
         assert len(dfs) >= 1
 
+    def test_compound_encode_plot_query_searches_new_subject_not_latest_df(self, SL, seed, tmp_path):
+        """A search+plot request with a new biosample should search that biosample, not reuse the latest DF."""
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool.return_value = [
+            {
+                "accession": f"ENCSR{i:03d}AAA",
+                "assay_title": "RNA-seq" if i % 2 == 0 else "ATAC-seq",
+                "biosample_summary": "C2C12",
+                "target": "",
+            }
+            for i in range(58)
+        ]
+
+        def think(msg, skill, history):
+            return (
+                "I wasn't able to find an ENCODE query tool for that search term. Could you clarify?",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "plot C2C12 experiments in encode by assay type in purple", skill="ENCODE_Search")
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        dfs = payload.get("_dataframes", {})
+        assert len(dfs) >= 1
+        first_df = next(iter(dfs.values()))
+        assert first_df["row_count"] == 58
+
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        charts = (plot_blocks[0].get("payload") or {}).get("charts", [])
+        assert charts
+        assert charts[0].get("palette") == "purple"
+
+    def test_compound_encode_plot_query_rebinds_stale_llm_df_to_new_results(self, SL, seed, tmp_path):
+        """A same-turn ENCODE search+plot should not keep an LLM-hallucinated stale DF id."""
+        s = SL()
+        stale_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Previous results.",
+                "state": {
+                    "active_skill": "ENCODE_Search",
+                    "known_dataframes": ["DF4 (K562, 12 rows)"],
+                    "latest_dataframe": "DF4",
+                },
+                "_dataframes": {
+                    "K562 (12 results)": {
+                        "columns": ["Accession", "Assay", "Biosample", "Target"],
+                        "data": [{
+                            "Accession": "ENCSRSTAL1",
+                            "Assay": "ChIP-seq",
+                            "Biosample": "K562",
+                            "Target": "CTCF",
+                        }],
+                        "row_count": 12,
+                        "metadata": {"df_id": 4, "visible": True, "label": "K562", "row_count": 12},
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(stale_block)
+        s.commit()
+        s.close()
+
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool.return_value = [
+            {
+                "accession": f"ENCSR{i:03d}AAA",
+                "assay_title": "RNA-seq" if i % 2 == 0 else "ATAC-seq",
+                "biosample_summary": "C2C12",
+                "target": "",
+            }
+            for i in range(58)
+        ]
+
+        def think(msg, skill, history):
+            return (
+                "I'll help you get the C2C12 experiments from ENCODE and create a plot by assay type.\n\n"
+                "[[DATA_CALL: consortium=encode, tool=search, biosample=C2C12]]\n\n"
+                "[[PLOT: type=bar, df=DF4, x=Assay, agg=count, title=C2C12 Experiments by Assay Type]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "get the C2C12 experiments in ENCODE and make a plot by assay type", skill="ENCODE_Search")
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        dfs = payload.get("_dataframes", {})
+        assert len(dfs) >= 1
+        first_df = next(iter(dfs.values()))
+        assert first_df["row_count"] == 58
+        assert first_df.get("metadata", {}).get("df_id") == 5
+
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        charts = (plot_blocks[0].get("payload") or {}).get("charts", [])
+        assert charts
+        assert charts[0].get("df_id") == 5
+
 
 # ===========================================================================
 # 8. Token tracking in chat response
@@ -899,3 +1254,187 @@ class TestFileToolChaining:
         payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
         md = payload.get("markdown", "")
         assert "SKILL_SWITCH" not in md
+
+
+# ===========================================================================
+# DF Inspection Quick Commands (list dfs / head DF)
+# ===========================================================================
+
+class TestDFInspectionHelpers:
+    """Unit tests for _detect_df_command, _render_list_dfs, _render_head_df."""
+
+    def test_detect_list_dfs_variants(self):
+        from cortex.app import _detect_df_command
+        assert _detect_df_command("list dfs") == {"action": "list"}
+        assert _detect_df_command("list dataframes") == {"action": "list"}
+        assert _detect_df_command("show dfs") == {"action": "list"}
+        assert _detect_df_command("show dataframes") == {"action": "list"}
+        # Should NOT trigger on unrelated messages
+        assert _detect_df_command("list my jobs") is None
+        assert _detect_df_command("can you list dfs please") is None
+
+    def test_detect_head_df_variants(self):
+        from cortex.app import _detect_df_command
+        # head df (no number) → latest
+        r = _detect_df_command("head df")
+        assert r == {"action": "head", "df_id": None, "n": 10}
+        # head df3 → DF3, 10 rows
+        r = _detect_df_command("head df3")
+        assert r == {"action": "head", "df_id": 3, "n": 10}
+        # head df 3 → DF3, 10 rows  (space between df and number)
+        r = _detect_df_command("head df 3")
+        assert r is None or r == {"action": "head", "df_id": 3, "n": 10}
+        # head df3 5 → DF3, 5 rows
+        r = _detect_df_command("head df3 5")
+        assert r == {"action": "head", "df_id": 3, "n": 5}
+        # Not a DF command
+        assert _detect_df_command("head over to encode") is None
+
+    def test_render_list_dfs_empty(self):
+        from cortex.app import _render_list_dfs
+        assert "No dataframes" in _render_list_dfs({})
+
+    def test_render_list_dfs_with_data(self):
+        from cortex.app import _render_list_dfs
+        df_map = {
+            1: {"columns": ["Assay", "Count"], "data": [], "row_count": 12, "label": "K562 experiments"},
+            3: {"columns": ["Gene", "logFC", "FDR"], "data": [], "row_count": 500, "label": "DE results"},
+        }
+        md = _render_list_dfs(df_map)
+        assert "DF1" in md
+        assert "DF3" in md
+        assert "K562 experiments" in md
+        assert "12" in md
+        assert "500" in md
+        assert "Assay" in md
+        assert "Gene" in md
+
+    def test_render_head_df_not_found(self):
+        from cortex.app import _render_head_df
+        df_map = {1: {"columns": [], "data": [], "row_count": 0, "label": "X"}}
+        md = _render_head_df(df_map, 5, 10)
+        assert "DF5" in md
+        assert "not found" in md
+        assert "DF1" in md  # suggests available DFs
+
+    def test_render_head_df_with_rows(self):
+        from cortex.app import _render_head_df
+        df_map = {
+            2: {
+                "columns": ["Gene", "logFC", "FDR"],
+                "data": [
+                    {"Gene": "TP53", "logFC": 2.1, "FDR": 0.001},
+                    {"Gene": "BRCA1", "logFC": -1.5, "FDR": 0.03},
+                    {"Gene": "MYC", "logFC": 0.8, "FDR": 0.12},
+                ],
+                "row_count": 3,
+                "label": "DE results",
+            }
+        }
+        md = _render_head_df(df_map, 2, 10)
+        assert "**DF2**" in md
+        assert "DE results" in md
+        assert "3 rows" in md
+        assert "TP53" in md
+        assert "BRCA1" in md
+        assert "MYC" in md
+        # Verify it's a markdown table
+        assert "| Gene | logFC | FDR |" in md
+        assert "| --- | --- | --- |" in md
+
+    def test_render_head_df_custom_row_count(self):
+        from cortex.app import _render_head_df
+        rows = [{"A": i} for i in range(20)]
+        df_map = {1: {"columns": ["A"], "data": rows, "row_count": 20, "label": "big"}}
+        md = _render_head_df(df_map, 1, 5)
+        assert "showing first 5" in md
+        # Should only have 5 data rows (plus header + separator)
+        table_lines = [l for l in md.split("\n") if l.startswith("|")]
+        assert len(table_lines) == 7  # header + separator + 5 data rows
+
+
+class TestDFInspectionIntegration:
+    """Integration test: send 'list dfs' and 'head df' through the chat endpoint."""
+
+    def _seed_df_block(self, SL):
+        """Insert an AGENT_PLAN block containing DFs into the project."""
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Here are K562 results.",
+                "state": {
+                    "active_skill": "ENCODE_Search",
+                    "known_dataframes": ["DF1 (K562, 3 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "K562 (3 results)": {
+                        "columns": ["Assay", "Accession", "Status"],
+                        "data": [
+                            {"Assay": "RNA-seq", "Accession": "ENCSR001", "Status": "released"},
+                            {"Assay": "ATAC-seq", "Accession": "ENCSR002", "Status": "released"},
+                            {"Assay": "ChIP-seq", "Accession": "ENCSR003", "Status": "archived"},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 1, "visible": True, "label": "K562", "row_count": 3},
+                    }
+                },
+            }),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+    def test_list_dfs_returns_table(self, SL, seed, tmp_path):
+        self._seed_df_block(SL)
+
+        def think(msg, skill, history):
+            raise AssertionError("LLM should NOT be called for list dfs")
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "list dfs")
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        assert "DF1" in md
+        assert "K562" in md
+
+    def test_head_df1_returns_rows(self, SL, seed, tmp_path):
+        self._seed_df_block(SL)
+
+        def think(msg, skill, history):
+            raise AssertionError("LLM should NOT be called for head df")
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "head df1")
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        assert "**DF1**" in md
+        assert "RNA-seq" in md
+        assert "ENCSR001" in md
+        assert "| Assay | Accession | Status |" in md
+
+    def test_head_df_defaults_to_latest(self, SL, seed, tmp_path):
+        self._seed_df_block(SL)
+
+        def think(msg, skill, history):
+            raise AssertionError("LLM should NOT be called for head df")
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "head df")
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        # Should default to DF1 (the only/latest DF)
+        assert "**DF1**" in md
+        assert "RNA-seq" in md

@@ -176,7 +176,7 @@ class TestCapabilitiesResponse:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
-        assert "AGOUTIC Capabilities" in data["agent_block"]["payload"]["markdown"]
+        assert "Welcome to **Agoutic**" in data["agent_block"]["payload"]["markdown"]
         assert data["gate_block"] is None
 
     def test_help_trigger(self, client):
@@ -186,7 +186,7 @@ class TestCapabilitiesResponse:
         })
         assert resp.status_code == 200
         data = resp.json()
-        assert "Capabilities" in data["agent_block"]["payload"]["markdown"]
+        assert "what i can help you with" in data["agent_block"]["payload"]["markdown"].lower()
 
     def test_show_capabilities(self, client):
         resp = client.post("/chat", json={
@@ -195,7 +195,7 @@ class TestCapabilitiesResponse:
         })
         assert resp.status_code == 200
         data = resp.json()
-        assert "DNA Analysis" in data["agent_block"]["payload"]["markdown"]
+        assert "Analyze a new local dataset" in data["agent_block"]["payload"]["markdown"]
 
     def test_what_can_i_do(self, client):
         resp = client.post("/chat", json={
@@ -212,7 +212,7 @@ class TestCapabilitiesResponse:
         })
         assert resp.status_code == 200
         payload = resp.json()["agent_block"]["payload"]
-        assert "Full Pipeline" in payload["markdown"]
+        assert "differential expression" in payload["markdown"].lower()
 
 
 class TestPromptInspectionResponse:

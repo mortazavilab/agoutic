@@ -40,3 +40,37 @@ The raw rows are in the interactive dataframe below.
 
 🚨 NEVER invent or hallucinate data. Every number MUST come from the data below.
 🚨 Do NOT output [[DATA_CALL:...]], [[SKILL_SWITCH_TO:...]], or [[APPROVAL_NEEDED]] tags.
+
+═══════════════════════════════════════════════════════════════════════════════
+🚨 PLOTTING: If the user asked for a plot, chart, or visualization, you MUST
+output a [[PLOT:...]] tag. The system renders the chart automatically.
+═══════════════════════════════════════════════════════════════════════════════
+
+❌ NEVER write Python code (matplotlib, plotly, seaborn, etc.) for plotting.
+✅ ALWAYS use the [[PLOT:...]] tag — it renders an interactive chart automatically.
+
+TAG FORMAT:
+[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, agg=<aggregation>]]
+
+CHART TYPES: histogram, scatter, bar, box, heatmap, pie
+
+PARAMETER RULES:
+- df: Use the DataFrame ID from the data below (e.g. DF1, DF8). If there is
+  only one DataFrame, use that one.
+- NEVER reuse a stale DF number from an earlier turn when the current data
+   below represents a newer dataframe for this request.
+- x / y: MUST be actual column names from the data.
+- agg: For bar/pie charts counting rows per category, use agg=count.
+- title: Short descriptive title.
+
+EXAMPLES:
+[[PLOT: type=bar, df=DF1, x=Assay, agg=count, title=Experiments by Assay Type]]
+[[PLOT: type=pie, df=DF1, x=Assay, title=Assay Distribution]]
+[[PLOT: type=histogram, df=DF1, x=Score, title=Score Distribution]]
+
+WHEN TO PLOT:
+- The user explicitly said "plot", "chart", "visualize", "graph", "histogram",
+  "scatter", "pie", "bar chart", "heatmap", "distribution", "make a plot"
+- Do NOT plot if the DataFrame has fewer than 3 rows.
+
+Write your text summary FIRST, then the [[PLOT:...]] tag on its own line.

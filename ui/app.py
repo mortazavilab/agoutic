@@ -880,12 +880,48 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
 
     Returns a plotly Figure or None on error.
     """
+    import re
+
     chart_type = chart_spec.get("type", "histogram")
     x_col = chart_spec.get("x")
     y_col = chart_spec.get("y")
     color_col = chart_spec.get("color")
+    palette = chart_spec.get("palette")
     title = chart_spec.get("title", "")
     agg = chart_spec.get("agg")
+    literal_color = None
+    palette_values = []
+
+    def _looks_like_literal_color(value):
+        if not value:
+            return False
+        value = str(value).strip().strip('"').strip("'")
+        if not value:
+            return False
+        if re.fullmatch(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})", value):
+            return True
+        if re.fullmatch(r"(?:rgb|rgba|hsl|hsla)\([^\)]*\)", value, re.IGNORECASE):
+            return True
+        return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", value))
+
+    def _parse_palette_values(value):
+        if not value:
+            return []
+        if isinstance(value, (list, tuple)):
+            candidates = value
+        else:
+            candidates = re.split(r"[|;]", str(value))
+        return [
+            str(item).strip().strip('"').strip("'")
+            for item in candidates
+            if str(item).strip().strip('"').strip("'")
+        ]
+
+    palette_values = _parse_palette_values(palette)
+    if palette_values and len(palette_values) == 1 and _looks_like_literal_color(palette_values[0]):
+        literal_color = palette_values[0]
+
+    px_color_kwargs = {}
 
     # Validate columns exist
     available = list(df.columns)
@@ -898,7 +934,18 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
         y_col = match[0] if match else None
     if color_col and color_col not in available:
         match = [c for c in available if c.lower() == color_col.lower()]
-        color_col = match[0] if match else None
+        if match:
+            color_col = match[0]
+        elif _looks_like_literal_color(color_col):
+            literal_color = str(color_col).strip().strip('"').strip("'")
+            color_col = None
+        else:
+            color_col = None
+
+    if color_col:
+        px_color_kwargs["color"] = color_col
+    if palette_values:
+        px_color_kwargs["color_discrete_sequence"] = palette_values
 
     try:
         # Convert numeric-looking columns to numeric for plotting
@@ -931,16 +978,19 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
                         (c for c in num_cols if c.lower() in _count_names),
                         num_cols[0]
                     )
-                    fig = px.bar(df_plot, x=x_col, y=_y_col, color=color_col,
+                    fig = px.bar(df_plot, x=x_col, y=_y_col,
+                                 **px_color_kwargs,
                                  title=title or f"{_y_col} by {x_col}")
                 else:
                     # Truly categorical with no numeric column — count rows
                     counts = df_plot[x_col].value_counts().reset_index()
                     counts.columns = [x_col, "Count"]
-                    fig = px.bar(counts, x=x_col, y="Count", color=color_col,
+                    fig = px.bar(counts, x=x_col, y="Count",
+                                 **px_color_kwargs,
                                  title=title or f"Count by {x_col}")
             else:
-                fig = px.histogram(df_plot, x=x_col, color=color_col,
+                fig = px.histogram(df_plot, x=x_col,
+                                   **px_color_kwargs,
                                    title=title or f"Distribution of {x_col}")
 
         elif chart_type == "scatter":
@@ -951,7 +1001,8 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
                     y_col = y_col or num_cols[1]
                 else:
                     return None
-            fig = px.scatter(df_plot, x=x_col, y=y_col, color=color_col,
+            fig = px.scatter(df_plot, x=x_col, y=y_col,
+                             **px_color_kwargs,
                              title=title or f"{x_col} vs {y_col}")
 
         elif chart_type == "bar":
@@ -975,7 +1026,8 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
                 # Count occurrences of each x value
                 counts = df_plot[x_col].value_counts().reset_index()
                 counts.columns = [x_col, "Count"]
-                fig = px.bar(counts, x=x_col, y="Count", color=color_col,
+                fig = px.bar(counts, x=x_col, y="Count",
+                             **px_color_kwargs,
                              title=title or f"Count by {x_col}")
             else:
                 if agg == "mean":
@@ -984,7 +1036,8 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
                     agg_df = df_plot.groupby(x_col, as_index=False)[y_col].sum()
                 else:
                     agg_df = df_plot
-                fig = px.bar(agg_df, x=x_col, y=y_col, color=color_col,
+                fig = px.bar(agg_df, x=x_col, y=y_col,
+                             **px_color_kwargs,
                              title=title or f"{y_col} by {x_col}")
 
         elif chart_type == "box":
@@ -993,7 +1046,8 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
                 y_col = num_cols[0] if len(num_cols) > 0 else None
             if not y_col:
                 return None
-            fig = px.box(df_plot, x=x_col, y=y_col, color=color_col,
+            fig = px.box(df_plot, x=x_col, y=y_col,
+                         **px_color_kwargs,
                          title=title or f"Distribution of {y_col}" + (f" by {x_col}" if x_col else ""))
 
         elif chart_type == "heatmap":
@@ -1012,15 +1066,32 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
                 x_col = cat_cols[0] if len(cat_cols) > 0 else available[0]
             if y_col:
                 fig = px.pie(df_plot, names=x_col, values=y_col,
+                             **({"color": color_col} if color_col else {}),
+                             **({"color_discrete_sequence": palette_values} if palette_values else {}),
                              title=title or f"{x_col} Proportions")
             else:
                 counts = df_plot[x_col].value_counts().reset_index()
                 counts.columns = [x_col, "Count"]
                 fig = px.pie(counts, names=x_col, values="Count",
+                             **({"color": color_col} if color_col else {}),
+                             **({"color_discrete_sequence": palette_values} if palette_values else {}),
                              title=title or f"{x_col} Distribution")
 
         else:
             return None
+
+        if literal_color:
+            if chart_type == "pie":
+                for trace in fig.data:
+                    labels = getattr(trace, "labels", None)
+                    trace.marker.colors = [literal_color] * len(labels or [1])
+            else:
+                fig.update_traces(marker_color=literal_color)
+                for trace in fig.data:
+                    if hasattr(trace, "line"):
+                        trace.line.color = literal_color
+                    if hasattr(trace, "fillcolor"):
+                        trace.fillcolor = literal_color
 
         fig.update_layout(template="plotly_white")
         return fig

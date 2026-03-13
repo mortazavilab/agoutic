@@ -66,6 +66,15 @@ class TestDFAndVisualizationEarlyExit:
         calls = _auto_generate_data_calls("scatter plot of coverage vs length", "ENCODE_Search")
         assert calls == []
 
+    def test_compound_encode_plot_query_still_generates_search_call(self):
+        calls = _auto_generate_data_calls(
+            "plot C2C12 experiments in encode by assay type in purple",
+            "ENCODE_Search",
+        )
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "search_by_biosample"
+        assert calls[0]["params"]["search_term"] == "C2C12"
+
 
 # ---------------------------------------------------------------------------
 # Browsing commands (list workflows / list files)

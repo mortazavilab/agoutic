@@ -583,3 +583,32 @@ Get Experiment (accession=ENCSR123ABC)
 **Remember:** Plain text descriptions will NOT execute. Only tags with [[double brackets]] work!
 
 # ═══════════════════════════════════════════════════════════════════════════════
+
+## Plan Chains
+
+### search_and_visualize
+- description: Search ENCODE and visualize the results
+- trigger: search|get|find|query|show|plot|chart|visualize|graph|make + plot|chart|visualize|graph|pie|histogram|bar|scatter|heatmap|distribution|by
+- steps:
+  1. SEARCH_DATA: Search ENCODE for the requested data
+  2. GENERATE_PLOT: Visualize the results
+- auto_approve: true
+- plot_hint: Infer chart type and grouping column from the user's message
+
+### visualize_existing
+- description: Plot data from a previous ENCODE query
+- trigger: plot|chart|visualize|graph|pie|histogram|bar|scatter|heatmap|distribution + assay|biosample|target|type|status|organism + this|it|the data|results|previous|existing|DF
+- steps:
+  1. GENERATE_PLOT: Plot the existing data by the requested dimension
+- auto_approve: true
+- plot_hint: Use the most recent DataFrame from the conversation
+
+### search_filter_visualize
+- description: Search ENCODE, apply filters, and visualize
+- trigger: search|get|find + filter|only|just|specific|subset + plot|chart|visualize|graph
+- steps:
+  1. SEARCH_DATA: Search ENCODE for the requested data
+  2. FILTER_DATA: Apply the requested filters
+  3. GENERATE_PLOT: Plot the filtered results
+- auto_approve: true
+- plot_hint: Infer filters and chart type from the user's message

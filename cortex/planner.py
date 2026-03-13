@@ -78,6 +78,7 @@ def classify_request(
     Classify a user request as INFORMATIONAL, SINGLE_TOOL, or MULTI_STEP.
 
     Uses heuristic keyword matching — no LLM call.
+    Also checks skill-defined plan chains for multi-step detection.
     Defaults to SINGLE_TOOL when uncertain (preserving existing behaviour).
     """
     msg = message.strip()
@@ -87,6 +88,13 @@ def classify_request(
         if pat.search(msg):
             logger.info("classify_request: MULTI_STEP", pattern=pat.pattern[:60])
             return "MULTI_STEP"
+
+    # 1b. Check skill-defined plan chains
+    from cortex.plan_chains import load_chains_for_skill, match_chain
+    chains = load_chains_for_skill(active_skill)
+    if chains and match_chain(msg, chains):
+        logger.info("classify_request: CHAIN_MULTI_STEP", skill=active_skill)
+        return "CHAIN_MULTI_STEP"
 
     # 2. Check for informational signals
     for pat in _INFORMATIONAL_PATTERNS:

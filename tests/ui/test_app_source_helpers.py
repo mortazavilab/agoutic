@@ -163,3 +163,27 @@ class TestBuildPlotlyFigure:
         fn = _load_function("_build_plotly_figure")
 
         assert fn({"type": "not-a-chart"}, sample_df, "Test DF") is None
+
+    def test_bar_honors_literal_named_color(self, sample_df):
+        fn = _load_function("_build_plotly_figure")
+
+        fig = fn({"type": "bar", "x": "Category", "color": "red"}, sample_df, "Test DF")
+
+        assert fig is not None
+        assert fig.data[0].marker.color == "red"
+
+    def test_bar_honors_literal_hex_color(self, sample_df):
+        fn = _load_function("_build_plotly_figure")
+
+        fig = fn({"type": "bar", "x": "Category", "color": "#ff0000"}, sample_df, "Test DF")
+
+        assert fig is not None
+        assert fig.data[0].marker.color == "#ff0000"
+
+    def test_bar_honors_palette_literal(self, sample_df):
+        fn = _load_function("_build_plotly_figure")
+
+        fig = fn({"type": "bar", "x": "Category", "palette": "red"}, sample_df, "Test DF")
+
+        assert fig is not None
+        assert fig.data[0].marker.color == "red"

@@ -1,5 +1,113 @@
 # Changelog - March 2026
 
+## [3.2.9] - 2026-03-13
+
+### Features
+
+- **Skill-defined plan chains** — new `cortex/plan_chains.py` module lets
+  skill authors declare multi-step workflows directly in their Markdown
+  files under a `## Plan Chains` section. Each chain specifies trigger
+  keyword groups (AND logic between groups, OR within), ordered steps, and
+  optional auto-approval and plot hints. The planner detects matching chains
+  at classify-time and injects the chain plan into the LLM context so a
+  single user message like "get the K562 experiments in ENCODE and make a
+  plot by assay type" produces both a data search **and** a visualization.
+
+- **Comprehensive skills system documentation** — new top-level `SKILLS.md`
+  file documents the complete skills framework: skill file structure, skill
+  routing patterns, tag system (`[[DATA_CALL:…]]`, `[[PLOT:…]]`), plan chains
+  format, and a step-by-step guide for creating new skills. Replaces scattered
+  documentation and provides a single authoritative reference.
+
+- **Multi-phrasing query support** — plan chain triggers are flexible enough
+  to match equivalent phrasings: "Plot the K562 experiments…", "Get K562
+  experiments… and make a chart", "Plot by assay type the K562 experiments…"
+  all resolve to the same `search_and_visualize` chain.
+
+- **Three-layer plot guarantee** — after data retrieval, plots are ensured
+  via: (1) chain context injection tells the first-pass LLM to emit both
+  `[[DATA_CALL:…]]` and `[[PLOT:…]]` tags, (2) the second-pass analysis
+  prompt now includes full PLOT tag instructions, (3) a post-DataFrame
+  fallback auto-generates a plot spec if the LLM still omitted one.
+
+- **Second-pass PLOT instructions** — `second_pass_system_prompt.md` now
+  documents the `[[PLOT:…]]` tag syntax, chart types, parameter rules, and
+  examples so the analysis LLM can emit visualization tags after reviewing
+  retrieved data.
+
+- **Literal plot colors and palette override** — the UI plot renderer now
+  honors literal color requests such as `color=red` instead of silently
+  falling back to Plotly's default blue, and also accepts a separate
+  `palette=` styling parameter so color grouping can stay distinct from
+  explicit chart colors. The backend plot fallback now also preserves
+  explicit color requests from malformed LLM plot output, so prompts like
+  "plot DF1 by assay in green" still render with the requested color.
+
+- **Search+plot safety net for new ENCODE subjects** — compound requests like
+  "plot C2C12 experiments in encode by assay type in purple" now auto-generate
+  the ENCODE search step even when the LLM misses it, instead of treating the
+  prompt as a pure visualization and reusing the latest visible dataframe from
+  an earlier query.
+
+- **Same-turn plot rebinding for newly created dataframes** — when a compound
+  search+plot request creates a new dataframe in the current turn, stale
+  LLM-guessed plot references like `DF4` are now rebound to the new result
+  dataframe instead of plotting older results from the conversation history.
+
+- **DF inspection quick commands** — `list dfs` and `head DF` (e.g.
+  `head df1`, `head df3 5`) bypass the LLM and return deterministic
+  markdown tables showing dataframe metadata or row previews from the
+  conversation context. Supports custom row counts and defaults to the
+  latest dataframe when no DF number is specified.
+
+### Bug Fixes
+
+- **Plot spec deduplication and intent-based selection** — fixes duplicate
+  overlapping bars in rendered charts by implementing three-layer deduplication:
+  (1) exact-match dedup removes byte-identical specs, (2) semantic dedup removes
+  specs differing only in non-trace metadata (title, df string), (3) for
+  competing specs within the same request (e.g., assay vs. accession grouping),
+  a best-match selector aligns each spec to the current prompt's intent (x-column,
+  chart type, styling). Prevents stale styling (e.g., colors from earlier requests)
+  from leaking into unrelated visualizations.
+
+### New Files
+
+- `cortex/plan_chains.py` — plan chain parser & matcher: `PlanChain` /
+  `ChainStep` dataclasses, `parse_chains_from_skill()`, `match_chain()`,
+  `render_chain_plan()`, `load_chains_for_skill()`
+- `SKILLS.md` — top-level documentation for the skills system, covering
+  skill file structure, plan chains format, tag system, routing patterns,
+  and how to create new skills
+
+### Changes
+
+- `cortex/planner.py` — `classify_request()` now returns
+  `CHAIN_MULTI_STEP` when a plan chain matches the user query
+- `cortex/app.py` — CHAIN_MULTI_STEP handling (shows chain plan, injects
+  chain context + PLOT hint), post-second-pass `[[PLOT:…]]` re-parsing,
+  post-DF-assignment fallback plot generation, DF inspection quick commands
+  (`list dfs`, `head DF`)
+- `cortex/prompt_templates/second_pass_system_prompt.md` — added PLOT tag
+  section with syntax, chart types, and examples
+- `skills/ENCODE_Search.md` — added `## Plan Chains` section with three
+  chains: `search_and_visualize`, `visualize_existing`,
+  `search_filter_visualize`
+- `ui/app.py` — `[[PLOT:…]]` rendering now supports literal colors and a
+  separate `palette` override without breaking existing `color=red`
+  prompts
+- `tests/ui/test_app_source_helpers.py` — added regression tests for
+  literal `color=` and `palette=` plot styling
+- `tests/cortex/test_plan_chains.py` — added parser, matcher, and planner
+  integration tests for skill-defined plan chains
+- `tests/cortex/test_chat_data_calls.py` — added regression coverage for
+  malformed plot fallback preserving explicit color requests, plus a chat-level
+  regression that ensures search+plot requests target the newly requested
+  ENCODE subject rather than a stale dataframe, including stale `DFn`
+  references emitted by the LLM during same-turn search+plot requests
+- `tests/cortex/test_auto_generate_data.py` — added regression coverage for
+  compound ENCODE search+plot prompts in the DATA_CALL safety net
+
 ## [3.2.8] - 2026-03-12
 
 ### Features

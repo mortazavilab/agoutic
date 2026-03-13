@@ -69,10 +69,15 @@ SUPPORTED CHART TYPES:
 - pie        — Proportion of categorical values. Requires: x (category). Optional: y (values), title.
 
 PARAMETER RULES:
-- df: MUST be a valid DF reference (e.g., DF1, DF5) from the conversation.
+- df: Use a valid DF reference (e.g., DF1, DF5) ONLY when plotting an
+  existing dataframe that is already in the conversation.
   When the user says "this", "it", "the data", or "the results" without
-  specifying a DF number, use the MOST RECENT dataframe — check
+  specifying a DF number, use the MOST RECENT existing dataframe — check
   latest_dataframe in the [STATE] JSON.
+- If the plot depends on a DATA_CALL in this SAME response and that dataframe
+  does not exist yet, OMIT df entirely. The system will bind the plot to the
+  newly created dataframe after retrieval.
+- NEVER guess or reuse an older DF number for newly fetched results.
 - x / y: MUST be actual column names from that DataFrame
 - color: Optional categorical column to group/color traces by
 - agg: For bar charts — "count" (count rows per x category), "sum", or "mean"
@@ -96,6 +101,8 @@ MORE EXAMPLES:
 [[PLOT: type=box, df=DF3, x=Status, y=File Size, title=File Size by Status]]
 [[PLOT: type=heatmap, df=DF2, title=Correlation Matrix]]
 [[PLOT: type=pie, df=DF1, x=Assay, title=Assay Distribution]]
+[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=C2C12, organism=Mus musculus]]
+[[PLOT: type=bar, x=Assay, agg=count, title=C2C12 Experiments by Assay Type]]
 
 WHEN TO SUGGEST PLOTS:
 - User explicitly asks: "plot", "chart", "visualize", "graph", "histogram", "scatter", "pie"

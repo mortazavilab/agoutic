@@ -323,7 +323,7 @@ stop_process() {
 cmd_start() {
     ensure_dirs
     rotate_logs
-    log "Starting AGOUTIC servers (v${AGOUTIC_VERSION})..."
+    log "Starting AGOUTIC servers (${AGOUTIC_VERSION})..."
     echo ""
 
     # Launchpad - REST API (Nextflow/Dogme job execution)

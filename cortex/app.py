@@ -232,6 +232,103 @@ def _format_prompt_report(prompt_type: str, skill_key: str, model_name: str, pro
     )
 
 
+# ── DF inspection helpers ──────────────────────────────────────────────
+
+_LIST_DF_RE = re.compile(
+    r"^(?:list|show)\s+(?:dfs|dataframes|data\s*frames)$"
+)
+_HEAD_DF_RE = re.compile(
+    r"^head\s+(?:df\s*(\d+)|df)\s*(\d+)?$"
+)
+
+
+def _detect_df_command(msg_lower: str) -> dict | None:
+    """Return ``{"action": "list"}`` or ``{"action": "head", "df_id": int|None, "n": int}``
+    if *msg_lower* is a DF inspection command, otherwise ``None``."""
+    msg = msg_lower.strip()
+    if _LIST_DF_RE.match(msg):
+        return {"action": "list"}
+    m = _HEAD_DF_RE.match(msg)
+    if m:
+        df_id = int(m.group(1)) if m.group(1) else None
+        n = int(m.group(2)) if m.group(2) else 10
+        return {"action": "head", "df_id": df_id, "n": n}
+    return None
+
+
+def _collect_df_map(history_blocks) -> dict:
+    """Build ``{df_id: {columns, data, row_count, label}}`` from all AGENT_PLAN blocks."""
+    df_map: dict[int, dict] = {}
+    for blk in history_blocks:
+        if blk.type != "AGENT_PLAN":
+            continue
+        _pl = get_block_payload(blk)
+        for _key, _val in _pl.get("_dataframes", {}).items():
+            _meta = _val.get("metadata", {})
+            _df_id = _meta.get("df_id")
+            if not isinstance(_df_id, int):
+                continue
+            if not _meta.get("visible", True):
+                continue
+            df_map[_df_id] = {
+                "columns": _val.get("columns", []),
+                "data": _val.get("data", []),
+                "row_count": _val.get("row_count", len(_val.get("data", []))),
+                "label": _meta.get("label", _key),
+            }
+    return df_map
+
+
+def _render_list_dfs(df_map: dict) -> str:
+    """Render a markdown table listing all known dataframes."""
+    if not df_map:
+        return "No dataframes in this conversation yet."
+    lines = ["| DF | Label | Rows | Columns |", "| --- | --- | ---: | --- |"]
+    for df_id in sorted(df_map):
+        d = df_map[df_id]
+        cols_str = ", ".join(d["columns"][:12])
+        if len(d["columns"]) > 12:
+            cols_str += f" … (+{len(d['columns']) - 12} more)"
+        lines.append(
+            f"| **DF{df_id}** | {d['label']} | {d['row_count']} | {cols_str} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_head_df(df_map: dict, df_id: int | None, n: int) -> str:
+    """Render the first *n* rows of a dataframe as a markdown table."""
+    if not df_map:
+        return "No dataframes in this conversation yet."
+    if df_id is None:
+        return "No dataframes in this conversation yet."
+    if df_id not in df_map:
+        available = ", ".join(f"DF{k}" for k in sorted(df_map))
+        return f"**DF{df_id}** not found. Available: {available}. Use `list dfs` to see details."
+    d = df_map[df_id]
+    cols = d["columns"]
+    rows = d["data"][:n]
+    total = d["row_count"]
+    showing = min(n, len(rows))
+
+    header = f"**DF{df_id}** — {d['label']} ({total} rows, showing first {showing})\n\n"
+    if not rows:
+        return header + "_No data rows._"
+
+    # Build markdown table with all columns
+    hdr_line = "| " + " | ".join(str(c) for c in cols) + " |"
+    sep_line = "| " + " | ".join("---" for _ in cols) + " |"
+    body_lines = []
+    for row in rows:
+        cells = []
+        for c in cols:
+            val = row.get(c, "") if isinstance(row, dict) else ""
+            # Escape pipe chars in cell values
+            cells.append(str(val).replace("|", "\\|"))
+        body_lines.append("| " + " | ".join(cells) + " |")
+
+    return header + "\n".join([hdr_line, sep_line] + body_lines)
+
+
 async def _create_prompt_response(
     session,
     req: ChatRequest,
@@ -301,6 +398,49 @@ def _emit_progress(request_id: str, stage: str, detail: str = ""):
     stale = [k for k, v in _chat_progress.items() if v["ts"] < cutoff]
     for k in stale:
         del _chat_progress[k]
+
+
+_COMMON_PLOT_COLOR_NAMES = {
+    "red", "green", "blue", "yellow", "orange", "purple", "pink",
+    "brown", "black", "white", "gray", "grey", "teal", "cyan",
+    "magenta", "lime", "navy", "maroon", "olive", "gold", "silver",
+    "violet", "indigo", "turquoise", "salmon", "coral", "beige",
+}
+
+
+def _extract_plot_style_params(message: str) -> dict[str, str]:
+    """Extract explicit plot styling hints like literal colors from the user message."""
+    if not message:
+        return {}
+
+    def _normalize_literal_color(raw_value: str | None) -> str | None:
+        if not raw_value:
+            return None
+        value = raw_value.strip().strip('"').strip("'").rstrip(".,;:)")
+        if not value:
+            return None
+        if re.fullmatch(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})", value):
+            return value
+        if re.fullmatch(r"(?:rgb|rgba|hsl|hsla)\([^\)]*\)", value, re.IGNORECASE):
+            return value
+        value_lower = value.lower()
+        if value_lower in _COMMON_PLOT_COLOR_NAMES:
+            return value_lower
+        return None
+
+    patterns = [
+        r'\bin\s+(#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8}))\b',
+        r'\bin\s+((?:rgb|rgba|hsl|hsla)\([^\)]*\))',
+        r'\bin\s+([A-Za-z]+)\b',
+        r'\b(?:colored?|coloured?)\s+((?:#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|(?:rgb|rgba|hsl|hsla)\([^\)]*\)|[A-Za-z]+))\b',
+        r'\bwith\s+((?:#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|(?:rgb|rgba|hsl|hsla)\([^\)]*\)|[A-Za-z]+))\s+(?:bars?|points?|lines?|slices?)\b',
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, message, re.IGNORECASE):
+            color = _normalize_literal_color(match.group(1))
+            if color:
+                return {"palette": color}
+    return {}
 
 def _is_cancelled(request_id: str) -> bool:
     """Check whether the user has requested cancellation for this chat request."""
@@ -2464,6 +2604,27 @@ What would you like to do?
         
         history_result = session.execute(history_query)
         history_blocks = history_result.scalars().all()
+
+        # ── DF INSPECTION QUICK COMMANDS ───────────────────────────────
+        # "list dfs" / "head DF3" bypass the LLM entirely and return
+        # deterministic responses from the conversation's embedded dataframes.
+        _df_cmd = _detect_df_command(user_msg_lower)
+        if _df_cmd is not None:
+            _df_map = _collect_df_map(history_blocks)
+            if _df_cmd["action"] == "list":
+                _md = _render_list_dfs(_df_map)
+            else:  # head
+                _target_id = _df_cmd.get("df_id")
+                if _target_id is None:
+                    # Default to latest (highest ID)
+                    _target_id = max(_df_map.keys()) if _df_map else None
+                _n_rows = _df_cmd.get("n", 10)
+                _md = _render_head_df(_df_map, _target_id, _n_rows)
+            return await _create_prompt_response(
+                session, req, user_block, user.id,
+                active_skill, req.model or "default", _md,
+                prompt_type="df_inspection",
+            )
         
         # Build conversation history in OpenAI format.
         # IMPORTANT: Strip <details>…</details> blocks from assistant messages.
@@ -2555,9 +2716,47 @@ What would you like to do?
         # ── PLAN DETECTION ─────────────────────────────────────────────
         # Classify the request. If it's a multi-step plan, generate a
         # structured plan and return immediately (execution is async).
+        # If it's a skill-defined chain (CHAIN_MULTI_STEP), show the plan
+        # then fall through to the single-turn flow for execution.
         from cortex.planner import classify_request, generate_plan, render_plan_markdown
 
         _request_class = classify_request(req.message, active_skill, _conv_state)
+        _active_chain = None  # will be set if CHAIN_MULTI_STEP
+
+        if _request_class == "CHAIN_MULTI_STEP":
+            # Skill-defined plan chain: show plan, then execute via single-turn flow
+            from cortex.plan_chains import load_chains_for_skill, match_chain, render_chain_plan
+            _chains = load_chains_for_skill(active_skill)
+            _active_chain = match_chain(req.message, _chains) if _chains else None
+            if _active_chain:
+                _chain_plan_md = render_chain_plan(_active_chain, req.message)
+                _emit_progress(req.request_id, "planning", _chain_plan_md)
+                # Inject chain context into the augmented message so the LLM
+                # knows it must execute ALL steps (data retrieval + plotting).
+                _chain_hint = (
+                    "\n\n[PLAN CHAIN: This is a multi-step request. "
+                    "You must execute ALL of the following steps in order:\n"
+                )
+                for _cs in _active_chain.steps:
+                    _chain_hint += f"  {_cs.order}. {_cs.kind}: {_cs.title}\n"
+                if _active_chain.plot_hint:
+                    _chain_hint += (
+                        f"\nPLOT INSTRUCTION: {_active_chain.plot_hint}. "
+                        "After the data is retrieved, you MUST emit a "
+                        "[[PLOT:...]] tag to visualize the results. "
+                        "If this plot depends on data fetched in this same response, "
+                        "do NOT guess or reuse an older DF number. Omit df= from the "
+                        "[[PLOT:...]] tag and the system will bind it to the newly "
+                        "created dataframe after retrieval. Infer the chart type and "
+                        "grouping column from the user's message.]\n"
+                    )
+                else:
+                    _chain_hint += "]\n"
+                augmented_message = augmented_message + _chain_hint
+                logger.info("Chain plan injected", chain=_active_chain.name,
+                            steps=len(_active_chain.steps))
+            # Fall through to single-turn flow — do NOT return early
+
         if _request_class == "MULTI_STEP":
             _emit_progress(req.request_id, "planning", "Generating execution plan...")
             _plan_payload = await run_in_threadpool(
@@ -2961,6 +3160,7 @@ What would you like to do?
                 }
                 if _auto_x:
                     _auto_spec["x"] = _auto_x
+                _auto_spec.update(_extract_plot_style_params(req.message))
                 # Do NOT set agg=count for bar by default — if the DF is
                 # pre-aggregated (has a numeric value column), _build_plotly_figure
                 # will use it automatically via the categorical-x companion-column logic.
@@ -4119,6 +4319,35 @@ What would you like to do?
                 clean_markdown = analyzed_response + "\n\n---\n\n" \
                     "<details><summary>📋 Raw Query Results (click to expand)</summary>\n\n" \
                     + formatted_data + "\n\n</details>"
+
+                # ── POST-SECOND-PASS PLOT TAG PARSING ──────────────────
+                # The second-pass LLM may have emitted [[PLOT:...]] tags
+                # (now that it has PLOT instructions). Parse them and
+                # merge into plot_specs so the UI renders charts.
+                _post_plot_matches = list(re.finditer(
+                    plot_tag_pattern, analyzed_response, re.DOTALL
+                ))
+                if _post_plot_matches:
+                    for _ppm in _post_plot_matches:
+                        _raw_inner2 = _ppm.group(1)
+                        _pp2 = _parse_tag_params(_raw_inner2)
+                        # Normalize df_id
+                        _df_ref2 = _pp2.get("df", "")
+                        _df_id_m2 = re.match(r'(?:DF)?\s*(\d+)', _df_ref2, re.IGNORECASE)
+                        if _df_id_m2:
+                            _pp2["df_id"] = int(_df_id_m2.group(1))
+                        else:
+                            _pp2["df_id"] = None
+                        if "type" not in _pp2:
+                            _pp2["type"] = "bar"
+                        plot_specs.append(_pp2)
+                    logger.info("Parsed PLOT tags from second-pass",
+                                count=len(_post_plot_matches))
+                    # Strip PLOT tags from the user-visible clean_markdown
+                    clean_markdown = re.sub(
+                        plot_tag_pattern, '', clean_markdown, flags=re.DOTALL
+                    ).strip()
+                # ── END POST-SECOND-PASS PLOT TAG PARSING ──────────────
             else:
                 # All errors or empty — show errors directly, no second pass
                 clean_markdown += formatted_data
@@ -4323,6 +4552,37 @@ What would you like to do?
                 _next_df_id += 1
             # Non-visible DFs intentionally get no df_id
 
+        # If this turn created a new dataframe and the user did not explicitly
+        # ask for a specific DF, bind any plot specs to the new DF from this
+        # turn rather than trusting an LLM-guessed stale DF number.
+        _newest_turn_df_id = None
+        for _df_data in _embedded_dataframes.values():
+            _df_id = _df_data.get("metadata", {}).get("df_id")
+            if isinstance(_df_id, int):
+                if _newest_turn_df_id is None or _df_id > _newest_turn_df_id:
+                    _newest_turn_df_id = _df_id
+        if _user_wants_plot and plot_specs and not _user_explicit_df and _newest_turn_df_id is not None:
+            _rebound_count = 0
+            _stale_df_ids = sorted({
+                _ps.get("df_id")
+                for _ps in plot_specs
+                if isinstance(_ps.get("df_id"), int) and _ps.get("df_id") != _newest_turn_df_id
+            })
+            for _ps in plot_specs:
+                if _ps.get("df_id") != _newest_turn_df_id:
+                    _ps["df_id"] = _newest_turn_df_id
+                    _ps["df"] = f"DF{_newest_turn_df_id}"
+                    _rebound_count += 1
+                elif _ps.get("df") != f"DF{_newest_turn_df_id}":
+                    _ps["df"] = f"DF{_newest_turn_df_id}"
+            if _rebound_count or _stale_df_ids:
+                logger.info(
+                    "Rebound plot specs to dataframe created in current turn",
+                    new_df_id=_newest_turn_df_id,
+                    stale_df_ids=_stale_df_ids,
+                    rebound_count=_rebound_count,
+                )
+
         # Update _conv_state with the newly-embedded DFs so the cached state
         # saved into this block is accurate for future requests' fast path.
         if _embedded_dataframes:
@@ -4342,6 +4602,216 @@ What would you like to do?
                     _conv_state.known_dataframes.append(
                         f"{_new_latest} ({_edf_label}, {_edf_rows} rows)"
                     )
+
+        # ── POST-DF-ASSIGNMENT PLOT FALLBACK ───────────────────────────
+        # If the user wanted a plot but we still don't have valid plot specs
+        # (e.g. the LLM didn't emit [[PLOT:...]] tags in either pass), and
+        # we now have newly-created DFs from data calls, auto-generate a
+        # plot spec using the new DF ID.
+        _has_valid_plot = plot_specs and any(
+            s.get("df_id") is not None for s in plot_specs
+        )
+        if _user_wants_plot and not _has_valid_plot and _embedded_dataframes:
+            # Find the newest DF with a valid ID
+            _newest_df_id = None
+            for _edf_val2 in _embedded_dataframes.values():
+                _edf_id2 = _edf_val2.get("metadata", {}).get("df_id")
+                if isinstance(_edf_id2, int):
+                    if _newest_df_id is None or _edf_id2 > _newest_df_id:
+                        _newest_df_id = _edf_id2
+            if _newest_df_id is not None:
+                # Detect chart type from user message
+                _msg_l2 = req.message.lower()
+                if "pie" in _msg_l2:
+                    _auto_type2 = "pie"
+                elif "scatter" in _msg_l2:
+                    _auto_type2 = "scatter"
+                elif "box" in _msg_l2:
+                    _auto_type2 = "box"
+                elif "heatmap" in _msg_l2 or "correlation" in _msg_l2:
+                    _auto_type2 = "heatmap"
+                elif "histogram" in _msg_l2 or "distribution" in _msg_l2:
+                    _auto_type2 = "histogram"
+                else:
+                    _auto_type2 = "bar"
+                # Detect x column from user message
+                _auto_x2 = None
+                _by_m2 = re.search(r'\bby\s+(\w+)', req.message, re.IGNORECASE)
+                if _by_m2 and not re.match(r'DF\d+', _by_m2.group(1), re.IGNORECASE):
+                    _auto_x2 = _by_m2.group(1)
+                if not _auto_x2:
+                    _of_m2 = re.search(r'\b(?:of|for)\s+(\w+)', req.message, re.IGNORECASE)
+                    if _of_m2 and not re.match(r'DF\d+', _of_m2.group(1), re.IGNORECASE):
+                        _auto_x2 = _of_m2.group(1)
+                _auto_post_spec = {
+                    "type": _auto_type2,
+                    "df_id": _newest_df_id,
+                    "df": f"DF{_newest_df_id}",
+                    "agg": "count",
+                }
+                if _auto_x2:
+                    _auto_post_spec["x"] = _auto_x2
+                _auto_post_spec.update(_extract_plot_style_params(req.message))
+                plot_specs.append(_auto_post_spec)
+                logger.info("Post-DF-assignment plot fallback generated",
+                           spec=_auto_post_spec)
+        # Also fix any plot specs with None df_id that can now be resolved
+        if plot_specs and _embedded_dataframes:
+            _newest_id_for_fix = None
+            for _v in _embedded_dataframes.values():
+                _id = _v.get("metadata", {}).get("df_id")
+                if isinstance(_id, int):
+                    if _newest_id_for_fix is None or _id > _newest_id_for_fix:
+                        _newest_id_for_fix = _id
+            if _newest_id_for_fix is not None:
+                for _ps_fix in plot_specs:
+                    if _ps_fix.get("df_id") is None:
+                        _ps_fix["df_id"] = _newest_id_for_fix
+                        _ps_fix["df"] = f"DF{_newest_id_for_fix}"
+                        logger.info("Fixed plot spec with None df_id",
+                                   new_df_id=_newest_id_for_fix)
+
+        # Deduplicate identical plot specs before serializing them into
+        # AGENT_PLOT blocks. The same chart can be accumulated from multiple
+        # phases (first-pass tag, second-pass tag, fallback), and the UI will
+        # otherwise overlay duplicate traces on the same figure.
+        if plot_specs:
+            _deduped_plot_specs = []
+            _seen_plot_specs = set()
+            for _ps_dedupe in plot_specs:
+                _semantic_plot_spec = {
+                    "type": _ps_dedupe.get("type"),
+                    "df_id": _ps_dedupe.get("df_id"),
+                    "x": _ps_dedupe.get("x"),
+                    "y": _ps_dedupe.get("y"),
+                    "color": _ps_dedupe.get("color"),
+                    "palette": _ps_dedupe.get("palette"),
+                    "agg": _ps_dedupe.get("agg"),
+                }
+                _plot_key = tuple(
+                    sorted(
+                        (str(_k), str(_v).strip().lower() if isinstance(_v, str) else _v)
+                        for _k, _v in _semantic_plot_spec.items()
+                        if _v is not None
+                    )
+                )
+                if _plot_key in _seen_plot_specs:
+                    continue
+                _seen_plot_specs.add(_plot_key)
+                _deduped_plot_specs.append(_ps_dedupe)
+            if len(_deduped_plot_specs) != len(plot_specs):
+                logger.info(
+                    "Deduplicated duplicate plot specs",
+                    original_count=len(plot_specs),
+                    deduped_count=len(_deduped_plot_specs),
+                )
+                plot_specs = _deduped_plot_specs
+
+        # For ordinary single-plot requests, multiple competing specs for the
+        # same dataframe/chart type are usually LLM leakage across passes, not
+        # intentional multi-trace overlays. Keep the spec that best matches the
+        # current user prompt and drop the rest.
+        if plot_specs:
+            def _normalize_plot_token(value: str | None) -> str:
+                if not value:
+                    return ""
+                _norm = re.sub(r'[^a-z0-9]+', '', str(value).lower())
+                if _norm.endswith("type"):
+                    _norm = _norm[:-4]
+                return _norm
+
+            def _requested_plot_type(message: str) -> str:
+                _msg = (message or "").lower()
+                if "pie" in _msg:
+                    return "pie"
+                if "scatter" in _msg:
+                    return "scatter"
+                if "box" in _msg:
+                    return "box"
+                if "heatmap" in _msg or "correlation" in _msg:
+                    return "heatmap"
+                if "histogram" in _msg or "distribution" in _msg:
+                    return "histogram"
+                if "bar" in _msg or "plot" in _msg or "chart" in _msg or "graph" in _msg:
+                    return "bar"
+                return ""
+
+            _multi_trace_requested = bool(re.search(
+                r'\b(compare|overlay|overlaid|versus|vs\.?|both|multiple|multi[- ]trace)\b',
+                req.message,
+                re.IGNORECASE,
+            ))
+            _requested_style = _extract_plot_style_params(req.message)
+            _requested_palette = _normalize_plot_token(_requested_style.get("palette"))
+            _requested_x_match = re.search(
+                r'\bby\s+([\w][\w ]*?)(?:\s+in\s+[#A-Za-z]|,|\.|$)',
+                req.message,
+                re.IGNORECASE,
+            ) or re.search(
+                r'\bof\s+([\w][\w ]*?)(?:\s+in\s+[#A-Za-z]|,|\.|$)',
+                req.message,
+                re.IGNORECASE,
+            )
+            _requested_x = _normalize_plot_token(_requested_x_match.group(1).strip()) if _requested_x_match else ""
+            _requested_type = _requested_plot_type(req.message)
+
+            if not _multi_trace_requested:
+                from collections import defaultdict
+                _grouped_specs = defaultdict(list)
+                for _plot_index, _plot_spec in enumerate(plot_specs):
+                    _grouped_specs[(_plot_spec.get("df_id"), _plot_spec.get("type"))].append((_plot_index, _plot_spec))
+
+                _selected_specs = []
+                for (_group_df_id, _group_type), _group_specs in _grouped_specs.items():
+                    if len(_group_specs) == 1:
+                        _selected_specs.append(_group_specs[0][1])
+                        continue
+
+                    _best_spec = None
+                    _best_score = None
+                    for _plot_index, _plot_spec in _group_specs:
+                        _score = 0
+                        _spec_x = _normalize_plot_token(_plot_spec.get("x"))
+                        _spec_palette = _normalize_plot_token(_plot_spec.get("palette") or _plot_spec.get("color"))
+                        _spec_type = str(_plot_spec.get("type") or "")
+
+                        if _requested_type and _spec_type == _requested_type:
+                            _score += 4
+                        if _requested_x:
+                            if _spec_x == _requested_x:
+                                _score += 10
+                            elif _spec_x and (_requested_x in _spec_x or _spec_x in _requested_x):
+                                _score += 6
+                        if _requested_palette:
+                            if _spec_palette == _requested_palette:
+                                _score += 5
+                        elif _spec_palette:
+                            _score -= 2
+                        if _plot_spec.get("agg") == "count":
+                            _score += 1
+                        if _plot_spec.get("x"):
+                            _score += 1
+                        # Prefer earlier specs on ties to avoid second-pass drift.
+                        _score -= _plot_index / 1000.0
+
+                        if _best_score is None or _score > _best_score:
+                            _best_score = _score
+                            _best_spec = _plot_spec
+
+                    if _best_spec is not None:
+                        _selected_specs.append(_best_spec)
+
+                if len(_selected_specs) != len(plot_specs):
+                    logger.info(
+                        "Collapsed competing plot specs to a single best-match chart",
+                        original_count=len(plot_specs),
+                        selected_count=len(_selected_specs),
+                        requested_x=_requested_x,
+                        requested_type=_requested_type,
+                        requested_palette=_requested_palette,
+                    )
+                    plot_specs = _selected_specs
+        # ── END POST-DF-ASSIGNMENT PLOT FALLBACK ───────────────────────
 
         # Consolidate token usage from both LLM passes (think + analyze_results)
         _total_usage = {
@@ -4442,6 +4912,7 @@ What would you like to do?
                         "x": _cs.get("x"),
                         "y": _cs.get("y"),
                         "color": _cs.get("color"),
+                        "palette": _cs.get("palette"),
                         "title": _cs.get("title"),
                         "agg": _cs.get("agg"),
                     }
