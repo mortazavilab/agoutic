@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.11
+**Version:** 3.2.10
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -112,7 +112,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                      AGOUTIC System v3.2.11                   │
+│                      AGOUTIC System v3.2.9                    │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -208,10 +208,9 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 - **Tech:** FastMCP + edgePython
 - **Features:**
   - Full DE pipeline: load → filter → normalize → design → dispersion → fit → test → results → plots
-  - 35+ MCP tools (bulk DE, single-cell DE, GO/pathway enrichment, DTU/splice, bidirectional gene lookup)
+  - 30+ MCP tools (bulk DE, single-cell DE, ChIP-seq enrichment, DTU/splice, bidirectional gene lookup)
   - Stateful pipeline — each step builds on previous results within a session
-  - Volcano, MDS, MA, BCV, heatmap, enrichment bar & dot plot generation
-  - GO enrichment (BP/MF/CC) and KEGG/Reactome pathway analysis via g:Profiler
+  - Volcano, MDS, MA, BCV, heatmap plot generation
   - TSV/CSV/JSON result export
   - JSON Schema tool contracts via `/tools/schema`
 - **Docs:** [edgepython_mcp/](edgepython_mcp/)
@@ -702,7 +701,6 @@ Pre-defined bioinformatics workflows are available in `skills/`:
 - **Dogme_RNA.md** - Direct RNA-seq workflow
 - **Dogme_cDNA.md** - cDNA isoform workflow
 - **Differential_Expression.md** - edgePython DE pipeline (with gene annotation)
-- **Enrichment_Analysis.md** - GO/pathway enrichment on DE gene lists (g:Profiler)
 - **ENCODE_LongRead.md** - ENCODE consortium workflow
 - **ENCODE_Search.md** - ENCODE search and data discovery
 - **Local_Sample_Intake.md** - Sample intake and validation
@@ -737,8 +735,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.2.11 — GO/pathway enrichment analysis, enrichment bar & dot plots, 9th plan template, Enrichment_Analysis skill
-- **Previous**: 3.2.10 — Gene lookup routing fixes, DATA_CALL JSON array parsing, Mistral tag format
+- **Release**: 3.2.8 — Bidirectional gene lookup, gene annotation & ID translation, expanded plan templates, plan-execute-observe-replan
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
@@ -751,6 +748,5 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 - complete: Core infrastructure, dual interface, MCP integration
 - complete: Web UI job monitoring, approval gates, project management
 - complete: Plan-execute-observe-replan, gene annotation, expanded templates
-- complete: GO/pathway enrichment analysis pipeline (g:Profiler integration)
 - current: Cortex modularisation and DE adapter integration
 - next: Production deployment preparation
