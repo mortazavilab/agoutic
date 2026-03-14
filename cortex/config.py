@@ -110,6 +110,7 @@ SERVICE_REGISTRY = {
         "count_label": None,
         "skills": [
             "differential_expression",
+            "enrichment_analysis",
         ],
         "fallback_patterns": {},
     },
@@ -186,4 +187,7 @@ SKILLS_REGISTRY = {
     
     # Differential Expression (edgePython)
     "differential_expression": "Differential_Expression.md",
+
+    # Enrichment Analysis (GO, KEGG, Reactome)
+    "enrichment_analysis": "Enrichment_Analysis.md",
 }

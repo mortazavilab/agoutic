@@ -66,6 +66,9 @@ _state: dict = {
     "feature_level_note": None,
     "analysis_context": "unknown",  # inferred: bulk | single_cell_10x | single_cell | unknown
     "analysis_context_note": None,
+    "enrichment_results": {},    # name → DataFrame of enrichment results
+    "last_enrichment": None,     # name of most recent enrichment result
+    "_filtered_genes": None,     # last filtered gene set (dict with up/down/all lists)
 }
 
 
@@ -606,6 +609,9 @@ def reset_state() -> str:
     _state["feature_level_note"] = None
     _state["analysis_context"] = "unknown"
     _state["analysis_context_note"] = None
+    _state["enrichment_results"] = {}
+    _state["last_enrichment"] = None
+    _state["_filtered_genes"] = None
     return "State cleared."
 
 
@@ -1712,7 +1718,8 @@ def generate_plot(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    valid_types = {"mds", "bcv", "ql_dispersion", "md", "volcano", "heatmap"}
+    valid_types = {"mds", "bcv", "ql_dispersion", "md", "volcano", "heatmap",
+                   "enrichment_bar", "enrichment_dot"}
     if plot_type not in valid_types:
         return f"Invalid plot_type '{plot_type}'. Choose from: {', '.join(sorted(valid_types))}"
 
@@ -1835,6 +1842,87 @@ def generate_plot(
         fig.savefig(output_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         return f"Heatmap saved to: {output_path}"
+
+    elif plot_type == "enrichment_bar":
+        enrich_name = result_name or _state["last_enrichment"]
+        if enrich_name is None or enrich_name not in _state["enrichment_results"]:
+            return "No enrichment results available. Run run_go_enrichment() or run_pathway_enrichment() first."
+        df = _state["enrichment_results"][enrich_name]
+        if df.empty:
+            return "Enrichment result is empty (no significant terms found)."
+
+        sig = df[df["p_value"] < 0.05].head(20) if "p_value" in df.columns else df.head(20)
+        if sig.empty:
+            return "No significant enrichment terms (p < 0.05)."
+
+        neg_log_p = -np.log10(np.clip(sig["p_value"].values, 1e-300, 1))
+        term_names = sig["name"].values if "name" in sig.columns else sig.index.values
+        # Truncate long names
+        term_names = [n[:50] + "..." if len(str(n)) > 50 else str(n) for n in term_names]
+        sources = sig["source"].values if "source" in sig.columns else [""] * len(sig)
+
+        source_colors = {
+            "GO:BP": "#e74c3c", "GO:MF": "#3498db", "GO:CC": "#2ecc71",
+            "KEGG": "#9b59b6", "REAC": "#f39c12",
+        }
+        colors = [source_colors.get(str(s), "#95a5a6") for s in sources]
+
+        fig, ax = plt.subplots(figsize=(10, max(4, len(sig) * 0.35)))
+        y_pos = range(len(term_names) - 1, -1, -1)
+        ax.barh(list(y_pos), neg_log_p, color=colors, height=0.7)
+        ax.set_yticks(list(y_pos))
+        ax.set_yticklabels(term_names, fontsize=8)
+        ax.set_xlabel("-log10(p-value)")
+        ax.set_title(f"Enrichment: {enrich_name}")
+        # Legend for sources
+        unique_sources = list(dict.fromkeys(str(s) for s in sources))
+        from matplotlib.patches import Patch
+        legend_patches = [Patch(color=source_colors.get(s, "#95a5a6"), label=s) for s in unique_sources]
+        ax.legend(handles=legend_patches, loc="lower right", fontsize=8)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return f"Enrichment bar plot saved to: {output_path}"
+
+    elif plot_type == "enrichment_dot":
+        enrich_name = result_name or _state["last_enrichment"]
+        if enrich_name is None or enrich_name not in _state["enrichment_results"]:
+            return "No enrichment results available. Run run_go_enrichment() or run_pathway_enrichment() first."
+        df = _state["enrichment_results"][enrich_name]
+        if df.empty:
+            return "Enrichment result is empty (no significant terms found)."
+
+        sig = df[df["p_value"] < 0.05].head(20) if "p_value" in df.columns else df.head(20)
+        if sig.empty:
+            return "No significant enrichment terms (p < 0.05)."
+
+        term_names = sig["name"].values if "name" in sig.columns else sig.index.values
+        term_names = [n[:50] + "..." if len(str(n)) > 50 else str(n) for n in term_names]
+        neg_log_p = -np.log10(np.clip(sig["p_value"].values, 1e-300, 1))
+        intersection = sig["intersection_size"].values if "intersection_size" in sig.columns else np.ones(len(sig)) * 5
+        term_size = sig["term_size"].values if "term_size" in sig.columns else np.ones(len(sig))
+        gene_ratio = intersection / np.clip(term_size, 1, None)
+
+        fig, ax = plt.subplots(figsize=(8, max(4, len(sig) * 0.35)))
+        y_pos = range(len(term_names) - 1, -1, -1)
+        scatter = ax.scatter(
+            gene_ratio, list(y_pos),
+            s=intersection * 10, c=neg_log_p, cmap="YlOrRd",
+            edgecolors="grey", linewidths=0.5, alpha=0.8,
+        )
+        ax.set_yticks(list(y_pos))
+        ax.set_yticklabels(term_names, fontsize=8)
+        ax.set_xlabel("Gene Ratio (intersect / term size)")
+        ax.set_title(f"Enrichment: {enrich_name}")
+        cbar = fig.colorbar(scatter, ax=ax, label="-log10(p-value)", shrink=0.6)
+        # Size legend
+        for sz_val in [5, 15, 30]:
+            ax.scatter([], [], s=sz_val * 10, c="grey", alpha=0.5, label=f"{sz_val} genes")
+        ax.legend(title="Gene count", loc="lower right", fontsize=7)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return f"Enrichment dot plot saved to: {output_path}"
 
 
 # ===========================================================================
@@ -1970,6 +2058,449 @@ def lookup_gene(
 
     n_found = sum(1 for line in lines[2:] if "(not found)" not in line)
     lines.append(f"\nFound: {n_found}/{len(queries)}")
+    return "\n".join(lines)
+
+
+# ===========================================================================
+# Enrichment analysis tools
+# ===========================================================================
+
+
+def _extract_gene_list_from_de(
+    result_name: Optional[str],
+    fdr_threshold: float,
+    logfc_threshold: float,
+    direction: str,
+) -> tuple[list[str], list[str], str]:
+    """Extract gene lists from DE results.
+
+    Returns:
+        (gene_list, background_genes, info_msg)
+    """
+    rname = result_name or _state["last_result"]
+    if rname is None or rname not in _state["results"]:
+        raise ValueError(
+            "No DE result available. Run a test (test_contrast, exact_test, etc.) first, "
+            "or provide an explicit gene_list."
+        )
+    res = _state["results"][rname]
+    tt = ep.top_tags(res, n=res["table"].shape[0])
+    table = tt["table"]
+
+    # Background = all tested genes
+    background = [_gene_name(row) for _, row in table.iterrows()]
+
+    # Filter significant
+    mask = pd.Series(True, index=table.index)
+    if "FDR" in table.columns:
+        mask &= table["FDR"] < fdr_threshold
+    elif "PValue" in table.columns:
+        mask &= table["PValue"] < fdr_threshold
+
+    if logfc_threshold > 0 and "logFC" in table.columns:
+        mask &= table["logFC"].abs() > logfc_threshold
+
+    if direction == "up" and "logFC" in table.columns:
+        mask &= table["logFC"] > 0
+    elif direction == "down" and "logFC" in table.columns:
+        mask &= table["logFC"] < 0
+
+    sig_table = table[mask]
+    genes = [_gene_name(row) for _, row in sig_table.iterrows()]
+
+    dir_label = f" ({direction})" if direction != "all" else ""
+    info = (
+        f"From DE result '{rname}': {len(genes)} significant genes{dir_label} "
+        f"(FDR < {fdr_threshold}"
+        + (f", |logFC| > {logfc_threshold}" if logfc_threshold > 0 else "")
+        + f") out of {len(background)} tested"
+    )
+    return genes, background, info
+
+
+def _detect_species_code(gene_ids: list[str]) -> str:
+    """Detect g:Profiler species code from gene identifiers."""
+    for gid in gene_ids[:20]:
+        gid_str = str(gid).strip().upper()
+        if gid_str.startswith("ENSG"):
+            return "Hs"
+        if gid_str.startswith("ENSMUSG"):
+            return "Mm"
+    # Try annotator
+    if _annotator.is_available:
+        for gid in gene_ids[:5]:
+            org = _annotator.detect_organism(str(gid))
+            if org == "human":
+                return "Hs"
+            if org == "mouse":
+                return "Mm"
+    return "Hs"  # default to human
+
+
+@mcp.tool()
+def filter_de_genes(
+    result_name: Optional[str] = None,
+    fdr_threshold: float = 0.05,
+    logfc_threshold: float = 0.0,
+    direction: str = "all",
+) -> str:
+    """Filter DE result to extract significant gene lists.
+
+    Args:
+        result_name: Which DE result to filter. Default: most recent.
+        fdr_threshold: FDR cutoff (default: 0.05).
+        logfc_threshold: Absolute log2FC cutoff (default: 0, no filter).
+        direction: 'up' (logFC > 0), 'down' (logFC < 0), or 'all' (default).
+    """
+    try:
+        genes, background, info = _extract_gene_list_from_de(
+            result_name, fdr_threshold, logfc_threshold, direction,
+        )
+    except ValueError as e:
+        return str(e)
+
+    # Also compute up/down separately for storage
+    rname = result_name or _state["last_result"]
+    res = _state["results"][rname]
+    tt = ep.top_tags(res, n=res["table"].shape[0])
+    table = tt["table"]
+
+    base_mask = pd.Series(True, index=table.index)
+    if "FDR" in table.columns:
+        base_mask &= table["FDR"] < fdr_threshold
+    elif "PValue" in table.columns:
+        base_mask &= table["PValue"] < fdr_threshold
+    if logfc_threshold > 0 and "logFC" in table.columns:
+        base_mask &= table["logFC"].abs() > logfc_threshold
+
+    sig = table[base_mask]
+    up_genes = [_gene_name(row) for _, row in sig[sig.get("logFC", pd.Series(dtype=float)) > 0].iterrows()]
+    down_genes = [_gene_name(row) for _, row in sig[sig.get("logFC", pd.Series(dtype=float)) < 0].iterrows()]
+    all_genes = [_gene_name(row) for _, row in sig.iterrows()]
+
+    _state["_filtered_genes"] = {
+        "up": up_genes, "down": down_genes, "all": all_genes,
+        "background": background, "result_name": rname,
+    }
+
+    lines = [info, ""]
+    if direction == "all":
+        lines.append(f"  Upregulated: {len(up_genes)}")
+        lines.append(f"  Downregulated: {len(down_genes)}")
+    lines.append(f"\nTop genes ({min(20, len(genes))} shown):")
+    for g in genes[:20]:
+        lines.append(f"  {g}")
+    if len(genes) > 20:
+        lines.append(f"  ... and {len(genes) - 20} more")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def run_go_enrichment(
+    result_name: Optional[str] = None,
+    gene_list: Optional[str] = None,
+    direction: str = "all",
+    fdr_threshold: float = 0.05,
+    logfc_threshold: float = 0.0,
+    species: str = "auto",
+    sources: Optional[str] = None,
+    name: Optional[str] = None,
+) -> str:
+    """Run Gene Ontology enrichment analysis (BP/MF/CC).
+
+    Two modes:
+    1. From DE results: uses result_name (or most recent) + direction to extract genes.
+    2. From explicit gene list: provide gene_list as comma-separated symbols or IDs.
+
+    Args:
+        result_name: DE result to use for gene extraction. Default: most recent.
+        gene_list: Comma-separated gene symbols or Ensembl IDs.
+        direction: 'up', 'down', or 'all'. Only used with DE result mode.
+        fdr_threshold: FDR cutoff for DE gene selection (default: 0.05).
+        logfc_threshold: Absolute logFC cutoff (default: 0).
+        species: 'Hs' (human), 'Mm' (mouse), or 'auto' (detect from IDs).
+        sources: GO sub-ontologies, comma-separated (default: 'GO:BP,GO:MF,GO:CC').
+        name: Label for this enrichment result. Auto-generated if not provided.
+    """
+    # --- Resolve gene list ---
+    background = None
+    if gene_list:
+        genes = [g.strip() for g in gene_list.split(",") if g.strip()]
+        gene_source = "explicit list"
+    else:
+        try:
+            genes, background, gene_source = _extract_gene_list_from_de(
+                result_name, fdr_threshold, logfc_threshold, direction,
+            )
+        except ValueError as e:
+            return str(e)
+
+    if not genes:
+        return "No genes to test. Check your thresholds or provide a gene list."
+
+    # --- Species ---
+    if species == "auto":
+        species = _detect_species_code(genes)
+
+    # --- Sources ---
+    sources_list = [s.strip() for s in (sources or "GO:BP,GO:MF,GO:CC").split(",")]
+
+    # --- Name ---
+    if not name:
+        dir_suffix = f"_{direction}" if direction != "all" else ""
+        name = f"go{dir_suffix}"
+
+    # --- Call g:Profiler via ep.goana ---
+    try:
+        result_df = ep.goana(genes, species=species, sources=sources_list)
+    except Exception as e:
+        return f"GO enrichment failed: {e}"
+
+    if result_df is None or result_df.empty:
+        _state["enrichment_results"][name] = pd.DataFrame()
+        _state["last_enrichment"] = name
+        return f"GO enrichment '{name}': No significant terms found for {len(genes)} genes ({gene_source})."
+
+    # Store result
+    _state["enrichment_results"][name] = result_df
+    _state["last_enrichment"] = name
+
+    # Format top terms
+    sig = result_df[result_df["p_value"] < 0.05] if "p_value" in result_df.columns else result_df
+    top = sig.head(15)
+
+    lines = [
+        f"GO Enrichment '{name}': {len(sig)} significant terms (p < 0.05) from {len(genes)} genes",
+        f"Species: {species} | Sources: {', '.join(sources_list)} | Gene source: {gene_source}",
+        "",
+        f"{'Source':<8} {'Term Name':<45} {'p-value':>10} {'Genes':>6} {'Size':>6}",
+        "-" * 80,
+    ]
+    for _, row in top.iterrows():
+        src = str(row.get("source", ""))[:7]
+        tname = str(row.get("name", ""))[:44]
+        pval = row.get("p_value", 1.0)
+        isect = int(row.get("intersection_size", 0))
+        tsize = int(row.get("term_size", 0))
+        lines.append(f"{src:<8} {tname:<45} {pval:>10.2e} {isect:>6d} {tsize:>6d}")
+
+    if len(sig) > 15:
+        lines.append(f"\n... and {len(sig) - 15} more significant terms. Use get_enrichment_results() to see more.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def run_pathway_enrichment(
+    result_name: Optional[str] = None,
+    gene_list: Optional[str] = None,
+    direction: str = "all",
+    fdr_threshold: float = 0.05,
+    logfc_threshold: float = 0.0,
+    species: str = "auto",
+    database: str = "KEGG",
+    name: Optional[str] = None,
+) -> str:
+    """Run pathway enrichment (KEGG or Reactome) on DE genes or a gene list.
+
+    Args:
+        result_name: DE result to use. Default: most recent.
+        gene_list: Comma-separated gene symbols or IDs (alternative to result_name).
+        direction: 'up', 'down', or 'all'. Only used with DE result mode.
+        fdr_threshold: FDR cutoff for DE gene selection (default: 0.05).
+        logfc_threshold: Absolute logFC cutoff (default: 0).
+        species: 'Hs' (human), 'Mm' (mouse), or 'auto'.
+        database: 'KEGG' (default) or 'REAC' (Reactome).
+        name: Label for this enrichment result. Auto-generated if not provided.
+    """
+    # --- Resolve gene list ---
+    if gene_list:
+        genes = [g.strip() for g in gene_list.split(",") if g.strip()]
+        gene_source = "explicit list"
+    else:
+        try:
+            genes, _, gene_source = _extract_gene_list_from_de(
+                result_name, fdr_threshold, logfc_threshold, direction,
+            )
+        except ValueError as e:
+            return str(e)
+
+    if not genes:
+        return "No genes to test. Check your thresholds or provide a gene list."
+
+    # --- Species ---
+    if species == "auto":
+        species = _detect_species_code(genes)
+
+    # --- Name ---
+    db_lower = database.upper()
+    if not name:
+        dir_suffix = f"_{direction}" if direction != "all" else ""
+        name = f"{db_lower.lower()}{dir_suffix}"
+
+    # --- Call enrichment ---
+    try:
+        if db_lower == "KEGG":
+            result_df = ep.kegga(genes, species=species)
+        else:
+            # Reactome: call g:Profiler directly
+            from gprofiler import GProfiler
+            species_map = {
+                'Hs': 'hsapiens', 'Mm': 'mmusculus', 'Rn': 'rnorvegicus',
+                'Dm': 'dmelanogaster',
+            }
+            organism = species_map.get(species, species)
+            gp = GProfiler(return_dataframe=True)
+            result_df = gp.profile(organism=organism, query=genes, sources=['REAC'])
+    except Exception as e:
+        return f"Pathway enrichment failed: {e}"
+
+    if result_df is None or result_df.empty:
+        _state["enrichment_results"][name] = pd.DataFrame()
+        _state["last_enrichment"] = name
+        return f"{db_lower} enrichment '{name}': No significant pathways found for {len(genes)} genes ({gene_source})."
+
+    # Store result
+    _state["enrichment_results"][name] = result_df
+    _state["last_enrichment"] = name
+
+    # Format top terms
+    sig = result_df[result_df["p_value"] < 0.05] if "p_value" in result_df.columns else result_df
+    top = sig.head(15)
+
+    lines = [
+        f"{db_lower} Enrichment '{name}': {len(sig)} significant pathways (p < 0.05) from {len(genes)} genes",
+        f"Species: {species} | Database: {db_lower} | Gene source: {gene_source}",
+        "",
+        f"{'Term Name':<55} {'p-value':>10} {'Genes':>6} {'Size':>6}",
+        "-" * 80,
+    ]
+    for _, row in top.iterrows():
+        tname = str(row.get("name", ""))[:54]
+        pval = row.get("p_value", 1.0)
+        isect = int(row.get("intersection_size", 0))
+        tsize = int(row.get("term_size", 0))
+        lines.append(f"{tname:<55} {pval:>10.2e} {isect:>6d} {tsize:>6d}")
+
+    if len(sig) > 15:
+        lines.append(f"\n... and {len(sig) - 15} more significant pathways. Use get_enrichment_results() to see more.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_enrichment_results(
+    name: Optional[str] = None,
+    max_terms: int = 30,
+    pvalue_threshold: float = 0.05,
+    source_filter: Optional[str] = None,
+) -> str:
+    """Retrieve enrichment results table with optional filtering.
+
+    Args:
+        name: Which enrichment result. Default: most recent.
+        max_terms: Maximum terms to return (default: 30).
+        pvalue_threshold: p-value cutoff (default: 0.05).
+        source_filter: Filter by source ('GO:BP', 'GO:MF', 'GO:CC', 'KEGG', 'REAC').
+    """
+    enrich_name = name or _state["last_enrichment"]
+    if enrich_name is None or enrich_name not in _state["enrichment_results"]:
+        avail = list(_state["enrichment_results"].keys())
+        if avail:
+            return f"Enrichment result '{name}' not found. Available: {', '.join(avail)}"
+        return "No enrichment results available. Run run_go_enrichment() or run_pathway_enrichment() first."
+
+    df = _state["enrichment_results"][enrich_name]
+    if df.empty:
+        return f"Enrichment result '{enrich_name}' is empty (no terms found)."
+
+    # Filter
+    filtered = df.copy()
+    if "p_value" in filtered.columns:
+        filtered = filtered[filtered["p_value"] < pvalue_threshold]
+    if source_filter and "source" in filtered.columns:
+        filtered = filtered[filtered["source"] == source_filter]
+
+    top = filtered.head(max_terms)
+
+    lines = [
+        f"Enrichment results: '{enrich_name}' ({len(filtered)} terms with p < {pvalue_threshold}"
+        + (f", source={source_filter}" if source_filter else "") + ")",
+        "",
+        f"{'Source':<8} {'Term ID':<14} {'Term Name':<42} {'p-value':>10} {'Genes':>6} {'Size':>6}",
+        "-" * 90,
+    ]
+    for _, row in top.iterrows():
+        src = str(row.get("source", ""))[:7]
+        tid = str(row.get("native", ""))[:13]
+        tname = str(row.get("name", ""))[:41]
+        pval = row.get("p_value", 1.0)
+        isect = int(row.get("intersection_size", 0))
+        tsize = int(row.get("term_size", 0))
+        lines.append(f"{src:<8} {tid:<14} {tname:<42} {pval:>10.2e} {isect:>6d} {tsize:>6d}")
+
+    if len(filtered) > max_terms:
+        lines.append(f"\n... showing {max_terms} of {len(filtered)} terms")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_term_genes(
+    term_id: str,
+    name: Optional[str] = None,
+) -> str:
+    """Show genes contributing to a specific GO term or pathway.
+
+    Args:
+        term_id: GO term ID (e.g. 'GO:0006915') or term name substring.
+        name: Which enrichment result to search. Default: most recent.
+    """
+    enrich_name = name or _state["last_enrichment"]
+    if enrich_name is None or enrich_name not in _state["enrichment_results"]:
+        return "No enrichment results available. Run enrichment first."
+
+    df = _state["enrichment_results"][enrich_name]
+    if df.empty:
+        return "Enrichment result is empty."
+
+    # Search by native ID first, then by name substring
+    match = None
+    if "native" in df.columns:
+        mask = df["native"].astype(str).str.contains(term_id, case=False, na=False)
+        if mask.any():
+            match = df[mask].iloc[0]
+
+    if match is None and "name" in df.columns:
+        mask = df["name"].astype(str).str.contains(term_id, case=False, na=False)
+        if mask.any():
+            match = df[mask].iloc[0]
+
+    if match is None:
+        return f"Term '{term_id}' not found in enrichment result '{enrich_name}'."
+
+    term_name = match.get("name", term_id)
+    source = match.get("source", "")
+    pval = match.get("p_value", None)
+    native = match.get("native", "")
+
+    # g:Profiler stores gene intersections
+    intersections = match.get("intersections", [])
+    if isinstance(intersections, str):
+        intersections = [g.strip() for g in intersections.split(",") if g.strip()]
+    elif not isinstance(intersections, list):
+        intersections = []
+
+    lines = [
+        f"Term: {term_name}",
+        f"  ID: {native}  |  Source: {source}  |  p-value: {pval:.2e}" if pval else f"  ID: {native}  |  Source: {source}",
+        f"  Term size: {int(match.get('term_size', 0))}  |  Intersection: {len(intersections)} genes",
+        "",
+        "Contributing genes:",
+    ]
+    for g in intersections:
+        lines.append(f"  {g}")
+
+    if not intersections:
+        lines.append("  (gene list not available — g:Profiler may not have returned intersections)")
+
     return "\n".join(lines)
 
 

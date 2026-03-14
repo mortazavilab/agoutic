@@ -51,6 +51,11 @@ _SAFE_STEP_KINDS = frozenset({
     "INTERPRET_RESULTS",
     "RECOMMEND_NEXT",
     "ANNOTATE_RESULTS",
+    "FILTER_DE_GENES",
+    "RUN_GO_ENRICHMENT",
+    "RUN_PATHWAY_ENRICHMENT",
+    "PLOT_ENRICHMENT",
+    "SUMMARIZE_ENRICHMENT",
 })
 
 # Expensive steps require explicit approval
@@ -103,6 +108,13 @@ STEP_TOOL_DEFAULTS: dict[str, list[dict] | None] = {
     "INTERPRET_RESULTS": None,      # LLM call (special handling)
     "RECOMMEND_NEXT": None,         # LLM call (special handling)
     "ANNOTATE_RESULTS": [{"source_key": "edgepython", "tool": "annotate_genes"}],
+    # Enrichment analysis step kinds
+    "FILTER_DE_GENES": [{"source_key": "edgepython", "tool": "filter_de_genes"}],
+    "RUN_GO_ENRICHMENT": [{"source_key": "edgepython", "tool": "run_go_enrichment"}],
+    "RUN_PATHWAY_ENRICHMENT": [{"source_key": "edgepython", "tool": "run_pathway_enrichment"}],
+    "PLOT_ENRICHMENT": [{"source_key": "edgepython", "tool": "generate_plot",
+                         "params": {"plot_type": "enrichment_bar"}}],
+    "SUMMARIZE_ENRICHMENT": None,   # LLM interpretation (special handling)
     # Legacy kinds (backward compat with existing WORKFLOW_PLAN):
     "copy_sample": None,
     "run": None,

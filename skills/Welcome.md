@@ -20,6 +20,7 @@ Here's what I can help you with:
 3. **Download files from URLs** — Grab files from any URL into your project
 4. **Check results from a completed job** — View QC reports, alignment stats, modification calls, and expression data
 5. **Differential expression analysis** — Run DE analysis on count matrices using edgePython (bulk, single-cell, DTU, ChIP-seq)
+6. **GO & pathway enrichment** — Run enrichment analysis on gene lists from DE results or custom gene sets
 
 What would you like to do?
 ```
@@ -58,6 +59,11 @@ Based on the user's answer, switch to the appropriate skill:
 **Gene lookup** (mentions "gene ID", "Ensembl ID", "gene symbol", "gene name", "gene annotation", "ENSG", or asks "what gene is X?"):
 ```
 [[SKILL_SWITCH_TO: differential_expression]]
+```
+
+**Enrichment analysis** (mentions "GO", "gene ontology", "enrichment", "pathway", "KEGG", "Reactome", "biological process", "enriched terms", or option 6):
+```
+[[SKILL_SWITCH_TO: enrichment_analysis]]
 ```
 
 ### Step 3: Handle Job Analysis Requests with UUID

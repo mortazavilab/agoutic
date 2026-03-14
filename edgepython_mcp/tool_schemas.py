@@ -456,4 +456,78 @@ TOOL_SCHEMAS = {
             "required": [],
         },
     },
+    # =================================================================
+    # Enrichment analysis tools
+    # =================================================================
+    "filter_de_genes": {
+        "description": "Filter DE result to extract significant gene lists by FDR and logFC thresholds.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "result_name": {"type": "string", "description": "Which DE result to filter. Default: most recent."},
+                "fdr_threshold": {"type": "number", "description": "FDR cutoff (default: 0.05)."},
+                "logfc_threshold": {"type": "number", "description": "Absolute log2FC cutoff (default: 0)."},
+                "direction": {"type": "string", "description": "'up', 'down', or 'all' (default: 'all')."},
+            },
+            "required": [],
+        },
+    },
+    "run_go_enrichment": {
+        "description": "Run Gene Ontology enrichment (BP/MF/CC) on DE genes or an explicit gene list.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "result_name": {"type": "string", "description": "DE result to use. Default: most recent."},
+                "gene_list": {"type": "string", "description": "Comma-separated gene symbols or Ensembl IDs (alternative to result_name)."},
+                "direction": {"type": "string", "description": "'up', 'down', or 'all' (default: 'all')."},
+                "fdr_threshold": {"type": "number", "description": "FDR cutoff for DE gene selection (default: 0.05)."},
+                "logfc_threshold": {"type": "number", "description": "Absolute logFC cutoff (default: 0)."},
+                "species": {"type": "string", "description": "'Hs' (human), 'Mm' (mouse), or 'auto' (default: 'auto')."},
+                "sources": {"type": "string", "description": "GO sub-ontologies, comma-separated (default: 'GO:BP,GO:MF,GO:CC')."},
+                "name": {"type": "string", "description": "Label for this enrichment result."},
+            },
+            "required": [],
+        },
+    },
+    "run_pathway_enrichment": {
+        "description": "Run KEGG or Reactome pathway enrichment on DE genes or an explicit gene list.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "result_name": {"type": "string", "description": "DE result to use. Default: most recent."},
+                "gene_list": {"type": "string", "description": "Comma-separated gene symbols or IDs (alternative to result_name)."},
+                "direction": {"type": "string", "description": "'up', 'down', or 'all' (default: 'all')."},
+                "fdr_threshold": {"type": "number", "description": "FDR cutoff (default: 0.05)."},
+                "logfc_threshold": {"type": "number", "description": "Absolute logFC cutoff (default: 0)."},
+                "species": {"type": "string", "description": "'Hs', 'Mm', or 'auto' (default: 'auto')."},
+                "database": {"type": "string", "description": "'KEGG' (default) or 'REAC' (Reactome)."},
+                "name": {"type": "string", "description": "Label for this enrichment result."},
+            },
+            "required": [],
+        },
+    },
+    "get_enrichment_results": {
+        "description": "Retrieve stored enrichment results table with optional filtering.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Which enrichment result. Default: most recent."},
+                "max_terms": {"type": "integer", "description": "Maximum terms to return (default: 30)."},
+                "pvalue_threshold": {"type": "number", "description": "p-value cutoff (default: 0.05)."},
+                "source_filter": {"type": "string", "description": "Filter by source ('GO:BP', 'GO:MF', 'GO:CC', 'KEGG', 'REAC')."},
+            },
+            "required": [],
+        },
+    },
+    "get_term_genes": {
+        "description": "Show genes contributing to a specific GO term or pathway from enrichment results.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "term_id": {"type": "string", "description": "GO term ID (e.g. 'GO:0006915') or term name substring."},
+                "name": {"type": "string", "description": "Which enrichment result. Default: most recent."},
+            },
+            "required": ["term_id"],
+        },
+    },
 }

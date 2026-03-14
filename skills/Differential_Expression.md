@@ -31,6 +31,7 @@ This skill performs differential expression (DE) analysis using edgePython — a
 - "Test for differential transcript usage"
 
 ### ❌ This Skill Does NOT Handle:
+- **GO/pathway enrichment analysis** → `[[SKILL_SWITCH_TO: enrichment_analysis]]`
 - **Running pipelines / alignment** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
 - **ENCODE data search** → `[[SKILL_SWITCH_TO: ENCODE_Search]]`
 - **Downloading files** → `[[SKILL_SWITCH_TO: download_files]]`

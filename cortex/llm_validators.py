@@ -278,6 +278,20 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
         if _has_gene_query or _has_gene:
             return "differential_expression"
 
+    # --- Signals for enrichment_analysis ---
+    _enrichment_words = [
+        "go enrichment", "gene ontology", "pathway enrichment",
+        "go analysis", "pathway analysis", "enrichment analysis",
+        "kegg enrichment", "reactome enrichment",
+        "biological process", "molecular function", "cellular component",
+        "enriched terms", "enriched pathways", "enriched go",
+        "go:bp", "go:mf", "go:cc",
+    ]
+    _has_enrichment = any(w in msg_lower for w in _enrichment_words)
+    if current_skill not in ("enrichment_analysis",):
+        if _has_enrichment:
+            return "enrichment_analysis"
+
     # --- Signals for differential_expression ---
     _de_words = [
         "differential expression", "differentially expressed",

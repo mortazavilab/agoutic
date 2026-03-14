@@ -408,6 +408,38 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 logger.info("Catch-all: extracted unknown search term for ENCODE",
                            search_term=_extracted)
 
+    # --- Enrichment / GO / Pathway patterns ---
+    enrichment_skills = {"enrichment_analysis", "differential_expression"}
+    if not calls and skill_key in enrichment_skills:
+        enrichment_keywords = ["go enrichment", "gene ontology", "pathway enrichment",
+                               "kegg", "reactome", "enrichment analysis",
+                               "enriched terms", "enriched pathways",
+                               "biological process", "molecular function",
+                               "cellular component"]
+        if any(kw in msg_lower for kw in enrichment_keywords):
+            # Determine direction
+            direction = "all"
+            if "upregulated" in msg_lower or "up-regulated" in msg_lower or "up regulated" in msg_lower:
+                direction = "up"
+            elif "downregulated" in msg_lower or "down-regulated" in msg_lower or "down regulated" in msg_lower:
+                direction = "down"
+            # Determine which tool
+            if any(kw in msg_lower for kw in ("kegg", "reactome", "pathway")):
+                database = "REAC" if "reactome" in msg_lower else "KEGG"
+                calls.append({
+                    "source_type": "service", "source_key": "edgepython",
+                    "tool": "run_pathway_enrichment",
+                    "params": {"direction": direction, "database": database},
+                })
+            else:
+                calls.append({
+                    "source_type": "service", "source_key": "edgepython",
+                    "tool": "run_go_enrichment",
+                    "params": {"direction": direction},
+                })
+            logger.info("Auto-generated enrichment call",
+                       tool=calls[-1]["tool"], direction=direction)
+
     # --- Dogme / Analyzer file-parsing patterns ---
     # When in a Dogme analysis skill and user asks to parse/show a file,
     # auto-generate find_file + parse/read calls so the LLM gets real data.
@@ -735,6 +767,21 @@ def _validate_edgepython_params(
             )
             if ct_match:
                 params["pair"] = [ct_match.group(1).strip(), ct_match.group(2).strip()]
+
+    elif tool in ("run_go_enrichment", "run_pathway_enrichment"):
+        # Auto-detect direction from message
+        if not params.get("direction"):
+            if re.search(r'\bup[-\s]?regulated\b', text_pool, re.I):
+                params["direction"] = "up"
+            elif re.search(r'\bdown[-\s]?regulated\b', text_pool, re.I):
+                params["direction"] = "down"
+
+    elif tool == "filter_de_genes":
+        if not params.get("direction"):
+            if re.search(r'\bup[-\s]?regulated\b', text_pool, re.I):
+                params["direction"] = "up"
+            elif re.search(r'\bdown[-\s]?regulated\b', text_pool, re.I):
+                params["direction"] = "down"
 
     if params != original_params:
         logger.info("edgepython param extraction filled missing params",
