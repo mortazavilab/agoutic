@@ -28,11 +28,10 @@ AGOUTIC enforces access control at every layer:
 - **Authentication**: Google OAuth 2.0 with session cookies (`httponly`, `samesite=lax`, `secure` in production)
 - **Authorization**: Role-based access (owner / editor / viewer) checked on every endpoint via `require_project_access()`. Admins bypass all project-level checks; public projects allow viewer access.
 - **Job ownership**: Each job records the submitting `user_id`. `require_run_uuid_access()` verifies ownership before exposing debug info or analysis results.
-- **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{user_id}/{project_id}/`) with input sanitization and jail-escape guards.
+- **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{username}/{project-slug}/`) with input sanitization and jail-escape guards; legacy `{user_id}/{project_id}` paths are still supported for backward compatibility.
 - **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
 - **Project management**: Full dashboard for browsing projects, viewing stats/files/jobs, renaming, archiving, and permanent deletion with cascading cleanup.
 - **Bootstrap & admin scripts**: Run `python scripts/cortex/init_db.py` for a fresh database bootstrap, `python scripts/cortex/set_usernames.py auto` to derive usernames from email addresses on an existing instance, and `python scripts/cortex/bootstrap_project_tasks.py` to seed persistent project tasks from existing workflow history.
-- **Username paths**: User-jailed filesystem paths use `$AGOUTIC_DATA/users/{username}/{project-slug}/` instead of raw IDs, giving human-readable directory trees.
 
 ## 🚀 Quick Start
 
@@ -80,7 +79,7 @@ auth flow depends on Streamlit request context and browser cookies.
 curl http://localhost:8000/health
 
 # Check Launchpad health
-curl http://localhost:8001/health
+curl http://localhost:8003/health
 
 # Test Atlas connection
 python cortex/atlas_mcp_client.py
@@ -112,7 +111,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                      AGOUTIC System v3.2.11                    │
+│                   AGOUTIC System v3.2.11                    │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -147,7 +146,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 - **Tech:** FastAPI + OpenAI-compatible LLM
 - **Features:**
   - Chat interface with skill-based workflows
-  - Coordinates Atlas, 3, and 4
+  - Coordinates Atlas, Launchpad, and Analyzer
   - Block-based project timeline
   - Persistent project task list with child-task projection for downloads,
     workflow stages, analysis, and follow-up review
@@ -175,7 +174,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Inline Plotly visualizations with deduplication** — `[[PLOT:...]]` tags produce interactive bar, scatter, pie, histogram, box, and heatmap charts rendered directly in chat. A three-layer pipeline guarantees chart generation: chain context injection → second-pass PLOT tag instructions → post-DataFrame fallback. Deduplication and prompt-intent selection prevent duplicate/overlapping traces and stale style leakage across turns. Supports explicit colors (`color=green`) and grouping palettes.
   - **DF inspection quick commands** — `list dfs` lists all dataframes in the conversation with their metadata; `head df1` (or `head df3 5`) shows the first N rows as a markdown table. Both bypass the LLM entirely — zero token cost.
 
-### Atlas: ENCODELIB (Port 8080)
+### Atlas: ENCODELIB (Port 8006 MCP)
 - **Role:** ENCODE Portal data retrieval
 - **Tech:** fastmcp + ENCODE API, extended via `atlas/mcp_server.py`
 - **Features:**
@@ -189,7 +188,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 - **Tool schemas:** `atlas/tool_schemas.py` defines JSON Schema contracts for all 16 ENCODE tools, served via `/tools/schema` GET endpoint.
 - **Docs:** [ATLAS_IMPLEMENTATION.md](ATLAS_IMPLEMENTATION.md)
 
-### Launchpad: Execution Engine (Port 8001)
+### Launchpad: Execution Engine (Ports 8003 REST / 8002 MCP)
 - **Role:** Nextflow pipeline execution
 - **Tech:** FastAPI + Nextflow + Dogme
 - **Features:**
@@ -210,7 +209,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - Full DE pipeline: load → filter → normalize → design → dispersion → fit → test → results → plots
   - GO enrichment (Biological Process, Molecular Function, Cellular Component) via g:Profiler
   - KEGG and Reactome pathway enrichment
-  - Gene list filtering from DE results (by FDR, logFC, direction: up/down/all)
+  - Gene list filtering from DE results by FDR, logFC, and direction (up/down/all)
   - Dual-mode input: enrichment from DE results or explicit gene lists
   - Enrichment bar plots and dot/bubble plots
   - Term-to-gene drilldown (which genes drive a specific GO term)
@@ -222,7 +221,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - JSON Schema tool contracts via `/tools/schema`
 - **Docs:** [edgepython_mcp/](edgepython_mcp/)
 
-### Analyzer: Analysis Engine (Port 8002)
+### Analyzer: Analysis Engine (Ports 8004 REST / 8005 MCP)
 - **Role:** Results analysis, QC reporting, and workflow file browsing
 - **Tech:** fastmcp + Python analysis tools
 - **Features:**
@@ -430,7 +429,7 @@ export AGOUTIC_CODE=/path/to/agoutic
 export AGOUTIC_DATA=/path/to/storage
 ```
 
-**No environment variables needed!** Defaults work automatically. See [CONFIGURATION.md](CONFIGURATION.md) for detailed configuration options.
+**No required environment variables for default local setup.** Defaults work automatically, but `AGOUTIC_CODE` and `AGOUTIC_DATA` can be overridden if needed. See [CONFIGURATION.md](CONFIGURATION.md) for detailed configuration options.
 
 ### Path Resolution
 
@@ -568,7 +567,7 @@ status = await client.check_nextflow_status(job["run_uuid"])
 
 ```bash
 # Submit job
-curl -X POST http://localhost:8001/jobs/submit \
+curl -X POST http://localhost:8003/jobs/submit \
   -H "Content-Type: application/json" \
   -d '{
     "project_id": "proj_001",
@@ -578,10 +577,10 @@ curl -X POST http://localhost:8001/jobs/submit \
   }'
 
 # Check status
-curl http://localhost:8001/jobs/{run_uuid}/status
+curl http://localhost:8003/jobs/{run_uuid}/status
 
 # Get results
-curl http://localhost:8001/jobs/{run_uuid}
+curl http://localhost:8003/jobs/{run_uuid}
 ```
 
 ## 📚 Documentation
@@ -630,7 +629,7 @@ pytest tests/cortex/test_project_endpoints.py -q
 - **In-memory SQLite** with `StaticPool` for fast, isolated tests
 - **Mocked LLM** via `AgentEngine` patches (no real model calls)
 - **Mocked MCP** via `MCPHttpClient` patches (no real service connections)
-- **34 cortex test files** covering: chat endpoint, approval gates, background tasks, project management, block endpoints, conversations, auth, admin, downloads, uploads, pure helpers, tool routing, skill detection, validation, planning
+- **37 cortex test files** covering: chat endpoint, approval gates, background tasks, project management, block endpoints, conversations, auth, admin, downloads, uploads, pure helpers, tool routing, skill detection, validation, planning
 - **Task coverage** includes persistent task projection, task actions,
   download-file children, and workflow-stage children in
   `tests/cortex/test_project_endpoints.py`
@@ -658,14 +657,14 @@ python launchpad/demo_launchpad.py
 ## 🐛 Troubleshooting
 
 ### Server Won't Start
-- Check port availability: `lsof -i :8001` (Launchpad) or `lsof -i :8000` (Cortex)
+- Check port availability: `lsof -i :8003` (Launchpad REST), `lsof -i :8002` (Launchpad MCP), or `lsof -i :8000` (Cortex)
 - Check database connectivity: `python -c "from launchpad.db import SessionLocal; SessionLocal()"`
 - Check Python version: `python --version` (requires 3.12+)
 
 ### Job Stuck in RUNNING
 - Check Nextflow process: `ps aux | grep nextflow`
 - Check logs: `tail -f $AGOUTIC_DATA/launchpad_logs/*.log`
-- Cancel job: `curl -X POST http://localhost:8001/jobs/{run_uuid}/cancel`
+- Cancel job: `curl -X POST http://localhost:8003/jobs/{run_uuid}/cancel`
 
 ### Configuration Issues
 - Verify configuration: `python -c "from launchpad.config import *; print(f'Code: {AGOUTIC_CODE}')"` 
@@ -749,7 +748,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
 - **Nextflow**: >= 23.0
-- **Test Coverage**: 1040+ tests across 53 test files
+- **Test Coverage**: 1040+ tests across 54 test files
 - **Status**: Active Development
 
 ## 🗓️ Development Timeline
