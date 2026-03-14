@@ -2998,13 +2998,26 @@ What would you like to do?
         if corrected_response != _before_mistral:
             fallback_fixes_applied += 1
             logger.warning("Converted [TOOL_CALLS]...[ARGS]{json} to [[DATA_CALL:...]]")
+
+        # FALLBACK: Convert [TOOL_CALLS]DATA_CALL: key=value, ... format
+        # devstral-small-2 sometimes emits the DATA_CALL params inline after
+        # [TOOL_CALLS] but without the [[...]] wrapper.
+        _mistral_inline_pattern = r'\[TOOL_CALLS\]\s*DATA_CALL:\s*(.+?)(?:\n|$)'
+        def _convert_mistral_inline(m: re.Match) -> str:
+            return f"[[DATA_CALL: {m.group(1).rstrip()}]]"
+        _before_inline = corrected_response
+        corrected_response = re.sub(_mistral_inline_pattern, _convert_mistral_inline, corrected_response)
+        if corrected_response != _before_inline:
+            fallback_fixes_applied += 1
+            logger.warning("Converted [TOOL_CALLS]DATA_CALL:... to [[DATA_CALL:...]]")
         
         if fallback_fixes_applied > 0:
             logger.warning("Applied fallback tag fixes to LLM response", count=fallback_fixes_applied)
         
         # Parse unified DATA_CALL tags
         # Groups: (1) source_type [consortium|service], (2) source_key, (3) tool_name, (4) remaining params
-        data_call_pattern = r'\[\[DATA_CALL:\s*(?:(consortium|service)=(\w+)),\s*tool=(\w+)(?:,\s*([^\]]+))?\]\]'
+        # The params group uses .+? (not [^\]]+) to allow ] inside JSON arrays like ["TP53"]
+        data_call_pattern = r'\[\[DATA_CALL:\s*(?:(consortium|service)=(\w+)),\s*tool=(\w+)(?:,\s*(.+))?\]\]'
         data_call_matches = list(re.finditer(data_call_pattern, corrected_response))
         
         # Also support legacy ENCODE_CALL and ANALYSIS_CALL tags for backward compatibility

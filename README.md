@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.9
+**Version:** 3.2.10
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -168,7 +168,8 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
   - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
   - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that decomposes complex requests into deterministic execution plans with dependency tracking, approval gates, and automatic replanning on failure. 8 plan templates covering: run workflow, compare samples, download+analyze, summarize results, run DE pipeline, parse+plot+interpret, compare workflows, and search+compare to local data. CHECK_EXISTING guards skip expensive operations when results already exist.
-  - **Gene Annotation & ID Translation** — offline Ensembl gene ID ↔ symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. Bidirectional `lookup_gene` tool answers "what is the Ensembl ID for TP53?" style queries. MCP tools: `annotate_genes`, `translate_gene_ids`, `lookup_gene`.
+  - **Gene Annotation & ID Translation** — offline Ensembl gene ID ↔ symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. Bidirectional `lookup_gene` tool answers "what is the Ensembl ID for TP53?" style queries. Pre-LLM auto-skill detection routes gene questions to the correct skill from any context (including Welcome). MCP tools: `annotate_genes`, `translate_gene_ids`, `lookup_gene`.
+  - **Robust DATA_CALL tag parsing** — bracket-aware parameter parser handles JSON arrays inside DATA_CALL tags (e.g. `gene_symbols=["TP53", "BRCA1"]`). Mistral-native `[TOOL_CALLS]DATA_CALL:` format is auto-normalized to standard `[[DATA_CALL:...]]` tags.
   - **Skill-defined plan chains** — skill authors can declare multi-step workflows in skill Markdown files under a `## Plan Chains` section. A single message like "get K562 experiments and make a plot by assay type" is detected at classify-time and produces both a data search and a visualization. Trigger phrases support multi-phrasing (AND/OR keyword groups) for flexible matching. See `SKILLS.md` for the full authoring guide.
   - **Skills system documentation** — new top-level `SKILLS.md` documents the complete skills framework: skill file structure, routing patterns, `[[DATA_CALL:...]]` / `[[PLOT:...]]` tag system, plan chains format, and a step-by-step guide for creating new skills.
   - **Inline Plotly visualizations with deduplication** — `[[PLOT:...]]` tags produce interactive bar, scatter, pie, histogram, box, and heatmap charts rendered directly in chat. A three-layer pipeline guarantees chart generation: chain context injection → second-pass PLOT tag instructions → post-DataFrame fallback. Deduplication and prompt-intent selection prevent duplicate/overlapping traces and stale style leakage across turns. Supports explicit colors (`color=green`) and grouping palettes.

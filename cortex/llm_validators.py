@@ -31,15 +31,41 @@ def _parse_tag_params(params_str: str | None) -> dict:
     """
     Parse a comma-separated key=value parameter string from a DATA_CALL tag.
     E.g., "search_term=K562, organism=Homo sapiens" -> {"search_term": "K562", "organism": "Homo sapiens"}
+    Handles JSON arrays like gene_symbols=["TP53", "BRCA1"] without splitting inside brackets.
     """
     params = {}
-    if params_str:
-        for param_pair in params_str.split(','):
-            param_pair = param_pair.strip()
-            if '=' in param_pair:
-                key, value = param_pair.split('=', 1)
-                value = value.strip().strip('"\'')
-                params[key.strip()] = value
+    if not params_str:
+        return params
+    # Split on commas that are NOT inside square brackets
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in params_str:
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            parts.append(''.join(current))
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append(''.join(current))
+    for part in parts:
+        part = part.strip()
+        if '=' in part:
+            key, value = part.split('=', 1)
+            value = value.strip()
+            # Try to parse JSON arrays/objects so MCP tools receive native types
+            if value.startswith('['):
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    value = value.strip('"\'')
+            else:
+                value = value.strip('"\'')
+            params[key.strip()] = value
     return params
 
 
@@ -234,6 +260,23 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
     if current_skill != "download_files":
         if _has_download and (_has_file_accession or _has_url):
             return "download_files"
+
+    # --- Signals for gene lookup (routes to differential_expression / edgePython) ---
+    _gene_words = [
+        "ensembl", "ensembl id", "gene id", "gene symbol",
+        "gene name", "gene annotation", "gene info",
+        "ensg0", "ensmusg0",
+    ]
+    _gene_query_words = [
+        "what gene", "which gene", "look up gene", "lookup gene",
+        "what is the gene", "what is the ensembl",
+        "gene id for", "ensembl id for", "info on ensg",
+    ]
+    _has_gene = any(w in msg_lower for w in _gene_words)
+    _has_gene_query = any(w in msg_lower for w in _gene_query_words)
+    if current_skill not in ("differential_expression",):
+        if _has_gene_query or _has_gene:
+            return "differential_expression"
 
     # --- Signals for differential_expression ---
     _de_words = [

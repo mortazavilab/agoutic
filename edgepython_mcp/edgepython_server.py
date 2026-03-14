@@ -13,6 +13,7 @@ Usage:
 import os
 import sys
 import re
+import json
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -1932,11 +1933,20 @@ def lookup_gene(
     if not _annotator.is_available:
         return "Gene annotation data not available. Place reference TSV files in data/reference/."
 
-    # Accept string arguments (LLM may pass "TP53" instead of ["TP53"])
+    # Accept string arguments (LLM may pass "TP53" instead of ["TP53"],
+    # or DATA_CALL parser may pass '["TP53"]' as a JSON-encoded string)
     if isinstance(gene_symbols, str):
-        gene_symbols = [gene_symbols]
+        try:
+            parsed = json.loads(gene_symbols)
+            gene_symbols = parsed if isinstance(parsed, list) else [gene_symbols]
+        except (json.JSONDecodeError, ValueError):
+            gene_symbols = [gene_symbols]
     if isinstance(gene_ids, str):
-        gene_ids = [gene_ids]
+        try:
+            parsed = json.loads(gene_ids)
+            gene_ids = parsed if isinstance(parsed, list) else [gene_ids]
+        except (json.JSONDecodeError, ValueError):
+            gene_ids = [gene_ids]
 
     if not gene_symbols and not gene_ids:
         return "Provide gene_symbols (e.g. ['TP53']) or gene_ids (e.g. ['ENSG00000141510'])."

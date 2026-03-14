@@ -55,6 +55,11 @@ Based on the user's answer, switch to the appropriate skill:
 [[SKILL_SWITCH_TO: differential_expression]]
 ```
 
+**Gene lookup** (mentions "gene ID", "Ensembl ID", "gene symbol", "gene name", "gene annotation", "ENSG", or asks "what gene is X?"):
+```
+[[SKILL_SWITCH_TO: differential_expression]]
+```
+
 ### Step 3: Handle Job Analysis Requests with UUID
 
 ⚠️ **CRITICAL: Detect UUID + Parse Requests Immediately**

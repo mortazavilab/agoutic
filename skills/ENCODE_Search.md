@@ -29,9 +29,23 @@
 ```
 
 **Decision rule:**
+- Has a gene name / gene symbol / Ensembl ID → `lookup_gene` (routed to edgePython)
 - Has a cell line / tissue name → `search_by_biosample`
 - Has only an assay type, no biosample → `search_by_assay`
 - Has a specific ENCSR accession → `get_experiment`
+
+## 🧬 Gene ID / Symbol Lookup (NOT an ENCODE tool)
+
+If the user asks for a **gene ID**, **gene symbol**, or **gene annotation** (e.g. "what is the Ensembl ID for TP53?", "what gene is ENSG00000141510?"), this is **NOT an ENCODE search**. Use the gene lookup tool — it is automatically routed to edgePython:
+
+```
+[[DATA_CALL: service=edgepython, tool=lookup_gene, gene_symbols=["TP53"]]]
+[[DATA_CALL: service=edgepython, tool=lookup_gene, gene_ids=["ENSG00000141510"]]]
+```
+
+⛔ NEVER use `get_experiment`, `search_by_biosample`, or any ENCODE tool for gene lookups.
+⛔ NEVER use invented tools like `get_gene_info` or `gene_info` — they do not exist.
+✅ ALWAYS use `lookup_gene` with `service=edgepython` for gene queries.
 
 ## ✅ CORRECT EXAMPLES (COPY THESE):
 
@@ -145,15 +159,6 @@ Use this skill to:
 - User wants to **download and process long-read data** → `[[SKILL_SWITCH_TO: ENCODE_LongRead]]`
 - User mentions **local data** on disk → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
 - User asks about **completed job results** → `[[SKILL_SWITCH_TO: analyze_job_results]]`
-
-## Gene ID / Symbol Lookup
-
-If the user asks for a **gene ID**, **gene symbol**, or **gene annotation** (e.g. "what is the Ensembl ID for TP53?"), use the gene lookup tool directly — it is automatically routed:
-
-```
-[[DATA_CALL: service=edgepython, tool=lookup_gene, gene_symbols=["TP53"]]]
-[[DATA_CALL: service=edgepython, tool=lookup_gene, gene_ids=["ENSG00000141510"]]]
-```
 
 ## Approval Gates
 

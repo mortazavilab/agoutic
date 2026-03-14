@@ -1,5 +1,54 @@
 # Changelog - March 2026
 
+## [3.2.10] - 2026-03-13
+
+### Bug Fixes
+
+- **Gene lookup routing & parsing pipeline** — fixes end-to-end failure
+  where gene ID questions (e.g. "what is the Ensembl ID for TP53?")
+  never reached the `lookup_gene` tool.
+
+- **Pre-LLM auto-skill detection for gene queries** — new keyword
+  heuristics in `_auto_detect_skill_switch` catch gene-related questions
+  ("ensembl", "gene id", "gene symbol", "ENSG0", etc.) and route them
+  to the `differential_expression` skill before the LLM runs, regardless
+  of the current active skill.
+
+- **DATA_CALL regex fix for JSON arrays** — the `[^\]]+` params group
+  in the DATA_CALL regex truncated array values like `["TP53"]` at the
+  first `]`. Changed to greedy `.+` so the regex correctly captures
+  `gene_symbols=["TP53", "BRCA1"]` as a complete value.
+
+- **Bracket-aware param parser** — `_parse_tag_params` now tracks
+  bracket depth when splitting on commas, so JSON arrays inside
+  DATA_CALL tags are preserved intact. Values starting with `[` are
+  JSON-parsed into native Python lists, avoiding Pydantic validation
+  errors from FastMCP.
+
+- **Mistral `[TOOL_CALLS]DATA_CALL:` fallback** — devstral-small-2
+  consistently emits `[TOOL_CALLS]DATA_CALL: key=value, ...` instead
+  of `[[DATA_CALL: ...]]`. New normalization step converts this format
+  to standard `[[DATA_CALL:...]]` tags before parsing.
+
+- **`lookup_gene` JSON string coercion** — when the DATA_CALL parser
+  passes array params as JSON-encoded strings (e.g. `'["TP53"]'`),
+  the tool now tries `json.loads` before falling back to single-element
+  wrapping.
+
+### Changes
+
+- `cortex/app.py` — DATA_CALL regex fix; `[TOOL_CALLS]DATA_CALL:`
+  inline normalization fallback
+- `cortex/llm_validators.py` — bracket-aware `_parse_tag_params` with
+  JSON array support; gene query auto-detection in
+  `_auto_detect_skill_switch`
+- `edgepython_mcp/edgepython_server.py` — `import json`; `lookup_gene`
+  JSON string coercion for array params
+- `skills/ENCODE_Search.md` — gene lookup section moved to top with
+  strong "NOT an ENCODE tool" guidance
+- `skills/Welcome.md` — gene lookup routing rule to
+  `differential_expression`
+
 ## [3.2.9] - 2026-03-13
 
 ### Features
