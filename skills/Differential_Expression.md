@@ -35,6 +35,7 @@ This skill performs differential expression (DE) analysis using edgePython — a
 - **ENCODE data search** → `[[SKILL_SWITCH_TO: ENCODE_Search]]`
 - **Downloading files** → `[[SKILL_SWITCH_TO: download_files]]`
 - **Checking pipeline job results** → `[[SKILL_SWITCH_TO: analyze_job_results]]`
+- **GO/pathway enrichment analysis** → `[[SKILL_SWITCH_TO: enrichment_analysis]]`
 
 ## Inputs
 

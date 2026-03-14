@@ -45,6 +45,11 @@ Each step object must have:
 - INTERPRET_RESULTS — explain what results mean biologically
 - RECOMMEND_NEXT — suggest what the user should do next
 - REQUEST_APPROVAL — pause and ask the user before proceeding
+- FILTER_DE_GENES — filter DE results by FDR/logFC to extract gene lists
+- RUN_GO_ENRICHMENT — run GO enrichment analysis (BP/MF/CC)
+- RUN_PATHWAY_ENRICHMENT — run KEGG or Reactome pathway enrichment
+- PLOT_ENRICHMENT — generate enrichment visualization (bar or dot plot)
+- SUMMARIZE_ENRICHMENT — interpret and summarize enrichment findings
 
 ## Current State
 

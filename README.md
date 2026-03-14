@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.10
+**Version:** 3.2.11
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -12,7 +12,7 @@ The system is composed of:
 - **Atlas**: ENCODE Integration - Public data retrieval via ENCODELIB
 - **Launchpad**: Execution Engine - Dogme/Nextflow pipeline management
 - **Analyzer**: Analysis Engine - Results analysis and QC reporting
-- **edgePython**: Differential Expression - Bulk/single-cell RNA-seq DE via edgePython
+- **edgePython**: Differential Expression & Enrichment — Bulk/single-cell RNA-seq DE + GO/pathway enrichment via edgePython
 - **UI**: Web interface for monitoring and control
 
 Current DE migration status: analyzer/server4 now contains the first adapter
@@ -112,7 +112,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                      AGOUTIC System v3.2.9                    │
+│                      AGOUTIC System v3.2.11                    │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -167,7 +167,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Error-Handling Playbook** — deterministic failure rules in the system prompt + structured `[TOOL_ERROR]` blocks + single-retry for transient failures
   - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
   - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
-  - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that decomposes complex requests into deterministic execution plans with dependency tracking, approval gates, and automatic replanning on failure. 8 plan templates covering: run workflow, compare samples, download+analyze, summarize results, run DE pipeline, parse+plot+interpret, compare workflows, and search+compare to local data. CHECK_EXISTING guards skip expensive operations when results already exist.
+  - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that decomposes complex requests into deterministic execution plans with dependency tracking, approval gates, and automatic replanning on failure. 9 plan templates covering: run workflow, compare samples, download+analyze, summarize results, run DE pipeline, run enrichment, parse+plot+interpret, compare workflows, and search+compare to local data. CHECK_EXISTING guards skip expensive operations when results already exist.
   - **Gene Annotation & ID Translation** — offline Ensembl gene ID ↔ symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. Bidirectional `lookup_gene` tool answers "what is the Ensembl ID for TP53?" style queries. Pre-LLM auto-skill detection routes gene questions to the correct skill from any context (including Welcome). MCP tools: `annotate_genes`, `translate_gene_ids`, `lookup_gene`.
   - **Robust DATA_CALL tag parsing** — bracket-aware parameter parser handles JSON arrays inside DATA_CALL tags (e.g. `gene_symbols=["TP53", "BRCA1"]`). Mistral-native `[TOOL_CALLS]DATA_CALL:` format is auto-normalized to standard `[[DATA_CALL:...]]` tags.
   - **Skill-defined plan chains** — skill authors can declare multi-step workflows in skill Markdown files under a `## Plan Chains` section. A single message like "get K562 experiments and make a plot by assay type" is detected at classify-time and produces both a data search and a visualization. Trigger phrases support multi-phrasing (AND/OR keyword groups) for flexible matching. See `SKILLS.md` for the full authoring guide.
@@ -203,12 +203,19 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **`delete_job_data` MCP tool** — enables chat-based deletion ("delete workflow1")
 - **Docs:** [launchpad/README.md](launchpad/README.md)
 
-### edgePython: Differential Expression (Port 8007)
-- **Role:** Bulk and single-cell RNA-seq differential expression analysis
-- **Tech:** FastMCP + edgePython
+### edgePython: Differential Expression & Enrichment (Port 8007)
+- **Role:** Bulk and single-cell RNA-seq differential expression analysis + GO/pathway enrichment
+- **Tech:** FastMCP + edgePython + g:Profiler
 - **Features:**
   - Full DE pipeline: load → filter → normalize → design → dispersion → fit → test → results → plots
-  - 30+ MCP tools (bulk DE, single-cell DE, ChIP-seq enrichment, DTU/splice, bidirectional gene lookup)
+  - GO enrichment (Biological Process, Molecular Function, Cellular Component) via g:Profiler
+  - KEGG and Reactome pathway enrichment
+  - Gene list filtering from DE results (by FDR, logFC, direction: up/down/all)
+  - Dual-mode input: enrichment from DE results or explicit gene lists
+  - Enrichment bar plots and dot/bubble plots
+  - Term-to-gene drilldown (which genes drive a specific GO term)
+  - Species auto-detection from gene ID prefixes (ENSG → human, ENSMUSG → mouse)
+  - 41 MCP tools (bulk DE, single-cell DE, ChIP-seq enrichment, DTU/splice, gene lookup, GO/pathway enrichment)
   - Stateful pipeline — each step builds on previous results within a session
   - Volcano, MDS, MA, BCV, heatmap plot generation
   - TSV/CSV/JSON result export
@@ -310,8 +317,8 @@ agoutic/
 │   ├── config.py               # Atlas configuration
 │   └── result_formatter.py     # Result formatting helpers
 │
-├── edgepython_mcp/              # edgePython DE Server
-│   ├── edgepython_server.py    # FastMCP tool definitions (30+ tools)
+├── edgepython_mcp/              # edgePython DE + Enrichment Server
+│   ├── edgepython_server.py    # FastMCP tool definitions (41 tools)
 │   ├── mcp_server.py           # Server wrapper + /tools/schema endpoint
 │   ├── launch_edgepython.py    # HTTP launcher
 │   ├── tool_schemas.py         # JSON Schema contracts for all tools
@@ -328,6 +335,7 @@ agoutic/
 │   ├── Dogme_RNA.md            # RNA pipeline definition
 │   ├── Dogme_cDNA.md           # cDNA pipeline definition
 │   ├── Differential_Expression.md # edgePython DE skill
+│   ├── Enrichment_Analysis.md  # GO & pathway enrichment skill
 │   ├── ENCODE_LongRead.md      # ENCODE pipeline definition
 │   ├── ENCODE_Search.md        # ENCODE search skill + routing rules
 │   ├── Local_Sample_Intake.md  # Sample intake workflow
@@ -701,6 +709,7 @@ Pre-defined bioinformatics workflows are available in `skills/`:
 - **Dogme_RNA.md** - Direct RNA-seq workflow
 - **Dogme_cDNA.md** - cDNA isoform workflow
 - **Differential_Expression.md** - edgePython DE pipeline (with gene annotation)
+- **Enrichment_Analysis.md** - GO & pathway enrichment analysis
 - **ENCODE_LongRead.md** - ENCODE consortium workflow
 - **ENCODE_Search.md** - ENCODE search and data discovery
 - **Local_Sample_Intake.md** - Sample intake and validation
@@ -735,7 +744,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.2.8 — Bidirectional gene lookup, gene annotation & ID translation, expanded plan templates, plan-execute-observe-replan
+- **Release**: 3.2.11 — GO & pathway enrichment analysis, bidirectional gene lookup, gene annotation & ID translation, expanded plan templates
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

@@ -193,6 +193,11 @@ _STEP_ICONS = {
     "INTERPRET_RESULTS": "\U0001f9e0", # 🧠
     "WRITE_SUMMARY": "\u270d\ufe0f",   # ✍️
     "COMPARE_SAMPLES": "\u2696\ufe0f", # ⚖️
+    "FILTER_DE_GENES": "\U0001f50e",   # 🔎
+    "RUN_GO_ENRICHMENT": "\U0001f9ec", # 🧬
+    "RUN_PATHWAY_ENRICHMENT": "\U0001f9ec",  # 🧬
+    "PLOT_ENRICHMENT": "\U0001f4ca",   # 📊
+    "SUMMARIZE_ENRICHMENT": "\U0001f9e0",    # 🧠
 }
 
 

@@ -3576,7 +3576,11 @@ What would you like to do?
 
         # From new DATA_CALL tags
         # Tools that always belong to edgepython, regardless of source in tag
-        _EDGEPYTHON_ONLY_TOOLS = frozenset({"lookup_gene", "translate_gene_ids", "annotate_genes"})
+        _EDGEPYTHON_ONLY_TOOLS = frozenset({
+            "lookup_gene", "translate_gene_ids", "annotate_genes",
+            "filter_de_genes", "run_go_enrichment", "run_pathway_enrichment",
+            "get_enrichment_results", "get_term_genes",
+        })
         for match in data_call_matches:
             source_type = match.group(1)  # "consortium" or "service"
             source_key = match.group(2)   # e.g., "encode", "analyzer"

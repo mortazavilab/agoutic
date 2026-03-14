@@ -408,6 +408,37 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 logger.info("Catch-all: extracted unknown search term for ENCODE",
                            search_term=_extracted)
 
+    # --- Enrichment analysis patterns ---
+    enrichment_skills = {"enrichment_analysis"}
+    if not calls and skill_key in enrichment_skills:
+        _enrich_kws = ["go enrichment", "gene ontology", "pathway enrichment",
+                        "pathway analysis", "kegg", "reactome", "go analysis",
+                        "enrichment analysis", "enriched terms", "enriched pathways"]
+        if any(kw in msg_lower for kw in _enrich_kws):
+            direction = "all"
+            if "up" in msg_lower and "down" not in msg_lower:
+                direction = "up"
+            elif "down" in msg_lower and "up" not in msg_lower:
+                direction = "down"
+            if "kegg" in msg_lower:
+                calls.append({
+                    "source_type": "service", "source_key": "edgepython",
+                    "tool": "run_pathway_enrichment",
+                    "params": {"direction": direction, "database": "KEGG"},
+                })
+            elif "reactome" in msg_lower:
+                calls.append({
+                    "source_type": "service", "source_key": "edgepython",
+                    "tool": "run_pathway_enrichment",
+                    "params": {"direction": direction, "database": "REAC"},
+                })
+            else:
+                calls.append({
+                    "source_type": "service", "source_key": "edgepython",
+                    "tool": "run_go_enrichment",
+                    "params": {"direction": direction},
+                })
+
     # --- Dogme / Analyzer file-parsing patterns ---
     # When in a Dogme analysis skill and user asks to parse/show a file,
     # auto-generate find_file + parse/read calls so the LLM gets real data.
@@ -735,6 +766,14 @@ def _validate_edgepython_params(
             )
             if ct_match:
                 params["pair"] = [ct_match.group(1).strip(), ct_match.group(2).strip()]
+
+    elif tool in ("run_go_enrichment", "run_pathway_enrichment", "filter_de_genes"):
+        # Auto-detect direction from user message
+        if not params.get("direction"):
+            if "up" in text_pool.lower() and "down" not in text_pool.lower():
+                params["direction"] = "up"
+            elif "down" in text_pool.lower() and "up" not in text_pool.lower():
+                params["direction"] = "down"
 
     if params != original_params:
         logger.info("edgepython param extraction filled missing params",

@@ -261,6 +261,19 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
         if _has_download and (_has_file_accession or _has_url):
             return "download_files"
 
+    # --- Signals for enrichment analysis ---
+    _enrichment_words = [
+        "go enrichment", "gene ontology", "pathway enrichment",
+        "go analysis", "pathway analysis", "enrichment analysis",
+        "kegg enrichment", "reactome enrichment",
+        "biological process", "molecular function", "cellular component",
+        "enriched terms", "enriched pathways", "enriched go",
+        "go:bp", "go:mf", "go:cc",
+    ]
+    if current_skill != "enrichment_analysis":
+        if any(w in msg_lower for w in _enrichment_words):
+            return "enrichment_analysis"
+
     # --- Signals for gene lookup (routes to differential_expression / edgePython) ---
     _gene_words = [
         "ensembl", "ensembl id", "gene id", "gene symbol",

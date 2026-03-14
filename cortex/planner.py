@@ -59,6 +59,10 @@ _MULTI_STEP_PATTERNS: list[re.Pattern] = [
     # Search + compare to local
     re.compile(r"(?:download|get|fetch)\s+.*encode.*(?:compare|vs)", re.I),
     re.compile(r"compare\s+(?:my\s+)?(?:local|sample).*(?:to|with|against)\s+.*(?:encode|public)", re.I),
+    # Enrichment analysis
+    re.compile(r"(?:run|do|perform)\s+(?:a\s+)?(?:GO|gene\s+ontology|enrichment|pathway)\s+(?:analysis|enrichment)", re.I),
+    re.compile(r"(?:KEGG|Reactome)\s+(?:enrichment|analysis|pathway)", re.I),
+    re.compile(r"(?:what|which)\s+(?:GO\s+terms?|pathways?|biological\s+processes?)\s+(?:are\s+)?enriched", re.I),
 ]
 
 # Patterns that signal an INFORMATIONAL request
@@ -430,6 +434,14 @@ _RUN_WORKFLOW_PATTERNS = [
     re.compile(r"analyze\s+(?:my\s+)?(?:local\s+)?(?:sample|data)", re.I),
 ]
 
+_ENRICHMENT_PATTERNS = [
+    re.compile(r"(?:run|do|perform)\s+(?:a\s+)?(?:GO|gene\s+ontology|enrichment|pathway)\s+(?:analysis|enrichment)", re.I),
+    re.compile(r"(?:GO|gene\s+ontology|enrichment|pathway)\s+(?:analysis|enrichment)\s+(?:on|for|of)", re.I),
+    re.compile(r"(?:what|which)\s+(?:GO\s+terms?|pathways?|biological\s+processes?)\s+(?:are\s+)?enriched", re.I),
+    re.compile(r"(?:KEGG|Reactome)\s+(?:enrichment|analysis|pathway)", re.I),
+    re.compile(r"(?:enrichment|GO)\s+(?:on|for)\s+(?:the\s+)?(?:up|down|significant|DE)", re.I),
+]
+
 
 def _detect_plan_type(message: str) -> str | None:
     """Return plan type string or None.
@@ -440,27 +452,31 @@ def _detect_plan_type(message: str) -> str | None:
     for pat in _DE_PATTERNS:
         if pat.search(message):
             return "run_de_pipeline"
-    # 2. Search + compare to local
+    # 2. Enrichment analysis
+    for pat in _ENRICHMENT_PATTERNS:
+        if pat.search(message):
+            return "run_enrichment"
+    # 3. Search + compare to local
     for pat in _SEARCH_COMPARE_LOCAL_PATTERNS:
         if pat.search(message):
             return "search_compare_to_local"
-    # 3. Compare workflows (before generic compare)
+    # 4. Compare workflows (before generic compare)
     for pat in _COMPARE_WORKFLOW_PATTERNS:
         if pat.search(message):
             return "compare_workflows"
-    # 4. Compare samples
+    # 5. Compare samples
     for pat in _COMPARE_PATTERNS:
         if pat.search(message):
             return "compare_samples"
-    # 5. Download + analyze
+    # 6. Download + analyze
     for pat in _DOWNLOAD_ANALYZE_PATTERNS:
         if pat.search(message):
             return "download_analyze"
-    # 6. Parse + plot + interpret
+    # 7. Parse + plot + interpret
     for pat in _PARSE_PLOT_PATTERNS:
         if pat.search(message):
             return "parse_plot_interpret"
-    # 7. Run workflow
+    # 8. Run workflow
     for pat in _RUN_WORKFLOW_PATTERNS:
         if pat.search(message):
             return "run_workflow"
@@ -531,6 +547,20 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         m = re.search(r"(\w+)\s+(?:vs?\.?|versus|compared?\s+to)\s+(\w+)", message, re.I)
         if m:
             params["contrast"] = f"{m.group(1)} - {m.group(2)}"
+        return params
+
+    if plan_type == "run_enrichment":
+        msg = message.lower()
+        if "up" in msg and "down" not in msg:
+            params["direction"] = "up"
+        elif "down" in msg and "up" not in msg:
+            params["direction"] = "down"
+        else:
+            params["direction"] = "all"
+        if "kegg" in msg:
+            params["database"] = "KEGG"
+        elif "reactome" in msg:
+            params["database"] = "REAC"
         return params
 
     if plan_type == "parse_plot_interpret":
@@ -640,6 +670,69 @@ def _template_run_de_pipeline(params: dict) -> dict:
         "title": f"Differential expression: {contrast}",
         "goal": params.get("goal", f"Run DE analysis: {contrast}"),
         "workflow_type": "de_analysis",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
+# ---- Template: run_enrichment ---------------------------------------------
+
+def _template_run_enrichment(params: dict) -> dict:
+    """
+    Deterministic plan for enrichment analysis.
+    Steps: FILTER_DE_GENES → RUN_GO_ENRICHMENT → RUN_PATHWAY_ENRICHMENT → PLOT_ENRICHMENT → SUMMARIZE_ENRICHMENT
+    """
+    direction = params.get("direction", "all")
+    database = params.get("database")
+
+    steps = []
+    idx = 0
+
+    s_filter = _make_step("FILTER_DE_GENES", f"Filter DE genes ({direction})", idx,
+                           tool_calls=[{"source_key": "edgepython", "tool": "filter_de_genes",
+                                        "params": {"direction": direction}}])
+    steps.append(s_filter)
+    idx += 1
+
+    s_go = _make_step("RUN_GO_ENRICHMENT", f"GO enrichment ({direction})", idx,
+                       depends_on=[s_filter["id"]],
+                       tool_calls=[{"source_key": "edgepython", "tool": "run_go_enrichment",
+                                    "params": {"direction": direction}}])
+    steps.append(s_go)
+    idx += 1
+
+    # Add pathway enrichment unless user specifically asked for GO only
+    if database != "GO_ONLY":
+        db = database or "KEGG"
+        s_pathway = _make_step("RUN_PATHWAY_ENRICHMENT", f"{db} pathway enrichment ({direction})", idx,
+                                depends_on=[s_filter["id"]],
+                                tool_calls=[{"source_key": "edgepython", "tool": "run_pathway_enrichment",
+                                             "params": {"direction": direction, "database": db}}])
+        steps.append(s_pathway)
+        idx += 1
+        plot_deps = [s_go["id"], s_pathway["id"]]
+    else:
+        plot_deps = [s_go["id"]]
+
+    s_plot = _make_step("PLOT_ENRICHMENT", "Plot enrichment results", idx,
+                         depends_on=plot_deps,
+                         tool_calls=[{"source_key": "edgepython", "tool": "generate_plot",
+                                      "params": {"plot_type": "enrichment_bar"}}])
+    steps.append(s_plot)
+    idx += 1
+
+    s_summarize = _make_step("SUMMARIZE_ENRICHMENT", "Interpret enrichment results", idx,
+                              depends_on=[s_plot["id"]])
+    steps.append(s_summarize)
+
+    return {
+        "plan_type": "run_enrichment",
+        "title": f"Enrichment analysis ({direction})",
+        "goal": params.get("goal", f"Run enrichment analysis ({direction})"),
+        "workflow_type": "enrichment_analysis",
         "auto_execute_safe_steps": True,
         "status": "PENDING",
         "current_step_id": steps[0]["id"],
@@ -882,6 +975,10 @@ def generate_plan(
     # 1. Deterministic templates
     if plan_type == "run_de_pipeline":
         plan = _template_run_de_pipeline(params)
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return plan
+    if plan_type == "run_enrichment":
+        plan = _template_run_enrichment(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return plan
     if plan_type == "search_compare_to_local":

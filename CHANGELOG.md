@@ -1,5 +1,55 @@
 # Changelog - March 2026
 
+## [3.2.11] - 2026-03-13
+
+### Features
+
+- **GO & pathway enrichment analysis** — new `enrichment_analysis` skill
+  with 5 MCP tools (`filter_de_genes`, `run_go_enrichment`,
+  `run_pathway_enrichment`, `get_enrichment_results`, `get_term_genes`)
+  wrapping g:Profiler for Gene Ontology (BP/MF/CC), KEGG, and Reactome
+  enrichment. Supports dual-mode input: from DE results or explicit gene
+  lists. Species auto-detected from gene ID prefixes (ENSG→human,
+  ENSMUSG→mouse).
+
+- **Enrichment visualizations** — two new plot types in `generate_plot`:
+  `enrichment_bar` (horizontal bar chart colored by source) and
+  `enrichment_dot` (bubble plot with gene ratio, intersection size, and
+  p-value). Both render as static PNGs via matplotlib.
+
+- **Enrichment plan template** — 9th deterministic plan template
+  (`run_enrichment`) generates FILTER_DE_GENES → RUN_GO_ENRICHMENT →
+  RUN_PATHWAY_ENRICHMENT → PLOT_ENRICHMENT → SUMMARIZE_ENRICHMENT. All
+  enrichment steps are safe (no approval required).
+
+- **Enrichment skill routing** — enrichment keywords auto-detected in
+  `_auto_detect_skill_switch` and routed from Welcome, DE, and any other
+  skill. Welcome menu updated with option 6. DE skill routes enrichment
+  requests to the new skill.
+
+- **Enrichment auto-generation** — `data_call_generator.py` pattern-matches
+  GO/pathway/KEGG/Reactome keywords and auto-generates tool calls when the
+  LLM fails to emit proper DATA_CALL tags. Direction (up/down/all)
+  extracted from user message.
+
+### Changes
+
+- `edgepython_mcp/edgepython_server.py` — 5 new enrichment tools, 2 helper
+  functions, 2 enrichment plot types, enrichment state management
+- `edgepython_mcp/tool_schemas.py` — 5 new tool schemas (41 total)
+- `skills/Enrichment_Analysis.md` — new skill file with routing, plan
+  chains, DATA_CALL examples
+- `cortex/config.py` — registered enrichment_analysis skill + service
+- `cortex/plan_executor.py` — 5 new safe step kinds + tool defaults
+- `cortex/planner.py` — enrichment patterns, template, detection, dispatch
+- `cortex/prompt_templates/planning_system_prompt.md` — 5 new step kinds
+- `cortex/app.py` — enrichment tools in _EDGEPYTHON_ONLY_TOOLS
+- `cortex/data_call_generator.py` — enrichment auto-generation + validation
+- `cortex/plan_chains.py` — enrichment step icons
+- `cortex/llm_validators.py` — enrichment skill auto-detection
+- `skills/Welcome.md` — option 6 + enrichment routing rule
+- `skills/Differential_Expression.md` — routes enrichment to new skill
+
 ## [3.2.10] - 2026-03-13
 
 ### Bug Fixes
