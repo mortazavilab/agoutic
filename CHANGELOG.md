@@ -1,5 +1,67 @@
 # Changelog - March 2026
 
+## [3.2.11] - 2026-03-14
+
+### Features
+
+- **GO/pathway enrichment analysis** — full enrichment pipeline integrated into
+  edgePython: filter DE genes by FDR/logFC/direction, run Gene Ontology (BP/MF/CC)
+  enrichment via g:Profiler, run KEGG or Reactome pathway enrichment, retrieve
+  result tables, and explore genes contributing to specific GO terms or pathways.
+
+- **Five new edgePython MCP tools** — `filter_de_genes`, `run_go_enrichment`,
+  `run_pathway_enrichment`, `get_enrichment_results`, and `get_term_genes` are
+  now registered in `edgepython_server.py` and fully described in
+  `edgepython_mcp/tool_schemas.py`.
+
+- **Enrichment plot types** — `generate_plot` now supports two new plot types:
+  `enrichment_bar` (horizontal bar chart colored by ontology source, sorted by
+  -log10 p-value) and `enrichment_dot` (bubble plot with gene ratio on x-axis,
+  color by -log10 p-value, size by intersection count).
+
+- **`run_enrichment` plan template (9th template)** — `cortex/planner.py` gains
+  a deterministic 5-step plan: FILTER_DE_GENES → RUN_GO_ENRICHMENT →
+  RUN_PATHWAY_ENRICHMENT → PLOT_ENRICHMENT → SUMMARIZE_ENRICHMENT. Routing
+  patterns (`_ENRICHMENT_PATTERNS`) detect phrases like "run GO enrichment",
+  "KEGG pathway analysis", and "what pathways are enriched". Direction and
+  database are auto-extracted from the user message.
+
+- **Auto-generated enrichment DATA_CALL tags** — `cortex/data_call_generator.py`
+  detects enrichment/GO/pathway keywords and auto-generates the correct
+  `run_go_enrichment` or `run_pathway_enrichment` tool call with direction
+  inferred from context. Param validation extended to fill missing `direction`
+  for `run_go_enrichment`, `run_pathway_enrichment`, and `filter_de_genes`.
+
+- **`Enrichment_Analysis` skill** — new `skills/Enrichment_Analysis.md` defines
+  the enrichment skill scope, routing rules, example prompts, inputs, expected
+  outputs, and plan chains for common enrichment workflows (GO-only,
+  pathway-only, compare up/down, plot-only).
+
+- **Automatic species detection** — `_detect_species_code()` infers the g:Profiler
+  organism code (`Hs`/`Mm`) from gene ID prefixes (`ENSG`/`ENSMUSG`) or via the
+  gene annotator, with a human-genome fallback.
+
+### Changes
+
+- `edgepython_mcp/edgepython_server.py` — `_state` extended with
+  `enrichment_results`, `last_enrichment`, `_filtered_genes`; `reset_state`
+  clears new keys; `generate_plot` extended with `enrichment_bar` /
+  `enrichment_dot`; new enrichment helper functions and tools added
+- `edgepython_mcp/tool_schemas.py` — schema entries for all five new enrichment
+  tools
+- `cortex/planner.py` — `_ENRICHMENT_PATTERNS`, `_detect_plan_type` branch,
+  `_extract_plan_params` branch, and `_template_run_enrichment` function;
+  docstring updated from "Eight" to "Nine plan templates"
+- `cortex/data_call_generator.py` — enrichment auto-call block and enrichment
+  param-validation branch
+- `skills/Enrichment_Analysis.md` — new skill file (175 lines)
+- `skills/Welcome.md` — enrichment analysis routing rule added
+- `skills/Differential_Expression.md` — minor routing update
+- `cortex/plan_chains.py` — minor update
+- `cortex/plan_executor.py` — minor update
+- `cortex/config.py` — minor update
+- `cortex/prompt_templates/planning_system_prompt.md` — updated template count
+
 ## [3.2.10] - 2026-03-13
 
 ### Bug Fixes
