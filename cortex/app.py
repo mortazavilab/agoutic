@@ -3835,60 +3835,101 @@ What would you like to do?
                         })
                         continue
 
-                    # --- ENCODE search retry: biosample ↔ assay swap on 0 results ---
-                    # When a search returns zero results, the term might have been
-                    # classified wrong (biosample vs assay).  Try the alternate tool.
-                    if source_key == "encode" \
-                            and isinstance(result_data, dict) \
-                            and result_data.get("total", -1) == 0 \
-                            and tool_name in ("search_by_biosample", "search_by_assay"):
-                        _swap_tool = None
-                        _swap_params: dict = {}
-
-                        if tool_name == "search_by_biosample":
-                            # The search_term might actually be an assay name
-                            _st = params.get("search_term", "")
-                            if _st and _looks_like_assay(_st):
-                                _swap_tool = "search_by_assay"
-                                _swap_params = {"assay_title": _st}
-                                if "organism" in params:
-                                    _swap_params["organism"] = params["organism"]
-                            elif _st:
-                                # Even if it doesn't look like an assay, try anyway
-                                _swap_tool = "search_by_assay"
-                                _swap_params = {"assay_title": _st}
-                                if "organism" in params:
-                                    _swap_params["organism"] = params["organism"]
-
-                        elif tool_name == "search_by_assay":
-                            # The assay_title might actually be a biosample name
-                            _at = params.get("assay_title", "")
-                            if _at and not _looks_like_assay(_at):
-                                _swap_tool = "search_by_biosample"
-                                _swap_params = {"search_term": _at}
-                                if "organism" in params:
-                                    _swap_params["organism"] = params["organism"]
-
-                        if _swap_tool:
+                    # --- ENCODE search retry: relaxation + biosample ↔ assay swap ---
+                    # Detect zero results for both list and dict return types.
+                    _is_zero_results = (
+                        source_key == "encode"
+                        and tool_name in ("search_by_biosample", "search_by_assay")
+                        and (
+                            (isinstance(result_data, list) and len(result_data) == 0)
+                            or (isinstance(result_data, dict) and result_data.get("total", -1) == 0)
+                        )
+                    )
+                    if _is_zero_results:
+                        # --- Phase 1: relax assay_title filter on compound queries ---
+                        # When both search_term and assay_title are present and we got
+                        # 0 results, the assay filter may be too restrictive.  Retry
+                        # without assay_title before trying the biosample↔assay swap.
+                        _relaxed = False
+                        if tool_name == "search_by_biosample" \
+                                and params.get("search_term") and params.get("assay_title"):
+                            _relaxed_params = {k: v for k, v in params.items()
+                                               if k != "assay_title"}
                             logger.warning(
-                                "ENCODE search returned 0 results — retrying with alternate tool",
-                                original_tool=tool_name, swap_tool=_swap_tool,
-                                original_params=params, swap_params=_swap_params,
+                                "ENCODE compound search returned 0 — retrying without assay filter",
+                                original_params=params, relaxed_params=_relaxed_params,
                             )
                             try:
-                                _swap_result = await mcp_client.call_tool(_swap_tool, **_swap_params)
-                                if isinstance(_swap_result, dict) and _swap_result.get("total", 0) > 0:
-                                    result_data = _swap_result
-                                    tool_name = _swap_tool
-                                    params = _swap_params
-                                    logger.info("Alternate tool returned results",
-                                               tool=_swap_tool, total=_swap_result.get("total"))
-                                else:
-                                    logger.info("Alternate tool also returned 0 results",
-                                               tool=_swap_tool)
-                            except Exception as _swap_err:
-                                logger.warning("Alternate tool call failed",
-                                              tool=_swap_tool, error=str(_swap_err))
+                                _relax_result = await mcp_client.call_tool(
+                                    tool_name, **_relaxed_params)
+                                _relax_count = (
+                                    len(_relax_result) if isinstance(_relax_result, list)
+                                    else _relax_result.get("total", 0)
+                                        if isinstance(_relax_result, dict) else 0
+                                )
+                                if _relax_count > 0:
+                                    result_data = _relax_result
+                                    params = _relaxed_params
+                                    _relaxed = True
+                                    logger.info("Relaxed search returned results",
+                                               tool=tool_name, count=_relax_count)
+                            except Exception as _relax_err:
+                                logger.warning("Relaxed search failed",
+                                              tool=tool_name, error=str(_relax_err))
+
+                        # --- Phase 2: biosample ↔ assay swap ---
+                        # Only if relaxation didn't help (or wasn't applicable).
+                        if not _relaxed:
+                            _swap_tool = None
+                            _swap_params: dict = {}
+
+                            if tool_name == "search_by_biosample":
+                                _st = params.get("search_term", "")
+                                if _st and _looks_like_assay(_st):
+                                    _swap_tool = "search_by_assay"
+                                    _swap_params = {"assay_title": _st}
+                                    if "organism" in params:
+                                        _swap_params["organism"] = params["organism"]
+                                elif _st:
+                                    _swap_tool = "search_by_assay"
+                                    _swap_params = {"assay_title": _st}
+                                    if "organism" in params:
+                                        _swap_params["organism"] = params["organism"]
+
+                            elif tool_name == "search_by_assay":
+                                _at = params.get("assay_title", "")
+                                if _at and not _looks_like_assay(_at):
+                                    _swap_tool = "search_by_biosample"
+                                    _swap_params = {"search_term": _at}
+                                    if "organism" in params:
+                                        _swap_params["organism"] = params["organism"]
+
+                            if _swap_tool:
+                                logger.warning(
+                                    "ENCODE search returned 0 results — retrying with alternate tool",
+                                    original_tool=tool_name, swap_tool=_swap_tool,
+                                    original_params=params, swap_params=_swap_params,
+                                )
+                                try:
+                                    _swap_result = await mcp_client.call_tool(
+                                        _swap_tool, **_swap_params)
+                                    _swap_count = (
+                                        len(_swap_result) if isinstance(_swap_result, list)
+                                        else _swap_result.get("total", 0)
+                                            if isinstance(_swap_result, dict) else 0
+                                    )
+                                    if _swap_count > 0:
+                                        result_data = _swap_result
+                                        tool_name = _swap_tool
+                                        params = _swap_params
+                                        logger.info("Alternate tool returned results",
+                                                   tool=_swap_tool, count=_swap_count)
+                                    else:
+                                        logger.info("Alternate tool also returned 0 results",
+                                                   tool=_swap_tool)
+                                except Exception as _swap_err:
+                                    logger.warning("Alternate tool call failed",
+                                                  tool=_swap_tool, error=str(_swap_err))
 
                     try:
                         source_results.append({

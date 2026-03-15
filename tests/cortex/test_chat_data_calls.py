@@ -1153,6 +1153,105 @@ class TestEncodeSearchSwap:
         resp = _chat(client, "find ChIP-seq experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
 
+    def test_empty_list_triggers_swap(self, SL, seed, tmp_path):
+        """search_by_biosample returns a list, not a dict. An empty list []
+        should trigger the retry swap just like {'total': 0}."""
+        mock_mcp = AsyncMock()
+        calls_log = []
+        call_results = [
+            [],  # search_by_biosample returns empty list (ENCODELIB format)
+            {"total": 3, "experiments": [{"accession": "ENCSR999"}]},  # swap → search_by_assay
+        ]
+        call_idx = [0]
+        async def mock_call_tool(tool_name, **kwargs):
+            calls_log.append((tool_name, dict(kwargs)))
+            idx = call_idx[0]
+            call_idx[0] += 1
+            if idx < len(call_results):
+                return call_results[idx]
+            return {"total": 0}
+
+        mock_mcp.call_tool = mock_call_tool
+
+        call_count = [0]
+        def think(msg, skill, history):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return (
+                    "Searching.\n"
+                    "[[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=ATAC-seq]]",
+                    {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+                )
+            return (
+                "Found results.",
+                {"prompt_tokens": 15, "completion_tokens": 10, "total_tokens": 25},
+            )
+
+        extra = [
+            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "find ATAC-seq experiments", skill="ENCODE_Search")
+        assert resp.status_code == 200
+        # Verify both calls were made (original + swap)
+        assert len(calls_log) >= 2
+        assert calls_log[0][0] == "search_by_biosample"
+        assert calls_log[1][0] == "search_by_assay"
+
+    def test_compound_query_relaxation(self, SL, seed, tmp_path):
+        """When search_by_biosample with both search_term and assay_title returns 0,
+        should first try dropping assay_title before trying the tool swap."""
+        mock_mcp = AsyncMock()
+        calls_log = []
+        async def mock_call_tool(tool_name, **kwargs):
+            calls_log.append((tool_name, dict(kwargs)))
+            # First call: compound search returns empty list
+            if len(calls_log) == 1:
+                return []
+            # Second call: relaxed search (no assay_title) returns results
+            if len(calls_log) == 2 and "assay_title" not in kwargs:
+                return [
+                    {"accession": "ENCSR001", "assay": "total RNA-seq",
+                     "biosample": "K562", "organism": "Homo sapiens"},
+                    {"accession": "ENCSR002", "assay": "polyA plus RNA-seq",
+                     "biosample": "K562", "organism": "Homo sapiens"},
+                ]
+            return []
+
+        mock_mcp.call_tool = mock_call_tool
+
+        call_count = [0]
+        def think(msg, skill, history):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return (
+                    "Searching for RNA-seq in K562.\n"
+                    "[[DATA_CALL: consortium=encode, tool=search_by_biosample, "
+                    "search_term=K562, assay_title=total RNA-seq]]",
+                    {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+                )
+            return (
+                "Found 2 experiments.",
+                {"prompt_tokens": 15, "completion_tokens": 10, "total_tokens": 25},
+            )
+
+        extra = [
+            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "How many RNA-seq experiments for K562", skill="ENCODE_Search")
+        assert resp.status_code == 200
+        # Verify: first compound call, then relaxed (without assay_title)
+        assert len(calls_log) == 2
+        assert calls_log[0][0] == "search_by_biosample"
+        assert "assay_title" in calls_log[0][1]  # original had assay_title
+        assert calls_log[1][0] == "search_by_biosample"
+        assert "assay_title" not in calls_log[1][1]  # relaxed — no assay_title
+
 
 # ===========================================================================
 # 12. Large result truncation
