@@ -1,5 +1,30 @@
 # Changelog - March 2026
 
+## [3.3.1] - 2026-03-15
+
+### Bug Fixes
+
+- **ENCODE search retry now handles list results** — `search_by_biosample`
+  (ENCODELIB) returns a list, but the zero-result retry guard only checked
+  `isinstance(result_data, dict)`.  Empty list `[]` now correctly triggers
+  the retry pipeline, matching the existing dict-based `{"total": 0}` path.
+
+- **Compound query relaxation before tool swap** — when a combined search
+  (`search_term=K562, assay_title=total RNA-seq`) returns 0 results, the
+  system now drops the `assay_title` filter and retries with just the
+  biosample first (Phase 1).  Only if relaxation also fails does it fall
+  through to the biosample↔assay tool swap (Phase 2).  Previously, the
+  swap would try `search_by_assay(assay_title=K562)` — nonsensical and
+  guaranteed to fail.
+
+### Changes
+
+- `cortex/app.py` — rewrote ENCODE search retry block: two-phase strategy
+  (relax filter → swap tool); detect zero results for both list and dict
+  return types
+- `tests/cortex/test_chat_data_calls.py` — added `test_empty_list_triggers_swap`
+  and `test_compound_query_relaxation` to `TestEncodeSearchSwap`
+
 ## [3.3.0] - 2026-03-14
 
 ### Features
