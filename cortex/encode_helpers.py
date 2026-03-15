@@ -446,7 +446,19 @@ def _validate_encode_params(tool: str, params: dict, user_message: str) -> dict:
                 logger.warning("Injected missing search_term from user message",
                               search_term=extracted)
 
-    # --- Fix 2: strip organism unless user explicitly mentioned it ---
+    # --- Fix 2: resolve assay_title through alias map ---
+    # The LLM often emits generic names like "RNA-seq" while ENCODE experiments
+    # use canonical names like "total RNA-seq".  Without this, the ENCODELIB
+    # exact-match filter returns 0 results.
+    if "assay_title" in params and params["assay_title"]:
+        _assay_lower = params["assay_title"].lower()
+        _canonical = _ENCODE_ASSAY_ALIASES.get(_assay_lower)
+        if _canonical:
+            logger.info("Resolved assay alias",
+                       original=params["assay_title"], canonical=_canonical)
+            params["assay_title"] = _canonical
+
+    # --- Fix 3: strip organism unless user explicitly mentioned it ---
     if "organism" in params:
         msg_lower = user_message.lower()
         _explicit_organism = any(kw in msg_lower for kw in (
@@ -458,7 +470,7 @@ def _validate_encode_params(tool: str, params: dict, user_message: str) -> dict:
             logger.info("Stripped auto-organism (user didn't request it)",
                        removed_organism=removed)
 
-    # --- Fix 3: replace hallucinated ENCSR with what the user explicitly stated ---
+    # --- Fix 4: replace hallucinated ENCSR with what the user explicitly stated ---
     # If the user message contains a valid ENCSR accession and the LLM put a
     # *different* ENCSR in "accession", always trust the user's value.
     if "accession" in params and params["accession"]:
