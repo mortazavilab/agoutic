@@ -29,7 +29,7 @@ from sqlalchemy.pool import StaticPool
 @pytest.fixture()
 def db_engine(tmp_path):
     """Create an in-memory SQLite engine with all tables."""
-    from cortex.models import Base
+    from common.database import Base
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},

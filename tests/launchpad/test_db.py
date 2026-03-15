@@ -14,7 +14,8 @@ from launchpad.db import (
     job_to_dict,
     update_job_status,
 )
-from launchpad.models import Base, DogmeJob, JobLog
+from common.database import Base
+from launchpad.models import DogmeJob, JobLog
 
 
 @pytest.fixture()

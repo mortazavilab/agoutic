@@ -421,41 +421,6 @@ TOOL_SCHEMAS = {
             "required": [],
         },
     },
-    "translate_gene_ids": {
-        "description": "Translate a list of Ensembl gene IDs to gene symbols.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "gene_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of Ensembl gene IDs (e.g. ['ENSG00000141510']).",
-                },
-                "organism": {"type": "string", "description": "'human' or 'mouse'. Auto-detected if not provided."},
-            },
-            "required": ["gene_ids"],
-        },
-    },
-    "lookup_gene": {
-        "description": "Look up genes by symbol or Ensembl ID (bidirectional). Provide gene_symbols to get Ensembl IDs, or gene_ids to get symbols.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "gene_symbols": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Gene symbols to look up (e.g. ['TP53', 'BRCA1']).",
-                },
-                "gene_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Ensembl gene IDs to look up (e.g. ['ENSG00000141510']).",
-                },
-                "organism": {"type": "string", "description": "'human' or 'mouse'. Auto-detected if not provided."},
-            },
-            "required": [],
-        },
-    },
     "filter_de_genes": {
         "description": "Filter DE results to extract gene lists for enrichment analysis. Splits by direction (up/down/all) with FDR and logFC thresholds.",
         "parameters": {
@@ -467,64 +432,6 @@ TOOL_SCHEMAS = {
                 "direction": {"type": "string", "description": "'all', 'up', or 'down'. Default: 'all'."},
             },
             "required": [],
-        },
-    },
-    "run_go_enrichment": {
-        "description": "Run Gene Ontology enrichment analysis (BP/MF/CC) on DE results or a gene list via g:Profiler.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "result_name": {"type": "string", "description": "Name of DE result. Default: most recent."},
-                "gene_list": {"type": "string", "description": "Comma-separated gene IDs (e.g. 'TP53,BRCA1'). Overrides result_name."},
-                "direction": {"type": "string", "description": "'all', 'up', or 'down'. Default: 'all'."},
-                "fdr_threshold": {"type": "number", "description": "FDR cutoff for DE genes. Default: 0.05."},
-                "logfc_threshold": {"type": "number", "description": "Minimum |logFC|. Default: 0."},
-                "species": {"type": "string", "description": "'auto', 'human', or 'mouse'. Default: 'auto'."},
-                "sources": {"type": "string", "description": "GO sources, comma-sep. Default: 'GO:BP,GO:MF,GO:CC'."},
-                "name": {"type": "string", "description": "Label for this result. Default: auto-generated."},
-            },
-            "required": [],
-        },
-    },
-    "run_pathway_enrichment": {
-        "description": "Run KEGG or Reactome pathway enrichment analysis on DE results or a gene list.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "result_name": {"type": "string", "description": "Name of DE result. Default: most recent."},
-                "gene_list": {"type": "string", "description": "Comma-separated gene IDs. Overrides result_name."},
-                "direction": {"type": "string", "description": "'all', 'up', or 'down'. Default: 'all'."},
-                "fdr_threshold": {"type": "number", "description": "FDR cutoff. Default: 0.05."},
-                "logfc_threshold": {"type": "number", "description": "Minimum |logFC|. Default: 0."},
-                "species": {"type": "string", "description": "'auto', 'human', or 'mouse'. Default: 'auto'."},
-                "database": {"type": "string", "description": "'KEGG' or 'REAC'. Default: 'KEGG'."},
-                "name": {"type": "string", "description": "Label for this result."},
-            },
-            "required": [],
-        },
-    },
-    "get_enrichment_results": {
-        "description": "Retrieve stored enrichment results with optional filtering by p-value and source.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Enrichment result name. Default: most recent."},
-                "max_terms": {"type": "integer", "description": "Max terms to return. Default: 30."},
-                "pvalue_threshold": {"type": "number", "description": "p-value filter. Default: 0.05."},
-                "source_filter": {"type": "string", "description": "Filter by source (e.g. 'GO:BP', 'KEGG')."},
-            },
-            "required": [],
-        },
-    },
-    "get_term_genes": {
-        "description": "Show genes contributing to a specific GO term or pathway from enrichment results.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "term_id": {"type": "string", "description": "Term ID (e.g. 'GO:0006915' or 'KEGG:04110')."},
-                "name": {"type": "string", "description": "Enrichment result name. Default: most recent."},
-            },
-            "required": ["term_id"],
         },
     },
 }

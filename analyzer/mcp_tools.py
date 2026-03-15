@@ -22,6 +22,18 @@ from analyzer.analysis_engine import (
 from analyzer.edgepython_adapter import call_edgepython_tool, relocate_edgepython_artifact
 from analyzer.config import MAX_PREVIEW_LINES
 from edgepython_mcp.tool_schemas import TOOL_SCHEMAS as EDGEPYTHON_TOOL_SCHEMAS
+from analyzer.gene_tools import translate_gene_ids, lookup_gene
+from analyzer.enrichment_engine import (
+    run_go_enrichment, run_pathway_enrichment,
+    get_enrichment_results, get_term_genes,
+)
+
+# Tools that have moved from edgePython to analyzer — exclude from proxy
+_EXCLUDED_FROM_PROXY = {
+    "translate_gene_ids", "lookup_gene",
+    "run_go_enrichment", "run_pathway_enrichment",
+    "get_enrichment_results", "get_term_genes",
+}
 
 
 def _json_serial(obj: Any) -> str:
@@ -44,6 +56,8 @@ def _prefixed_edgepython_schema() -> Dict[str, Any]:
     """
     proxy_schemas: Dict[str, Any] = {}
     for tool_name, schema in EDGEPYTHON_TOOL_SCHEMAS.items():
+        if tool_name in _EXCLUDED_FROM_PROXY:
+            continue
         prefixed_name = f"edgepython_{tool_name}"
         parameters = json.loads(json.dumps(schema.get("parameters", {})))
         properties = parameters.setdefault("properties", {})
@@ -110,6 +124,7 @@ async def _edgepython_proxy_tool(
 EDGEPYTHON_PROXY_TOOL_REGISTRY = {
     f"edgepython_{tool_name}": partial(_edgepython_proxy_tool, tool_name)
     for tool_name in EDGEPYTHON_TOOL_SCHEMAS.keys()
+    if tool_name not in _EXCLUDED_FROM_PROXY
 }
 
 
@@ -558,7 +573,15 @@ TOOL_REGISTRY = {
     "parse_csv_file": parse_csv_file_tool,
     "parse_bed_file": parse_bed_file_tool,
     "get_analysis_summary": get_analysis_summary_tool,
-    "categorize_job_files": categorize_job_files_tool
+    "categorize_job_files": categorize_job_files_tool,
+    # Gene annotation tools (moved from edgePython)
+    "translate_gene_ids": translate_gene_ids,
+    "lookup_gene": lookup_gene,
+    # Enrichment tools (moved from edgePython)
+    "run_go_enrichment": run_go_enrichment,
+    "run_pathway_enrichment": run_pathway_enrichment,
+    "get_enrichment_results": get_enrichment_results,
+    "get_term_genes": get_term_genes,
 }
 
 TOOL_REGISTRY.update(EDGEPYTHON_PROXY_TOOL_REGISTRY)
@@ -724,7 +747,158 @@ TOOL_SCHEMAS = {
             },
             "required": []
         }
-    }
+    },
+    # Gene annotation tools (moved from edgePython)
+    "translate_gene_ids": {
+        "description": "Translate Ensembl gene IDs to gene symbols.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gene_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of Ensembl gene IDs (e.g. ['ENSG00000141510'])"
+                },
+                "organism": {
+                    "type": "string",
+                    "description": "'human' or 'mouse'. Auto-detected from ID prefix if not provided."
+                },
+            },
+            "required": ["gene_ids"]
+        }
+    },
+    "lookup_gene": {
+        "description": "Look up genes by symbol or Ensembl ID (bidirectional).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gene_symbols": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gene symbols (e.g. ['TP53', 'BRCA1'])"
+                },
+                "gene_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ensembl gene IDs (e.g. ['ENSG00000141510'])"
+                },
+                "organism": {
+                    "type": "string",
+                    "description": "'human' or 'mouse'. Auto-detected if not provided."
+                },
+            },
+            "required": []
+        }
+    },
+    # Enrichment tools (moved from edgePython)
+    "run_go_enrichment": {
+        "description": "Run Gene Ontology enrichment analysis on a gene list.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gene_list": {
+                    "type": "string",
+                    "description": "Comma-separated gene IDs or symbols (e.g. 'TP53,BRCA1,MDM2')"
+                },
+                "species": {
+                    "type": "string",
+                    "description": "'auto', 'human', or 'mouse'. Default: auto-detect."
+                },
+                "sources": {
+                    "type": "string",
+                    "description": "GO sources, comma-separated. Default: 'GO:BP,GO:MF,GO:CC'."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Label for this enrichment result."
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Conversation/session identifier for state management."
+                },
+            },
+            "required": ["gene_list"]
+        }
+    },
+    "run_pathway_enrichment": {
+        "description": "Run pathway enrichment analysis (KEGG or Reactome) on a gene list.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gene_list": {
+                    "type": "string",
+                    "description": "Comma-separated gene IDs or symbols"
+                },
+                "species": {
+                    "type": "string",
+                    "description": "'auto', 'human', or 'mouse'. Default: auto-detect."
+                },
+                "database": {
+                    "type": "string",
+                    "description": "'KEGG' or 'REAC' (Reactome). Default: 'KEGG'."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Label for this enrichment result."
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Conversation/session identifier for state management."
+                },
+            },
+            "required": ["gene_list"]
+        }
+    },
+    "get_enrichment_results": {
+        "description": "Retrieve stored enrichment results with optional filtering.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Enrichment result name. Default: most recent."
+                },
+                "max_terms": {
+                    "type": "integer",
+                    "description": "Maximum terms to return. Default: 30."
+                },
+                "pvalue_threshold": {
+                    "type": "number",
+                    "description": "Filter terms by p-value. Default: 0.05."
+                },
+                "source_filter": {
+                    "type": "string",
+                    "description": "Filter by source (e.g. 'GO:BP', 'KEGG')."
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Conversation/session identifier for state management."
+                },
+            },
+            "required": []
+        }
+    },
+    "get_term_genes": {
+        "description": "Show genes contributing to a specific GO term or pathway.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "term_id": {
+                    "type": "string",
+                    "description": "Term identifier (e.g. 'GO:0006915' or 'KEGG:04110')"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Enrichment result name. Default: most recent."
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Conversation/session identifier for state management."
+                },
+            },
+            "required": ["term_id"]
+        }
+    },
 }
 
 TOOL_SCHEMAS.update(EDGEPYTHON_PROXY_TOOL_SCHEMAS)

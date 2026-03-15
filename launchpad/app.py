@@ -119,7 +119,10 @@ job_monitors: dict = {}  # Maps run_uuid -> monitoring task
 @app.on_event("startup")
 async def startup():
     """Initialize database on startup."""
-    await init_db()
+    from common.database import is_sqlite
+    if is_sqlite():
+        await init_db()  # Auto-create tables for local SQLite dev
+    # For Postgres, tables are managed by Alembic migrations
     logger.info("Launchpad initialized", max_concurrent_jobs=MAX_CONCURRENT_JOBS, poll_interval=JOB_POLL_INTERVAL)
 
 @app.on_event("shutdown")

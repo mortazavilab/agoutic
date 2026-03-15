@@ -15,7 +15,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from cortex.models import Base, User, Project, ProjectAccess, ProjectBlock
+from common.database import Base
+from cortex.models import User, Project, ProjectAccess, ProjectBlock
 from cortex.app import extract_job_parameters_from_conversation
 
 

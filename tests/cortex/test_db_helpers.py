@@ -9,7 +9,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from cortex.models import Base, ProjectBlock
+from common.database import Base
+from cortex.models import ProjectBlock
 from cortex.db import row_to_dict, next_seq_sync
 
 

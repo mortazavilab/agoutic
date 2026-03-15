@@ -1,19 +1,19 @@
 """
 Database connection and utilities for Launchpad.
+
+Delegates to common.database for engine/session creation.
+Retains Launchpad-specific CRUD helpers.
 """
 import json
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import select, func
-from launchpad.config import DATABASE_URL
-from launchpad.models import Base, DogmeJob, JobLog
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
-engine = create_async_engine(DATABASE_URL, echo=False)
-SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+from common.database import (
+    AsyncSessionLocal as SessionLocal,
+    init_db_async as init_db,
+)
+from launchpad.models import DogmeJob, JobLog
 
-async def init_db() -> None:
-    """Initialize database tables."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
 def job_to_dict(job: DogmeJob) -> dict:
     """Convert DogmeJob row to dictionary."""
@@ -49,13 +49,13 @@ async def create_job(
 ) -> DogmeJob:
     """Create a new job record."""
     import json
-    
+
     # Serialize reference_genome list to JSON string for storage
     if isinstance(reference_genome, list):
         reference_genome_str = json.dumps(reference_genome)
     else:
         reference_genome_str = reference_genome
-    
+
     job = DogmeJob(
         run_uuid=run_uuid,
         project_id=project_id,

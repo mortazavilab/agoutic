@@ -26,17 +26,12 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from common.database import Base
 from cortex.models import (
-    Base, User, Session as SessionModel, Project, ProjectAccess,
+    User, Session as SessionModel, Project, ProjectAccess,
     ProjectBlock, Conversation, ConversationMessage,
 )
 from cortex.app import app
-
-try:
-    from launchpad.models import Base as LaunchpadBase
-    _LP = True
-except ImportError:
-    _LP = False
 
 
 # ---------------------------------------------------------------------------
@@ -51,8 +46,6 @@ def test_engine():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(bind=engine)
-    if _LP:
-        LaunchpadBase.metadata.create_all(bind=engine)
     return engine
 
 

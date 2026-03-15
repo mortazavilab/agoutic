@@ -1,5 +1,78 @@
 # Changelog - March 2026
 
+## [3.3.0] - 2026-03-14
+
+### Features
+
+- **Centralized database infrastructure** — new `common/database.py` provides
+  shared `Base`, `DATABASE_URL`, lazy engine/session factories, and
+  `_import_all_models()` for all three services (cortex, launchpad, analyzer).
+  Eliminates three duplicate `Base(DeclarativeBase)` classes, three
+  `DATABASE_URL` definitions, and the `sqlite+aiosqlite → sqlite` URL
+  replacement hack that appeared in every service.
+
+- **Alembic database migrations** — `alembic/` with baseline migration
+  capturing all 18 existing tables. Existing databases stamped with
+  `alembic stamp head`. SQLite dev uses `create_all()` (gated behind
+  `is_sqlite()`); Postgres will use `alembic upgrade head`.
+
+- **Gene annotation & enrichment tools moved to Analyzer** — `lookup_gene`,
+  `translate_gene_ids`, `run_go_enrichment`, `run_pathway_enrichment`,
+  `get_enrichment_results`, and `get_term_genes` relocated from
+  edgePython MCP server to Analyzer where they belong. These tools have
+  no dependency on DE state — they use `common/gene_annotation.py`
+  (GeneAnnotator) and `gprofiler-official` directly.
+
+- **Per-conversation enrichment state** — enrichment results in Analyzer
+  are keyed by `conversation_id`, preventing state collisions across
+  concurrent conversations.
+
+- **Simplified enrichment API** — Analyzer enrichment tools accept only
+  explicit `gene_list` (comma-separated). No `result_name`/`fdr_threshold`/
+  `logfc_threshold` parameters. The LLM bridges DE → enrichment: call
+  `filter_de_genes` in edgePython, then pass the returned gene list to
+  Analyzer's `run_go_enrichment`/`run_pathway_enrichment`.
+
+### Changes
+
+- `common/database.py` — **new**: shared DB infrastructure (Base, engines,
+  sessions, DATABASE_URL, is_sqlite, init_db_sync/async, reset_engines)
+- `common/__init__.py` — database exports added to `__all__`
+- `cortex/models.py`, `launchpad/models.py`, `analyzer/models.py` — use
+  shared `Base` from `common.database`
+- `analyzer/models.py` — deleted duplicate `DogmeJob`, re-exports from
+  launchpad
+- `cortex/config.py`, `launchpad/config.py`, `analyzer/config.py` — removed
+  per-service `DB_FOLDER`/`DB_FILE`/`DATABASE_URL`; import from common
+- `cortex/db.py`, `launchpad/db.py`, `analyzer/db.py` — thin wrappers over
+  `common.database`
+- `cortex/dependencies.py` — removed inline `create_engine` + sync URL hack
+- `cortex/app.py` — removed inline engine creation in `resubmit_job`;
+  startup gated behind `is_sqlite()`; routing split into
+  `_EDGEPYTHON_ONLY_TOOLS` (annotate_genes, filter_de_genes) and
+  `_ANALYZER_ONLY_TOOLS` (6 gene/enrichment tools)
+- `launchpad/app.py` — startup gated behind `is_sqlite()`
+- `alembic.ini`, `alembic/env.py`, `alembic/script.py.mako` — **new**: Alembic
+  configuration and baseline migration
+- `environment.yml` — added `alembic>=1.13`, `asyncpg`, `psycopg2-binary`,
+  `gprofiler-official`
+- `analyzer/gene_tools.py` — **new**: translate_gene_ids, lookup_gene
+- `analyzer/enrichment_engine.py` — **new**: enrichment tools with
+  per-conversation state
+- `analyzer/mcp_tools.py` — registered 6 new native tools; excluded from
+  edgePython proxy
+- `analyzer/mcp_server.py` — added @mcp.tool() wrappers for 6 new tools
+- `cortex/config.py` — moved `enrichment_analysis` skill from edgepython
+  to analyzer in SERVICE_REGISTRY
+- `skills/Enrichment_Analysis.md` — DATA_CALL tags route enrichment tools
+  to `service:analyzer`; `filter_de_genes` stays at `service:edgepython`
+- `skills/Differential_Expression.md` — gene lookup DATA_CALLs route to
+  `service:analyzer`
+- `edgepython_mcp/edgepython_server.py` — removed 6 tools + `_detect_species_code`
+  helper (moved to analyzer); kept `filter_de_genes`, `annotate_genes`
+- `edgepython_mcp/tool_schemas.py` — removed 6 tool schemas
+- 23 test files — `Base` import changed to `common.database`
+
 ## [3.2.11] - 2026-03-13
 
 ### Features

@@ -23,8 +23,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from common.database import Base
 from cortex.models import (
-    Base, User, Session as SessionModel,
+    User, Session as SessionModel,
     Conversation, ConversationMessage,
     DeletedProjectTokenUsage, DeletedProjectTokenDaily,
 )

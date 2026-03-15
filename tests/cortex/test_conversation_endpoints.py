@@ -23,19 +23,13 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from common.database import Base
 from cortex.models import (
-    Base, User, Session as SessionModel, Project, ProjectAccess,
+    User, Session as SessionModel, Project, ProjectAccess,
     ProjectBlock, Conversation, ConversationMessage,
     DeletedProjectTokenUsage, DeletedProjectTokenDaily,
 )
 from cortex.app import app
-
-# Also import launchpad models so dogme_jobs table gets created
-try:
-    from launchpad.models import Base as LaunchpadBase
-    _LAUNCHPAD_AVAILABLE = True
-except ImportError:
-    _LAUNCHPAD_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +44,6 @@ def test_engine():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(bind=engine)
-    if _LAUNCHPAD_AVAILABLE:
-        LaunchpadBase.metadata.create_all(bind=engine)
     return engine
 
 

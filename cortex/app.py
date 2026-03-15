@@ -119,7 +119,10 @@ app.include_router(user_data_router)
 # Initialize database on startup
 @app.on_event("startup")
 async def startup_event():
-    init_db_sync()
+    from common.database import is_sqlite
+    if is_sqlite():
+        init_db_sync()  # Auto-create tables for local SQLite dev
+    # For Postgres, tables are managed by Alembic migrations
     # Fetch tool schemas from MCP servers (best-effort, non-blocking on failure)
     try:
         from cortex.config import SERVICE_REGISTRY
@@ -602,15 +605,10 @@ async def resubmit_job(run_uuid: str, request: Request):
 
     # Look up the original job params from dogme_jobs
     from launchpad.models import DogmeJob as LaunchpadDogmeJob
-    from cortex.config import DATABASE_URL
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import Session as SyncSession
 
-    sync_url = DATABASE_URL.replace("sqlite+aiosqlite://", "sqlite://")
-    engine = create_engine(sync_url, connect_args={"check_same_thread": False})
-
-    with SyncSession(engine) as db:
-        job = db.execute(
+    session = SessionLocal()
+    try:
+        job = session.execute(
             select(LaunchpadDogmeJob).where(LaunchpadDogmeJob.run_uuid == run_uuid)
         ).scalar_one_or_none()
         if not job:
@@ -644,9 +642,7 @@ async def resubmit_job(run_uuid: str, request: Request):
         # Find the project this job belongs to
         project_id = job.project_id
 
-    # Create approval gate block in the same project
-    session = SessionLocal()
-    try:
+        # Create approval gate block in the same project
         gate_block = _create_block_internal(
             session,
             project_id,
@@ -3575,10 +3571,14 @@ What would you like to do?
                 calls_by_source.setdefault(_ac_source, []).append(entry)
 
         # From new DATA_CALL tags
-        # Tools that always belong to edgepython, regardless of source in tag
+        # Tools that MUST route to edgepython (DE-stateful)
         _EDGEPYTHON_ONLY_TOOLS = frozenset({
-            "lookup_gene", "translate_gene_ids", "annotate_genes",
-            "filter_de_genes", "run_go_enrichment", "run_pathway_enrichment",
+            "annotate_genes", "filter_de_genes",
+        })
+        # Tools that MUST route to analyzer (gene annotation + enrichment)
+        _ANALYZER_ONLY_TOOLS = frozenset({
+            "lookup_gene", "translate_gene_ids",
+            "run_go_enrichment", "run_pathway_enrichment",
             "get_enrichment_results", "get_term_genes",
         })
         for match in data_call_matches:
@@ -3593,12 +3593,18 @@ What would you like to do?
                 logger.warning("Corrected hallucinated tool name",
                               original=tool_name, corrected=corrected_tool)
 
-            # Cross-source re-routing: gene lookup tools belong to edgepython
+            # Cross-source re-routing: DE-stateful tools belong to edgepython
             if corrected_tool in _EDGEPYTHON_ONLY_TOOLS and source_key != "edgepython":
                 logger.warning("Re-routing tool to edgepython",
                               tool=corrected_tool, original_source=f"{source_type}/{source_key}")
                 source_type = "service"
                 source_key = "edgepython"
+            # Cross-source re-routing: gene/enrichment tools belong to analyzer
+            elif corrected_tool in _ANALYZER_ONLY_TOOLS and source_key != "analyzer":
+                logger.warning("Re-routing tool to analyzer",
+                              tool=corrected_tool, original_source=f"{source_type}/{source_key}")
+                source_type = "service"
+                source_key = "analyzer"
             
             params = _parse_tag_params(params_str)
 

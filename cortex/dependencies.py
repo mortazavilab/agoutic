@@ -132,35 +132,29 @@ def require_run_uuid_access(run_uuid: str, user: User) -> None:
 
     session = SessionLocal()
     try:
-        # Use the shared SQLite DB — Cortex, 3, 4 all share it
-        # Import sync engine directly to avoid async/sync mismatch
-        from sqlalchemy import create_engine
-        from cortex.config import DATABASE_URL
-        sync_url = DATABASE_URL.replace("sqlite+aiosqlite://", "sqlite://")
-        engine = create_engine(sync_url, connect_args={"check_same_thread": False})
-        from sqlalchemy.orm import Session
-        with Session(engine) as db:
-            job = db.execute(
-                select(LaunchpadDogmeJob).where(LaunchpadDogmeJob.run_uuid == run_uuid)
-            ).scalar_one_or_none()
+        job = session.execute(
+            select(LaunchpadDogmeJob).where(LaunchpadDogmeJob.run_uuid == run_uuid)
+        ).scalar_one_or_none()
 
-            if not job:
-                raise HTTPException(status_code=404, detail="Job not found.")
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found.")
 
-            # If job has user_id, check direct ownership
-            if hasattr(job, 'user_id') and job.user_id:
-                if job.user_id != user.id and user.role != "admin":
-                    raise HTTPException(
-                        status_code=403,
-                        detail="You do not have access to this job."
-                    )
-                return
+        # If job has user_id, check direct ownership
+        if hasattr(job, 'user_id') and job.user_id:
+            if job.user_id != user.id and user.role != "admin":
+                raise HTTPException(
+                    status_code=403,
+                    detail="You do not have access to this job."
+                )
+            return
 
-            # Fallback: check project access
-            require_project_access(job.project_id, user, min_role="viewer")
+        # Fallback: check project access
+        require_project_access(job.project_id, user, min_role="viewer")
     except HTTPException:
         raise
     except Exception:
         # If we can't verify (e.g., table doesn't have user_id yet), allow
         # access for backward compat — the column migration may not have run
         pass
+    finally:
+        session.close()

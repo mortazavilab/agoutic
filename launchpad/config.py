@@ -13,15 +13,13 @@ AGOUTIC_DATA = Path(os.getenv("AGOUTIC_DATA", AGOUTIC_CODE / "data"))
 # --- STORAGE & DATABASE CONFIG (derived from AGOUTIC_DATA) ---
 LAUNCHPAD_WORK_DIR = AGOUTIC_DATA / "launchpad_work"
 LAUNCHPAD_LOGS_DIR = AGOUTIC_DATA / "launchpad_logs"
-DB_FOLDER = AGOUTIC_DATA / "database"
-DB_FILE = DB_FOLDER / "agoutic_v24.sqlite"  # Updated to v24 for multi-user support
 
 # Create directories
 LAUNCHPAD_WORK_DIR.mkdir(parents=True, exist_ok=True)
 LAUNCHPAD_LOGS_DIR.mkdir(parents=True, exist_ok=True)
-DB_FOLDER.mkdir(parents=True, exist_ok=True)
 
-DATABASE_URL = f"sqlite+aiosqlite:///{DB_FILE}"
+# DATABASE_URL is centralized in common.database
+from common.database import DATABASE_URL  # noqa: E402
 
 # Internal API secret for Cortex <-> Launchpad communication
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")

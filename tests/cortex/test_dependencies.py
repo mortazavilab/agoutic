@@ -16,7 +16,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from fastapi import HTTPException
 
-from cortex.models import Base, User, Project, ProjectAccess
+from common.database import Base
+from cortex.models import User, Project, ProjectAccess
 from cortex.dependencies import get_current_user, require_admin, require_project_access
 
 

@@ -20,7 +20,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from cortex.models import Base, User, Session as SessionModel
+from common.database import Base
+from cortex.models import User, Session as SessionModel
 from cortex.app import app
 
 

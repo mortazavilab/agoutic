@@ -23,7 +23,7 @@ GO & pathway enrichment analysis for gene lists derived from DE results or provi
 ## Inputs
 
 Enrichment analysis requires **one of**:
-1. **DE results** already in the pipeline (from a prior `test_contrast()` call) — use `result_name` to reference.
+1. **DE results** already in the pipeline (from a prior `test_contrast()` call) — use `filter_de_genes` in edgePython to extract the gene list first.
 2. **An explicit gene list** — comma-separated gene symbols or Ensembl IDs.
 
 Species is auto-detected from gene ID prefixes (ENSG → human, ENSMUSG → mouse).
@@ -37,17 +37,17 @@ Species is auto-detected from gene ID prefixes (ENSG → human, ENSMUSG → mous
 
 ### Step 2: Run GO enrichment
 ```
-[[DATA_CALL:service:edgepython:run_go_enrichment:direction=up,sources=GO:BP,GO:MF,GO:CC]]
+[[DATA_CALL:service:analyzer:run_go_enrichment:gene_list={genes},sources=GO:BP,GO:MF,GO:CC]]
 ```
 
 ### Step 3: Run pathway enrichment (KEGG)
 ```
-[[DATA_CALL:service:edgepython:run_pathway_enrichment:direction=up,database=KEGG]]
+[[DATA_CALL:service:analyzer:run_pathway_enrichment:gene_list={genes},database=KEGG]]
 ```
 
 ### Step 4: Run pathway enrichment (Reactome)
 ```
-[[DATA_CALL:service:edgepython:run_pathway_enrichment:direction=up,database=REAC]]
+[[DATA_CALL:service:analyzer:run_pathway_enrichment:gene_list={genes},database=REAC]]
 ```
 
 ### Step 5: Plot enrichment results
@@ -58,7 +58,7 @@ Species is auto-detected from gene ID prefixes (ENSG → human, ENSMUSG → mous
 
 ### Step 6: View term details
 ```
-[[DATA_CALL:service:edgepython:get_term_genes:term_id=GO:0006915]]
+[[DATA_CALL:service:analyzer:get_term_genes:term_id=GO:0006915]]
 ```
 
 ## Plan Chains
@@ -67,7 +67,7 @@ Species is auto-detected from gene ID prefixes (ENSG → human, ENSMUSG → mous
 **Triggers:** "run GO enrichment", "GO analysis on .* genes", "what GO terms are enriched"
 **Steps:**
 1. FILTER_DE_GENES — Filter significant genes from DE results
-2. RUN_GO_ENRICHMENT — Run GO enrichment (BP/MF/CC)
+2. RUN_GO_ENRICHMENT — Run GO enrichment (BP/MF/CC) with extracted gene list
 3. PLOT_ENRICHMENT — Generate enrichment bar plot
 4. SUMMARIZE_ENRICHMENT — Interpret biological significance
 
@@ -75,7 +75,7 @@ Species is auto-detected from gene ID prefixes (ENSG → human, ENSMUSG → mous
 **Triggers:** "run pathway enrichment", "KEGG analysis", "Reactome enrichment", "what pathways"
 **Steps:**
 1. FILTER_DE_GENES — Filter significant genes from DE results
-2. RUN_PATHWAY_ENRICHMENT — Run KEGG/Reactome enrichment
+2. RUN_PATHWAY_ENRICHMENT — Run KEGG/Reactome enrichment with extracted gene list
 3. PLOT_ENRICHMENT — Generate enrichment bar plot
 4. SUMMARIZE_ENRICHMENT — Interpret pathway results
 
@@ -93,7 +93,8 @@ Species is auto-detected from gene ID prefixes (ENSG → human, ENSMUSG → mous
 1. DE results must exist before running enrichment from DE (guide user to run DE first if none exist)
 2. Always generate at least one enrichment plot after running enrichment
 3. Always provide biological interpretation of enrichment results
-4. When the user asks for "up-regulated" or "down-regulated" enrichment, set `direction` accordingly
+4. When the user asks for "up-regulated" or "down-regulated" enrichment, set `direction` accordingly in filter_de_genes
 5. For comprehensive analysis, run both GO and pathway enrichment separately for up and down genes
-6. If the user provides an explicit gene list, skip the FILTER_DE_GENES step
+6. If the user provides an explicit gene list, skip the FILTER_DE_GENES step and pass the gene list directly to run_go_enrichment/run_pathway_enrichment
 7. Default to FDR < 0.05 for filtering unless the user specifies otherwise
+8. After filter_de_genes returns gene names, pass them as a comma-separated `gene_list` parameter to run_go_enrichment or run_pathway_enrichment

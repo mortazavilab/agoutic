@@ -10,12 +10,8 @@ AGOUTIC_CODE = Path(os.getenv("AGOUTIC_CODE", Path(__file__).resolve().parent.pa
 AGOUTIC_DATA = Path(os.getenv("AGOUTIC_DATA", AGOUTIC_CODE / "data"))
 
 # --- DATA & STORAGE CONFIG (derived from AGOUTIC_DATA) ---
-DB_FOLDER = AGOUTIC_DATA / "database"
-DB_FILE = DB_FOLDER / "agoutic_v24.sqlite"  # Updated to v24 for multi-user support
-
-DB_FOLDER.mkdir(parents=True, exist_ok=True)
-
-DATABASE_URL = f"sqlite+aiosqlite:///{DB_FILE}"
+# DATABASE_URL is centralized in common.database
+from common.database import DATABASE_URL  # noqa: E402
 
 # --- AUTH CONFIGURATION ---
 # Google OAuth
@@ -98,6 +94,7 @@ SERVICE_REGISTRY = {
         "skills": [
             "analyze_job_results",
             "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
+            "enrichment_analysis",
         ],
         "fallback_patterns": {},
     },
@@ -110,7 +107,6 @@ SERVICE_REGISTRY = {
         "count_label": None,
         "skills": [
             "differential_expression",
-            "enrichment_analysis",
         ],
         "fallback_patterns": {},
     },

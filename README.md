@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.2.11
+**Version:** 3.3.0
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -12,14 +12,13 @@ The system is composed of:
 - **Atlas**: ENCODE Integration - Public data retrieval via ENCODELIB
 - **Launchpad**: Execution Engine - Dogme/Nextflow pipeline management
 - **Analyzer**: Analysis Engine - Results analysis and QC reporting
-- **edgePython**: Differential Expression & Enrichment — Bulk/single-cell RNA-seq DE + GO/pathway enrichment via edgePython
+- **edgePython**: Differential Expression — Bulk/single-cell RNA-seq DE via edgePython
 - **UI**: Web interface for monitoring and control
 
-Current DE migration status: analyzer/server4 now contains the first adapter
-layer for proxying edgePython MCP calls upstream. The foundation includes
-conversation-scoped upstream client/session helpers, artifact relocation
-helpers for project-scoped DE outputs, analyzer-owned proxy tool registries,
-and unit tests. Cortex is not switched to this adapter path yet.
+Current status: database infrastructure centralized in `common/database.py`
+with Alembic migrations. Gene annotation and enrichment tools moved from
+edgePython to Analyzer. The analyzer/server4 adapter layer proxies remaining
+edgePython MCP calls upstream.
 
 ## 🔒 Security & Multi-User Isolation
 
@@ -111,7 +110,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   AGOUTIC System v3.2.11                    │
+│                   AGOUTIC System v3.3.0                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -167,7 +166,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
   - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
   - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that decomposes complex requests into deterministic execution plans with dependency tracking, approval gates, and automatic replanning on failure. 9 plan templates covering: run workflow, compare samples, download+analyze, summarize results, run DE pipeline, run enrichment, parse+plot+interpret, compare workflows, and search+compare to local data. CHECK_EXISTING guards skip expensive operations when results already exist.
-  - **Gene Annotation & ID Translation** — offline Ensembl gene ID ↔ symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. Bidirectional `lookup_gene` tool answers "what is the Ensembl ID for TP53?" style queries. Pre-LLM auto-skill detection routes gene questions to the correct skill from any context (including Welcome). MCP tools: `annotate_genes`, `translate_gene_ids`, `lookup_gene`.
+  - **Gene Annotation & ID Translation** — offline Ensembl gene ID ↔ symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. Bidirectional `lookup_gene` tool answers "what is the Ensembl ID for TP53?" style queries. Pre-LLM auto-skill detection routes gene questions to the correct skill from any context (including Welcome). MCP tools: `annotate_genes` (edgePython, DE-stateful), `translate_gene_ids` and `lookup_gene` (Analyzer).
   - **Robust DATA_CALL tag parsing** — bracket-aware parameter parser handles JSON arrays inside DATA_CALL tags (e.g. `gene_symbols=["TP53", "BRCA1"]`). Mistral-native `[TOOL_CALLS]DATA_CALL:` format is auto-normalized to standard `[[DATA_CALL:...]]` tags.
   - **Skill-defined plan chains** — skill authors can declare multi-step workflows in skill Markdown files under a `## Plan Chains` section. A single message like "get K562 experiments and make a plot by assay type" is detected at classify-time and produces both a data search and a visualization. Trigger phrases support multi-phrasing (AND/OR keyword groups) for flexible matching. See `SKILLS.md` for the full authoring guide.
   - **Skills system documentation** — new top-level `SKILLS.md` documents the complete skills framework: skill file structure, routing patterns, `[[DATA_CALL:...]]` / `[[PLOT:...]]` tag system, plan chains format, and a step-by-step guide for creating new skills.
@@ -202,19 +201,13 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **`delete_job_data` MCP tool** — enables chat-based deletion ("delete workflow1")
 - **Docs:** [launchpad/README.md](launchpad/README.md)
 
-### edgePython: Differential Expression & Enrichment (Port 8007)
-- **Role:** Bulk and single-cell RNA-seq differential expression analysis + GO/pathway enrichment
-- **Tech:** FastMCP + edgePython + g:Profiler
+### edgePython: Differential Expression (Port 8007)
+- **Role:** Bulk and single-cell RNA-seq differential expression analysis
+- **Tech:** FastMCP + edgePython
 - **Features:**
   - Full DE pipeline: load → filter → normalize → design → dispersion → fit → test → results → plots
-  - GO enrichment (Biological Process, Molecular Function, Cellular Component) via g:Profiler
-  - KEGG and Reactome pathway enrichment
   - Gene list filtering from DE results by FDR, logFC, and direction (up/down/all)
-  - Dual-mode input: enrichment from DE results or explicit gene lists
-  - Enrichment bar plots and dot/bubble plots
-  - Term-to-gene drilldown (which genes drive a specific GO term)
-  - Species auto-detection from gene ID prefixes (ENSG → human, ENSMUSG → mouse)
-  - 41 MCP tools (bulk DE, single-cell DE, ChIP-seq enrichment, DTU/splice, gene lookup, GO/pathway enrichment)
+  - Gene annotation (annotate_genes) on DE results in-place
   - Stateful pipeline — each step builds on previous results within a session
   - Volcano, MDS, MA, BCV, heatmap plot generation
   - TSV/CSV/JSON result export
@@ -222,13 +215,17 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 - **Docs:** [edgepython_mcp/](edgepython_mcp/)
 
 ### Analyzer: Analysis Engine (Ports 8004 REST / 8005 MCP)
-- **Role:** Results analysis, QC reporting, and workflow file browsing
-- **Tech:** fastmcp + Python analysis tools
+- **Role:** Results analysis, QC reporting, gene annotation, and GO/pathway enrichment
+- **Tech:** fastmcp + Python analysis tools + g:Profiler
 - **Features:**
   - Parse pipeline outputs (CSV, TSV, BED files)
   - Generate QC reports and analysis summaries
   - File discovery and content reading
   - Workflow folder browsing via `list_job_files`
+  - Gene ID translation (`translate_gene_ids`) and bidirectional lookup (`lookup_gene`) via Ensembl reference tables
+  - GO enrichment (BP/MF/CC) and pathway enrichment (KEGG/Reactome) via g:Profiler
+  - Per-conversation enrichment state management
+  - Species auto-detection from gene ID prefixes (ENSG → human, ENSMUSG → mouse)
 - **Workflow Directory Layout:**
   ```
   $AGOUTIC_DATA/users/{username}/{project-slug}/
@@ -255,6 +252,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 agoutic/
 ├── README.md                     # This file
 ├── environment.yml               # Conda environment specification
+├── alembic.ini                  # Alembic migration configuration
 ├── CONFIGURATION.md              # Path configuration guide
 ├── ARCHITECTURE_UPDATE.md        # System architecture (all servers)
 ├── ATLAS_IMPLEMENTATION.md     # Atlas integration guide
@@ -316,14 +314,15 @@ agoutic/
 │   ├── config.py               # Atlas configuration
 │   └── result_formatter.py     # Result formatting helpers
 │
-├── edgepython_mcp/              # edgePython DE + Enrichment Server
-│   ├── edgepython_server.py    # FastMCP tool definitions (41 tools)
+├── edgepython_mcp/              # edgePython DE Server
+│   ├── edgepython_server.py    # FastMCP tool definitions (DE + filtering)
 │   ├── mcp_server.py           # Server wrapper + /tools/schema endpoint
 │   ├── launch_edgepython.py    # HTTP launcher
-│   ├── tool_schemas.py         # JSON Schema contracts for all tools
+│   ├── tool_schemas.py         # JSON Schema contracts for DE tools
 │   └── config.py               # Configuration
 │
 ├── common/                      # Shared Utilities
+│   ├── database.py            # Centralized DB infrastructure (Base, engines, sessions)
 │   ├── gene_annotation.py      # Ensembl gene ID ↔ symbol translation (bidirectional)
 │   ├── mcp_client.py           # Shared MCP HTTP client
 │   ├── logging_config.py       # Structured logging setup
@@ -602,10 +601,10 @@ curl http://localhost:8003/jobs/{run_uuid}
 
 ### Run All Tests
 
-The project has **1040+ tests** providing comprehensive coverage.
+The project has **1068 tests** providing comprehensive coverage.
 
 ```bash
-# Run the full test suite (1040+ tests)
+# Run the full test suite (1068 tests)
 pytest tests/ -q
 
 # Cortex tests only
@@ -692,12 +691,12 @@ export MAX_CONCURRENT_JOBS=2  # Adjust based on server capacity
 
 ### Database Selection
 
-- **Development**: SQLite (default, no setup required)
-- **Production**: PostgreSQL or MySQL for concurrent access
+- **Development**: SQLite (default, no setup required — `create_all()` at startup)
+- **Production**: PostgreSQL with Alembic migrations (`alembic upgrade head`)
 
 ```python
-# launchpad/config.py
-DATABASE_URL = "postgresql+asyncpg://user:pass@localhost/agoutic"
+# Set via environment variable
+DATABASE_URL = "postgresql://user:pass@localhost/agoutic"
 ```
 
 ## 📝 Workflow Skills
@@ -743,12 +742,12 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.2.11 — GO & pathway enrichment analysis, bidirectional gene lookup, gene annotation & ID translation, expanded plan templates
+- **Release**: 3.3.0 — Centralized DB infrastructure + Alembic migrations; gene annotation & enrichment tools moved from edgePython to Analyzer
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
 - **Nextflow**: >= 23.0
-- **Test Coverage**: 1040+ tests across 54 test files
+- **Test Coverage**: 1068 tests across 54 test files
 - **Status**: Active Development
 
 ## 🗓️ Development Timeline
@@ -756,5 +755,6 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 - complete: Core infrastructure, dual interface, MCP integration
 - complete: Web UI job monitoring, approval gates, project management
 - complete: Plan-execute-observe-replan, gene annotation, expanded templates
+- complete: Centralized DB, Alembic migrations, enrichment tools in Analyzer
 - current: Cortex modularisation and DE adapter integration
 - next: Production deployment preparation

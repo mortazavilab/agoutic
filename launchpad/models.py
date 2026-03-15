@@ -1,12 +1,10 @@
 """
 Database models for Launchpad job tracking.
 """
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import String, Integer, Text, DateTime, func, JSON
 from datetime import datetime
-
-class Base(DeclarativeBase):
-    pass
+from common.database import Base
 
 class DogmeJob(Base):
     """Tracks a Dogme/Nextflow job submission."""

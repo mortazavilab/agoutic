@@ -18,7 +18,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from cortex.models import Base, Conversation, ConversationMessage, User, Project
+from common.database import Base
+from cortex.models import Conversation, ConversationMessage, User, Project
 from cortex.app import save_conversation_message
 
 

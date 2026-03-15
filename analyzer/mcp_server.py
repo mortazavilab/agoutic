@@ -69,6 +69,42 @@ async def categorize_job_files(work_dir: str | None = None, run_uuid: str | None
     return await TOOL_REGISTRY["categorize_job_files"](work_dir=work_dir, run_uuid=run_uuid)
 
 
+# ==================== Gene Annotation Tools ====================
+
+@mcp.tool()
+def translate_gene_ids(gene_ids: list, organism: str | None = None) -> str:
+    """Translate Ensembl gene IDs to gene symbols."""
+    return TOOL_REGISTRY["translate_gene_ids"](gene_ids=gene_ids, organism=organism)
+
+@mcp.tool()
+def lookup_gene(gene_symbols: list | None = None, gene_ids: list | None = None, organism: str | None = None) -> str:
+    """Look up genes by symbol or Ensembl ID (bidirectional)."""
+    return TOOL_REGISTRY["lookup_gene"](gene_symbols=gene_symbols, gene_ids=gene_ids, organism=organism)
+
+
+# ==================== Enrichment Analysis Tools ====================
+
+@mcp.tool()
+def run_go_enrichment(gene_list: str, species: str = "auto", sources: str = "GO:BP,GO:MF,GO:CC", name: str | None = None, conversation_id: str = "default") -> str:
+    """Run Gene Ontology enrichment analysis on a gene list."""
+    return TOOL_REGISTRY["run_go_enrichment"](gene_list=gene_list, species=species, sources=sources, name=name, conversation_id=conversation_id)
+
+@mcp.tool()
+def run_pathway_enrichment(gene_list: str, species: str = "auto", database: str = "KEGG", name: str | None = None, conversation_id: str = "default") -> str:
+    """Run pathway enrichment analysis (KEGG or Reactome) on a gene list."""
+    return TOOL_REGISTRY["run_pathway_enrichment"](gene_list=gene_list, species=species, database=database, name=name, conversation_id=conversation_id)
+
+@mcp.tool()
+def get_enrichment_results(name: str | None = None, max_terms: int = 30, pvalue_threshold: float = 0.05, source_filter: str | None = None, conversation_id: str = "default") -> str:
+    """Retrieve stored enrichment results with optional filtering."""
+    return TOOL_REGISTRY["get_enrichment_results"](name=name, max_terms=max_terms, pvalue_threshold=pvalue_threshold, source_filter=source_filter, conversation_id=conversation_id)
+
+@mcp.tool()
+def get_term_genes(term_id: str, name: str | None = None, conversation_id: str = "default") -> str:
+    """Show genes contributing to a specific GO term or pathway."""
+    return TOOL_REGISTRY["get_term_genes"](term_id=term_id, name=name, conversation_id=conversation_id)
+
+
 # ==================== Server Entry Points ====================
 
 async def main_stdio():

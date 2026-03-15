@@ -8,7 +8,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from launchpad.models import Base, DogmeJob, JobLog
+from common.database import Base
+from launchpad.models import DogmeJob, JobLog
 
 
 @pytest.fixture()

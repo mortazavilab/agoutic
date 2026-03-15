@@ -28,6 +28,9 @@ dependencies:
     # --- The Database ---
     - sqlalchemy>=2.0
     - aiosqlite                # Async SQLite driver
+    - alembic>=1.13            # Database migrations
+    - asyncpg                  # Async PostgreSQL driver
+    - psycopg2-binary          # Sync PostgreSQL driver (needed by Alembic)
     
     # --- Observability ---
     - structlog                # Structured logging (JSON lines)
@@ -38,6 +41,9 @@ dependencies:
     
     # --- Visualization ---
     - plotly>=5.18.0           # Interactive charts (st.plotly_chart)
+
+    # --- Enrichment Analysis ---
+    - gprofiler-official        # GO & pathway enrichment (g:Profiler)
 
     # --- Differential Expression ---
     - edgepython[all]          # edgeR-style DE analysis (bulk + single-cell)

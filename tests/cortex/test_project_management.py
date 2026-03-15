@@ -22,8 +22,8 @@ from cortex.app import (
     get_block_payload,
     _create_block_internal,
 )
+from common.database import Base
 from cortex.models import (
-    Base,
     Conversation,
     ConversationMessage,
     JobResult,
@@ -33,12 +33,6 @@ from cortex.models import (
     Session as SessionModel,
     User,
 )
-
-# LaunchpadBase needed for dogme_jobs table
-try:
-    from launchpad.models import Base as LaunchpadBase
-except Exception:
-    LaunchpadBase = None
 
 # ---------------------------------------------------------------------------
 # DB + auth helpers (same pattern as other test files)
@@ -99,8 +93,6 @@ def setup():
 
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
-    if LaunchpadBase is not None:
-        LaunchpadBase.metadata.create_all(engine)
     SL = sessionmaker(bind=engine)
     session = SL()
     data = _seed(session)
