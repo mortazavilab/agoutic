@@ -1,5 +1,23 @@
 # Changelog - March 2026
 
+## [3.3.2] - 2026-03-15
+
+### Bug Fixes
+
+- **ENCODE assay alias resolution in main tag-parsing path** — when the LLM
+  emits `assay_title=RNA-seq` in a `[[DATA_CALL:...]]` tag, ENCODELIB's
+  exact-match filter fails because experiments use canonical names like
+  `"total RNA-seq"`.  The `_ENCODE_ASSAY_ALIASES` map was only applied in
+  the auto-generation and tool-rerouting paths, not in `_validate_encode_params()`.
+  Now all assay titles are normalized before the MCP call (e.g. `RNA-seq` →
+  `total RNA-seq`, `ChIP-seq` → `TF ChIP-seq`), so searches return correct
+  results on the first try instead of falling back to the relaxation retry.
+
+### Changes
+
+- `cortex/encode_helpers.py` — added Fix 2 (assay alias resolution) to
+  `_validate_encode_params()`; renumbered subsequent fixes
+
 ## [3.3.1] - 2026-03-15
 
 ### Bug Fixes

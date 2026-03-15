@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.3.0
+**Version:** 3.3.2
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -110,7 +110,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   AGOUTIC System v3.3.0                     │
+│                   AGOUTIC System v3.3.2                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -159,7 +159,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - `[[PLOT:...]]` tag parsing → `AGENT_PLOT` blocks for inline Plotly charts (histogram, scatter, bar, box, heatmap, pie)
   - **Per-message and per-conversation token tracking** — every LLM response records `prompt_tokens`, `completion_tokens`, `total_tokens`, and `model_name` in the database; exposed via `GET /user/token-usage` (own data) and `GET /admin/token-usage` (all users)
   - **`find_file` echo recovery** — when a weak model emits a `find_file` JSON result verbatim instead of a `[[DATA_CALL:...]]` tag, the pipeline intercepts the response, auto-chains to `parse_csv_file`/`parse_bed_file`/`read_file_content`, and strips the bad block from conversation history to prevent looping
-  - **ENCODE tool routing guards** — structural checks prevent LLM misrouting (e.g. cell-line names sent to `get_experiment`); assay-only queries are routed to `search_by_assay`
+  - **ENCODE tool routing guards** — structural checks prevent LLM misrouting (e.g. cell-line names sent to `get_experiment`); assay-only queries are routed to `search_by_assay`; assay name aliases (e.g. `RNA-seq` → `total RNA-seq`, `ChIP-seq` → `TF ChIP-seq`) are resolved before MCP dispatch
   - **Tool Schema Contracts** — machine-readable JSON Schema for every MCP tool, fetched at startup from `/tools/schema` endpoints on all servers. Injected into the system prompt as a compact reference and used for pre-call param validation (strip unknown params, check required fields, normalise enums).
   - **Structured Conversation State** — typed `ConversationState` JSON (skill, project, sample, experiment, dataframes, workflows) built each turn and injected as `[STATE]...[/STATE]` so the LLM always sees current context
   - **Error-Handling Playbook** — deterministic failure rules in the system prompt + structured `[TOOL_ERROR]` blocks + single-retry for transient failures
@@ -742,7 +742,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.3.0 — Centralized DB infrastructure + Alembic migrations; gene annotation & enrichment tools moved from edgePython to Analyzer
+- **Release**: 3.3.2 — ENCODE assay alias resolution in main search path; list-type zero-result retry fix; centralized DB + Alembic migrations
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
