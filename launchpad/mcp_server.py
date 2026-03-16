@@ -181,6 +181,76 @@ async def delete_job_data(
     )
     return json.dumps(result, indent=2)
 
+
+# ==================== Remote Execution MCP Tools ====================
+
+
+@mcp.tool()
+async def list_ssh_profiles(
+    user_id: str,
+) -> str:
+    """List saved SSH connection profiles for a user."""
+    import httpx
+    url = tools.server_url + "/ssh-profiles"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(url, params={"user_id": user_id}, headers=tools._headers())
+        return resp.text
+
+
+@mcp.tool()
+async def test_ssh_connection(
+    profile_id: str,
+    user_id: str,
+) -> str:
+    """Test SSH connectivity for a saved profile."""
+    import httpx
+    url = f"{tools.server_url}/ssh-profiles/{profile_id}/test"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.post(url, params={"user_id": user_id}, headers=tools._headers())
+        return resp.text
+
+
+@mcp.tool()
+async def get_slurm_defaults(
+    user_id: str,
+    project_id: str | None = None,
+) -> str:
+    """Get saved SLURM resource defaults for a user/project."""
+    from sqlalchemy import select
+    from common.database import AsyncSessionLocal
+    from launchpad.models import SlurmDefaults
+    async with AsyncSessionLocal() as session:
+        query = select(SlurmDefaults).where(SlurmDefaults.user_id == user_id)
+        if project_id:
+            query = query.where(SlurmDefaults.project_id == project_id)
+        else:
+            query = query.where(SlurmDefaults.project_id.is_(None))
+        result = await session.execute(query)
+        defaults = result.scalar_one_or_none()
+        if not defaults:
+            return json.dumps({"found": False, "message": "No saved defaults"})
+        return json.dumps({
+            "found": True,
+            "account": defaults.account,
+            "partition": defaults.partition,
+            "cpus": defaults.cpus,
+            "memory_gb": defaults.memory_gb,
+            "walltime": defaults.walltime,
+            "gpus": defaults.gpus,
+            "gpu_type": defaults.gpu_type,
+        }, indent=2)
+
+
+@mcp.tool()
+async def cancel_slurm_job(
+    run_uuid: str,
+) -> str:
+    """Cancel a running SLURM job on the remote cluster."""
+    from launchpad.backends import get_backend
+    backend = get_backend("slurm")
+    ok = await backend.cancel(run_uuid)
+    return json.dumps({"ok": ok, "run_uuid": run_uuid})
+
 if __name__ == "__main__":
     import argparse
     import uvicorn

@@ -195,13 +195,18 @@ def _import_all_models() -> None:
 
 
 def init_db_sync() -> None:
-    """Create all tables using the sync engine."""
+    """Ensure all model classes are imported so metadata is populated.
+
+    Schema creation/migration is handled exclusively by Alembic
+    (``alembic upgrade head``).  This function no longer calls
+    ``Base.metadata.create_all()`` to avoid conflicts with migrations.
+    """
     _import_all_models()
-    Base.metadata.create_all(bind=get_sync_engine())
 
 
 async def init_db_async() -> None:
-    """Create all tables using the async engine."""
+    """Async counterpart of :func:`init_db_sync`.
+
+    Schema creation/migration is handled exclusively by Alembic.
+    """
     _import_all_models()
-    async with get_async_engine().begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)

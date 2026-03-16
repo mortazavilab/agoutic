@@ -1,5 +1,113 @@
 # Changelog - March 2026
 
+## [3.4.0] - 2026-03-16
+
+### Features
+
+- **HPC3/SLURM remote execution (Phase 1)** — AGOUTIC now supports dual
+  execution modes: local (existing behavior, unchanged) and remote HPC3/SLURM
+  via SSH.  Users can save SSH connection profiles, configure SLURM resources,
+  set remote paths, and choose where final results are stored.
+
+- **Execution backend abstraction** — new `launchpad/backends/` package with
+  `ExecutionBackend` protocol, `LocalBackend` (wraps existing NextflowExecutor),
+  and `SlurmBackend` (SSH + sbatch).  Cortex and UI remain backend-agnostic.
+
+- **SSH connection profiles** — per-user saved profiles with host, port,
+  username, and auth method (key_file path reference or ssh-agent).  Full CRUD
+  via REST API and MCP tools.  Connection test support.  No raw secrets stored.
+  Supports `local_username` for sudo-based key access when the service process
+  runs as a different OS user — password is prompted transiently and never stored.
+
+- **SLURM resource management** — configurable account, partition, CPUs, memory,
+  walltime, GPUs, and GPU type with validation against safe limits.  Saved
+  defaults per user/project.  Resource presets for common use cases.
+
+- **Remote path configuration** — saved input, work, output, and log paths per
+  user/project/profile.  Remote path validation over SSH before submission.
+
+- **Result destination policy** — users choose where final outputs are stored:
+  remote only, local only, or both.  Transfer state tracked per job.
+
+- **13-stage run tracking** — granular stage labels from `awaiting_details`
+  through `syncing_results` to `completed`/`failed`/`cancelled`.  Stage state
+  machine enforces valid transitions.
+
+- **SLURM scheduler integration** — job ID tracking, state polling via
+  sacct/squeue, state mapping to AGOUTIC statuses, cancellation via scancel,
+  human-readable pending-reason and failure-reason interpretation.
+
+- **Staged approval prompts** — Cortex `Remote_Execution` skill collects
+  execution details progressively, checks saved preferences first, and presents
+  a plain-language approval summary before remote submission.
+
+- **File transfer** — rsync/sftp-based input upload and output download with
+  partial transfer/retry support and transfer state tracking.
+
+- **Run audit logging** — `RunAuditLog` records every significant event
+  (submitted, approved, cancelled, completed, failed) with user, profile,
+  account, resources, and timestamps.  No secrets in audit trail.
+
+- **User execution preferences** — saved preferred execution mode, SSH profile,
+  and result destination per user.
+
+### Database
+
+- New tables: `ssh_profiles`, `slurm_defaults`, `remote_path_configs`,
+  `run_audit_logs`, `user_execution_preferences`
+- Extended `dogme_jobs` with 16 new columns: `execution_mode`, `ssh_profile_id`,
+  `slurm_job_id`, `slurm_state`, `slurm_account`, `slurm_partition`,
+  `slurm_cpus`, `slurm_memory_gb`, `slurm_walltime`, `slurm_gpus`,
+  `slurm_gpu_type`, `remote_work_dir`, `remote_output_dir`,
+  `result_destination`, `transfer_state`, `run_stage`
+- Alembic migration `b95a2c38062c` with full upgrade/downgrade
+- Alembic migration `9e12f5bb7e6e` adds `local_username` to `ssh_profiles`
+
+### API
+
+- SSH profile CRUD: `POST/GET/PUT/DELETE /ssh-profiles`, `POST /ssh-profiles/{id}/test`
+- Test endpoint accepts transient `local_password` in body for sudo key access
+- UI includes `X-Internal-Secret` header for Launchpad service-to-service auth
+- New MCP tools: `list_ssh_profiles`, `test_ssh_connection`, `get_slurm_defaults`,
+  `cancel_slurm_job`
+
+### UI
+
+- SSH profile manager page (`ui/pages/remote_profiles.py`)
+- SLURM resource form component (`ui/components/slurm_form.py`)
+- Remote paths form component (`ui/components/remote_paths.py`)
+- Enhanced run status panel with stage emojis (`ui/components/run_status.py`)
+
+### Cortex
+
+- `Remote_Execution` skill registered in skills registry
+- `ConversationState` extended with `execution_mode`, `ssh_profile_id`,
+  `ssh_profile_nickname`, `slurm_resources`, `remote_paths`, `result_destination`
+
+### Documentation
+
+- `docs/remote_execution_architecture.md` — architecture and data flow
+- `docs/ssh_profile_security.md` — credential handling and security model
+- `docs/hpc3_slurm_setup.md` — setup guide for HPC3 cluster connection
+- `docs/troubleshooting_remote.md` — common issues and fixes
+- `docs/user_guide_execution_modes.md` — local vs HPC3 usage guide
+- README updated with execution modes section
+
+### Tests
+
+- `tests/test_slurm_backend.py` — 42 tests: resource validation, walltime parsing,
+  SLURM state mapping, stage transitions, sbatch generation
+- `tests/test_ssh_profile.py` — 9 tests: schema validation for SSH profiles
+- `tests/test_remote_paths.py` — 5 tests: path validation result types
+
+### Notes
+
+- Phase 1 limitation: Analyzer operates on local-accessible files only; remote
+  results must be copied back before downstream analysis
+- All new DogmeJob columns are nullable with sensible defaults; existing local
+  runs are completely unaffected
+- `asyncssh` required for remote execution (`pip install asyncssh`)
+
 ## [3.3.2] - 2026-03-15
 
 ### Bug Fixes

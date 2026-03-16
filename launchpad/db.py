@@ -12,7 +12,8 @@ from common.database import (
     AsyncSessionLocal as SessionLocal,
     init_db_async as init_db,
 )
-from launchpad.models import DogmeJob, JobLog
+from launchpad.models import DogmeJob, JobLog, SSHProfile
+from launchpad.backends.ssh_manager import SSHProfileData
 
 
 def job_to_dict(job: DogmeJob) -> dict:
@@ -138,3 +139,62 @@ async def get_job_logs(
         }
         for log in logs
     ]
+
+
+# ==================== Session-managed helpers (for backends) ====================
+
+async def get_job_by_uuid(run_uuid: str) -> DogmeJob | None:
+    """Retrieve a job by UUID (opens its own session). Used by backends."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(DogmeJob).where(DogmeJob.run_uuid == run_uuid)
+        )
+        return result.scalar_one_or_none()
+
+
+async def update_job_field(run_uuid: str, field: str, value) -> None:
+    """Update a single field on a DogmeJob (opens its own session)."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(DogmeJob).where(DogmeJob.run_uuid == run_uuid)
+        )
+        job = result.scalar_one_or_none()
+        if job:
+            setattr(job, field, value)
+            await session.commit()
+
+
+async def update_job_fields(run_uuid: str, fields: dict) -> None:
+    """Update multiple fields on a DogmeJob (opens its own session)."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(DogmeJob).where(DogmeJob.run_uuid == run_uuid)
+        )
+        job = result.scalar_one_or_none()
+        if job:
+            for key, value in fields.items():
+                setattr(job, key, value)
+            await session.commit()
+
+
+async def get_ssh_profile(profile_id: str) -> SSHProfileData | None:
+    """Load an SSH profile from DB and return as SSHProfileData."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SSHProfile).where(SSHProfile.id == profile_id)
+        )
+        row = result.scalar_one_or_none()
+        if not row:
+            return None
+        return SSHProfileData(
+            id=row.id,
+            user_id=row.user_id,
+            nickname=row.nickname,
+            ssh_host=row.ssh_host,
+            ssh_port=row.ssh_port,
+            ssh_username=row.ssh_username,
+            auth_method=row.auth_method,
+            key_file_path=row.key_file_path,
+            local_username=row.local_username,
+            is_enabled=row.is_enabled,
+        )

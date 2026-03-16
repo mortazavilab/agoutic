@@ -1,7 +1,7 @@
 """
 Pydantic schemas for Launchpad API.
 """
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, Any, List, Literal, Union
 from datetime import datetime
 
@@ -92,3 +92,72 @@ class HealthCheckResponse(BaseModel):
     version: str
     running_jobs: int
     database_ok: bool
+
+
+# ==================== SSH Profile Schemas ====================
+
+class SSHProfileCreate(BaseModel):
+    """Request to create an SSH profile."""
+    user_id: str = Field(..., min_length=1)
+    nickname: Optional[str] = None
+    ssh_host: str = Field(..., min_length=1)
+    ssh_port: int = 22
+    ssh_username: str = Field(..., min_length=1)
+    auth_method: Literal["key_file", "ssh_agent"] = "key_file"
+    key_file_path: Optional[str] = None
+    local_username: Optional[str] = None  # OS user who owns the key file (for sudo access)
+
+    @model_validator(mode="after")
+    def validate_auth_method(self):
+        if self.auth_method == "key_file" and not self.key_file_path:
+            raise ValueError("key_file_path is required when auth_method is 'key_file'")
+        return self
+
+
+class SSHProfileUpdate(BaseModel):
+    """Request to update an SSH profile."""
+    nickname: Optional[str] = None
+    ssh_host: Optional[str] = None
+    ssh_port: Optional[int] = None
+    ssh_username: Optional[str] = None
+    auth_method: Optional[Literal["key_file", "ssh_agent"]] = None
+    key_file_path: Optional[str] = None
+    local_username: Optional[str] = None
+    is_enabled: Optional[bool] = None
+
+
+class SSHProfileOut(BaseModel):
+    """Response model for an SSH profile (no secrets)."""
+    id: str
+    user_id: str
+    nickname: Optional[str] = None
+    ssh_host: str
+    ssh_port: int
+    ssh_username: str
+    auth_method: str
+    has_key_file: bool = False
+    local_username: Optional[str] = None
+    is_enabled: bool = True
+    created_at: str
+    updated_at: str
+
+
+class SSHProfileTestResult(BaseModel):
+    """Result of testing an SSH connection."""
+    ok: bool
+    message: str
+    hostname: Optional[str] = None
+    remote_user: Optional[str] = None
+
+
+# ==================== Extended Job Schemas ====================
+
+class JobStatusExtendedResponse(JobStatusResponse):
+    """Extended job status with remote execution fields."""
+    execution_mode: str = "local"
+    run_stage: Optional[str] = None
+    slurm_job_id: Optional[str] = None
+    slurm_state: Optional[str] = None
+    transfer_state: Optional[str] = None
+    result_destination: Optional[str] = None
+    ssh_profile_nickname: Optional[str] = None

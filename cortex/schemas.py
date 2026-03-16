@@ -28,6 +28,13 @@ class ConversationState:
     active_workflow_index: int | None = None
     active_plan_id: str | None = None           # block ID of active WORKFLOW_PLAN
     active_plan_step: str | None = None         # current step ID within that plan
+    # --- Remote execution state (Phase 1) ---
+    execution_mode: str | None = None           # "local" or "slurm"
+    ssh_profile_id: str | None = None
+    ssh_profile_nickname: str | None = None
+    slurm_resources: dict | None = None         # {account, partition, cpus, memory_gb, walltime, gpus, gpu_type}
+    remote_paths: dict | None = None            # {remote_input_path, remote_work_path, remote_output_path, remote_log_path}
+    result_destination: str | None = None       # "remote", "local", "both"
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-safe dict, stripping None/empty values."""

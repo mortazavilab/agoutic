@@ -80,6 +80,7 @@ SERVICE_REGISTRY = {
         "count_label": None,
         "skills": [
             "analyze_local_sample",
+            "remote_execution",
         ],
         "fallback_patterns": {},
     },
@@ -186,4 +187,7 @@ SKILLS_REGISTRY = {
 
     # GO & Pathway Enrichment (edgePython)
     "enrichment_analysis": "Enrichment_Analysis.md",
+
+    # Remote Execution (HPC3/SLURM)
+    "remote_execution": "Remote_Execution.md",
 }

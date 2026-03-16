@@ -10,7 +10,7 @@ AGOUTIC is a general-purpose agent for analyzing and interpreting long-read geno
 The system is composed of:
 - **Cortex**: Agent Engine - AI-powered orchestration and user interaction
 - **Atlas**: ENCODE Integration - Public data retrieval via ENCODELIB
-- **Launchpad**: Execution Engine - Dogme/Nextflow pipeline management
+- **Launchpad**: Execution Engine - Dogme/Nextflow pipeline management (local + HPC3/SLURM)
 - **Analyzer**: Analysis Engine - Results analysis and QC reporting
 - **edgePython**: Differential Expression — Bulk/single-cell RNA-seq DE via edgePython
 - **UI**: Web interface for monitoring and control
@@ -19,6 +19,26 @@ Current status: database infrastructure centralized in `common/database.py`
 with Alembic migrations. Gene annotation and enrichment tools moved from
 edgePython to Analyzer. The analyzer/server4 adapter layer proxies remaining
 edgePython MCP calls upstream.
+
+## 🖥️ Execution Modes
+
+AGOUTIC supports **dual execution modes**:
+
+- **Local**: Runs Nextflow/Dogme pipelines directly on the local machine (default, original behavior)
+- **HPC3/SLURM**: Submits jobs to a remote SLURM cluster via SSH
+
+Remote execution features:
+- **Saved SSH profiles** — per-user connection profiles with secure key references (no raw secrets stored). Supports sudo-based key access for multi-user servers (transient password, never stored)
+- **SLURM resource management** — configurable account, partition, CPUs, memory, walltime, GPUs with validation
+- **Remote path configuration** — input, work, output, and log paths on the cluster
+- **Result destination policy** — keep results remote-only, copy back locally, or both
+- **Staged approval prompts** — Cortex collects details progressively, presents summary before submission
+- **13-stage run tracking** — from `awaiting_details` through `syncing_results` to `completed`
+- **Scheduler integration** — SLURM job ID tracking, state polling via sacct/squeue, cancellation via scancel
+
+Phase 1 limitation: Analyzer operates on local-accessible files only. Remote results must be copied back before downstream analysis.
+
+See [`docs/remote_execution_architecture.md`](docs/remote_execution_architecture.md) for architecture details and [`docs/user_guide_execution_modes.md`](docs/user_guide_execution_modes.md) for usage.
 
 ## 🔒 Security & Multi-User Isolation
 

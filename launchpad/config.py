@@ -76,3 +76,13 @@ REFERENCE_GENOMES = {
 DEFAULT_DNA_MODS = "5mCG_5hmCG,6mA"
 DEFAULT_RNA_MODS = "inosine_m6A,pseU,m5C"
 DEFAULT_CDNA_MODS = ""  # cDNA does not call modifications
+
+# --- SLURM / REMOTE EXECUTION ---
+# Default SLURM resource limits (override via environment)
+SLURM_MAX_CPUS = int(os.getenv("SLURM_MAX_CPUS", "128"))
+SLURM_MAX_MEMORY_GB = int(os.getenv("SLURM_MAX_MEMORY_GB", "1024"))
+SLURM_MAX_WALLTIME_MINUTES = int(os.getenv("SLURM_MAX_WALLTIME_MINUTES", "4320"))  # 72h
+SLURM_MAX_GPUS = int(os.getenv("SLURM_MAX_GPUS", "8"))
+# Comma-separated whitelist (empty = any allowed)
+SLURM_ALLOWED_PARTITIONS = [p for p in os.getenv("SLURM_ALLOWED_PARTITIONS", "").split(",") if p] or None
+SLURM_ALLOWED_ACCOUNTS = [a for a in os.getenv("SLURM_ALLOWED_ACCOUNTS", "").split(",") if a] or None

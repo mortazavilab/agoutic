@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Path as FastAPIPath, Query, Request
+from fastapi import FastAPI, HTTPException, Path as FastAPIPath, Query, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -35,7 +35,7 @@ from launchpad.db import (
     get_job_logs,
     job_to_dict,
 )
-from launchpad.models import DogmeJob
+from launchpad.models import DogmeJob, SSHProfile
 from launchpad.nextflow_executor import NextflowExecutor
 from launchpad.schemas import (
     SubmitJobRequest,
@@ -46,6 +46,10 @@ from launchpad.schemas import (
     JobLogsResponse,
     LogEntry,
     HealthCheckResponse,
+    SSHProfileCreate,
+    SSHProfileUpdate,
+    SSHProfileOut,
+    SSHProfileTestResult,
 )
 
 # --- LOGGING ---
@@ -767,5 +771,165 @@ async def root():
             "get_logs": "GET /jobs/{run_uuid}/logs",
             "list_jobs": "GET /jobs",
             "cancel_job": "POST /jobs/{run_uuid}/cancel",
+            "ssh_profiles": "GET /ssh-profiles",
+            "create_ssh_profile": "POST /ssh-profiles",
+            "test_ssh_profile": "POST /ssh-profiles/{id}/test",
         }
     }
+
+
+# ==================== SSH Profile CRUD ====================
+
+
+@app.post("/ssh-profiles", response_model=SSHProfileOut)
+async def create_ssh_profile(req: SSHProfileCreate):
+    """Create a new SSH connection profile."""
+    import uuid as _uuid
+    profile_id = _uuid.uuid4().hex
+
+    async with SessionLocal() as session:
+        # Check for duplicate
+        existing = await session.execute(
+            select(SSHProfile).where(
+                SSHProfile.user_id == req.user_id,
+                SSHProfile.ssh_host == req.ssh_host,
+                SSHProfile.ssh_username == req.ssh_username,
+            )
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(400, "A profile for this host/username already exists")
+
+        profile = SSHProfile(
+            id=profile_id,
+            user_id=req.user_id,
+            nickname=req.nickname,
+            ssh_host=req.ssh_host,
+            ssh_port=req.ssh_port,
+            ssh_username=req.ssh_username,
+            auth_method=req.auth_method,
+            key_file_path=req.key_file_path,
+        )
+        session.add(profile)
+        await session.commit()
+        await session.refresh(profile)
+        return _profile_to_out(profile)
+
+
+@app.get("/ssh-profiles", response_model=list[SSHProfileOut])
+async def list_ssh_profiles(user_id: str = Query(..., min_length=1)):
+    """List SSH profiles for a user."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SSHProfile).where(SSHProfile.user_id == user_id).order_by(SSHProfile.created_at.desc())
+        )
+        profiles = result.scalars().all()
+        return [_profile_to_out(p) for p in profiles]
+
+
+@app.get("/ssh-profiles/{profile_id}", response_model=SSHProfileOut)
+async def get_ssh_profile_detail(
+    profile_id: str = FastAPIPath(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
+):
+    """Get a single SSH profile."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SSHProfile).where(SSHProfile.id == profile_id, SSHProfile.user_id == user_id)
+        )
+        profile = result.scalar_one_or_none()
+        if not profile:
+            raise HTTPException(404, "SSH profile not found")
+        return _profile_to_out(profile)
+
+
+@app.put("/ssh-profiles/{profile_id}", response_model=SSHProfileOut)
+async def update_ssh_profile(
+    req: SSHProfileUpdate,
+    profile_id: str = FastAPIPath(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
+):
+    """Update an SSH profile."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SSHProfile).where(SSHProfile.id == profile_id, SSHProfile.user_id == user_id)
+        )
+        profile = result.scalar_one_or_none()
+        if not profile:
+            raise HTTPException(404, "SSH profile not found")
+
+        for field, value in req.model_dump(exclude_unset=True).items():
+            setattr(profile, field, value)
+
+        await session.commit()
+        await session.refresh(profile)
+        return _profile_to_out(profile)
+
+
+@app.delete("/ssh-profiles/{profile_id}")
+async def delete_ssh_profile(
+    profile_id: str = FastAPIPath(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
+):
+    """Delete an SSH profile."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SSHProfile).where(SSHProfile.id == profile_id, SSHProfile.user_id == user_id)
+        )
+        profile = result.scalar_one_or_none()
+        if not profile:
+            raise HTTPException(404, "SSH profile not found")
+
+        await session.delete(profile)
+        await session.commit()
+        return {"ok": True, "message": "Profile deleted"}
+
+
+@app.post("/ssh-profiles/{profile_id}/test", response_model=SSHProfileTestResult)
+async def test_ssh_profile(
+    profile_id: str = FastAPIPath(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
+    local_password: str = Body("", embed=True),
+):
+    """Test SSH connectivity for a profile. Password is transient — never stored."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SSHProfile).where(SSHProfile.id == profile_id, SSHProfile.user_id == user_id)
+        )
+        profile = result.scalar_one_or_none()
+        if not profile:
+            raise HTTPException(404, "SSH profile not found")
+
+    from launchpad.backends.ssh_manager import SSHConnectionManager, SSHProfileData
+    manager = SSHConnectionManager()
+    profile_data = SSHProfileData(
+        id=profile.id,
+        user_id=profile.user_id,
+        nickname=profile.nickname,
+        ssh_host=profile.ssh_host,
+        ssh_port=profile.ssh_port,
+        ssh_username=profile.ssh_username,
+        auth_method=profile.auth_method,
+        key_file_path=profile.key_file_path,
+        local_username=profile.local_username,
+        is_enabled=profile.is_enabled,
+    )
+    test_result = await manager.test_connection(profile_data, local_password)
+    return SSHProfileTestResult(**test_result)
+
+
+def _profile_to_out(profile: SSHProfile) -> SSHProfileOut:
+    """Convert SSHProfile model to output schema (no secrets)."""
+    return SSHProfileOut(
+        id=profile.id,
+        user_id=profile.user_id,
+        nickname=profile.nickname,
+        ssh_host=profile.ssh_host,
+        ssh_port=profile.ssh_port,
+        ssh_username=profile.ssh_username,
+        auth_method=profile.auth_method,
+        has_key_file=bool(profile.key_file_path),
+        local_username=profile.local_username,
+        is_enabled=profile.is_enabled,
+        created_at=profile.created_at.isoformat() if profile.created_at else "",
+        updated_at=profile.updated_at.isoformat() if profile.updated_at else "",
+    )

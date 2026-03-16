@@ -276,3 +276,24 @@ class ProjectTask(Base):
     )
     completed_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UserExecutionPreference(Base):
+    """Saved execution preferences per user (default mode, profile, destination)."""
+    __tablename__ = "user_execution_preferences"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    preferred_execution_mode: Mapped[str | None] = mapped_column(String, nullable=True)  # "local" or "slurm"
+    preferred_ssh_profile_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    preferred_result_destination: Mapped[str | None] = mapped_column(String, nullable=True)  # "remote","local","both"
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
