@@ -9,6 +9,14 @@ from typing import Optional
 import json
 import httpx
 
+
+def _describe_exception(exc: Exception) -> str:
+    """Return a stable, non-empty exception description for surfaced errors."""
+    message = str(exc).strip()
+    if message:
+        return message
+    return f"{type(exc).__name__}: {exc!r}"
+
 class LaunchpadMCPTools:
     """MCP tools for Launchpad job management."""
     
@@ -17,6 +25,7 @@ class LaunchpadMCPTools:
         default_url = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
         self.server_url = (server_url or default_url).rstrip("/")
         self.timeout = 30.0
+        self.submit_timeout = float(os.getenv("LAUNCHPAD_SUBMIT_TIMEOUT", "900"))
         # Internal API secret for Launchpad authentication
         self._api_secret = os.getenv("INTERNAL_API_SECRET", "")
     
@@ -164,12 +173,25 @@ class LaunchpadMCPTools:
                     f"{self.server_url}/jobs/submit",
                     json=payload,
                     headers=self._headers(),
-                    timeout=self.timeout,
+                    timeout=httpx.Timeout(self.submit_timeout, connect=30.0),
                 )
                 response.raise_for_status()
                 return response.json()
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = e.response.text
+            except Exception:
+                detail = ""
+            if detail:
+                raise RuntimeError(
+                    f"Failed to submit job: HTTP {e.response.status_code} from {e.request.url} - {detail}"
+                )
+            raise RuntimeError(
+                f"Failed to submit job: HTTP {e.response.status_code} from {e.request.url}"
+            )
         except Exception as e:
-            raise RuntimeError(f"Failed to submit job: {str(e)}")
+            raise RuntimeError(f"Failed to submit job: {_describe_exception(e)}")
     
     async def check_nextflow_status(self, run_uuid: str) -> dict:
         """

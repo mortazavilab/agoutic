@@ -1,5 +1,28 @@
 # Changelog - March 2026
 
+## [3.4.2] - 2026-03-17
+
+### Fixes
+
+- **Execution mode validation** — added defensive normalization of `execution_mode`
+  parameter in Cortex and Launchpad to prevent incorrect backend selection. Local
+  jobs with malformed or uppercase execution_mode values are now correctly routed
+  to NextflowExecutor instead of accidentally triggering SLURM backend paths
+  (which tried to create `/scratch` directories on macOS, causing permission errors).
+
+- **Backend routing safeguards** — Cortex now validates `execution_mode` before
+  passing to Launchpad, includes logging of selected backend, and defaults to
+  "local" for any invalid values (None, empty, uppercase, or unrecognized).
+
+- **Launchpad submission consistency** — improved error messages and logging when
+  execution_mode is normalized or corrected, making debugging backend selection
+  issues easier.
+
+### Tests
+
+- Verified execution_mode normalization handles edge cases: None, empty string,
+  whitespace-padded values, uppercase variants, and invalid values.
+
 ## [3.4.1] - 2026-03-17
 
 ### Features

@@ -114,7 +114,9 @@ class TestSubmitDogmeJob:
         url, kwargs = fake_client.post_calls[0]
         assert url == "http://launchpad.local/jobs/submit"
         assert kwargs["headers"] == {"X-Internal-Secret": "secret"}
-        assert kwargs["timeout"] == 30.0
+        assert isinstance(kwargs["timeout"], httpx.Timeout)
+        assert kwargs["timeout"].read == 900.0
+        assert kwargs["timeout"].connect == 30.0
         assert kwargs["json"] == {
             "project_id": "proj-1",
             "sample_name": "sample-a",
@@ -154,6 +156,20 @@ class TestSubmitDogmeJob:
         with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
             tools = LaunchpadMCPTools("http://launchpad.local")
             with pytest.raises(RuntimeError, match="Failed to submit job: connection refused"):
+                await tools.submit_dogme_job(
+                    project_id="proj-1",
+                    sample_name="sample-a",
+                    mode="DNA",
+                    input_directory="/data/input",
+                )
+
+    @pytest.mark.asyncio
+    async def test_submit_dogme_job_wraps_empty_exception_message(self):
+        fake_client = FakeAsyncClient(post_error=Exception())
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            with pytest.raises(RuntimeError, match=r"Failed to submit job: Exception: Exception\(\)"):
                 await tools.submit_dogme_job(
                     project_id="proj-1",
                     sample_name="sample-a",

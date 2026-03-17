@@ -125,6 +125,14 @@ app.add_middleware(
 executor = NextflowExecutor()
 job_monitors: dict = {}  # Maps run_uuid -> monitoring task
 
+
+def _describe_exception(exc: Exception) -> str:
+    """Return a stable, non-empty exception string for API error details."""
+    msg = str(exc).strip()
+    if msg:
+        return msg
+    return f"{type(exc).__name__}: {exc!r}"
+
 # --- LIFECYCLE ---
 @app.on_event("startup")
 async def startup():
@@ -317,7 +325,18 @@ async def submit_job(req: SubmitJobRequest):
         
         # Submit to selected execution backend
         try:
-            if req.execution_mode == "slurm":
+            # Validate and normalize execution_mode
+            exec_mode = (req.execution_mode or "local").strip().lower()
+            if exec_mode not in ("local", "slurm"):
+                logger.warning(
+                    "Invalid execution_mode, defaulting to local",
+                    provided_mode=exec_mode,
+                    run_uuid=run_uuid,
+                    sample_name=req.sample_name,
+                )
+                exec_mode = "local"
+            
+            if exec_mode == "slurm":
                 backend = get_backend("slurm")
                 await backend.submit(
                     run_uuid,
@@ -362,7 +381,12 @@ async def submit_job(req: SubmitJobRequest):
                 await session.commit()
                 work_directory = job.remote_work_dir or req.remote_work_path or ""
                 response_status = job.status or JobStatus.PENDING
+                logger.info("Job submitted to SLURM backend", run_uuid=run_uuid,
+                           sample_name=req.sample_name, remote_work=work_directory)
             else:
+                # Local execution
+                logger.info("Using local NextflowExecutor", run_uuid=run_uuid,
+                           sample_name=req.sample_name, exec_mode=exec_mode)
                 run_uuid_returned, work_dir = await executor.submit_job(
                     run_uuid=run_uuid,
                     sample_name=req.sample_name,
@@ -429,23 +453,24 @@ async def submit_job(req: SubmitJobRequest):
             # Job submission failed
             import traceback
             error_trace = traceback.format_exc()
-            logger.error("Nextflow submission error", run_uuid=run_uuid, error=str(e), exc_info=True)
+            error_detail = _describe_exception(e)
+            logger.error("Nextflow submission error", run_uuid=run_uuid, error=error_detail, exc_info=True)
             
             job.status = JobStatus.FAILED
-            job.error_message = str(e)
+            job.error_message = error_detail
             await session.commit()
             
             await add_log_entry(
                 session,
                 run_uuid,
                 "ERROR",
-                f"Failed to submit to Nextflow: {str(e)}",
+                f"Failed to submit to Nextflow: {error_detail}",
                 source="api",
             )
             
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to submit job: {str(e)}"
+                detail=f"Failed to submit job: {error_detail}"
             )
     
     except HTTPException:
@@ -453,8 +478,9 @@ async def submit_job(req: SubmitJobRequest):
     except Exception as e:
         import traceback
         error_trace = traceback.format_exc()
-        logger.error("Submit endpoint error", error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        error_detail = _describe_exception(e)
+        logger.error("Submit endpoint error", error=error_detail, exc_info=True)
+        raise HTTPException(status_code=500, detail=error_detail)
     finally:
         await session.close()
 

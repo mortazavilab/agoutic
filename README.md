@@ -1,10 +1,16 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.0
+**Version:** 3.4.2
 **Status:** Active Prototype 
 
 ## Latest Updates (2026-03-17)
 
+- **Execution mode validation fix** — added defensive normalization of execution_mode
+  parameter to prevent incorrect backend selection. Local jobs are now reliably
+  routed to NextflowExecutor even with malformed parameters, preventing accidental
+  SLURM backend activation that would fail trying to create `/scratch` directories.
+- **Backend routing safeguards** — Cortex and Launchpad now validate and log
+  execution_mode selection, with automatic fallback to "local" for invalid values.
 - Added SLURM approval form reuse improvements:
   approval gates now support selecting a saved SSH profile directly, with
   auto-filled SLURM defaults and remote paths; subsequent runs in the same

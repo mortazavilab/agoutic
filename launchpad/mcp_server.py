@@ -75,6 +75,9 @@ async def submit_dogme_job(
     remote_input_path: str | None = None,
     remote_work_path: str | None = None,
     remote_output_path: str | None = None,
+    remote_reference_cache_root: str | None = None,
+    remote_data_cache_root: str | None = None,
+    cache_preflight: dict | None = None,
     result_destination: str | None = None,
 ) -> str:
     """Submit a DOGME job for processing. Input can be pod5, bam, or fastq files. Supports multiple reference genomes in parallel."""
@@ -110,6 +113,9 @@ async def submit_dogme_job(
         remote_input_path=remote_input_path,
         remote_work_path=remote_work_path,
         remote_output_path=remote_output_path,
+        remote_reference_cache_root=remote_reference_cache_root,
+        remote_data_cache_root=remote_data_cache_root,
+        cache_preflight=cache_preflight,
         result_destination=result_destination,
     )
     return json.dumps(result, indent=2)

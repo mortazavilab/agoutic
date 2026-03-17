@@ -1857,20 +1857,28 @@ def render_block(block, expected_project_id: str = ""):
             sample_name = content.get("sample_name", "Unknown")
             mode = content.get("mode", "Unknown")
             work_directory = content.get("work_directory", "")
+            has_identity = bool(run_uuid) or bool(content.get("sample_name"))
+            block_status_str = block.get("status", "")
             
-            st.write(f"### 🧬 Nextflow Job: {sample_name} ({mode})")
-            # Show human-readable folder name (e.g. "workflow2") when available
-            if work_directory:
-                import pathlib as _pathlib
-                _folder_name = _pathlib.PurePosixPath(work_directory).name
-                st.caption(f"📁 `{_folder_name}` &nbsp;|&nbsp; Run UUID: `{run_uuid}`")
+            if has_identity:
+                st.write(f"### 🧬 Nextflow Job: {sample_name} ({mode})")
             else:
-                st.caption(f"Run UUID: `{run_uuid}`")
+                st.write("### 🧬 Nextflow Job Submission")
+
+            # Show human-readable folder name (e.g. "workflow2") when available
+            if run_uuid:
+                if work_directory:
+                    import pathlib as _pathlib
+                    _folder_name = _pathlib.PurePosixPath(work_directory).name
+                    st.caption(f"📁 `{_folder_name}` &nbsp;|&nbsp; Run UUID: `{run_uuid}`")
+                else:
+                    st.caption(f"Run UUID: `{run_uuid}`")
+            elif block_status_str == "FAILED":
+                st.caption("Run UUID not assigned (submission failed before launch)")
             
             # For RUNNING jobs, live-fetch status directly from Cortex
             # (bypasses stale block payload — always fresh from Launchpad)
             job_status = content.get("job_status", {})
-            block_status_str = block.get("status", "")
             if run_uuid and block_status_str == "RUNNING":
                 try:
                     live_resp = make_authenticated_request(

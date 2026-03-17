@@ -53,10 +53,23 @@ Guides the agent through collecting execution mode, SSH profile, SLURM resources
 
 ### Stage 1: Check Saved Preferences
 
-Before asking any questions, check the user's saved preferences:
-- `preferred_execution_mode` — if set, use it directly
-- `preferred_ssh_profile_id` — if set, pre-select the SSH profile
-- `preferred_result_destination` — if set, use it as the default
+Before asking any questions, use only available Launchpad tools to derive defaults:
+
+1. List SSH profiles:
+   ```
+   [[DATA_CALL: service=launchpad, tool=list_ssh_profiles, user_id=<user_id>]]
+   ```
+2. If a profile is selected/known, fetch SLURM defaults:
+   ```
+   [[DATA_CALL: service=launchpad, tool=get_slurm_defaults, user_id=<user_id>, project_id=<project_id>]]
+   ```
+
+There is no `get_user_preferences` MCP tool. Do not call it.
+
+Use these values as prefilled suggestions:
+- Execution mode: infer from user intent (`slurm`/`hpc3` implies SLURM; otherwise ask)
+- SSH profile: use explicit nickname from user message when present; else ask user to pick from listed profiles
+- Result destination: default to `local` unless user specifies `remote` or `both`
 
 Only ask the user for values that have no saved preference.
 
@@ -196,6 +209,7 @@ The following stages are reported to the user during execution:
 
 **DO:**
 - Check saved preferences before asking questions
+- Use only tools listed in this skill; never invent tool names
 - Present the approval summary before every submission
 - Report stage transitions clearly with human-readable labels
 - Explain scheduler states and pending reasons in plain language

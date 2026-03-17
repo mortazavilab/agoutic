@@ -87,7 +87,23 @@ class SlurmBackend:
             # 6. Generate and submit sbatch script
             await self._update_job_stage(run_uuid, RunStage.SUBMITTING_JOB)
 
-            remote_work = params.remote_work_path or f"/scratch/{profile.ssh_username}/agoutic/{run_uuid}"
+            # Validate remote work path - must be explicitly provided or default to /scratch
+            # CRITICAL: If neither provided, fail explicitly rather than trying to create /scratch
+            if not params.remote_work_path:
+                if not profile or not profile.ssh_username:
+                    raise ValueError(
+                        "SLURM execution requires either explicit remote_work_path or a valid SSH profile with username"
+                    )
+                default_remote_work = f"/scratch/{profile.ssh_username}/agoutic/{run_uuid}"
+                logger.warning(
+                    "No explicit remote_work_path provided; using default /scratch path",
+                    run_uuid=run_uuid,
+                    default_remote_work=default_remote_work,
+                )
+                remote_work = default_remote_work
+            else:
+                remote_work = params.remote_work_path
+            
             remote_output = params.remote_output_path or f"{remote_work}/output"
             remote_input = cache_resolution["remote_input"]
 

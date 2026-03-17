@@ -2424,7 +2424,14 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
         _username = owner_user.username if owner_user else None
         _project_slug = project_obj.slug if project_obj else None
-        execution_mode = job_params.get("execution_mode") or "local"
+        execution_mode = (job_params.get("execution_mode") or "local").strip().lower()
+        if execution_mode not in ("local", "slurm"):
+            logger.warning(
+                "Invalid execution_mode from job_params, defaulting to local",
+                provided_mode=execution_mode,
+                project_id=project_id,
+            )
+            execution_mode = "local"
         ssh_profile_id = job_params.get("ssh_profile_id")
         ssh_profile_nickname = job_params.get("ssh_profile_nickname")
 
@@ -2625,14 +2632,15 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         # Submit job to Launchpad via MCP (single call — Nextflow handles multi-genome)
         try:
             launchpad_url = get_service_url("launchpad")
-            client = MCPHttpClient(name="launchpad", base_url=launchpad_url)
+            client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=900.0)
             await client.connect()
             try:
                 result = await client.call_tool("submit_dogme_job", **submission_payload)
             finally:
                 await client.disconnect()
         except Exception as e:
-            raise Exception(f"MCP call to Launchpad failed: {e}")
+            _err = str(e).strip() or f"{type(e).__name__}: {e!r}"
+            raise Exception(f"MCP call to Launchpad failed: {_err}")
         
         run_uuid = result.get("run_uuid") if isinstance(result, dict) else None
         _work_directory = result.get("work_directory", "") if isinstance(result, dict) else ""
@@ -2703,6 +2711,8 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 project_id,
                 "EXECUTION_JOB",
                 {
+                    "sample_name": job_data.get("sample_name"),
+                    "mode": job_data.get("mode"),
                     "error": f"No run_uuid in Launchpad response: {error_detail}",
                     "message": error_detail,
                     "job_data": {k: str(v) for k, v in job_data.items()},  # Include params for debugging
@@ -2736,6 +2746,8 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             project_id,
             "EXECUTION_JOB",
             {
+                "sample_name": locals().get("job_data", {}).get("sample_name", ""),
+                "mode": locals().get("job_data", {}).get("mode", ""),
                 "error": error_msg,
                 "message": f"Failed to submit job to Launchpad: {error_msg}",
                 "job_status": {
