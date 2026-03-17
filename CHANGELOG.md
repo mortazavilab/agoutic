@@ -23,6 +23,12 @@
 
 ### Improvements
 
+- **SLURM approval reuse UX** — approval gates now expose a saved SSH profile
+  picker that auto-fills profile defaults (account/partition and remote path
+  templates). Parameter extraction now also seeds SLURM settings from the most
+  recent approved SLURM run in the same project cycle, reducing repeat data
+  entry on reruns.
+
 - **Safer SSH profile create errors** — Launchpad now maps duplicate profile
   conflicts to `400` with clear messaging, and schema drift (`no such table` /
   `no such column`) to `503` with explicit migration guidance.

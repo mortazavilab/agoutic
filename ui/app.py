@@ -20,6 +20,8 @@ AGOUTIC_VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() el
 # --- CONFIG ---
 # Use environment variable or default to localhost
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
+LAUNCHPAD_URL = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 
 st.set_page_config(page_title=f"AGOUTIC v{AGOUTIC_VERSION}", layout="wide")
 
@@ -171,6 +173,55 @@ def _create_project_server_side(name: str = None) -> str:
     # The /chat endpoint will auto-register it on first message.
     import uuid as _uuid
     return str(_uuid.uuid4())
+
+
+def _launchpad_headers() -> dict:
+    headers = {"Content-Type": "application/json"}
+    if INTERNAL_API_SECRET:
+        headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+    return headers
+
+
+def _load_user_ssh_profiles(user_id: str) -> list[dict]:
+    if not user_id:
+        return []
+    try:
+        resp = make_authenticated_request(
+            "GET",
+            f"{LAUNCHPAD_URL}/ssh-profiles",
+            params={"user_id": user_id},
+            headers=_launchpad_headers(),
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            profiles = data.get("profiles")
+            return profiles if isinstance(profiles, list) else []
+    except Exception:
+        return []
+    return []
+
+
+def _active_project_slug() -> str:
+    active_id = st.session_state.get("active_project_id", "")
+    for project in st.session_state.get("_cached_projects", []):
+        if project.get("id") == active_id:
+            return _slugify_project_name(project.get("name") or active_id)
+    return _slugify_project_name(active_id)
+
+
+def _render_profile_path_template(template: str | None, context: dict[str, str]) -> str | None:
+    if not template:
+        return None
+    rendered = template
+    for key, value in context.items():
+        rendered = rendered.replace(f"{{{key}}}", value)
+        rendered = rendered.replace(f"<{key}>", value)
+    return rendered
 
 # Check if we're creating a new project (flag set by New Project button)
 if st.session_state.get("_create_new_project", False):
@@ -1272,6 +1323,7 @@ def render_block(block, expected_project_id: str = ""):
         with st.chat_message("assistant", avatar="🚦"):
             # Get extracted parameters and metadata
             extracted_params = content.get("extracted_params", {})
+            approved_params = content.get("edited_params") or extracted_params
             manual_mode = content.get("manual_mode", False)
             attempt_number = content.get("attempt_number", 1)
             rejection_history = content.get("rejection_history", [])
@@ -1296,9 +1348,9 @@ def render_block(block, expected_project_id: str = ""):
             if status == "APPROVED":
                 st.success("✅ Approved")
                 # Show what parameters were used
-                if extracted_params:
+                if approved_params:
                     with st.expander("📋 Parameters Used", expanded=False):
-                        st.json(extracted_params)
+                        st.json(approved_params)
                         
             elif status == "REJECTED":
                 st.error("❌ Rejected")
@@ -1486,6 +1538,109 @@ def render_block(block, expected_project_id: str = ""):
 
                         if execution_mode == "slurm":
                             st.caption("Remote execution uses one of your saved SSH profiles. You can refer to it by nickname, for example hpc3.")
+                            _current_user_id = user.get("id") or user.get("user_id", "")
+                            _saved_profiles = _load_user_ssh_profiles(_current_user_id)
+                            _profile_by_id = {
+                                profile.get("id"): profile
+                                for profile in _saved_profiles
+                                if profile.get("id")
+                            }
+
+                            _selected_profile_id = ssh_profile_id if ssh_profile_id in _profile_by_id else ""
+                            if not _selected_profile_id and ssh_profile_nickname:
+                                _nickname = ssh_profile_nickname.strip().lower()
+                                _match = next(
+                                    (
+                                        profile
+                                        for profile in _saved_profiles
+                                        if (
+                                            (profile.get("nickname") or "").strip().lower() == _nickname
+                                            or (profile.get("ssh_host") or "").strip().lower() == _nickname
+                                        )
+                                    ),
+                                    None,
+                                )
+                                _selected_profile_id = (_match or {}).get("id") or ""
+                            if not _selected_profile_id and len(_saved_profiles) == 1:
+                                _selected_profile_id = _saved_profiles[0].get("id") or ""
+
+                            _profile_options = [""] + list(_profile_by_id.keys())
+                            _selected_profile_id = st.selectbox(
+                                "Saved SSH Profile",
+                                options=_profile_options,
+                                index=_profile_options.index(_selected_profile_id) if _selected_profile_id in _profile_options else 0,
+                                format_func=lambda profile_id: (
+                                    "(manual entry)"
+                                    if not profile_id
+                                    else (
+                                        _profile_by_id[profile_id].get("nickname")
+                                        or _profile_by_id[profile_id].get("ssh_host")
+                                        or profile_id
+                                    )
+                                ),
+                                key=f"slurm_profile_{block_id}",
+                                help="Choose a saved profile to reuse its SLURM defaults and remote path templates.",
+                            )
+
+                            _selected_profile = _profile_by_id.get(_selected_profile_id) if _selected_profile_id else None
+                            if _selected_profile:
+                                ssh_profile_id = _selected_profile_id
+                                ssh_profile_nickname = (
+                                    _selected_profile.get("nickname")
+                                    or _selected_profile.get("ssh_host")
+                                    or ssh_profile_nickname
+                                )
+
+                                slurm_account = slurm_account or (_selected_profile.get("default_slurm_account") or "")
+                                slurm_partition = slurm_partition or (_selected_profile.get("default_slurm_partition") or "")
+                                slurm_gpu_account = slurm_gpu_account or (_selected_profile.get("default_slurm_gpu_account") or "")
+                                slurm_gpu_partition = slurm_gpu_partition or (_selected_profile.get("default_slurm_gpu_partition") or "")
+
+                                _ssh_username = _selected_profile.get("ssh_username") or "agoutic"
+                                _project_slug = _active_project_slug()
+                                _workflow_slug = _slugify_project_name(sample_name or "workflow")
+                                _remote_root = f"/scratch/{_ssh_username}/agoutic/{_project_slug}/{_workflow_slug}"
+                                _template_context = {
+                                    "user_id": _current_user_id,
+                                    "project_id": st.session_state.get("active_project_id", ""),
+                                    "project_slug": _project_slug,
+                                    "sample_name": sample_name or "workflow",
+                                    "workflow_slug": _workflow_slug,
+                                    "ssh_username": _ssh_username,
+                                    "remote_root": _remote_root,
+                                }
+
+                                if not remote_input_path:
+                                    remote_input_path = (
+                                        _render_profile_path_template(
+                                            _selected_profile.get("default_remote_input_path"),
+                                            _template_context,
+                                        )
+                                        or f"{_remote_root}/input"
+                                    )
+
+                                _template_context["remote_input_path"] = remote_input_path
+                                if not remote_work_path:
+                                    remote_work_path = (
+                                        _render_profile_path_template(
+                                            _selected_profile.get("default_remote_work_path"),
+                                            _template_context,
+                                        )
+                                        or f"{_remote_root}/work"
+                                    )
+
+                                _template_context["remote_work_path"] = remote_work_path
+                                if not remote_output_path:
+                                    remote_output_path = (
+                                        _render_profile_path_template(
+                                            _selected_profile.get("default_remote_output_path"),
+                                            _template_context,
+                                        )
+                                        or f"{remote_work_path}/output"
+                                    )
+                            elif not _saved_profiles:
+                                st.caption("No saved SSH profiles found. Create one from Remote Profiles to avoid re-entering SLURM settings.")
+
                             if local_workflow_directory:
                                 st.caption(f"Local workflow folder: {local_workflow_directory}")
                             ssh_profile_nickname = st.text_input(

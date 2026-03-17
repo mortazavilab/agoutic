@@ -5,6 +5,10 @@
 
 ## Latest Updates (2026-03-17)
 
+- Added SLURM approval form reuse improvements:
+  approval gates now support selecting a saved SSH profile directly, with
+  auto-filled SLURM defaults and remote paths; subsequent runs in the same
+  project can also seed SLURM settings from the most recent approved run.
 - Added per-user, cross-project SLURM staging cache reuse with preflight metadata.
   AGOUTIC now computes cache actions (reuse/stage/refresh/fallback) for
   references and input data before submission and surfaces those actions through

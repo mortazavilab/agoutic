@@ -1402,6 +1402,40 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
             last_boundary_idx = i
     
     recent_blocks = blocks[last_boundary_idx + 1:] if last_boundary_idx >= 0 else blocks
+
+    slurm_reuse_seed = {}
+    if last_boundary_idx >= 0:
+        for block in reversed(blocks[: last_boundary_idx + 1]):
+            seed_params = {}
+            if block.type == "APPROVAL_GATE" and block.status == "APPROVED":
+                payload = get_block_payload(block)
+                seed_params = payload.get("edited_params") or payload.get("extracted_params") or {}
+            elif block.type == "EXECUTION_JOB":
+                seed_params = get_block_payload(block)
+
+            if (seed_params.get("execution_mode") or "local") != "slurm":
+                continue
+
+            slurm_reuse_seed = {
+                "execution_mode": "slurm",
+                "ssh_profile_id": seed_params.get("ssh_profile_id"),
+                "ssh_profile_nickname": seed_params.get("ssh_profile_nickname"),
+                "slurm_account": seed_params.get("slurm_account"),
+                "slurm_partition": seed_params.get("slurm_partition"),
+                "slurm_gpu_account": seed_params.get("slurm_gpu_account"),
+                "slurm_gpu_partition": seed_params.get("slurm_gpu_partition"),
+                "slurm_cpus": seed_params.get("slurm_cpus"),
+                "slurm_memory_gb": seed_params.get("slurm_memory_gb"),
+                "slurm_walltime": seed_params.get("slurm_walltime"),
+                "slurm_gpus": seed_params.get("slurm_gpus"),
+                "slurm_gpu_type": seed_params.get("slurm_gpu_type"),
+                "remote_input_path": seed_params.get("remote_input_path"),
+                "remote_work_path": seed_params.get("remote_work_path"),
+                "remote_output_path": seed_params.get("remote_output_path"),
+                "result_destination": seed_params.get("result_destination"),
+                "max_gpu_tasks": seed_params.get("max_gpu_tasks"),
+            }
+            break
     
     # Build conversation context from recent blocks only
     conversation = []
@@ -1435,23 +1469,23 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         "min_cov": None,  # Will default based on mode if not specified
         "per_mod": None,  # Will use default 5 if not specified
         "accuracy": None,  # Will use default "sup" if not specified
-        "max_gpu_tasks": None,  # Will use default 1 if not specified
-        "execution_mode": "local",
-        "ssh_profile_id": None,
-        "ssh_profile_nickname": None,
-        "slurm_account": None,
-        "slurm_partition": None,
-        "slurm_gpu_account": None,
-        "slurm_gpu_partition": None,
-        "slurm_cpus": None,
-        "slurm_memory_gb": None,
-        "slurm_walltime": None,
-        "slurm_gpus": None,
-        "slurm_gpu_type": None,
-        "remote_input_path": None,
-        "remote_work_path": None,
-        "remote_output_path": None,
-        "result_destination": None,
+        "max_gpu_tasks": slurm_reuse_seed.get("max_gpu_tasks"),  # Will use default 1 if not specified
+        "execution_mode": slurm_reuse_seed.get("execution_mode") or "local",
+        "ssh_profile_id": slurm_reuse_seed.get("ssh_profile_id"),
+        "ssh_profile_nickname": slurm_reuse_seed.get("ssh_profile_nickname"),
+        "slurm_account": slurm_reuse_seed.get("slurm_account"),
+        "slurm_partition": slurm_reuse_seed.get("slurm_partition"),
+        "slurm_gpu_account": slurm_reuse_seed.get("slurm_gpu_account"),
+        "slurm_gpu_partition": slurm_reuse_seed.get("slurm_gpu_partition"),
+        "slurm_cpus": slurm_reuse_seed.get("slurm_cpus"),
+        "slurm_memory_gb": slurm_reuse_seed.get("slurm_memory_gb"),
+        "slurm_walltime": slurm_reuse_seed.get("slurm_walltime"),
+        "slurm_gpus": slurm_reuse_seed.get("slurm_gpus"),
+        "slurm_gpu_type": slurm_reuse_seed.get("slurm_gpu_type"),
+        "remote_input_path": slurm_reuse_seed.get("remote_input_path"),
+        "remote_work_path": slurm_reuse_seed.get("remote_work_path"),
+        "remote_output_path": slurm_reuse_seed.get("remote_output_path"),
+        "result_destination": slurm_reuse_seed.get("result_destination"),
     }
 
     if re.search(r"\b(slurm|sbatch|hpc3|cluster|remote(?:ly|\s+execution)?)\b", all_user_text):
