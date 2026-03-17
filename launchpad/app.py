@@ -40,6 +40,7 @@ from launchpad.nextflow_executor import NextflowExecutor
 from launchpad.schemas import (
     SubmitJobRequest,
     JobStatusResponse,
+    JobStatusExtendedResponse,
     JobDetailsResponse,
     JobSubmitResponse,
     JobListResponse,
@@ -50,7 +51,11 @@ from launchpad.schemas import (
     SSHProfileUpdate,
     SSHProfileOut,
     SSHProfileTestResult,
+    SSHProfileAuthSessionResult,
 )
+from launchpad.backends import get_backend, SubmitParams
+from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
+from launchpad.backends.ssh_manager import SSHProfileData
 
 # --- LOGGING ---
 setup_logging("launchpad-rest")
@@ -136,6 +141,7 @@ async def shutdown():
     for task in job_monitors.values():
         if isinstance(task, asyncio.Task):
             task.cancel()
+    await get_local_auth_session_manager().close_all()
     logger.info("Launchpad shutdown complete")
 
 # --- MONITORING BACKGROUND TASK ---
@@ -284,6 +290,19 @@ async def submit_job(req: SubmitJobRequest):
             parent_block_id=req.parent_block_id,
             user_id=req.user_id,
         )
+        job.execution_mode = req.execution_mode
+        job.ssh_profile_id = req.ssh_profile_id
+        job.slurm_account = req.slurm_account
+        job.slurm_partition = req.slurm_partition
+        job.slurm_cpus = req.slurm_cpus
+        job.slurm_memory_gb = req.slurm_memory_gb
+        job.slurm_walltime = req.slurm_walltime
+        job.slurm_gpus = req.slurm_gpus
+        job.slurm_gpu_type = req.slurm_gpu_type
+        job.remote_work_dir = req.remote_work_path
+        job.remote_output_dir = req.remote_output_path
+        job.result_destination = req.result_destination
+        await session.commit()
         
         # Log submission
         await add_log_entry(
@@ -294,59 +313,104 @@ async def submit_job(req: SubmitJobRequest):
             source="api",
         )
         
-        # Submit to Nextflow
+        # Submit to selected execution backend
         try:
-            run_uuid_returned, work_dir = await executor.submit_job(
-                run_uuid=run_uuid,
-                sample_name=req.sample_name,
-                mode=req.mode,
-                input_type=req.input_type,
-                input_dir=req.input_directory,
-                reference_genome=req.reference_genome,  # Now normalized to list by validator
-                modifications=req.modifications,
-                entry_point=req.entry_point,
-                modkit_filter_threshold=req.modkit_filter_threshold,
-                min_cov=req.min_cov,
-                per_mod=req.per_mod,
-                accuracy=req.accuracy,
-                max_gpu_tasks=req.max_gpu_tasks or DEFAULT_MAX_GPU_TASKS,
-                user_id=req.user_id,
-                project_id=req.project_id,
-                username=req.username,
-                project_slug=req.project_slug,
-                resume_from_dir=req.resume_from_dir,
-            )
-            
-            # Update job with work directory info
-            job.nextflow_work_dir = str(work_dir)
-            job.status = JobStatus.RUNNING
-            job.started_at = datetime.utcnow()
-            # Persist the Nextflow process PID for cancellation support
-            _pid_file = work_dir / ".nextflow_pid"
-            if _pid_file.exists():
-                try:
-                    job.nextflow_process_id = int(_pid_file.read_text().strip())
-                except (ValueError, OSError):
-                    pass
-            await session.commit()
-            
-            # Start background monitoring task
-            monitor_task = asyncio.create_task(monitor_job(run_uuid, work_dir))
-            job_monitors[run_uuid] = monitor_task
+            if req.execution_mode == "slurm":
+                backend = get_backend("slurm")
+                await backend.submit(
+                    run_uuid,
+                    SubmitParams(
+                        project_id=req.project_id,
+                        user_id=req.user_id,
+                        username=req.username,
+                        project_slug=req.project_slug,
+                        sample_name=req.sample_name,
+                        mode=req.mode,
+                        input_type=req.input_type,
+                        input_directory=req.input_directory,
+                        reference_genome=req.reference_genome,
+                        modifications=req.modifications,
+                        entry_point=req.entry_point,
+                        modkit_filter_threshold=req.modkit_filter_threshold,
+                        min_cov=req.min_cov,
+                        per_mod=req.per_mod,
+                        accuracy=req.accuracy,
+                        max_gpu_tasks=req.max_gpu_tasks or DEFAULT_MAX_GPU_TASKS,
+                        resume_from_dir=req.resume_from_dir,
+                        parent_block_id=req.parent_block_id,
+                        ssh_profile_id=req.ssh_profile_id,
+                        slurm_account=req.slurm_account,
+                        slurm_partition=req.slurm_partition,
+                        slurm_cpus=req.slurm_cpus,
+                        slurm_memory_gb=req.slurm_memory_gb,
+                        slurm_walltime=req.slurm_walltime,
+                        slurm_gpus=req.slurm_gpus,
+                        slurm_gpu_type=req.slurm_gpu_type,
+                        remote_input_path=req.remote_input_path,
+                        remote_work_path=req.remote_work_path,
+                        remote_output_path=req.remote_output_path,
+                        result_destination=req.result_destination or "local",
+                    ),
+                )
+                await session.refresh(job)
+                job.started_at = datetime.utcnow()
+                await session.commit()
+                work_directory = job.remote_work_dir or req.remote_work_path or ""
+                response_status = job.status or JobStatus.PENDING
+            else:
+                run_uuid_returned, work_dir = await executor.submit_job(
+                    run_uuid=run_uuid,
+                    sample_name=req.sample_name,
+                    mode=req.mode,
+                    input_type=req.input_type,
+                    input_dir=req.input_directory,
+                    reference_genome=req.reference_genome,  # Now normalized to list by validator
+                    modifications=req.modifications,
+                    entry_point=req.entry_point,
+                    modkit_filter_threshold=req.modkit_filter_threshold,
+                    min_cov=req.min_cov,
+                    per_mod=req.per_mod,
+                    accuracy=req.accuracy,
+                    max_gpu_tasks=req.max_gpu_tasks or DEFAULT_MAX_GPU_TASKS,
+                    user_id=req.user_id,
+                    project_id=req.project_id,
+                    username=req.username,
+                    project_slug=req.project_slug,
+                    resume_from_dir=req.resume_from_dir,
+                )
+                
+                # Update job with work directory info
+                job.nextflow_work_dir = str(work_dir)
+                job.status = JobStatus.RUNNING
+                job.started_at = datetime.utcnow()
+                # Persist the Nextflow process PID for cancellation support
+                _pid_file = work_dir / ".nextflow_pid"
+                if _pid_file.exists():
+                    try:
+                        job.nextflow_process_id = int(_pid_file.read_text().strip())
+                    except (ValueError, OSError):
+                        pass
+                await session.commit()
+                
+                # Start background monitoring task
+                monitor_task = asyncio.create_task(monitor_job(run_uuid, work_dir))
+                job_monitors[run_uuid] = monitor_task
+                work_directory = str(work_dir)
+                response_status = JobStatus.RUNNING
             
             await add_log_entry(
                 session,
                 run_uuid,
                 "INFO",
-                f"Nextflow submitted successfully",
+                f"{req.execution_mode.upper()} submission completed successfully",
                 source="api",
             )
             
             return {
                 "run_uuid": run_uuid,
                 "sample_name": req.sample_name,
-                "status": JobStatus.RUNNING,
-                "work_directory": str(work_dir),
+                "status": response_status,
+                "work_directory": work_directory,
             }
         
         except Exception as e:
@@ -398,7 +462,7 @@ async def get_job_details(run_uuid: str = FastAPIPath(..., min_length=1)):
     finally:
         await session.close()
 
-@app.get("/jobs/{run_uuid}/status", response_model=JobStatusResponse)
+@app.get("/jobs/{run_uuid}/status", response_model=JobStatusExtendedResponse)
 async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
     """Get quick status of a job."""
     session = SessionLocal()
@@ -418,6 +482,24 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "tasks": {},
             }
         
+        if job.execution_mode == "slurm":
+            backend = get_backend("slurm")
+            status_data = await backend.check_status(run_uuid)
+            return {
+                "run_uuid": run_uuid,
+                "status": status_data.status,
+                "progress_percent": 100 if status_data.status == JobStatus.COMPLETED else job.progress_percent,
+                "message": status_data.message or job.error_message or f"Status: {job.status}",
+                "tasks": status_data.tasks or {},
+                "execution_mode": status_data.execution_mode,
+                "run_stage": status_data.run_stage,
+                "slurm_job_id": status_data.slurm_job_id,
+                "slurm_state": status_data.slurm_state,
+                "transfer_state": status_data.transfer_state,
+                "result_destination": status_data.result_destination,
+                "ssh_profile_nickname": status_data.ssh_profile_nickname,
+            }
+
         # Get detailed status including tasks from check_status
         executor = NextflowExecutor()
         # Use the actual work directory stored in DB (may be jailed path)
@@ -430,6 +512,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             "progress_percent": status_data.get("progress_percent", job.progress_percent),
             "message": status_data.get("message", job.error_message or f"Status: {job.status}"),
             "tasks": status_data.get("tasks", {}),
+            "execution_mode": "local",
         }
     
     finally:
@@ -448,6 +531,22 @@ async def get_job_logs_endpoint(
         job = await get_job(session, run_uuid)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
+        if job.execution_mode == "slurm":
+            backend = get_backend("slurm")
+            logs = await backend.get_logs(run_uuid, limit=limit)
+            return {
+                "run_uuid": run_uuid,
+                "logs": [
+                    LogEntry(
+                        timestamp=log.timestamp,
+                        level=log.level,
+                        message=log.message,
+                        source=log.source,
+                    )
+                    for log in logs
+                ],
+            }
         
         logs = await get_job_logs(session, run_uuid, limit=limit)
         
@@ -512,6 +611,25 @@ async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                 status_code=400,
                 detail=f"Cannot cancel job with status {job.status}"
             )
+
+        if job.execution_mode == "slurm":
+            backend = get_backend("slurm")
+            if not await backend.cancel(run_uuid):
+                raise HTTPException(status_code=500, detail="Failed to cancel SLURM job")
+            await update_job_status(session, run_uuid, JobStatus.CANCELLED)
+            await add_log_entry(
+                session,
+                run_uuid,
+                "WARNING",
+                "Job cancelled via SLURM backend.",
+                source="api",
+            )
+            return {
+                "status": "cancelled",
+                "run_uuid": run_uuid,
+                "message": "Job cancelled via SLURM backend.",
+                "process_killed": True,
+            }
         
         # Cancel monitoring task if running
         if run_uuid in job_monitors:
@@ -808,6 +926,14 @@ async def create_ssh_profile(req: SSHProfileCreate):
             ssh_username=req.ssh_username,
             auth_method=req.auth_method,
             key_file_path=req.key_file_path,
+            local_username=req.local_username,
+            default_slurm_account=req.default_slurm_account,
+            default_slurm_partition=req.default_slurm_partition,
+            default_slurm_gpu_account=req.default_slurm_gpu_account,
+            default_slurm_gpu_partition=req.default_slurm_gpu_partition,
+            default_remote_input_path=req.default_remote_input_path,
+            default_remote_work_path=req.default_remote_work_path,
+            default_remote_output_path=req.default_remote_output_path,
         )
         session.add(profile)
         await session.commit()
@@ -914,7 +1040,120 @@ async def test_ssh_profile(
         is_enabled=profile.is_enabled,
     )
     test_result = await manager.test_connection(profile_data, local_password)
+    if local_password and profile.local_username:
+        session_meta = await get_local_auth_session_manager().get_session_metadata(profile_data)
+        if session_meta is not None:
+            test_result["session_started"] = True
+            test_result["session_expires_at"] = session_meta["expires_at"]
     return SSHProfileTestResult(**test_result)
+
+
+@app.get("/ssh-profiles/{profile_id}/auth-session", response_model=SSHProfileAuthSessionResult)
+async def get_ssh_profile_auth_session(
+    profile_id: str = FastAPIPath(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
+):
+    """Return the active local auth session for a profile, if any."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SSHProfile).where(SSHProfile.id == profile_id, SSHProfile.user_id == user_id)
+        )
+        profile = result.scalar_one_or_none()
+        if not profile:
+            raise HTTPException(404, "SSH profile not found")
+
+    profile_data = SSHProfileData(
+        id=profile.id,
+        user_id=profile.user_id,
+        nickname=profile.nickname,
+        ssh_host=profile.ssh_host,
+        ssh_port=profile.ssh_port,
+        ssh_username=profile.ssh_username,
+        auth_method=profile.auth_method,
+        key_file_path=profile.key_file_path,
+        local_username=profile.local_username,
+        is_enabled=profile.is_enabled,
+    )
+    session_meta = await get_local_auth_session_manager().get_session_metadata(profile_data)
+    if session_meta is None:
+        return SSHProfileAuthSessionResult(active=False, message="No active local auth session")
+    return SSHProfileAuthSessionResult(message="Local auth session active", **session_meta)
+
+
+@app.post("/ssh-profiles/{profile_id}/auth-session", response_model=SSHProfileAuthSessionResult)
+async def create_ssh_profile_auth_session(
+    profile_id: str = FastAPIPath(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
+    local_password: str = Body(..., embed=True),
+):
+    """Start or replace a local auth session for a profile using the local Unix password."""
+    try:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(SSHProfile).where(SSHProfile.id == profile_id, SSHProfile.user_id == user_id)
+            )
+            profile = result.scalar_one_or_none()
+            if not profile:
+                raise HTTPException(404, "SSH profile not found")
+
+        profile_data = SSHProfileData(
+            id=profile.id,
+            user_id=profile.user_id,
+            nickname=profile.nickname,
+            ssh_host=profile.ssh_host,
+            ssh_port=profile.ssh_port,
+            ssh_username=profile.ssh_username,
+            auth_method=profile.auth_method,
+            key_file_path=profile.key_file_path,
+            local_username=profile.local_username,
+            is_enabled=profile.is_enabled,
+        )
+        session_obj = await get_local_auth_session_manager().create_or_replace_session(profile_data, local_password)
+        payload = get_local_auth_session_manager()._serialize_session(session_obj)
+        return SSHProfileAuthSessionResult(message="Local auth session started", **payload)
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        logger.warning("Local auth session rejected", profile_id=profile_id, user_id=user_id, error=str(exc))
+        raise HTTPException(401, str(exc))
+    except (ValueError, RuntimeError, TimeoutError) as exc:
+        logger.error("Local auth session failed", profile_id=profile_id, user_id=user_id, error=str(exc))
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        logger.exception("Unexpected local auth session error", profile_id=profile_id, user_id=user_id)
+        raise HTTPException(500, f"Unexpected unlock error: {exc}")
+
+
+@app.delete("/ssh-profiles/{profile_id}/auth-session", response_model=SSHProfileAuthSessionResult)
+async def delete_ssh_profile_auth_session(
+    profile_id: str = FastAPIPath(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
+):
+    """Terminate the active local auth session for a profile."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SSHProfile).where(SSHProfile.id == profile_id, SSHProfile.user_id == user_id)
+        )
+        profile = result.scalar_one_or_none()
+        if not profile:
+            raise HTTPException(404, "SSH profile not found")
+
+    profile_data = SSHProfileData(
+        id=profile.id,
+        user_id=profile.user_id,
+        nickname=profile.nickname,
+        ssh_host=profile.ssh_host,
+        ssh_port=profile.ssh_port,
+        ssh_username=profile.ssh_username,
+        auth_method=profile.auth_method,
+        key_file_path=profile.key_file_path,
+        local_username=profile.local_username,
+        is_enabled=profile.is_enabled,
+    )
+    closed = await get_local_auth_session_manager().close_session_for_profile(profile_data)
+    if not closed:
+        return SSHProfileAuthSessionResult(active=False, message="No active local auth session")
+    return SSHProfileAuthSessionResult(active=False, message="Local auth session closed")
 
 
 def _profile_to_out(profile: SSHProfile) -> SSHProfileOut:
@@ -929,6 +1168,13 @@ def _profile_to_out(profile: SSHProfile) -> SSHProfileOut:
         auth_method=profile.auth_method,
         has_key_file=bool(profile.key_file_path),
         local_username=profile.local_username,
+        default_slurm_account=profile.default_slurm_account,
+        default_slurm_partition=profile.default_slurm_partition,
+        default_slurm_gpu_account=profile.default_slurm_gpu_account,
+        default_slurm_gpu_partition=profile.default_slurm_gpu_partition,
+        default_remote_input_path=profile.default_remote_input_path,
+        default_remote_work_path=profile.default_remote_work_path,
+        default_remote_output_path=profile.default_remote_output_path,
         is_enabled=profile.is_enabled,
         created_at=profile.created_at.isoformat() if profile.created_at else "",
         updated_at=profile.updated_at.isoformat() if profile.updated_at else "",

@@ -790,6 +790,36 @@ class TestSubmitJobAfterApproval:
         # asyncio.create_task should have been called with poll_job_status coroutine
         assert mock_aio.create_task.called
 
+    @pytest.mark.asyncio
+    async def test_resolves_slurm_profile_nickname_before_submission(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "extracted_params": {
+                "sample_name": "remote-test",
+                "mode": "CDNA",
+                "input_directory": "/data/test",
+                "reference_genome": ["mm39"],
+                "execution_mode": "slurm",
+                "ssh_profile_nickname": "hpc3",
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "remote-uuid", "work_directory": "/work/remote",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.app.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["execution_mode"] == "slurm"
+        assert submitted["ssh_profile_id"] == "profile-123"
+
 
 # ---------------------------------------------------------------------------
 # poll_job_status

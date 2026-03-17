@@ -10,7 +10,7 @@ import json
 import uuid
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -338,3 +338,57 @@ class TestInputType:
         sess.close()
         assert result["input_type"] == "bam"
         assert result["entry_point"] == "remap"
+
+
+class TestRemoteExecutionDetection:
+    @pytest.fixture(autouse=True)
+    def _setup(self, test_session_factory, setup_project, tmp_path):
+        self.sf = test_session_factory
+        self.tmp = tmp_path
+
+    @pytest.mark.asyncio
+    async def test_detects_slurm_execution_mode(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 using slurm"})
+        sess = self.sf()
+        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert result["execution_mode"] == "slurm"
+
+    @pytest.mark.asyncio
+    async def test_detects_hpc3_profile_nickname(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 on hpc3"})
+        sess = self.sf()
+        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert result["execution_mode"] == "slurm"
+        assert result["ssh_profile_nickname"] == "hpc3"
+
+    @pytest.mark.asyncio
+    async def test_applies_profile_defaults_for_slurm_paths_and_accounts(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 on hpc3"})
+        sess = self.sf()
+        with patch("cortex.app.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+                 "id": "profile-123",
+                 "nickname": "hpc3",
+                 "ssh_username": "jdoe",
+                 "default_slurm_account": "cpu-acct",
+                 "default_slurm_partition": "cpu-part",
+                 "default_slurm_gpu_account": "gpu-acct",
+                 "default_slurm_gpu_partition": "gpu-part",
+                 "default_remote_input_path": "/scratch/{ssh_username}/incoming/{project_slug}/{workflow_slug}",
+                 "default_remote_work_path": "/scratch/{ssh_username}/runs/{project_slug}/{workflow_slug}",
+                 "default_remote_output_path": "{remote_work_path}/results",
+             }])):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert result["slurm_account"] == "cpu-acct"
+        assert result["slurm_partition"] == "cpu-part"
+        assert result["slurm_gpu_account"] == "gpu-acct"
+        assert result["slurm_gpu_partition"] == "gpu-part"
+        assert result["remote_input_path"].endswith("/incoming/test/jamshid3")
+        assert result["remote_work_path"].endswith("/runs/test/jamshid3")
+        assert result["remote_output_path"].endswith("/runs/test/jamshid3/results")

@@ -23,6 +23,21 @@ class SubmitJobRequest(BaseModel):
     # Resume support
     resume_from_dir: Optional[str] = None  # Path to previous workflow dir to resume with -resume
 
+    # Remote execution (SLURM backend)
+    execution_mode: Literal["local", "slurm"] = "local"
+    ssh_profile_id: Optional[str] = None
+    slurm_account: Optional[str] = None
+    slurm_partition: Optional[str] = None
+    slurm_cpus: Optional[int] = None
+    slurm_memory_gb: Optional[int] = None
+    slurm_walltime: Optional[str] = None
+    slurm_gpus: Optional[int] = None
+    slurm_gpu_type: Optional[str] = None
+    remote_input_path: Optional[str] = None
+    remote_work_path: Optional[str] = None
+    remote_output_path: Optional[str] = None
+    result_destination: Optional[Literal["local", "remote", "both"]] = None
+
     # Advanced parameters (optional)
     modkit_filter_threshold: Optional[float] = 0.9  # Modification calling threshold
     min_cov: Optional[int] = None  # Minimum coverage (defaults: 1 for DNA, 3 for RNA/CDNA)
@@ -37,6 +52,15 @@ class SubmitJobRequest(BaseModel):
         if isinstance(v, str):
             return [v]
         return v
+
+    @model_validator(mode="after")
+    def validate_remote_execution(self):
+        if self.execution_mode == "slurm":
+            if not self.user_id:
+                raise ValueError("user_id is required when execution_mode is 'slurm'")
+            if not self.ssh_profile_id:
+                raise ValueError("ssh_profile_id is required when execution_mode is 'slurm'")
+        return self
 
 class JobStatusResponse(BaseModel):
     """Response with job status."""
@@ -105,7 +129,14 @@ class SSHProfileCreate(BaseModel):
     ssh_username: str = Field(..., min_length=1)
     auth_method: Literal["key_file", "ssh_agent"] = "key_file"
     key_file_path: Optional[str] = None
-    local_username: Optional[str] = None  # OS user who owns the key file (for sudo access)
+    local_username: Optional[str] = None  # Local Unix account unlocked for per-session SSH access
+    default_slurm_account: Optional[str] = None
+    default_slurm_partition: Optional[str] = None
+    default_slurm_gpu_account: Optional[str] = None
+    default_slurm_gpu_partition: Optional[str] = None
+    default_remote_input_path: Optional[str] = None
+    default_remote_work_path: Optional[str] = None
+    default_remote_output_path: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_auth_method(self):
@@ -123,6 +154,13 @@ class SSHProfileUpdate(BaseModel):
     auth_method: Optional[Literal["key_file", "ssh_agent"]] = None
     key_file_path: Optional[str] = None
     local_username: Optional[str] = None
+    default_slurm_account: Optional[str] = None
+    default_slurm_partition: Optional[str] = None
+    default_slurm_gpu_account: Optional[str] = None
+    default_slurm_gpu_partition: Optional[str] = None
+    default_remote_input_path: Optional[str] = None
+    default_remote_work_path: Optional[str] = None
+    default_remote_output_path: Optional[str] = None
     is_enabled: Optional[bool] = None
 
 
@@ -137,6 +175,13 @@ class SSHProfileOut(BaseModel):
     auth_method: str
     has_key_file: bool = False
     local_username: Optional[str] = None
+    default_slurm_account: Optional[str] = None
+    default_slurm_partition: Optional[str] = None
+    default_slurm_gpu_account: Optional[str] = None
+    default_slurm_gpu_partition: Optional[str] = None
+    default_remote_input_path: Optional[str] = None
+    default_remote_work_path: Optional[str] = None
+    default_remote_output_path: Optional[str] = None
     is_enabled: bool = True
     created_at: str
     updated_at: str
@@ -148,6 +193,19 @@ class SSHProfileTestResult(BaseModel):
     message: str
     hostname: Optional[str] = None
     remote_user: Optional[str] = None
+    session_started: bool = False
+    session_expires_at: Optional[str] = None
+
+
+class SSHProfileAuthSessionResult(BaseModel):
+    """Result of creating/querying/deleting a local auth session."""
+    active: bool
+    message: str
+    session_id: Optional[str] = None
+    local_username: Optional[str] = None
+    created_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+    expires_at: Optional[str] = None
 
 
 # ==================== Extended Job Schemas ====================

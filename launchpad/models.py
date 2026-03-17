@@ -114,6 +114,13 @@ class SSHProfile(Base):
     auth_method: Mapped[str] = mapped_column(String, nullable=False, default="key_file")  # "key_file", "ssh_agent"
     key_file_path: Mapped[str | None] = mapped_column(String, nullable=True)  # Path on server filesystem
     local_username: Mapped[str | None] = mapped_column(String, nullable=True)  # OS user who owns the key file
+    default_slurm_account: Mapped[str | None] = mapped_column(String, nullable=True)
+    default_slurm_partition: Mapped[str | None] = mapped_column(String, nullable=True)
+    default_slurm_gpu_account: Mapped[str | None] = mapped_column(String, nullable=True)
+    default_slurm_gpu_partition: Mapped[str | None] = mapped_column(String, nullable=True)
+    default_remote_input_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    default_remote_work_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    default_remote_output_path: Mapped[str | None] = mapped_column(String, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,

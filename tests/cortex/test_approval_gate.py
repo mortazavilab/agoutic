@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -31,6 +32,7 @@ from cortex.app import (
     app, _update_download_block, _post_download_suggestions,
     get_block_payload,
 )
+from fastapi import HTTPException
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +175,56 @@ class TestApprovalGate:
     def test_nonexistent_block_404(self, client):
         resp = client.patch("/block/fake-id", json={"status": "APPROVED"})
         assert resp.status_code == 404
+
+    def test_slurm_approval_requires_unlocked_profile(self, client, session_factory):
+        gate_id = _create_gate(session_factory, "proj-gate")
+        sess = session_factory()
+        block = sess.execute(select(ProjectBlock).where(ProjectBlock.id == gate_id)).scalar_one()
+        payload = json.loads(block.payload_json)
+        payload["edited_params"] = {
+            "execution_mode": "slurm",
+            "ssh_profile_nickname": "hpc3",
+        }
+        block.payload_json = json.dumps(payload)
+        sess.commit()
+        sess.close()
+
+        with patch(
+            "cortex.app._ensure_gate_remote_profile_unlocked",
+            new=AsyncMock(side_effect=HTTPException(status_code=400, detail="Unlock hpc3 first")),
+        ):
+            resp = client.patch(f"/block/{gate_id}", json={
+                "status": "APPROVED",
+                "payload": payload,
+            })
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Unlock hpc3 first"
+
+    def test_slurm_approval_requires_unlocked_profile(self, client, session_factory):
+        gate_id = _create_gate(session_factory, "proj-gate")
+        sess = session_factory()
+        block = sess.execute(select(ProjectBlock).where(ProjectBlock.id == gate_id)).scalar_one()
+        payload = json.loads(block.payload_json)
+        payload["edited_params"] = {
+            "execution_mode": "slurm",
+            "ssh_profile_nickname": "hpc3",
+        }
+        block.payload_json = json.dumps(payload)
+        sess.commit()
+        sess.close()
+
+        with patch(
+            "cortex.app._ensure_gate_remote_profile_unlocked",
+            new=AsyncMock(side_effect=HTTPException(status_code=400, detail="Unlock hpc3 first")),
+        ):
+            resp = client.patch(f"/block/{gate_id}", json={
+                "status": "APPROVED",
+                "payload": payload,
+            })
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Unlock hpc3 first"
 
 
 # ---------------------------------------------------------------------------

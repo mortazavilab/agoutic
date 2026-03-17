@@ -31,6 +31,7 @@ user_id = user.get("id") or user.get("user_id", "")
 
 st.title("🔌 Remote Connection Profiles")
 st.caption("Manage SSH connection profiles for remote HPC/SLURM execution")
+st.caption("Path defaults may use placeholders like {ssh_username}, {project_slug}, {sample_name}, {workflow_slug}, {remote_root}, and {remote_work_path}.")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -76,6 +77,40 @@ def _load_profiles() -> list[dict]:
         return []
 
 
+def _load_auth_session(profile_id: str) -> dict:
+    """Fetch active local auth session metadata for a profile."""
+    try:
+        resp = make_authenticated_request(
+            "GET",
+            f"{LAUNCHPAD_URL}/ssh-profiles/{profile_id}/auth-session",
+            params={"user_id": user_id},
+            headers=_launchpad_headers(),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return {"active": False, "message": "Session status unavailable"}
+
+
+def _response_error_text(resp) -> str:
+    """Extract the most useful error text from an HTTP response."""
+    try:
+        payload = resp.json()
+    except Exception:
+        return resp.text[:300]
+
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail[:300]
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return message[:300]
+    return resp.text[:300]
+
+
 # ── Create Profile ───────────────────────────────────────────────────
 
 with st.expander("➕ Create Profile", expanded=False):
@@ -101,8 +136,20 @@ with st.expander("➕ Create Profile", expanded=False):
 
         local_username = st.text_input(
             "Local OS Username (optional)",
-            help="If the key file is owned by a different OS user, enter their username for sudo access",
+            help="Local Unix account used to unlock a per-session SSH broker with that user's password.",
         )
+
+        st.markdown("**Remote Execution Defaults**")
+        def_col1, def_col2 = st.columns(2)
+        with def_col1:
+            default_slurm_account = st.text_input("Default CPU Account")
+            default_slurm_gpu_account = st.text_input("Default GPU Account")
+            default_remote_input_path = st.text_input("Default Remote Input Path")
+            default_remote_work_path = st.text_input("Default Remote Work Path")
+        with def_col2:
+            default_slurm_partition = st.text_input("Default CPU Partition")
+            default_slurm_gpu_partition = st.text_input("Default GPU Partition")
+            default_remote_output_path = st.text_input("Default Remote Output Path")
 
         submitted = st.form_submit_button("🔧 Create Profile", type="primary")
 
@@ -132,6 +179,20 @@ with st.expander("➕ Create Profile", expanded=False):
                     payload["key_file_path"] = key_file_path.strip()
                 if local_username.strip():
                     payload["local_username"] = local_username.strip()
+                if default_slurm_account.strip():
+                    payload["default_slurm_account"] = default_slurm_account.strip()
+                if default_slurm_partition.strip():
+                    payload["default_slurm_partition"] = default_slurm_partition.strip()
+                if default_slurm_gpu_account.strip():
+                    payload["default_slurm_gpu_account"] = default_slurm_gpu_account.strip()
+                if default_slurm_gpu_partition.strip():
+                    payload["default_slurm_gpu_partition"] = default_slurm_gpu_partition.strip()
+                if default_remote_input_path.strip():
+                    payload["default_remote_input_path"] = default_remote_input_path.strip()
+                if default_remote_work_path.strip():
+                    payload["default_remote_work_path"] = default_remote_work_path.strip()
+                if default_remote_output_path.strip():
+                    payload["default_remote_output_path"] = default_remote_output_path.strip()
 
                 try:
                     resp = make_authenticated_request(
@@ -188,18 +249,64 @@ for idx, profile in enumerate(profiles):
         # ── Test Connection ──────────────────────────────────────────
         with act_col1:
             needs_password = bool(profile.get("local_username"))
-            pwd_key = f"_sudo_pwd_{idx}"
+            pwd_key = f"_local_auth_pwd_{idx}"
+            session_info = _load_auth_session(pid) if needs_password else {"active": False}
             if needs_password:
-                sudo_pwd = st.text_input(
-                    "Local password", type="password", key=pwd_key,
-                    help=f"Password for OS user '{profile.get('local_username')}' (not stored)",
+                local_auth_pwd = st.text_input(
+                    "Local account password", type="password", key=pwd_key,
+                    help=f"Password used once to start a session broker as local Unix user '{profile.get('local_username')}'; not stored",
                 )
             else:
-                sudo_pwd = ""
+                local_auth_pwd = ""
+
+            if needs_password:
+                if session_info.get("active"):
+                    st.success(f"Unlocked until {_fmt_datetime(session_info.get('expires_at', ''))}")
+                unlock_col, lock_col = st.columns(2)
+                with unlock_col:
+                    if st.button("🔓 Unlock Session", key=f"unlock_{idx}"):
+                        if not local_auth_pwd:
+                            st.warning("Enter the local account password to start a session")
+                        else:
+                            with st.spinner("Starting local auth session…"):
+                                try:
+                                    resp = make_authenticated_request(
+                                        "POST",
+                                        f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/auth-session",
+                                        params={"user_id": user_id},
+                                        json={"local_password": local_auth_pwd},
+                                        headers=_launchpad_headers(),
+                                        timeout=30,
+                                    )
+                                    if resp.status_code == 200:
+                                        result = resp.json()
+                                        st.success(f"Session unlocked until {_fmt_datetime(result.get('expires_at', ''))}")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Unlock failed ({resp.status_code}): {_response_error_text(resp)}")
+                                except Exception as e:
+                                    st.error(f"Unlock error: {e}")
+                with lock_col:
+                    if st.button("🔒 End Session", key=f"lock_{idx}"):
+                        try:
+                            resp = make_authenticated_request(
+                                "DELETE",
+                                f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/auth-session",
+                                params={"user_id": user_id},
+                                headers=_launchpad_headers(),
+                                timeout=10,
+                            )
+                            if resp.status_code == 200:
+                                st.info("Local auth session closed")
+                                st.rerun()
+                            else:
+                                st.error(f"Close failed ({resp.status_code}): {_response_error_text(resp)}")
+                        except Exception as e:
+                            st.error(f"Error closing session: {e}")
 
             if st.button("🔌 Test Connection", key=f"test_{idx}"):
-                if needs_password and not sudo_pwd:
-                    st.warning("Enter your local OS password to test (required for sudo key access)")
+                if needs_password and not (local_auth_pwd or session_info.get("active")):
+                    st.warning("Unlock the local auth session first, or enter the password for a one-off test")
                 else:
                     with st.spinner("Testing connection…"):
                         try:
@@ -207,18 +314,21 @@ for idx, profile in enumerate(profiles):
                                 "POST",
                                 f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/test",
                                 params={"user_id": user_id},
-                                json={"local_password": sudo_pwd},
+                                json={"local_password": local_auth_pwd},
                                 headers=_launchpad_headers(),
                                 timeout=30,
                             )
                             if resp.status_code == 200:
                                 result = resp.json()
                                 if result.get("success", result.get("ok", False)):
-                                    st.success(f"✅ Connection successful! {result.get('message', '')}")
+                                    msg = result.get("message", "")
+                                    if result.get("session_started") and result.get("session_expires_at"):
+                                        msg = f"{msg} Session unlocked until {_fmt_datetime(result['session_expires_at'])}".strip()
+                                    st.success(f"✅ Connection successful! {msg}")
                                 else:
                                     st.warning(f"⚠️ Test returned: {result.get('message', result)}")
                             else:
-                                st.error(f"Test failed ({resp.status_code}): {resp.text[:300]}")
+                                st.error(f"Test failed ({resp.status_code}): {_response_error_text(resp)}")
                         except Exception as e:
                             st.error(f"Connection test error: {e}")
 
@@ -307,8 +417,48 @@ for idx, profile in enumerate(profiles):
                         "Local OS Username (optional)",
                         value=profile.get("local_username", ""),
                         key=f"elu_{idx}",
-                        help="OS user who owns the key file (for sudo access)",
+                        help="Local Unix account used to unlock a per-session SSH broker with that user's password.",
                     )
+
+                    st.markdown("**Remote Execution Defaults**")
+                    ed1, ed2 = st.columns(2)
+                    with ed1:
+                        new_default_slurm_account = st.text_input(
+                            "Default CPU Account",
+                            value=profile.get("default_slurm_account", ""),
+                            key=f"edcpuacct_{idx}",
+                        )
+                        new_default_slurm_gpu_account = st.text_input(
+                            "Default GPU Account",
+                            value=profile.get("default_slurm_gpu_account", ""),
+                            key=f"edgpuacct_{idx}",
+                        )
+                        new_default_remote_input_path = st.text_input(
+                            "Default Remote Input Path",
+                            value=profile.get("default_remote_input_path", ""),
+                            key=f"edrinput_{idx}",
+                        )
+                        new_default_remote_work_path = st.text_input(
+                            "Default Remote Work Path",
+                            value=profile.get("default_remote_work_path", ""),
+                            key=f"edrwork_{idx}",
+                        )
+                    with ed2:
+                        new_default_slurm_partition = st.text_input(
+                            "Default CPU Partition",
+                            value=profile.get("default_slurm_partition", ""),
+                            key=f"edcpupart_{idx}",
+                        )
+                        new_default_slurm_gpu_partition = st.text_input(
+                            "Default GPU Partition",
+                            value=profile.get("default_slurm_gpu_partition", ""),
+                            key=f"edgpupart_{idx}",
+                        )
+                        new_default_remote_output_path = st.text_input(
+                            "Default Remote Output Path",
+                            value=profile.get("default_remote_output_path", ""),
+                            key=f"edroutput_{idx}",
+                        )
 
                     new_enabled = st.checkbox(
                         "Enabled",
@@ -323,6 +473,13 @@ for idx, profile in enumerate(profiles):
                             "ssh_port": new_port,
                             "ssh_username": new_username.strip(),
                             "auth_method": new_auth,
+                            "default_slurm_account": new_default_slurm_account.strip() or None,
+                            "default_slurm_partition": new_default_slurm_partition.strip() or None,
+                            "default_slurm_gpu_account": new_default_slurm_gpu_account.strip() or None,
+                            "default_slurm_gpu_partition": new_default_slurm_gpu_partition.strip() or None,
+                            "default_remote_input_path": new_default_remote_input_path.strip() or None,
+                            "default_remote_work_path": new_default_remote_work_path.strip() or None,
+                            "default_remote_output_path": new_default_remote_output_path.strip() or None,
                             "is_enabled": new_enabled,
                         }
                         if new_auth == "key_file" and new_key_path.strip():

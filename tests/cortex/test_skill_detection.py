@@ -67,6 +67,20 @@ class TestAnalyzeLocalSample:
         assert result is None
 
 
+class TestRemoteExecution:
+    def test_using_slurm_routes_remote_execution(self):
+        result = _auto_detect_skill_switch(
+            "Run the mouse cDNA sample Jamshid3 at /data/pod5 using slurm", "welcome"
+        )
+        assert result == "remote_execution"
+
+    def test_on_hpc3_routes_remote_execution(self):
+        result = _auto_detect_skill_switch(
+            "Run the mouse cDNA sample Jamshid3 at /data/pod5 on hpc3", "welcome"
+        )
+        assert result == "remote_execution"
+
+
 class TestEncodeSearch:
     """Tests for routing to ENCODE_Search skill."""
 

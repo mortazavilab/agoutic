@@ -177,12 +177,13 @@ async def update_job_fields(run_uuid: str, fields: dict) -> None:
             await session.commit()
 
 
-async def get_ssh_profile(profile_id: str) -> SSHProfileData | None:
+async def get_ssh_profile(profile_id: str, user_id: str | None = None) -> SSHProfileData | None:
     """Load an SSH profile from DB and return as SSHProfileData."""
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(SSHProfile).where(SSHProfile.id == profile_id)
-        )
+        query = select(SSHProfile).where(SSHProfile.id == profile_id)
+        if user_id:
+            query = query.where(SSHProfile.user_id == user_id)
+        result = await session.execute(query)
         row = result.scalar_one_or_none()
         if not row:
             return None

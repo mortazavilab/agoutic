@@ -86,3 +86,14 @@ SLURM_MAX_GPUS = int(os.getenv("SLURM_MAX_GPUS", "8"))
 # Comma-separated whitelist (empty = any allowed)
 SLURM_ALLOWED_PARTITIONS = [p for p in os.getenv("SLURM_ALLOWED_PARTITIONS", "").split(",") if p] or None
 SLURM_ALLOWED_ACCOUNTS = [a for a in os.getenv("SLURM_ALLOWED_ACCOUNTS", "").split(",") if a] or None
+
+# SSH transport hardening
+# If unset, underlying SSH clients use their normal system defaults.
+SSH_KNOWN_HOSTS = os.getenv("SSH_KNOWN_HOSTS", "").strip() or None
+SSH_STRICT_HOST_KEY_CHECKING = os.getenv("SSH_STRICT_HOST_KEY_CHECKING", "true").strip().lower() not in {"0", "false", "no"}
+SSH_AGENT_FORWARDING = os.getenv("SSH_AGENT_FORWARDING", "false").strip().lower() in {"1", "true", "yes"}
+
+# Local auth broker sessions for per-user SSH access via `su`
+LOCAL_AUTH_SESSION_TTL_SECONDS = int(os.getenv("LOCAL_AUTH_SESSION_TTL_SECONDS", "3600"))
+LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS = int(os.getenv("LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS", "20"))
+LOCAL_AUTH_SOCKET_DIR = Path(os.getenv("LOCAL_AUTH_SOCKET_DIR", "/tmp"))

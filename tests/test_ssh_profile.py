@@ -16,9 +16,12 @@ class TestSSHProfileCreate:
             ssh_username="jdoe",
             auth_method="key_file",
             key_file_path="/home/jdoe/.ssh/id_rsa",
+            default_slurm_account="cpu-acct",
+            default_remote_work_path="/scratch/{ssh_username}/agoutic/{project_slug}/{workflow_slug}",
         )
         assert profile.auth_method == "key_file"
         assert profile.ssh_port == 22
+        assert profile.default_slurm_account == "cpu-acct"
 
     def test_valid_ssh_agent_profile(self):
         profile = SSHProfileCreate(
@@ -62,10 +65,13 @@ class TestSSHProfileUpdate:
             ssh_username="newuser",
             auth_method="ssh_agent",
             key_file_path=None,
+            default_slurm_partition="cpu-part",
+            default_remote_output_path="{remote_work_path}/results",
             is_enabled=False,
         )
         assert update.ssh_port == 2222
         assert update.is_enabled is False
+        assert update.default_slurm_partition == "cpu-part"
 
     def test_empty_update_is_valid(self):
         update = SSHProfileUpdate()
@@ -86,11 +92,13 @@ class TestSSHProfileOut:
             ssh_username="jdoe",
             auth_method="key_file",
             has_key_file=True,
+            default_slurm_gpu_account="gpu-acct",
             is_enabled=True,
             created_at="2024-01-01T00:00:00",
             updated_at="2024-01-01T00:00:00",
         )
         assert profile.has_key_file is True
+        assert profile.default_slurm_gpu_account == "gpu-acct"
 
     def test_has_key_file_false(self):
         profile = SSHProfileOut(

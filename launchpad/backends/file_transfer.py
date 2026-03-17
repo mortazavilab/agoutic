@@ -4,11 +4,14 @@ File transfer over SSH — upload inputs and download outputs.
 from __future__ import annotations
 
 import asyncio
-import subprocess
+import os
+import shlex
 from pathlib import Path
 
 from common.logging_config import get_logger
-from launchpad.backends.ssh_manager import SSHConnection, SSHProfileData
+from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
+from launchpad.config import SSH_KNOWN_HOSTS, SSH_STRICT_HOST_KEY_CHECKING
+from launchpad.backends.ssh_manager import SSHConnection, SSHProfileData, resolve_key_file_path
 
 logger = get_logger(__name__)
 
@@ -86,6 +89,51 @@ class FileTransferManager:
         logger.info(f"Starting {direction}: {source} → {dest}")
 
         try:
+            if profile.auth_method == "key_file" and profile.local_username and profile.key_file_path:
+                resolved_key = Path(resolve_key_file_path(profile))
+                if not resolved_key.exists():
+                    return {
+                        "ok": False,
+                        "message": f"SSH key file not found: {resolved_key}",
+                        "bytes_transferred": 0,
+                    }
+                if not resolved_key.is_file() or not os.access(resolved_key, os.R_OK):
+                    session_manager = get_local_auth_session_manager()
+                    session = await session_manager.get_active_session(profile)
+                    if session is None:
+                        return {
+                            "ok": False,
+                            "message": "No active local auth session for this profile. Unlock the profile in Remote Profiles first.",
+                            "bytes_transferred": 0,
+                        }
+                    response = await session_manager.invoke(
+                        session,
+                        {
+                            "op": "rsync_transfer",
+                            "profile": {
+                                "ssh_host": profile.ssh_host,
+                                "ssh_port": profile.ssh_port,
+                                "ssh_username": profile.ssh_username,
+                                "auth_method": profile.auth_method,
+                                "key_file_path": profile.key_file_path,
+                            },
+                            "source": source,
+                            "dest": dest,
+                            "exclude_patterns": exclude_patterns or [],
+                        },
+                    )
+                    if response.get("ok"):
+                        return {
+                            "ok": True,
+                            "message": f"{direction.title()} completed",
+                            "bytes_transferred": int(response.get("bytes_transferred", 0)),
+                        }
+                    return {
+                        "ok": False,
+                        "message": f"{direction.title()} failed: {response.get('stderr') or response.get('error') or 'unknown error'}",
+                        "bytes_transferred": 0,
+                    }
+
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -123,11 +171,13 @@ class FileTransferManager:
 
     def _build_ssh_command(self, profile: SSHProfileData) -> str:
         """Build the ssh command string for rsync -e."""
-        parts = ["ssh", f"-p {profile.ssh_port}"]
+        parts = ["ssh", "-p", str(profile.ssh_port)]
         if profile.auth_method == "key_file" and profile.key_file_path:
-            parts.append(f"-i {profile.key_file_path}")
-        parts.append("-o StrictHostKeyChecking=no")  # TODO: configurable in production
-        return " ".join(parts)
+            parts.extend(["-i", resolve_key_file_path(profile)])
+        parts.extend(["-o", f"StrictHostKeyChecking={'yes' if SSH_STRICT_HOST_KEY_CHECKING else 'no'}"])
+        if SSH_KNOWN_HOSTS:
+            parts.extend(["-o", f"UserKnownHostsFile={str(Path(SSH_KNOWN_HOSTS).expanduser())}"])
+        return " ".join(shlex.quote(part) for part in parts)
 
     @staticmethod
     def _parse_rsync_bytes(output: str) -> int:

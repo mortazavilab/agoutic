@@ -594,6 +594,274 @@ async def delete_job_proxy(run_uuid: str, request: Request):
                        run_uuid=run_uuid, error=str(e))
         raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
 
+
+def _launchpad_internal_headers() -> dict[str, str]:
+    from cortex.config import INTERNAL_API_SECRET
+
+    headers: dict[str, str] = {}
+    if INTERNAL_API_SECRET:
+        headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+    return headers
+
+
+def _launchpad_rest_base_url() -> str:
+    return SERVICE_REGISTRY.get("launchpad", {}).get(
+        "rest_url", os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
+    )
+
+
+async def _list_user_ssh_profiles(user_id: str) -> list[dict]:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            f"{_launchpad_rest_base_url()}/ssh-profiles",
+            params={"user_id": user_id},
+            headers=_launchpad_internal_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
+
+async def _resolve_ssh_profile_reference(
+    user_id: str,
+    ssh_profile_id: str | None,
+    ssh_profile_nickname: str | None,
+) -> tuple[str | None, str | None]:
+    if ssh_profile_id and not ssh_profile_nickname:
+        return ssh_profile_id, None
+    if not ssh_profile_id and not ssh_profile_nickname:
+        return None, None
+
+    profiles = await _list_user_ssh_profiles(user_id)
+
+    if ssh_profile_id:
+        for profile in profiles:
+            if profile.get("id") == ssh_profile_id:
+                return ssh_profile_id, profile.get("nickname")
+        return ssh_profile_id, ssh_profile_nickname
+
+    nickname = (ssh_profile_nickname or "").strip().lower()
+    if not nickname:
+        return None, None
+
+    exact_matches = [
+        profile for profile in profiles
+        if (profile.get("nickname") or "").strip().lower() == nickname
+    ]
+    if len(exact_matches) == 1:
+        profile = exact_matches[0]
+        return profile.get("id"), profile.get("nickname")
+
+    host_matches = [
+        profile for profile in profiles
+        if nickname in (profile.get("ssh_host") or "").strip().lower()
+        or (profile.get("nickname") or "").strip().lower().startswith(nickname)
+    ]
+    if len(host_matches) == 1:
+        profile = host_matches[0]
+        return profile.get("id"), profile.get("nickname")
+
+    available_profiles = ", ".join(
+        sorted(
+            {
+                profile.get("nickname") or profile.get("ssh_host") or ""
+                for profile in profiles
+                if profile.get("nickname") or profile.get("ssh_host")
+            }
+        )
+    ) or "none"
+    raise ValueError(
+        f"SSH profile {ssh_profile_nickname!r} was not found. Available profiles: {available_profiles}."
+    )
+
+
+async def _get_ssh_profile_auth_session(user_id: str, profile_id: str) -> dict:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            f"{_launchpad_rest_base_url()}/ssh-profiles/{profile_id}/auth-session",
+            params={"user_id": user_id},
+            headers=_launchpad_internal_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
+
+
+async def _ensure_gate_remote_profile_unlocked(user_id: str, gate_payload: dict) -> None:
+    job_params = gate_payload.get("edited_params") or gate_payload.get("extracted_params") or {}
+    if (job_params.get("execution_mode") or "local") != "slurm":
+        return
+
+    ssh_profile_id, ssh_profile_nickname = await _resolve_ssh_profile_reference(
+        user_id,
+        job_params.get("ssh_profile_id"),
+        job_params.get("ssh_profile_nickname"),
+    )
+    if not ssh_profile_id:
+        raise HTTPException(
+            status_code=400,
+            detail="SLURM execution requires a saved SSH profile. Select one in the approval gate, then unlock it if needed.",
+        )
+
+    missing_remote_fields = []
+    for field_name, label in (
+        ("remote_input_path", "Remote Input Path"),
+        ("remote_work_path", "Remote Work Path"),
+        ("remote_output_path", "Remote Output Path"),
+    ):
+        if not (job_params.get(field_name) or "").strip():
+            missing_remote_fields.append(label)
+
+    if missing_remote_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "SLURM execution requires explicit remote paths before approval. "
+                f"Fill in: {', '.join(missing_remote_fields)}."
+            ),
+        )
+
+    profiles = await _list_user_ssh_profiles(user_id)
+    profile = next((item for item in profiles if item.get("id") == ssh_profile_id), None)
+    if not profile:
+        raise HTTPException(status_code=400, detail="Selected SSH profile no longer exists.")
+
+    if not profile.get("local_username") or profile.get("auth_method") != "key_file":
+        return
+
+    session_info = await _get_ssh_profile_auth_session(user_id, ssh_profile_id)
+    if session_info.get("active"):
+        return
+
+    profile_label = profile.get("nickname") or ssh_profile_nickname or profile.get("ssh_host") or ssh_profile_id
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Remote profile {profile_label!r} is locked. Unlock it in Remote Connection Profiles before approving this SLURM run."
+        ),
+    )
+
+
+async def _prepare_remote_execution_params(
+    session,
+    project_id: str,
+    owner_id: str,
+    params: dict,
+) -> dict:
+    def _render_profile_default(template: str | None, context: dict[str, str]) -> str | None:
+        if not template:
+            return None
+        rendered = template
+        for key, value in context.items():
+            rendered = rendered.replace(f"{{{key}}}", value)
+            rendered = rendered.replace(f"<{key}>", value)
+        return rendered
+
+    normalized = dict(params or {})
+    if (normalized.get("execution_mode") or "local") != "slurm":
+        return normalized
+
+    normalized["slurm_gpus"] = max(int(normalized.get("slurm_gpus") or 0), 1)
+    normalized["result_destination"] = normalized.get("result_destination") or "local"
+
+    owner_user = session.execute(select(User).where(User.id == owner_id)).scalar_one_or_none()
+    project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
+
+    project_slug = _slugify(project_obj.slug if project_obj and project_obj.slug else project_id)
+    workflow_slug = _slugify(normalized.get("sample_name") or "workflow")
+
+    if owner_user:
+        local_workflow_dir = _resolve_project_dir(session, owner_user, project_id) / "workflow" / workflow_slug
+    else:
+        local_workflow_dir = Path(AGOUTIC_DATA) / "users" / owner_id / project_id / "workflow" / workflow_slug
+
+    normalized["local_workflow_directory"] = str(local_workflow_dir)
+
+    ssh_profile_id = normalized.get("ssh_profile_id")
+    ssh_profile_nickname = normalized.get("ssh_profile_nickname")
+    ssh_username = None
+    profile_defaults: dict = {}
+
+    if ssh_profile_id or ssh_profile_nickname:
+        try:
+            ssh_profile_id, ssh_profile_nickname = await _resolve_ssh_profile_reference(
+                owner_id,
+                ssh_profile_id,
+                ssh_profile_nickname,
+            )
+            normalized["ssh_profile_id"] = ssh_profile_id
+            normalized["ssh_profile_nickname"] = ssh_profile_nickname
+
+            if ssh_profile_id:
+                try:
+                    profiles = await _list_user_ssh_profiles(owner_id)
+                    profile = next((item for item in profiles if item.get("id") == ssh_profile_id), None)
+                    if profile:
+                        ssh_username = profile.get("ssh_username")
+                        profile_defaults = profile
+                except (httpx.HTTPError, OSError):
+                    logger.info(
+                        "Skipping SSH profile enrichment while preparing remote defaults",
+                        owner_id=owner_id,
+                        ssh_profile_id=ssh_profile_id,
+                    )
+        except (ValueError, httpx.HTTPError, OSError):
+            pass
+
+    remote_root = f"/scratch/{ssh_username or 'agoutic'}/agoutic/{project_slug}/{workflow_slug}"
+    normalized["slurm_account"] = normalized.get("slurm_account") or profile_defaults.get("default_slurm_account")
+    normalized["slurm_partition"] = normalized.get("slurm_partition") or profile_defaults.get("default_slurm_partition")
+    normalized["slurm_gpu_account"] = normalized.get("slurm_gpu_account") or profile_defaults.get("default_slurm_gpu_account")
+    normalized["slurm_gpu_partition"] = normalized.get("slurm_gpu_partition") or profile_defaults.get("default_slurm_gpu_partition")
+
+    template_context = {
+        "user_id": owner_id,
+        "project_id": project_id,
+        "project_slug": project_slug,
+        "sample_name": normalized.get("sample_name") or "workflow",
+        "workflow_slug": workflow_slug,
+        "ssh_username": ssh_username or "agoutic",
+        "local_workflow_directory": normalized["local_workflow_directory"],
+        "remote_root": remote_root,
+    }
+    remote_input_default = _render_profile_default(profile_defaults.get("default_remote_input_path"), template_context)
+    normalized["remote_input_path"] = normalized.get("remote_input_path") or remote_input_default or f"{remote_root}/input"
+
+    template_context["remote_input_path"] = normalized["remote_input_path"]
+    remote_work_default = _render_profile_default(profile_defaults.get("default_remote_work_path"), template_context)
+    normalized["remote_work_path"] = normalized.get("remote_work_path") or remote_work_default or f"{remote_root}/work"
+
+    template_context["remote_work_path"] = normalized["remote_work_path"]
+    remote_output_default = _render_profile_default(profile_defaults.get("default_remote_output_path"), template_context)
+    normalized["remote_output_path"] = normalized.get("remote_output_path") or remote_output_default or f"{normalized['remote_work_path']}/output"
+
+    return normalized
+
+
+def _hydrate_request_placeholders(value, *, user_id: str, project_id: str):
+    if isinstance(value, str):
+        substitutions = {
+            "<user_id>": user_id,
+            "{user_id}": user_id,
+            "<project_id>": project_id,
+            "{project_id}": project_id,
+        }
+        hydrated = value
+        for placeholder, replacement in substitutions.items():
+            hydrated = hydrated.replace(placeholder, replacement)
+        return hydrated
+    if isinstance(value, list):
+        return [
+            _hydrate_request_placeholders(item, user_id=user_id, project_id=project_id)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _hydrate_request_placeholders(item, user_id=user_id, project_id=project_id)
+            for key, item in value.items()
+        }
+    return value
+
 @app.post("/jobs/{run_uuid}/resubmit")
 async def resubmit_job(run_uuid: str, request: Request):
     """
@@ -632,6 +900,18 @@ async def resubmit_job(run_uuid: str, request: Request):
             "mode": job.mode,
             "input_directory": job.input_directory,
             "reference_genome": _ref_genome,
+            "execution_mode": job.execution_mode or "local",
+            "ssh_profile_id": job.ssh_profile_id,
+            "slurm_account": job.slurm_account,
+            "slurm_partition": job.slurm_partition,
+            "slurm_cpus": job.slurm_cpus,
+            "slurm_memory_gb": job.slurm_memory_gb,
+            "slurm_walltime": job.slurm_walltime,
+            "slurm_gpus": job.slurm_gpus,
+            "slurm_gpu_type": job.slurm_gpu_type,
+            "remote_work_path": job.remote_work_dir,
+            "remote_output_path": job.remote_output_dir,
+            "result_destination": job.result_destination,
         }
         if job.modifications:
             extracted_params["modifications"] = job.modifications
@@ -641,6 +921,12 @@ async def resubmit_job(run_uuid: str, request: Request):
 
         # Find the project this job belongs to
         project_id = job.project_id
+        extracted_params = await _prepare_remote_execution_params(
+            session,
+            project_id=project_id,
+            owner_id=user.id,
+            params=extracted_params,
+        )
 
         # Create approval gate block in the same project
         gate_block = _create_block_internal(
@@ -763,6 +1049,15 @@ async def update_block(
         require_project_access(block.project_id, user, min_role="editor")
             
         old_status = block.status
+
+        prospective_payload = get_block_payload(block)
+        if isinstance(body.payload, dict):
+            prospective_payload = {**prospective_payload, **body.payload}
+
+        if block.type == "APPROVAL_GATE" and old_status == "PENDING" and body.status == "APPROVED":
+            gate_action = prospective_payload.get("gate_action") or "job"
+            if gate_action != "download":
+                await _ensure_gate_remote_profile_unlocked(user.id, prospective_payload)
         
         if body.status is not None:
             block.status = body.status
@@ -899,7 +1194,71 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         "per_mod": None,  # Will use default 5 if not specified
         "accuracy": None,  # Will use default "sup" if not specified
         "max_gpu_tasks": None,  # Will use default 1 if not specified
+        "execution_mode": "local",
+        "ssh_profile_id": None,
+        "ssh_profile_nickname": None,
+        "slurm_account": None,
+        "slurm_partition": None,
+        "slurm_gpu_account": None,
+        "slurm_gpu_partition": None,
+        "slurm_cpus": None,
+        "slurm_memory_gb": None,
+        "slurm_walltime": None,
+        "slurm_gpus": None,
+        "slurm_gpu_type": None,
+        "remote_input_path": None,
+        "remote_work_path": None,
+        "remote_output_path": None,
+        "result_destination": None,
     }
+
+    if re.search(r"\b(slurm|sbatch|hpc3|cluster|remote(?:ly|\s+execution)?)\b", all_user_text):
+        params["execution_mode"] = "slurm"
+
+    if re.search(r"\bhpc3\b", all_user_text):
+        params["execution_mode"] = "slurm"
+        params["ssh_profile_nickname"] = "hpc3"
+
+    profile_match = re.search(
+        r"\b(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile\b",
+        all_user_text_original,
+        re.IGNORECASE,
+    )
+    if profile_match:
+        params["execution_mode"] = "slurm"
+        params["ssh_profile_nickname"] = profile_match.group(1)
+
+    account_match = re.search(r"\baccount\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
+    if account_match:
+        params["slurm_account"] = account_match.group(1)
+
+    gpu_account_match = re.search(r"\bgpu\s+account\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
+    if gpu_account_match:
+        params["slurm_gpu_account"] = gpu_account_match.group(1)
+
+    partition_match = re.search(r"\b(?:partition|queue)\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
+    if partition_match:
+        params["slurm_partition"] = partition_match.group(1)
+
+    gpu_partition_match = re.search(r"\bgpu\s+(?:partition|queue)\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
+    if gpu_partition_match:
+        params["slurm_gpu_partition"] = gpu_partition_match.group(1)
+
+    cpus_match = re.search(r"\b(\d+)\s*(?:cpus?|cores?)\b", all_user_text, re.IGNORECASE)
+    if cpus_match:
+        params["slurm_cpus"] = int(cpus_match.group(1))
+
+    memory_match = re.search(r"\b(\d+)\s*(?:gb|gib)\b", all_user_text, re.IGNORECASE)
+    if memory_match:
+        params["slurm_memory_gb"] = int(memory_match.group(1))
+
+    walltime_match = re.search(r"\b(\d{1,2}:\d{2}:\d{2}|\d+-\d{2}:\d{2}:\d{2})\b", all_user_text)
+    if walltime_match:
+        params["slurm_walltime"] = walltime_match.group(1)
+
+    gpus_match = re.search(r"\b(\d+)\s*gpus?\b", all_user_text, re.IGNORECASE)
+    if gpus_match:
+        params["slurm_gpus"] = int(gpus_match.group(1))
     
     # Detect Dogme entry point from conversation
     if "only basecall" in all_user_text or "just basecalling" in all_user_text or "basecall only" in all_user_text:
@@ -1095,6 +1454,14 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
             params["max_gpu_tasks"] = int(gpu_match.group(1))
             break
     
+    owner_id = None
+    project = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
+    if project:
+        owner_id = project.owner_id
+
+    if owner_id:
+        params = await _prepare_remote_execution_params(session, project_id, owner_id, params)
+
     logger.info("Extracted parameters", method="heuristics", params=params)
     return params
 
@@ -1723,6 +2090,8 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             return
         
         # Normalize reference_genome to list for Launchpad (Nextflow handles multi-genome in parallel)
+        job_params = await _prepare_remote_execution_params(session, project_id, owner_id, job_params)
+
         ref_genome = job_params.get("reference_genome", ["mm39"])
         if isinstance(ref_genome, str):
             ref_genome = [ref_genome]
@@ -1732,7 +2101,27 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
         _username = owner_user.username if owner_user else None
         _project_slug = project_obj.slug if project_obj else None
+        execution_mode = job_params.get("execution_mode") or "local"
+        ssh_profile_id = job_params.get("ssh_profile_id")
+        ssh_profile_nickname = job_params.get("ssh_profile_nickname")
+
+        if execution_mode == "slurm":
+            if not ssh_profile_id and not ssh_profile_nickname:
+                raise ValueError(
+                    "SLURM execution requires an SSH profile. Select one in the approval gate or use a saved profile nickname such as 'hpc3'."
+                )
+            ssh_profile_id, ssh_profile_nickname = await _resolve_ssh_profile_reference(
+                owner_id,
+                ssh_profile_id,
+                ssh_profile_nickname,
+            )
         
+        selected_slurm_account = (job_params.get("slurm_resources") or {}).get("account") or job_params.get("slurm_account")
+        selected_slurm_partition = (job_params.get("slurm_resources") or {}).get("partition") or job_params.get("slurm_partition")
+        if execution_mode == "slurm" and max(int(job_params.get("slurm_gpus") or 0), 0) > 0:
+            selected_slurm_account = job_params.get("slurm_gpu_account") or selected_slurm_account
+            selected_slurm_partition = job_params.get("slurm_gpu_partition") or selected_slurm_partition
+
         job_data = {
             "project_id": project_id,
             "user_id": owner_id,  # Pass owner for jailed file paths and job ownership
@@ -1751,6 +2140,19 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "per_mod": job_params.get("per_mod") or 5,
             "accuracy": job_params.get("accuracy") or "sup",
             "max_gpu_tasks": job_params.get("max_gpu_tasks") or 1,
+            "execution_mode": execution_mode,
+            "ssh_profile_id": ssh_profile_id,
+            "slurm_account": selected_slurm_account,
+            "slurm_partition": selected_slurm_partition,
+            "slurm_cpus": (job_params.get("slurm_resources") or {}).get("cpus") or job_params.get("slurm_cpus"),
+            "slurm_memory_gb": (job_params.get("slurm_resources") or {}).get("memory_gb") or job_params.get("slurm_memory_gb"),
+            "slurm_walltime": (job_params.get("slurm_resources") or {}).get("walltime") or job_params.get("slurm_walltime"),
+            "slurm_gpus": (job_params.get("slurm_resources") or {}).get("gpus") or job_params.get("slurm_gpus"),
+            "slurm_gpu_type": (job_params.get("slurm_resources") or {}).get("gpu_type") or job_params.get("slurm_gpu_type"),
+            "remote_input_path": (job_params.get("remote_paths") or {}).get("remote_input_path") or job_params.get("remote_input_path"),
+            "remote_work_path": (job_params.get("remote_paths") or {}).get("remote_work_path") or job_params.get("remote_work_path"),
+            "remote_output_path": (job_params.get("remote_paths") or {}).get("remote_output_path") or job_params.get("remote_output_path"),
+            "result_destination": job_params.get("result_destination"),
         }
 
         workflow_block = None
@@ -2912,7 +3314,7 @@ What would you like to do?
         # history even when the current skill is a search/browse skill.
         _APPROVAL_SKILLS = {
             "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
-            "analyze_local_sample", "download_files",
+            "analyze_local_sample", "download_files", "remote_execution",
         }
         if needs_approval and active_skill not in _APPROVAL_SKILLS:
             logger.warning(
@@ -3606,7 +4008,11 @@ What would you like to do?
                 source_type = "service"
                 source_key = "analyzer"
             
-            params = _parse_tag_params(params_str)
+            params = _hydrate_request_placeholders(
+                _parse_tag_params(params_str),
+                user_id=user.id,
+                project_id=req.project_id,
+            )
 
             # Fix hallucinated parameter names using param alias map
             _p_aliases = _param_aliases.get(corrected_tool, {})
@@ -3646,7 +4052,11 @@ What would you like to do?
         for match in legacy_encode_matches:
             tool_name = match.group(1)
             params_str = match.group(2)
-            params = _parse_tag_params(params_str)
+            params = _hydrate_request_placeholders(
+                _parse_tag_params(params_str),
+                user_id=user.id,
+                project_id=req.project_id,
+            )
             
             # Fix hallucinated tool names using alias map
             corrected_tool = _tool_aliases.get(tool_name, tool_name)
@@ -3686,7 +4096,11 @@ What would you like to do?
             
             calls_by_source.setdefault("analyzer", []).append({
                 "tool": tool_name,
-                "params": {"run_uuid": run_uuid},
+                "params": _hydrate_request_placeholders(
+                    {"run_uuid": run_uuid},
+                    user_id=user.id,
+                    project_id=req.project_id,
+                ),
             })
         
         # 6b. Deduplicate tool calls within each source.
@@ -5008,6 +5422,7 @@ What would you like to do?
         if needs_approval:
             # Determine gate action based on active skill
             gate_action = "download" if active_skill == "download_files" else "job"
+            gate_skill = active_skill
 
             if gate_action == "download" and _pending_download_files:
                 # Download gate: show the files to be downloaded, not Dogme params
@@ -5023,6 +5438,8 @@ What would you like to do?
             else:
                 # Job gate: extract Dogme pipeline parameters
                 extracted_params = await extract_job_parameters_from_conversation(session, req.project_id)
+                if (extracted_params.get("execution_mode") or "local") == "slurm":
+                    gate_skill = "remote_execution"
             
             gate_block = _create_block_internal(
                 session,
@@ -5034,7 +5451,7 @@ What would you like to do?
                     "gate_action": gate_action,
                     "attempt_number": 1,
                     "rejection_history": [],
-                    "skill": active_skill,
+                    "skill": gate_skill,
                     "model": engine.model_name
                 },
                 status="PENDING",

@@ -189,6 +189,13 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
         if _has_de_word_early and _has_counts_file_early:
             return "differential_expression"
 
+    # --- Early remote execution pre-check ---
+    _remote_words_early = ["slurm", "sbatch", "hpc3", "cluster", "remote execution"]
+    _has_remote_word_early = any(w in msg_lower for w in _remote_words_early)
+    _has_run_intent_early = any(w in msg_lower for w in ["run", "submit", "launch", "analyze", "analyse", "process"])
+    if current_skill != "remote_execution" and _has_remote_word_early and _has_run_intent_early:
+        return "remote_execution"
+
     # --- Signals for analyze_local_sample ---
     # User mentions a local file path + analysis intent
     _has_local_path = bool(re.search(r'(/[a-z_][\w/.-]+|~[\w/.-]+)', user_message))

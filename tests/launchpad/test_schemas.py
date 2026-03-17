@@ -93,6 +93,34 @@ class TestSubmitJobRequest:
         assert req.accuracy == "sup"
         assert req.max_gpu_tasks == 1
 
+    def test_slurm_requires_user_and_profile(self):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="s",
+                mode="DNA",
+                input_directory="/d",
+                execution_mode="slurm",
+            )
+
+    def test_slurm_accepts_remote_fields(self):
+        req = SubmitJobRequest(
+            project_id="p",
+            user_id="user-1",
+            sample_name="s",
+            mode="DNA",
+            input_directory="/d",
+            execution_mode="slurm",
+            ssh_profile_id="prof-1",
+            slurm_account="lab",
+            slurm_partition="gpu",
+            remote_work_path="/scratch/user/work",
+            result_destination="both",
+        )
+        assert req.execution_mode == "slurm"
+        assert req.ssh_profile_id == "prof-1"
+        assert req.result_destination == "both"
+
 
 class TestJobStatusResponse:
     def test_valid(self):

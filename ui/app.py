@@ -1455,6 +1455,71 @@ def render_block(block, expected_project_id: str = ""):
                             index=_gpu_idx,
                             help="Maximum simultaneous dorado/GPU tasks within a pipeline run (default: 1)",
                         )
+
+                        execution_mode_options = ["local", "slurm"]
+                        current_execution_mode = extracted_params.get("execution_mode", "local")
+                        execution_mode_index = execution_mode_options.index(current_execution_mode) if current_execution_mode in execution_mode_options else 0
+                        execution_mode = st.selectbox(
+                            "Execution Mode",
+                            execution_mode_options,
+                            index=execution_mode_index,
+                            format_func=lambda value: "Local" if value == "local" else "HPC3 / SLURM",
+                            help="Choose whether this run stays on the AGOUTIC host or is submitted through a remote SLURM profile."
+                        )
+
+                        ssh_profile_id = extracted_params.get("ssh_profile_id")
+                        ssh_profile_nickname = extracted_params.get("ssh_profile_nickname", "") or ""
+                        slurm_account = extracted_params.get("slurm_account", "") or ""
+                        slurm_partition = extracted_params.get("slurm_partition", "") or ""
+                        slurm_gpu_account = extracted_params.get("slurm_gpu_account", "") or ""
+                        slurm_gpu_partition = extracted_params.get("slurm_gpu_partition", "") or ""
+                        slurm_cpus = int(extracted_params.get("slurm_cpus") or 4)
+                        slurm_memory_gb = int(extracted_params.get("slurm_memory_gb") or 16)
+                        slurm_walltime = extracted_params.get("slurm_walltime", "04:00:00") or "04:00:00"
+                        slurm_gpus = max(int(extracted_params.get("slurm_gpus") or 1), 1)
+                        slurm_gpu_type = extracted_params.get("slurm_gpu_type", "") or ""
+                        remote_input_path = extracted_params.get("remote_input_path", "") or ""
+                        remote_work_path = extracted_params.get("remote_work_path", "") or ""
+                        remote_output_path = extracted_params.get("remote_output_path", "") or ""
+                        local_workflow_directory = extracted_params.get("local_workflow_directory", "") or ""
+                        result_destination_default = extracted_params.get("result_destination") or "local"
+
+                        if execution_mode == "slurm":
+                            st.caption("Remote execution uses one of your saved SSH profiles. You can refer to it by nickname, for example hpc3.")
+                            if local_workflow_directory:
+                                st.caption(f"Local workflow folder: {local_workflow_directory}")
+                            ssh_profile_nickname = st.text_input(
+                                "SSH Profile Nickname",
+                                value=ssh_profile_nickname,
+                                help="Saved Remote Profile nickname, such as hpc3."
+                            )
+                            if ssh_profile_id:
+                                st.caption(f"Existing SSH profile ID will be reused unless you change the nickname: {ssh_profile_id}")
+
+                            col_slurm_1, col_slurm_2 = st.columns(2)
+                            with col_slurm_1:
+                                slurm_account = st.text_input("SLURM Account", value=slurm_account)
+                                slurm_gpu_account = st.text_input("GPU Account Override", value=slurm_gpu_account, help="Optional account to use when GPUs are requested.")
+                                slurm_cpus = st.number_input("SLURM CPUs", min_value=1, max_value=256, value=slurm_cpus)
+                                slurm_walltime = st.text_input("SLURM Walltime", value=slurm_walltime, help="Format HH:MM:SS or D-HH:MM:SS")
+                                remote_input_path = st.text_input("Remote Input Path", value=remote_input_path)
+                                remote_work_path = st.text_input("Remote Work Path", value=remote_work_path)
+                            with col_slurm_2:
+                                slurm_partition = st.text_input("SLURM Partition", value=slurm_partition)
+                                slurm_gpu_partition = st.text_input("GPU Partition Override", value=slurm_gpu_partition, help="Optional partition to use when GPUs are requested.")
+                                slurm_memory_gb = st.number_input("SLURM Memory (GB)", min_value=1, max_value=2048, value=slurm_memory_gb)
+                                slurm_gpus = st.number_input("SLURM GPUs", min_value=1, max_value=32, value=slurm_gpus)
+                                remote_output_path = st.text_input("Remote Output Path", value=remote_output_path)
+
+                            slurm_gpu_type = st.text_input("GPU Type (optional)", value=slurm_gpu_type)
+                            result_destination = st.selectbox(
+                                "Result Destination",
+                                ["local", "remote", "both"],
+                                index=["local", "remote", "both"].index(result_destination_default) if result_destination_default in ["local", "remote", "both"] else 0,
+                                help="Choose whether results stay remote, sync back locally, or both."
+                            )
+                        else:
+                            result_destination = None
                         
                         # Advanced parameters in expander
                         with st.expander("⚙️ Advanced Parameters (optional)"):
@@ -1530,7 +1595,46 @@ def render_block(block, expected_project_id: str = ""):
                                 "per_mod": per_mod,
                                 "accuracy": accuracy,
                                 "max_gpu_tasks": max_gpu_tasks,
+                                "execution_mode": execution_mode,
                             }
+                            if execution_mode == "slurm":
+                                edited_params.update({
+                                    "ssh_profile_id": ssh_profile_id,
+                                    "ssh_profile_nickname": ssh_profile_nickname or None,
+                                    "local_workflow_directory": local_workflow_directory or None,
+                                    "slurm_account": slurm_account or None,
+                                    "slurm_partition": slurm_partition or None,
+                                    "slurm_gpu_account": slurm_gpu_account or None,
+                                    "slurm_gpu_partition": slurm_gpu_partition or None,
+                                    "slurm_cpus": int(slurm_cpus),
+                                    "slurm_memory_gb": int(slurm_memory_gb),
+                                    "slurm_walltime": slurm_walltime or None,
+                                    "slurm_gpus": int(slurm_gpus),
+                                    "slurm_gpu_type": slurm_gpu_type or None,
+                                    "remote_input_path": remote_input_path or None,
+                                    "remote_work_path": remote_work_path or None,
+                                    "remote_output_path": remote_output_path or None,
+                                    "result_destination": result_destination,
+                                })
+                            else:
+                                edited_params.update({
+                                    "local_workflow_directory": None,
+                                    "ssh_profile_id": None,
+                                    "ssh_profile_nickname": None,
+                                    "slurm_account": None,
+                                    "slurm_partition": None,
+                                    "slurm_gpu_account": None,
+                                    "slurm_gpu_partition": None,
+                                    "slurm_cpus": None,
+                                    "slurm_memory_gb": None,
+                                    "slurm_walltime": None,
+                                    "slurm_gpus": None,
+                                    "slurm_gpu_type": None,
+                                    "remote_input_path": None,
+                                    "remote_work_path": None,
+                                    "remote_output_path": None,
+                                    "result_destination": None,
+                                })
                             # Preserve resume_from_dir for resubmit-resume flow
                             if extracted_params.get("resume_from_dir"):
                                 edited_params["resume_from_dir"] = extracted_params["resume_from_dir"]
@@ -1539,12 +1643,19 @@ def render_block(block, expected_project_id: str = ""):
                             payload_update = dict(content)
                             payload_update["edited_params"] = edited_params
                             
-                            make_authenticated_request(
+                            resp = make_authenticated_request(
                                 "PATCH",
                                 f"{API_URL}/block/{block_id}",
                                 json={"status": "APPROVED", "payload": payload_update}
                             )
-                            st.rerun()
+                            if resp.status_code == 200:
+                                st.rerun()
+                            else:
+                                try:
+                                    error_detail = resp.json().get("detail") or resp.text
+                                except Exception:
+                                    error_detail = resp.text
+                                st.error(f"Approval failed: {error_detail}")
                         
                         if submit_reject:
                             st.session_state[f"rejecting_{block_id}"] = True

@@ -46,6 +46,19 @@ class LaunchpadMCPTools:
         username: Optional[str] = None,
         project_slug: Optional[str] = None,
         resume_from_dir: Optional[str] = None,
+        execution_mode: str = "local",
+        ssh_profile_id: Optional[str] = None,
+        slurm_account: Optional[str] = None,
+        slurm_partition: Optional[str] = None,
+        slurm_cpus: Optional[int] = None,
+        slurm_memory_gb: Optional[int] = None,
+        slurm_walltime: Optional[str] = None,
+        slurm_gpus: Optional[int] = None,
+        slurm_gpu_type: Optional[str] = None,
+        remote_input_path: Optional[str] = None,
+        remote_work_path: Optional[str] = None,
+        remote_output_path: Optional[str] = None,
+        result_destination: Optional[str] = None,
     ) -> dict:
         """
         Submit a Dogme/Nextflow analysis job to Launchpad.
@@ -84,6 +97,7 @@ class LaunchpadMCPTools:
             "mode": mode,
             "input_directory": input_directory,
             "reference_genome": reference_genome,
+            "execution_mode": execution_mode,
         }
         # Add optional parameters if provided
         if modifications:
@@ -110,6 +124,30 @@ class LaunchpadMCPTools:
             payload["project_slug"] = project_slug
         if resume_from_dir is not None:
             payload["resume_from_dir"] = resume_from_dir
+        if ssh_profile_id is not None:
+            payload["ssh_profile_id"] = ssh_profile_id
+        if slurm_account is not None:
+            payload["slurm_account"] = slurm_account
+        if slurm_partition is not None:
+            payload["slurm_partition"] = slurm_partition
+        if slurm_cpus is not None:
+            payload["slurm_cpus"] = slurm_cpus
+        if slurm_memory_gb is not None:
+            payload["slurm_memory_gb"] = slurm_memory_gb
+        if slurm_walltime is not None:
+            payload["slurm_walltime"] = slurm_walltime
+        if slurm_gpus is not None:
+            payload["slurm_gpus"] = slurm_gpus
+        if slurm_gpu_type is not None:
+            payload["slurm_gpu_type"] = slurm_gpu_type
+        if remote_input_path is not None:
+            payload["remote_input_path"] = remote_input_path
+        if remote_work_path is not None:
+            payload["remote_work_path"] = remote_work_path
+        if remote_output_path is not None:
+            payload["remote_output_path"] = remote_output_path
+        if result_destination is not None:
+            payload["result_destination"] = result_destination
         
         try:
             async with httpx.AsyncClient() as client:
@@ -491,6 +529,19 @@ TOOL_REGISTRY = {
                 "input_type": {"type": "string", "enum": ["pod5", "bam", "fastq"], "description": "Type of input files (default: pod5)"},
                 "modifications": {"type": "string", "description": "Modification motifs to call (optional)"},
                 "max_gpu_tasks": {"type": "integer", "description": "Max concurrent GPU tasks (dorado/openChromatin) per pipeline run (default: 1)"},
+                "execution_mode": {"type": "string", "enum": ["local", "slurm"], "description": "Execution backend to use (default: local)"},
+                "ssh_profile_id": {"type": "string", "description": "Saved SSH profile to use for SLURM execution"},
+                "slurm_account": {"type": "string", "description": "SLURM account/allocation"},
+                "slurm_partition": {"type": "string", "description": "SLURM partition"},
+                "slurm_cpus": {"type": "integer", "description": "Requested CPU count"},
+                "slurm_memory_gb": {"type": "integer", "description": "Requested memory in GB"},
+                "slurm_walltime": {"type": "string", "description": "Requested walltime (HH:MM:SS or D-HH:MM:SS)"},
+                "slurm_gpus": {"type": "integer", "description": "Requested GPU count"},
+                "slurm_gpu_type": {"type": "string", "description": "Optional GPU type"},
+                "remote_input_path": {"type": "string", "description": "Remote path for staged inputs"},
+                "remote_work_path": {"type": "string", "description": "Remote Nextflow work directory"},
+                "remote_output_path": {"type": "string", "description": "Remote results directory"},
+                "result_destination": {"type": "string", "enum": ["local", "remote", "both"], "description": "Where final outputs should be kept"},
             },
             "required": ["sample_name", "mode", "input_directory"],
         }

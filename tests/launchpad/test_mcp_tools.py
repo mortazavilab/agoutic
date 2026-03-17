@@ -94,6 +94,19 @@ class TestSubmitDogmeJob:
                 user_id="user-1",
                 username="alim",
                 project_slug="project-a",
+                execution_mode="slurm",
+                ssh_profile_id="prof-1",
+                slurm_account="lab",
+                slurm_partition="gpu",
+                slurm_cpus=8,
+                slurm_memory_gb=64,
+                slurm_walltime="12:00:00",
+                slurm_gpus=1,
+                slurm_gpu_type="a100",
+                remote_input_path="/remote/input",
+                remote_work_path="/remote/work",
+                remote_output_path="/remote/output",
+                result_destination="both",
             )
 
         assert result == {"run_uuid": "run-1", "status": "PENDING"}
@@ -108,6 +121,7 @@ class TestSubmitDogmeJob:
             "mode": "DNA",
             "input_directory": "/data/input",
             "reference_genome": ["GRCh38", "mm39"],
+            "execution_mode": "slurm",
             "input_type": "pod5",
             "modkit_filter_threshold": 0.75,
             "min_cov": 4,
@@ -117,6 +131,18 @@ class TestSubmitDogmeJob:
             "user_id": "user-1",
             "username": "alim",
             "project_slug": "project-a",
+            "ssh_profile_id": "prof-1",
+            "slurm_account": "lab",
+            "slurm_partition": "gpu",
+            "slurm_cpus": 8,
+            "slurm_memory_gb": 64,
+            "slurm_walltime": "12:00:00",
+            "slurm_gpus": 1,
+            "slurm_gpu_type": "a100",
+            "remote_input_path": "/remote/input",
+            "remote_work_path": "/remote/work",
+            "remote_output_path": "/remote/output",
+            "result_destination": "both",
         }
         assert "modifications" not in kwargs["json"]
         assert "entry_point" not in kwargs["json"]

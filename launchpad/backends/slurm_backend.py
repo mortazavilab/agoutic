@@ -4,6 +4,7 @@ SLURM execution backend — SSH + sbatch for remote HPC execution.
 from __future__ import annotations
 
 import json
+import shlex
 import uuid
 from datetime import datetime, timezone
 
@@ -47,7 +48,7 @@ class SlurmBackend:
             raise ValueError(f"Resource validation failed: {'; '.join(errors)}")
 
         # 2. Load SSH profile
-        profile = await self._load_profile(params.ssh_profile_id)
+        profile = await self._load_profile(params.ssh_profile_id, params.user_id)
 
         # 3. Connect and validate
         await self._update_job_stage(run_uuid, RunStage.VALIDATING_CONNECTION)
@@ -112,11 +113,12 @@ class SlurmBackend:
             # Write script to remote
             script_path = f"{remote_work}/submit_{run_uuid[:8]}.sh"
             await conn.mkdir_p(remote_work)
-            await conn.run(f"cat > {script_path} << 'AGOUTIC_EOF'\n{script}AGOUTIC_EOF", check=True)
-            await conn.run(f"chmod +x {script_path}", check=True)
+            quoted_script_path = shlex.quote(script_path)
+            await conn.run(f"cat > {quoted_script_path} << 'AGOUTIC_EOF'\n{script}AGOUTIC_EOF", check=True)
+            await conn.run(f"chmod +x {quoted_script_path}", check=True)
 
             # Submit via sbatch
-            result = await conn.run_checked(f"sbatch --parsable {script_path}")
+            result = await conn.run_checked(f"sbatch --parsable {quoted_script_path}")
             slurm_job_id = result.strip()
 
             # Update job record with SLURM info
@@ -146,13 +148,13 @@ class SlurmBackend:
             )
 
         # Query SLURM
-        profile = await self._load_profile(job.ssh_profile_id)
+        profile = await self._load_profile(job.ssh_profile_id, job.user_id)
         try:
             conn = await self._ssh_manager.connect(profile)
             try:
                 # Try sacct first (works for completed/failed jobs too)
                 result = await conn.run(
-                    f"sacct -j {job.slurm_job_id} --format=State,ExitCode,Reason --noheader --parsable2 | head -1"
+                    f"sacct -j {shlex.quote(str(job.slurm_job_id))} --format=State,ExitCode,Reason --noheader --parsable2 | head -1"
                 )
                 output = (result.stdout or "").strip()
 
@@ -164,7 +166,7 @@ class SlurmBackend:
                 else:
                     # Fallback to squeue for pending/running jobs
                     result = await conn.run(
-                        f"squeue -j {job.slurm_job_id} --format=%T --noheader"
+                        f"squeue -j {shlex.quote(str(job.slurm_job_id))} --format=%T --noheader"
                     )
                     raw_state = (result.stdout or "").strip() or "UNKNOWN"
                     reason = ""
@@ -211,11 +213,11 @@ class SlurmBackend:
         if not job or not job.slurm_job_id:
             return False
 
-        profile = await self._load_profile(job.ssh_profile_id)
+        profile = await self._load_profile(job.ssh_profile_id, job.user_id)
         try:
             conn = await self._ssh_manager.connect(profile)
             try:
-                await conn.run_checked(f"scancel {job.slurm_job_id}")
+                await conn.run_checked(f"scancel {shlex.quote(str(job.slurm_job_id))}")
                 await self._update_job_stage(run_uuid, RunStage.CANCELLED)
                 logger.info(f"Cancelled SLURM job {job.slurm_job_id} for run {run_uuid}")
                 return True
@@ -232,7 +234,7 @@ class SlurmBackend:
         if not job or not job.slurm_job_id:
             return []
 
-        profile = await self._load_profile(job.ssh_profile_id)
+        profile = await self._load_profile(job.ssh_profile_id, job.user_id)
         logs: list[LogEntry] = []
 
         try:
@@ -242,7 +244,7 @@ class SlurmBackend:
                 # Read stdout log
                 for suffix, level in [("out", "INFO"), ("err", "ERROR")]:
                     log_path = f"{work_dir}/slurm-{job.slurm_job_id}.{suffix}"
-                    result = await conn.run(f"tail -n {limit} {log_path} 2>/dev/null || true")
+                    result = await conn.run(f"tail -n {int(limit)} {shlex.quote(log_path)} 2>/dev/null || true")
                     if result.stdout:
                         for line in result.stdout.strip().split("\n"):
                             if line.strip():
@@ -271,7 +273,7 @@ class SlurmBackend:
         if not job or not job.remote_work_dir:
             return False
 
-        profile = await self._load_profile(job.ssh_profile_id)
+        profile = await self._load_profile(job.ssh_profile_id, job.user_id)
         try:
             conn = await self._ssh_manager.connect(profile)
             try:
@@ -285,13 +287,13 @@ class SlurmBackend:
 
     # --- Internal helpers ---
 
-    async def _load_profile(self, profile_id: str | None) -> SSHProfileData:
+    async def _load_profile(self, profile_id: str | None, user_id: str | None = None) -> SSHProfileData:
         """Load an SSH profile from the database."""
         if not profile_id:
             raise ValueError("ssh_profile_id is required for SLURM execution")
 
         from launchpad.db import get_ssh_profile
-        profile = await get_ssh_profile(profile_id)
+        profile = await get_ssh_profile(profile_id, user_id=user_id)
         if not profile:
             raise ValueError(f"SSH profile not found: {profile_id}")
         return profile
@@ -303,16 +305,16 @@ class SlurmBackend:
         genome_list = ",".join(params.reference_genome)
         cmd_parts = [
             "nextflow run main.nf",
-            f"--sample_name {params.sample_name!r}",
-            f"--mode {params.mode}",
-            f"--input {remote_input!r}",
-            f"--outdir {remote_output!r}",
-            f"--reference_genome {genome_list!r}",
+            f"--sample_name {shlex.quote(params.sample_name)}",
+            f"--mode {shlex.quote(params.mode)}",
+            f"--input {shlex.quote(remote_input)}",
+            f"--outdir {shlex.quote(remote_output)}",
+            f"--reference_genome {shlex.quote(genome_list)}",
         ]
         if params.modifications:
-            cmd_parts.append(f"--modifications {params.modifications!r}")
+            cmd_parts.append(f"--modifications {shlex.quote(params.modifications)}")
         if params.entry_point:
-            cmd_parts.append(f"-entry {params.entry_point}")
+            cmd_parts.append(f"-entry {shlex.quote(params.entry_point)}")
         return " \\\n    ".join(cmd_parts)
 
     async def _update_job_stage(self, run_uuid: str, stage: RunStage) -> None:

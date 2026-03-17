@@ -63,6 +63,19 @@ async def submit_dogme_job(
     accuracy: str | None = None,
     max_gpu_tasks: int | None = None,
     resume_from_dir: str | None = None,
+    execution_mode: str = "local",
+    ssh_profile_id: str | None = None,
+    slurm_account: str | None = None,
+    slurm_partition: str | None = None,
+    slurm_cpus: int | None = None,
+    slurm_memory_gb: int | None = None,
+    slurm_walltime: str | None = None,
+    slurm_gpus: int | None = None,
+    slurm_gpu_type: str | None = None,
+    remote_input_path: str | None = None,
+    remote_work_path: str | None = None,
+    remote_output_path: str | None = None,
+    result_destination: str | None = None,
 ) -> str:
     """Submit a DOGME job for processing. Input can be pod5, bam, or fastq files. Supports multiple reference genomes in parallel."""
     import uuid as _uuid
@@ -85,6 +98,19 @@ async def submit_dogme_job(
         accuracy=accuracy,
         max_gpu_tasks=max_gpu_tasks,
         resume_from_dir=resume_from_dir,
+        execution_mode=execution_mode,
+        ssh_profile_id=ssh_profile_id,
+        slurm_account=slurm_account,
+        slurm_partition=slurm_partition,
+        slurm_cpus=slurm_cpus,
+        slurm_memory_gb=slurm_memory_gb,
+        slurm_walltime=slurm_walltime,
+        slurm_gpus=slurm_gpus,
+        slurm_gpu_type=slurm_gpu_type,
+        remote_input_path=remote_input_path,
+        remote_work_path=remote_work_path,
+        remote_output_path=remote_output_path,
+        result_destination=result_destination,
     )
     return json.dumps(result, indent=2)
 

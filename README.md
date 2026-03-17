@@ -28,7 +28,7 @@ AGOUTIC supports **dual execution modes**:
 - **HPC3/SLURM**: Submits jobs to a remote SLURM cluster via SSH
 
 Remote execution features:
-- **Saved SSH profiles** — per-user connection profiles with secure key references (no raw secrets stored). Supports sudo-based key access for multi-user servers (transient password, never stored)
+- **Saved SSH profiles** — per-user connection profiles with secure key references (no raw secrets stored). Supports local OS user key access through a per-session broker launched under that Unix account with `su` (password used transiently, never stored)
 - **SLURM resource management** — configurable account, partition, CPUs, memory, walltime, GPUs with validation
 - **Remote path configuration** — input, work, output, and log paths on the cluster
 - **Result destination policy** — keep results remote-only, copy back locally, or both

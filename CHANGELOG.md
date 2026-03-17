@@ -16,8 +16,12 @@
 - **SSH connection profiles** — per-user saved profiles with host, port,
   username, and auth method (key_file path reference or ssh-agent).  Full CRUD
   via REST API and MCP tools.  Connection test support.  No raw secrets stored.
-  Supports `local_username` for sudo-based key access when the service process
-  runs as a different OS user — password is prompted transiently and never stored.
+  Supports `local_username` for local OS user key access when the service process
+  runs as a different OS user.  Users can unlock a per-session local auth broker
+  with their local Unix password; the password is used only to launch the broker
+  via `su` and is never stored.  Profiles can also save default CPU/GPU account
+  and partition values plus remote input/work/output path templates for
+  pre-populating SLURM approval gates.
 
 - **SLURM resource management** — configurable account, partition, CPUs, memory,
   walltime, GPUs, and GPU type with validation against safe limits.  Saved
@@ -62,11 +66,14 @@
   `result_destination`, `transfer_state`, `run_stage`
 - Alembic migration `b95a2c38062c` with full upgrade/downgrade
 - Alembic migration `9e12f5bb7e6e` adds `local_username` to `ssh_profiles`
+- Alembic migration `c7a2e7b6b2df` adds per-profile SLURM/path defaults to `ssh_profiles`
 
 ### API
 
 - SSH profile CRUD: `POST/GET/PUT/DELETE /ssh-profiles`, `POST /ssh-profiles/{id}/test`
-- Test endpoint accepts transient `local_password` in body for sudo key access
+- Test endpoint accepts transient `local_password` in body to unlock a per-session
+  local auth broker when needed
+- New local auth session endpoints: `GET/POST/DELETE /ssh-profiles/{id}/auth-session`
 - UI includes `X-Internal-Secret` header for Launchpad service-to-service auth
 - New MCP tools: `list_ssh_profiles`, `test_ssh_connection`, `get_slurm_defaults`,
   `cancel_slurm_job`
