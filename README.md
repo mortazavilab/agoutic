@@ -3,6 +3,22 @@
 **Version:** 3.4.0
 **Status:** Active Prototype 
 
+## Latest Updates (2026-03-17)
+
+- Added per-user, cross-project SLURM staging cache reuse with preflight metadata.
+  AGOUTIC now computes cache actions (reuse/stage/refresh/fallback) for
+  references and input data before submission and surfaces those actions through
+  gate payloads and run status.
+- Added persistent remote cache metadata in Launchpad for references and input
+  fingerprints, plus new DB migrations for cache tables and job/profile fields.
+- Expanded SSH profile defaults to include remote cache root templates.
+- Hardened SSH profile creation errors in Launchpad:
+  duplicate profile conflicts now return actionable `400` errors, and schema
+  drift conditions return `503` with migration guidance.
+- Improved My Data in UI/Cortex:
+  optional inclusion of untracked filesystem files, clear tracked/untracked
+  behavior, folder column, and full disk path visibility in file details.
+
 ## 🧬 Overview
 
 AGOUTIC is a general-purpose agent for analyzing and interpreting long-read genomic data (Nanopore/PacBio). It uses a **Dual Interface** architecture (REST + MCP) to allow both human users and AI agents to orchestrate complex bioinformatics pipelines.

@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import uuid
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -742,6 +743,232 @@ async def _ensure_gate_remote_profile_unlocked(user_id: str, gate_payload: dict)
     )
 
 
+def _normalize_reference_id(reference_id: str | None) -> str:
+    return (reference_id or "default").strip().lower()
+
+
+def _compute_local_input_fingerprint(local_path: str) -> str:
+    path = Path(local_path)
+    hasher = hashlib.sha256()
+
+    if not path.exists():
+        hasher.update(f"missing:{local_path}".encode("utf-8"))
+        return hasher.hexdigest()
+
+    if path.is_file():
+        stat = path.stat()
+        hasher.update(str(path.name).encode("utf-8"))
+        hasher.update(str(stat.st_size).encode("utf-8"))
+        hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
+        return hasher.hexdigest()
+
+    for root, _, files in os.walk(path):
+        root_path = Path(root)
+        for filename in sorted(files):
+            file_path = root_path / filename
+            try:
+                stat = file_path.stat()
+            except OSError:
+                continue
+            rel_path = str(file_path.relative_to(path))
+            hasher.update(rel_path.encode("utf-8"))
+            hasher.update(str(stat.st_size).encode("utf-8"))
+            hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def _compute_reference_source_signature(reference_id: str) -> str | None:
+    from launchpad.config import REFERENCE_GENOMES
+
+    ref_cfg = REFERENCE_GENOMES.get(reference_id)
+    if ref_cfg is None:
+        lower_map = {k.lower(): k for k in REFERENCE_GENOMES.keys()}
+        mapped = lower_map.get(reference_id.lower())
+        ref_cfg = REFERENCE_GENOMES.get(mapped) if mapped else None
+    if not isinstance(ref_cfg, dict):
+        return None
+
+    fasta_path = ref_cfg.get("fasta")
+    if not fasta_path:
+        return None
+    source_dir = Path(fasta_path).parent
+    if not source_dir.exists() or not source_dir.is_dir():
+        return None
+
+    hasher = hashlib.sha256()
+    for root, _, files in os.walk(source_dir):
+        root_path = Path(root)
+        for filename in sorted(files):
+            file_path = root_path / filename
+            try:
+                stat = file_path.stat()
+            except OSError:
+                continue
+            rel_path = str(file_path.relative_to(source_dir))
+            hasher.update(rel_path.encode("utf-8"))
+            hasher.update(str(stat.st_size).encode("utf-8"))
+            hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+async def _build_slurm_cache_preflight(
+    session,
+    project_id: str,
+    owner_id: str,
+    params: dict,
+) -> dict:
+    """Build planner/approval cache preflight metadata for SLURM staging reuse."""
+    normalized = dict(params or {})
+    if (normalized.get("execution_mode") or "local") != "slurm":
+        return normalized
+
+    ssh_profile_id = normalized.get("ssh_profile_id")
+    ssh_profile_nickname = normalized.get("ssh_profile_nickname")
+    ssh_username = "agoutic"
+    profile_defaults: dict = {}
+
+    if ssh_profile_id or ssh_profile_nickname:
+        try:
+            ssh_profile_id, ssh_profile_nickname = await _resolve_ssh_profile_reference(
+                owner_id,
+                ssh_profile_id,
+                ssh_profile_nickname,
+            )
+            normalized["ssh_profile_id"] = ssh_profile_id
+            normalized["ssh_profile_nickname"] = ssh_profile_nickname
+            profiles = await _list_user_ssh_profiles(owner_id)
+            profile = next((item for item in profiles if item.get("id") == ssh_profile_id), None)
+            if profile:
+                ssh_username = profile.get("ssh_username") or ssh_username
+                profile_defaults = profile
+        except Exception:
+            logger.info("SLURM cache preflight: profile enrichment unavailable", project_id=project_id)
+
+    profile_key = ssh_profile_id or "default-profile"
+    cache_base = f"/scratch/{ssh_username}/agoutic/.agoutic_cache/{owner_id}/{profile_key}"
+    normalized["remote_reference_cache_root"] = (
+        normalized.get("remote_reference_cache_root")
+        or profile_defaults.get("default_remote_reference_cache_root")
+        or f"{cache_base}/references"
+    )
+    normalized["remote_data_cache_root"] = (
+        normalized.get("remote_data_cache_root")
+        or profile_defaults.get("default_remote_data_cache_root")
+        or f"{cache_base}/data"
+    )
+
+    ref_ids_raw = normalized.get("reference_genome") or ["mm39"]
+    if isinstance(ref_ids_raw, str):
+        ref_ids_raw = [ref_ids_raw]
+    ref_ids = [_normalize_reference_id(ref_id) for ref_id in ref_ids_raw]
+    primary_ref = ref_ids[0]
+
+    input_directory = str(normalized.get("input_directory") or "")
+    input_fingerprint = _compute_local_input_fingerprint(input_directory)
+    data_key = input_fingerprint[:16]
+
+    preflight = {
+        "scope": "per_user_cross_project",
+        "status": "ready",
+        "project_id": project_id,
+        "user_id": owner_id,
+        "ssh_profile_id": ssh_profile_id,
+        "cache_roots": {
+            "reference_root": normalized["remote_reference_cache_root"],
+            "data_root": normalized["remote_data_cache_root"],
+        },
+        "reference_actions": [],
+        "data_action": {
+            "reference_id": primary_ref,
+            "input_fingerprint": input_fingerprint,
+            "cache_path": f"{normalized['remote_data_cache_root']}/{primary_ref}/{data_key}",
+            "action": "stage",
+            "reason": "cache_miss",
+        },
+        "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+
+    try:
+        from launchpad.models import RemoteReferenceCache, RemoteInputCache
+
+        for ref_id in ref_ids:
+            expected_path = f"{normalized['remote_reference_cache_root']}/{ref_id}"
+            source_signature = _compute_reference_source_signature(ref_id)
+            if source_signature is None:
+                preflight["reference_actions"].append(
+                    {
+                        "reference_id": ref_id,
+                        "cache_path": expected_path,
+                        "action": "fallback",
+                        "reason": "source_signature_unavailable",
+                    }
+                )
+                continue
+
+            ref_entry = session.execute(
+                select(RemoteReferenceCache).where(
+                    RemoteReferenceCache.user_id == owner_id,
+                    RemoteReferenceCache.ssh_profile_id == (ssh_profile_id or ""),
+                    RemoteReferenceCache.reference_id == ref_id,
+                )
+            ).scalar_one_or_none()
+
+            if ref_entry is None:
+                action = "stage"
+                reason = "cache_miss"
+            elif ref_entry.source_signature != source_signature:
+                action = "refresh"
+                reason = "source_changed"
+            else:
+                action = "reuse"
+                reason = "cache_hit_validate_remote"
+
+            preflight["reference_actions"].append(
+                {
+                    "reference_id": ref_id,
+                    "cache_path": ref_entry.remote_path if ref_entry else expected_path,
+                    "action": action,
+                    "reason": reason,
+                    "last_validated_at": ref_entry.last_validated_at.isoformat() if ref_entry and ref_entry.last_validated_at else None,
+                }
+            )
+
+        data_entry = session.execute(
+            select(RemoteInputCache).where(
+                RemoteInputCache.user_id == owner_id,
+                RemoteInputCache.ssh_profile_id == (ssh_profile_id or ""),
+                RemoteInputCache.reference_id == primary_ref,
+                RemoteInputCache.input_fingerprint == input_fingerprint,
+            )
+        ).scalar_one_or_none()
+        if data_entry is not None:
+            preflight["data_action"].update(
+                {
+                    "action": "reuse",
+                    "reason": "cache_hit_validate_remote",
+                    "cache_path": data_entry.remote_path,
+                    "last_used_at": data_entry.last_used_at.isoformat() if data_entry.last_used_at else None,
+                }
+            )
+
+    except Exception as cache_err:
+        preflight["status"] = "degraded"
+        preflight["degraded_reason"] = f"cache_metadata_unavailable: {cache_err}"
+        preflight["fallback_action"] = "stage_inputs_without_cache_metadata"
+        preflight["reference_actions"] = [
+            {
+                "reference_id": ref_id,
+                "cache_path": f"{normalized['remote_reference_cache_root']}/{ref_id}",
+                "action": "fallback",
+                "reason": "metadata_unavailable",
+            }
+            for ref_id in ref_ids
+        ]
+
+    normalized["cache_preflight"] = preflight
+    return normalized
+
+
 async def _prepare_remote_execution_params(
     session,
     project_id: str,
@@ -835,6 +1062,20 @@ async def _prepare_remote_execution_params(
     remote_output_default = _render_profile_default(profile_defaults.get("default_remote_output_path"), template_context)
     normalized["remote_output_path"] = normalized.get("remote_output_path") or remote_output_default or f"{normalized['remote_work_path']}/output"
 
+    profile_key = ssh_profile_id or "default-profile"
+    cache_root_default = f"/scratch/{ssh_username or 'agoutic'}/agoutic/.agoutic_cache/{owner_id}/{profile_key}"
+    normalized["remote_reference_cache_root"] = (
+        normalized.get("remote_reference_cache_root")
+        or profile_defaults.get("default_remote_reference_cache_root")
+        or f"{cache_root_default}/references"
+    )
+    normalized["remote_data_cache_root"] = (
+        normalized.get("remote_data_cache_root")
+        or profile_defaults.get("default_remote_data_cache_root")
+        or f"{cache_root_default}/data"
+    )
+
+    normalized = await _build_slurm_cache_preflight(session, project_id, owner_id, normalized)
     return normalized
 
 
@@ -936,6 +1177,7 @@ async def resubmit_job(run_uuid: str, request: Request):
             {
                 "label": f"Resubmit job (previously {job.status.lower()})? Review and edit parameters:",
                 "extracted_params": extracted_params,
+                "cache_preflight": extracted_params.get("cache_preflight") if isinstance(extracted_params, dict) else None,
                 "gate_action": "job",
                 "attempt_number": 1,
                 "rejection_history": [],
@@ -1901,6 +2143,46 @@ def _set_workflow_step_status(
     return payload
 
 
+def _apply_slurm_cache_preflight_to_workflow(
+    session,
+    workflow_block: ProjectBlock | None,
+    cache_preflight: dict | None,
+) -> None:
+    if workflow_block is None or not cache_preflight:
+        return
+
+    payload = get_block_payload(workflow_block)
+    steps = payload.get("steps", [])
+    if not steps:
+        return
+
+    reference_actions = cache_preflight.get("reference_actions") or []
+    data_action = cache_preflight.get("data_action") or {}
+    preflight_status = cache_preflight.get("status") or "ready"
+
+    for idx, step in enumerate(steps):
+        kind = step.get("kind")
+        if kind == "FIND_REFERENCE_CACHE":
+            updated = dict(step)
+            updated["status"] = "COMPLETED"
+            updated["cache_preflight_status"] = preflight_status
+            updated["reference_actions"] = reference_actions
+            updated["cache_root"] = (cache_preflight.get("cache_roots") or {}).get("reference_root")
+            updated.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+            steps[idx] = updated
+        elif kind == "FIND_DATA_CACHE":
+            updated = dict(step)
+            updated["status"] = "COMPLETED"
+            updated["cache_preflight_status"] = preflight_status
+            updated["data_action"] = data_action
+            updated["cache_root"] = (cache_preflight.get("cache_roots") or {}).get("data_root")
+            updated.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+            steps[idx] = updated
+
+    payload["steps"] = steps
+    _persist_workflow_plan(session, workflow_block, payload)
+
+
 def _find_workflow_plan(session, project_id: str, workflow_block_id: str | None = None, run_uuid: str | None = None) -> ProjectBlock | None:
     query = select(ProjectBlock).where(
         ProjectBlock.project_id == project_id,
@@ -2091,6 +2373,13 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         
         # Normalize reference_genome to list for Launchpad (Nextflow handles multi-genome in parallel)
         job_params = await _prepare_remote_execution_params(session, project_id, owner_id, job_params)
+        if gate_payload.get("edited_params"):
+            gate_payload["edited_params"] = job_params
+        else:
+            gate_payload["extracted_params"] = job_params
+        gate_payload["cache_preflight"] = job_params.get("cache_preflight")
+        gate_block.payload_json = json.dumps(gate_payload)
+        session.commit()
 
         ref_genome = job_params.get("reference_genome", ["mm39"])
         if isinstance(ref_genome, str):
@@ -2152,12 +2441,22 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "remote_input_path": (job_params.get("remote_paths") or {}).get("remote_input_path") or job_params.get("remote_input_path"),
             "remote_work_path": (job_params.get("remote_paths") or {}).get("remote_work_path") or job_params.get("remote_work_path"),
             "remote_output_path": (job_params.get("remote_paths") or {}).get("remote_output_path") or job_params.get("remote_output_path"),
+            "remote_reference_cache_root": job_params.get("remote_reference_cache_root"),
+            "remote_data_cache_root": job_params.get("remote_data_cache_root"),
+            "cache_preflight": job_params.get("cache_preflight"),
             "result_destination": job_params.get("result_destination"),
         }
 
         workflow_block = None
         gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
         workflow_block_id = job_params.get("workflow_block_id")
+
+        if workflow_block_id:
+            workflow_block = _find_workflow_plan(session, project_id, workflow_block_id=workflow_block_id)
+        if workflow_block is None and job_params.get("run_uuid"):
+            workflow_block = _find_workflow_plan(session, project_id, run_uuid=job_params.get("run_uuid"))
+
+        _apply_slurm_cache_preflight_to_workflow(session, workflow_block, job_data.get("cache_preflight"))
 
         if _should_stage_local_sample(gate_payload, job_params):
             staged_dir = _local_sample_dest_dir(
@@ -2326,6 +2625,8 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     "model": _gate_model,
                     "status": "SUBMITTED",
                     "message": f"Job submitted: {run_uuid}",
+                    "cache_preflight": job_data.get("cache_preflight"),
+                    "cache_actions": result.get("cache_actions") if isinstance(result, dict) else None,
                     "job_status": {
                         "status": "PENDING",
                         "progress_percent": 0,
@@ -5448,6 +5749,7 @@ What would you like to do?
                 {
                     "label": "Do you authorize the Agent to proceed with this plan?",
                     "extracted_params": extracted_params,
+                    "cache_preflight": extracted_params.get("cache_preflight") if isinstance(extracted_params, dict) else None,
                     "gate_action": gate_action,
                     "attempt_number": 1,
                     "rejection_history": [],

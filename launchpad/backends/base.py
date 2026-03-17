@@ -45,6 +45,11 @@ class SubmitParams:
     remote_work_path: str | None = None
     remote_output_path: str | None = None
     result_destination: str = "local"  # "local", "remote", "both"
+    remote_reference_cache_root: str | None = None
+    remote_data_cache_root: str | None = None
+    cache_preflight: dict | None = None
+    reference_cache_path: str | None = None
+    data_cache_path: str | None = None
 
 
 @dataclass

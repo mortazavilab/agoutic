@@ -3,7 +3,10 @@ SLURM execution backend — SSH + sbatch for remote HPC execution.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+from pathlib import Path, PurePosixPath
 import shlex
 import uuid
 from datetime import datetime, timezone
@@ -17,6 +20,7 @@ from launchpad.backends.stage_machine import RunStage
 from launchpad.backends.resource_validator import validate_resources
 from launchpad.backends.path_validator import validate_remote_paths, check_all_paths_ok
 from launchpad.backends.file_transfer import FileTransferManager
+from launchpad.config import REFERENCE_GENOMES
 
 logger = get_logger(__name__)
 
@@ -69,28 +73,23 @@ class SlurmBackend:
                 if not ok:
                     raise ValueError(f"Remote path validation failed: {'; '.join(path_errors)}")
 
-            # 5. Transfer inputs if needed
-            if params.remote_input_path and params.input_directory:
-                await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
-                await self._update_job_transfer_state(run_uuid, "uploading_inputs")
-
-                result = await self._transfer_manager.upload_inputs(
-                    profile=profile,
-                    local_path=params.input_directory,
-                    remote_path=params.remote_input_path,
+            # 5. Resolve reusable staging (reference + input data)
+            try:
+                cache_resolution = await self._resolve_staging_cache(run_uuid, params, profile, conn)
+            except Exception as cache_error:
+                logger.warning(
+                    "Cache resolution degraded; falling back to direct staging",
+                    run_uuid=run_uuid,
+                    error=str(cache_error),
                 )
-                if not result["ok"]:
-                    await self._update_job_transfer_state(run_uuid, "transfer_failed")
-                    raise RuntimeError(f"Input transfer failed: {result['message']}")
-
-                await self._update_job_transfer_state(run_uuid, "inputs_uploaded")
+                cache_resolution = await self._fallback_stage_inputs(run_uuid, params, profile, conn)
 
             # 6. Generate and submit sbatch script
             await self._update_job_stage(run_uuid, RunStage.SUBMITTING_JOB)
 
             remote_work = params.remote_work_path or f"/scratch/{profile.ssh_username}/agoutic/{run_uuid}"
             remote_output = params.remote_output_path or f"{remote_work}/output"
-            remote_input = params.remote_input_path or params.input_directory
+            remote_input = cache_resolution["remote_input"]
 
             # Build the nextflow command for the batch script
             nf_cmd = self._build_nextflow_command(params, remote_input, remote_output)
@@ -347,3 +346,292 @@ class SlurmBackend:
             "slurm_state": raw_state,
             "status": agoutic_status,
         })
+
+    async def _resolve_staging_cache(
+        self,
+        run_uuid: str,
+        params: SubmitParams,
+        profile: SSHProfileData,
+        conn,
+    ) -> dict:
+        """Resolve per-user reusable cache paths for references and input data."""
+        from launchpad.db import (
+            get_remote_reference_cache_entry,
+            get_remote_input_cache_entry,
+            upsert_remote_reference_cache_entry,
+            upsert_remote_input_cache_entry,
+            update_job_fields,
+        )
+
+        user_key = self._cache_user_key(params, profile)
+        ref_root, data_root = self._derive_cache_roots(params, profile, user_key)
+        primary_ref = self._normalize_reference_id((params.reference_genome or ["default"])[0])
+
+        reference_cache_path = None
+        reference_status = "skipped"
+
+        for ref_raw in params.reference_genome or []:
+            ref_id = self._normalize_reference_id(ref_raw)
+            ref_source_dir = self._resolve_reference_source_dir(ref_raw)
+            if not ref_source_dir:
+                logger.warning(f"Reference source directory is unknown for {ref_raw}; skipping reference cache stage")
+                continue
+
+            source_signature = self._compute_directory_signature(ref_source_dir)
+            source_uri = str(ref_source_dir)
+            target_remote_path = str(PurePosixPath(ref_root) / ref_id)
+
+            cache_entry = await get_remote_reference_cache_entry(params.user_id or user_key, profile.id, ref_id)
+            cache_path = cache_entry.remote_path if cache_entry else target_remote_path
+            cache_exists = await conn.path_exists(cache_path)
+            needs_refresh = (
+                cache_entry is None
+                or cache_entry.source_signature != source_signature
+                or not cache_exists
+            )
+
+            if needs_refresh:
+                await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
+                await self._update_job_transfer_state(run_uuid, "uploading_inputs")
+                await conn.mkdir_p(cache_path)
+                result = await self._transfer_manager.upload_inputs(
+                    profile=profile,
+                    local_path=str(ref_source_dir),
+                    remote_path=cache_path,
+                )
+                if not result["ok"]:
+                    await self._update_job_transfer_state(run_uuid, "transfer_failed")
+                    raise RuntimeError(f"Reference cache stage failed for {ref_id}: {result['message']}")
+                reference_status = "refreshed" if cache_entry else "staged"
+            else:
+                reference_status = "reused"
+
+            await upsert_remote_reference_cache_entry(
+                user_id=params.user_id or user_key,
+                ssh_profile_id=profile.id,
+                reference_id=ref_id,
+                source_signature=source_signature,
+                source_uri=source_uri,
+                remote_path=cache_path,
+                status="READY",
+                increment_use_count=True,
+            )
+
+            if ref_id == primary_ref:
+                reference_cache_path = cache_path
+
+        input_fingerprint = self._compute_input_fingerprint(params.input_directory)
+        data_cache_key = input_fingerprint[:16]
+        target_data_remote = str(PurePosixPath(data_root) / primary_ref / data_cache_key)
+        data_entry = await get_remote_input_cache_entry(
+            params.user_id or user_key,
+            profile.id,
+            primary_ref,
+            input_fingerprint,
+        )
+
+        data_cache_path = data_entry.remote_path if data_entry else target_data_remote
+        data_exists = await conn.path_exists(data_cache_path)
+
+        if data_entry is not None and data_exists:
+            data_status = "reused"
+        else:
+            await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
+            await self._update_job_transfer_state(run_uuid, "uploading_inputs")
+            await conn.mkdir_p(data_cache_path)
+            result = await self._transfer_manager.upload_inputs(
+                profile=profile,
+                local_path=params.input_directory,
+                remote_path=data_cache_path,
+            )
+            if not result["ok"]:
+                await self._update_job_transfer_state(run_uuid, "transfer_failed")
+                raise RuntimeError(f"Input transfer failed: {result['message']}")
+            data_status = "staged"
+
+        await upsert_remote_input_cache_entry(
+            user_id=params.user_id or user_key,
+            ssh_profile_id=profile.id,
+            reference_id=primary_ref,
+            input_fingerprint=input_fingerprint,
+            remote_path=data_cache_path,
+            status="READY",
+            increment_use_count=True,
+        )
+        await self._update_job_transfer_state(run_uuid, "inputs_uploaded")
+
+        await update_job_fields(
+            run_uuid,
+            {
+                "reference_cache_status": reference_status,
+                "data_cache_status": data_status,
+                "reference_cache_path": reference_cache_path,
+                "data_cache_path": data_cache_path,
+            },
+        )
+
+        return {
+            "reference_cache_path": reference_cache_path,
+            "data_cache_path": data_cache_path,
+            "remote_input": data_cache_path,
+            "reference_cache_status": reference_status,
+            "data_cache_status": data_status,
+        }
+
+    async def _fallback_stage_inputs(
+        self,
+        run_uuid: str,
+        params: SubmitParams,
+        profile: SSHProfileData,
+        conn,
+    ) -> dict:
+        """Fallback path when cache metadata/services are unavailable."""
+        from launchpad.db import update_job_fields
+
+        user_key = self._cache_user_key(params, profile)
+        ref_root, _ = self._derive_cache_roots(params, profile, user_key)
+        remote_input = params.remote_input_path or f"/scratch/{profile.ssh_username}/agoutic/{run_uuid}/input"
+
+        reference_status = "fallback"
+        reference_cache_path = None
+        first_ref = (params.reference_genome or ["default"])[0]
+        first_ref_id = self._normalize_reference_id(first_ref)
+        ref_source_dir = self._resolve_reference_source_dir(first_ref)
+        if ref_source_dir is not None:
+            reference_cache_path = str(PurePosixPath(ref_root) / first_ref_id)
+            await conn.mkdir_p(reference_cache_path)
+            await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
+            await self._update_job_transfer_state(run_uuid, "uploading_inputs")
+            ref_result = await self._transfer_manager.upload_inputs(
+                profile=profile,
+                local_path=str(ref_source_dir),
+                remote_path=reference_cache_path,
+            )
+            if not ref_result["ok"]:
+                raise RuntimeError(f"Fallback reference stage failed: {ref_result['message']}")
+
+        await conn.mkdir_p(remote_input)
+        await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
+        await self._update_job_transfer_state(run_uuid, "uploading_inputs")
+        result = await self._transfer_manager.upload_inputs(
+            profile=profile,
+            local_path=params.input_directory,
+            remote_path=remote_input,
+        )
+        if not result["ok"]:
+            await self._update_job_transfer_state(run_uuid, "transfer_failed")
+            raise RuntimeError(f"Fallback input stage failed: {result['message']}")
+
+        await self._update_job_transfer_state(run_uuid, "inputs_uploaded")
+        await update_job_fields(
+            run_uuid,
+            {
+                "reference_cache_status": reference_status,
+                "data_cache_status": "fallback",
+                "reference_cache_path": reference_cache_path,
+                "data_cache_path": remote_input,
+            },
+        )
+
+        return {
+            "reference_cache_path": reference_cache_path,
+            "data_cache_path": remote_input,
+            "remote_input": remote_input,
+            "reference_cache_status": reference_status,
+            "data_cache_status": "fallback",
+        }
+
+    @staticmethod
+    def _cache_user_key(params: SubmitParams, profile: SSHProfileData) -> str:
+        return (params.user_id or params.username or profile.ssh_username or "user").strip()
+
+    @staticmethod
+    def _normalize_reference_id(reference_id: str) -> str:
+        return (reference_id or "default").strip().lower()
+
+    @staticmethod
+    def _derive_cache_roots(params: SubmitParams, profile: SSHProfileData, user_key: str) -> tuple[str, str]:
+        if params.remote_reference_cache_root and params.remote_data_cache_root:
+            return params.remote_reference_cache_root, params.remote_data_cache_root
+
+        cache_root = f"/scratch/{profile.ssh_username}/agoutic/.agoutic_cache/{user_key}/{profile.id}"
+        if params.remote_reference_cache_root and not params.remote_data_cache_root:
+            data_root = str(PurePosixPath(params.remote_reference_cache_root).parent / "data")
+            return params.remote_reference_cache_root, data_root
+        if params.remote_data_cache_root and not params.remote_reference_cache_root:
+            ref_root = str(PurePosixPath(params.remote_data_cache_root).parent / "references")
+            return ref_root, params.remote_data_cache_root
+
+        return (
+            str(PurePosixPath(cache_root) / "references"),
+            str(PurePosixPath(cache_root) / "data"),
+        )
+
+    @staticmethod
+    def _resolve_reference_source_dir(reference_id: str) -> Path | None:
+        if not reference_id:
+            return None
+
+        requested = reference_id.strip()
+        ref_cfg = REFERENCE_GENOMES.get(requested)
+        if ref_cfg is None:
+            lower_map = {k.lower(): k for k in REFERENCE_GENOMES.keys()}
+            mapped_key = lower_map.get(requested.lower())
+            ref_cfg = REFERENCE_GENOMES.get(mapped_key) if mapped_key else None
+        if not isinstance(ref_cfg, dict):
+            return None
+
+        fasta_path = ref_cfg.get("fasta")
+        if not fasta_path:
+            return None
+        return Path(fasta_path).parent
+
+    @staticmethod
+    def _compute_directory_signature(directory: Path) -> str:
+        if not directory.exists() or not directory.is_dir():
+            return "missing"
+
+        hasher = hashlib.sha256()
+        for root, _, files in os.walk(directory):
+            root_path = Path(root)
+            for filename in sorted(files):
+                file_path = root_path / filename
+                try:
+                    stat = file_path.stat()
+                except OSError:
+                    continue
+                rel_path = str(file_path.relative_to(directory))
+                hasher.update(rel_path.encode("utf-8"))
+                hasher.update(str(stat.st_size).encode("utf-8"))
+                hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
+        return hasher.hexdigest()
+
+    @staticmethod
+    def _compute_input_fingerprint(local_path: str) -> str:
+        path = Path(local_path)
+        hasher = hashlib.sha256()
+
+        if not path.exists():
+            hasher.update(f"missing:{local_path}".encode("utf-8"))
+            return hasher.hexdigest()
+
+        if path.is_file():
+            stat = path.stat()
+            hasher.update(str(path.name).encode("utf-8"))
+            hasher.update(str(stat.st_size).encode("utf-8"))
+            hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
+            return hasher.hexdigest()
+
+        for root, _, files in os.walk(path):
+            root_path = Path(root)
+            for filename in sorted(files):
+                file_path = root_path / filename
+                try:
+                    stat = file_path.stat()
+                except OSError:
+                    continue
+                rel_path = str(file_path.relative_to(path))
+                hasher.update(rel_path.encode("utf-8"))
+                hasher.update(str(stat.st_size).encode("utf-8"))
+                hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
+        return hasher.hexdigest()

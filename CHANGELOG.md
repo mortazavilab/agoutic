@@ -1,5 +1,51 @@
 # Changelog - March 2026
 
+## [3.4.1] - 2026-03-17
+
+### Features
+
+- **Per-user cross-project SLURM cache reuse** — added cache preflight planning
+  and execution for remote references and input datasets. Jobs now carry cache
+  metadata (roots, actions, reasons) from Cortex approval through Launchpad
+  submission and workflow status updates.
+
+- **Remote cache persistence** — introduced remote cache metadata storage for
+  staged references and input fingerprints, including use counters and
+  validation timestamps for reuse decisions.
+
+- **My Data filesystem visibility** — `/user/data` now supports an
+  `include_untracked` mode so users can view files present on disk even when
+  no DB record exists.
+
+- **My Data path clarity** — UI now shows each file's folder/path context with:
+  folder column in table view, disambiguated selector labels, and full disk
+  path in file details.
+
+### Improvements
+
+- **Safer SSH profile create errors** — Launchpad now maps duplicate profile
+  conflicts to `400` with clear messaging, and schema drift (`no such table` /
+  `no such column`) to `503` with explicit migration guidance.
+
+- **Workflow planning visibility** — planner templates now include
+  `FIND_REFERENCE_CACHE` and `FIND_DATA_CACHE` steps before approval for remote
+  runs, with cache preflight details attached to gate payloads.
+
+### Database
+
+- Added new Alembic migrations for:
+  - remote staging cache tables
+  - cache status/path columns on `dogme_jobs`
+  - `cache_preflight_json` on `dogme_jobs`
+  - default remote cache roots on `ssh_profiles`
+
+### Tests
+
+- Added coverage for:
+  - planner cache preflight steps
+  - SLURM backend cache hit/miss/refresh/fallback behavior
+  - remote cache DB upsert/retrieval helpers
+
 ## [3.4.0] - 2026-03-16
 
 ### Features

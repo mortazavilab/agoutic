@@ -77,6 +77,11 @@ class DogmeJob(Base):
     result_destination: Mapped[str | None] = mapped_column(String, nullable=True)  # "remote", "local", "both"
     transfer_state: Mapped[str | None] = mapped_column(String, nullable=True)  # "none","uploading_inputs","inputs_uploaded","downloading_outputs","outputs_downloaded","transfer_failed"
     run_stage: Mapped[str | None] = mapped_column(String, nullable=True)  # Detailed stage label
+    cache_preflight_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reference_cache_status: Mapped[str | None] = mapped_column(String, nullable=True)  # "reused","staged","refreshed","skipped"
+    data_cache_status: Mapped[str | None] = mapped_column(String, nullable=True)  # "reused","staged","skipped"
+    reference_cache_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    data_cache_path: Mapped[str | None] = mapped_column(String, nullable=True)
 
 class JobLog(Base):
     """Stores streaming logs from Nextflow execution."""
@@ -121,6 +126,8 @@ class SSHProfile(Base):
     default_remote_input_path: Mapped[str | None] = mapped_column(String, nullable=True)
     default_remote_work_path: Mapped[str | None] = mapped_column(String, nullable=True)
     default_remote_output_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    default_remote_reference_cache_root: Mapped[str | None] = mapped_column(String, nullable=True)
+    default_remote_data_cache_root: Mapped[str | None] = mapped_column(String, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
@@ -200,5 +207,64 @@ class RunAuditLog(Base):
     event: Mapped[str] = mapped_column(String, nullable=False)  # "submitted","approved","cancelled","completed","failed",...
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+# ==================== Remote Cache Metadata ====================
+
+class RemoteReferenceCache(Base):
+    """Tracks staged references on remote systems for reuse across projects."""
+    __tablename__ = "remote_reference_cache"
+    __table_args__ = (
+        UniqueConstraint("user_id", "ssh_profile_id", "reference_id", name="uq_remote_ref_cache_user_profile_ref"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    ssh_profile_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    reference_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_signature: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_uri: Mapped[str | None] = mapped_column(String, nullable=True)
+    remote_path: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="READY", nullable=False)
+    use_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class RemoteInputCache(Base):
+    """Tracks staged input datasets on remote systems for reuse across projects."""
+    __tablename__ = "remote_input_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "ssh_profile_id",
+            "reference_id",
+            "input_fingerprint",
+            name="uq_remote_input_cache_user_profile_ref_fp",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    ssh_profile_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    reference_id: Mapped[str] = mapped_column(String, nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    remote_path: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="READY", nullable=False)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    use_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )

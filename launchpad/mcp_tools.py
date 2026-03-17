@@ -58,6 +58,9 @@ class LaunchpadMCPTools:
         remote_input_path: Optional[str] = None,
         remote_work_path: Optional[str] = None,
         remote_output_path: Optional[str] = None,
+        remote_reference_cache_root: Optional[str] = None,
+        remote_data_cache_root: Optional[str] = None,
+        cache_preflight: Optional[dict] = None,
         result_destination: Optional[str] = None,
     ) -> dict:
         """
@@ -146,6 +149,12 @@ class LaunchpadMCPTools:
             payload["remote_work_path"] = remote_work_path
         if remote_output_path is not None:
             payload["remote_output_path"] = remote_output_path
+        if remote_reference_cache_root is not None:
+            payload["remote_reference_cache_root"] = remote_reference_cache_root
+        if remote_data_cache_root is not None:
+            payload["remote_data_cache_root"] = remote_data_cache_root
+        if cache_preflight is not None:
+            payload["cache_preflight"] = cache_preflight
         if result_destination is not None:
             payload["result_destination"] = result_destination
         
@@ -541,6 +550,9 @@ TOOL_REGISTRY = {
                 "remote_input_path": {"type": "string", "description": "Remote path for staged inputs"},
                 "remote_work_path": {"type": "string", "description": "Remote Nextflow work directory"},
                 "remote_output_path": {"type": "string", "description": "Remote results directory"},
+                "remote_reference_cache_root": {"type": "string", "description": "Remote root for per-user reference cache"},
+                "remote_data_cache_root": {"type": "string", "description": "Remote root for per-user input-data cache"},
+                "cache_preflight": {"type": "object", "description": "Planner/approval cache preflight metadata"},
                 "result_destination": {"type": "string", "enum": ["local", "remote", "both"], "description": "Where final outputs should be kept"},
             },
             "required": ["sample_name", "mode", "input_directory"],

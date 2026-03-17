@@ -36,6 +36,9 @@ class SubmitJobRequest(BaseModel):
     remote_input_path: Optional[str] = None
     remote_work_path: Optional[str] = None
     remote_output_path: Optional[str] = None
+    remote_reference_cache_root: Optional[str] = None
+    remote_data_cache_root: Optional[str] = None
+    cache_preflight: Optional[dict] = None
     result_destination: Optional[Literal["local", "remote", "both"]] = None
 
     # Advanced parameters (optional)
@@ -91,6 +94,7 @@ class JobSubmitResponse(BaseModel):
     sample_name: str
     status: str
     work_directory: str
+    cache_actions: Optional[dict] = None
 
 class JobListResponse(BaseModel):
     """Response with list of jobs."""
@@ -137,6 +141,8 @@ class SSHProfileCreate(BaseModel):
     default_remote_input_path: Optional[str] = None
     default_remote_work_path: Optional[str] = None
     default_remote_output_path: Optional[str] = None
+    default_remote_reference_cache_root: Optional[str] = None
+    default_remote_data_cache_root: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_auth_method(self):
@@ -161,6 +167,8 @@ class SSHProfileUpdate(BaseModel):
     default_remote_input_path: Optional[str] = None
     default_remote_work_path: Optional[str] = None
     default_remote_output_path: Optional[str] = None
+    default_remote_reference_cache_root: Optional[str] = None
+    default_remote_data_cache_root: Optional[str] = None
     is_enabled: Optional[bool] = None
 
 
@@ -182,6 +190,8 @@ class SSHProfileOut(BaseModel):
     default_remote_input_path: Optional[str] = None
     default_remote_work_path: Optional[str] = None
     default_remote_output_path: Optional[str] = None
+    default_remote_reference_cache_root: Optional[str] = None
+    default_remote_data_cache_root: Optional[str] = None
     is_enabled: bool = True
     created_at: str
     updated_at: str

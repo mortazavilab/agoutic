@@ -174,8 +174,18 @@ def _template_run_workflow(params: dict) -> dict:
     steps.append(s_check)
     idx += 1
 
+    s_ref_cache = _make_step("FIND_REFERENCE_CACHE", f"Check staged references for {sample_name}", idx,
+                             depends_on=[s_check["id"]])
+    steps.append(s_ref_cache)
+    idx += 1
+
+    s_data_cache = _make_step("FIND_DATA_CACHE", f"Check staged input data for {sample_name}", idx,
+                              depends_on=[s_ref_cache["id"]])
+    steps.append(s_data_cache)
+    idx += 1
+
     s_approve = _make_step("REQUEST_APPROVAL", f"Approve workflow submission for {sample_name}", idx,
-                           requires_approval=True, depends_on=[s_check["id"]])
+                           requires_approval=True, depends_on=[s_data_cache["id"]])
     steps.append(s_approve)
     idx += 1
 

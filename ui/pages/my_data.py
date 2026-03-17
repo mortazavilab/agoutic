@@ -32,8 +32,9 @@ st.caption("All files in your central data folder — shared across projects via
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=10)
-def _fetch_user_files():
-    resp = make_authenticated_request("GET", f"{API_URL}/user/data")
+def _fetch_user_files(include_untracked: bool = True):
+    q = "true" if include_untracked else "false"
+    resp = make_authenticated_request("GET", f"{API_URL}/user/data?include_untracked={q}")
     if resp and resp.status_code == 200:
         return resp.json()
     return {"files": [], "count": 0}
@@ -47,7 +48,13 @@ def _fetch_projects():
     return []
 
 
-data = _fetch_user_files()
+include_untracked = st.toggle(
+    "Show files found on disk (not in database)",
+    value=True,
+    help="Includes files physically present in your central data directory even if they were not registered via upload/download flows.",
+)
+
+data = _fetch_user_files(include_untracked=include_untracked)
 files = data.get("files", [])
 
 if not files:
@@ -100,6 +107,7 @@ for f in filtered:
     size_mb = round((f.get("size_bytes") or 0) / 1_048_576, 2)
     table_data.append({
         "Filename": f["filename"],
+        "Folder": str(Path(f.get("disk_path") or "").parent),
         "Size (MB)": size_mb,
         "Source": f.get("source", ""),
         "Accession": f.get("encode_accession") or "",
@@ -127,11 +135,24 @@ st.dataframe(
 st.divider()
 st.subheader("File Details & Actions")
 
-file_options = {f["filename"]: f for f in filtered}
+file_options = {}
+for f in filtered:
+    filename = f.get("filename") or "(unnamed)"
+    parent = str(Path(f.get("disk_path") or "").parent)
+    display = f"{filename} ({parent})"
+    # Ensure stable uniqueness even if both filename and folder collide
+    key = display
+    suffix = 2
+    while key in file_options:
+        key = f"{display} [{suffix}]"
+        suffix += 1
+    file_options[key] = f
+
 selected_name = st.selectbox("Select a file", list(file_options.keys()))
 
 if selected_name:
     f = file_options[selected_name]
+    is_tracked = f.get("tracked", True)
 
     detail_col, action_col = st.columns([2, 1])
 
@@ -139,19 +160,24 @@ if selected_name:
     with detail_col:
         st.markdown(f"**{f['filename']}** — {round((f.get('size_bytes') or 0) / 1_048_576, 2)} MB")
         st.caption(f"MD5: `{f.get('md5_hash', 'N/A')}` | Source: {f.get('source', '?')} | Added: {(f.get('created_at') or '')[:10]}")
+        st.code(str(f.get("disk_path") or ""), language="text")
+        st.caption(f"Folder: {str(Path(f.get('disk_path') or '').parent)}")
+        if not is_tracked:
+            st.info("This file exists on disk but is not in the AGOUTIC database catalog. Metadata/link/delete actions are disabled for this entry.")
         if f.get("source_url"):
             st.caption(f"URL: {f['source_url']}")
 
         with st.form(key=f"meta_{f['id']}"):
-            new_sample = st.text_input("Sample name", value=f.get("sample_name") or "")
-            new_organism = st.text_input("Organism", value=f.get("organism") or "")
-            new_tissue = st.text_input("Tissue", value=f.get("tissue") or "")
+            new_sample = st.text_input("Sample name", value=f.get("sample_name") or "", disabled=not is_tracked)
+            new_organism = st.text_input("Organism", value=f.get("organism") or "", disabled=not is_tracked)
+            new_tissue = st.text_input("Tissue", value=f.get("tissue") or "", disabled=not is_tracked)
             raw_tags = st.text_area(
                 "Tags (JSON)",
                 value=json.dumps(f.get("tags") or {}, indent=2),
                 height=80,
+                disabled=not is_tracked,
             )
-            submitted = st.form_submit_button("💾 Save metadata")
+            submitted = st.form_submit_button("💾 Save metadata", disabled=not is_tracked)
 
         if submitted:
             try:
@@ -179,6 +205,10 @@ if selected_name:
 
     # ---- Projects & actions ----
     with action_col:
+        if not is_tracked:
+            st.caption("Actions unavailable for untracked filesystem entries")
+            st.stop()
+
         st.markdown("**Linked projects**")
         linked = f.get("projects", [])
         if linked:

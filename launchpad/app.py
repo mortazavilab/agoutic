@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from common.logging_config import setup_logging, get_logger
 from common.logging_middleware import RequestLoggingMiddleware
@@ -302,6 +303,7 @@ async def submit_job(req: SubmitJobRequest):
         job.remote_work_dir = req.remote_work_path
         job.remote_output_dir = req.remote_output_path
         job.result_destination = req.result_destination
+        job.cache_preflight_json = req.cache_preflight
         await session.commit()
         
         # Log submission
@@ -349,6 +351,9 @@ async def submit_job(req: SubmitJobRequest):
                         remote_input_path=req.remote_input_path,
                         remote_work_path=req.remote_work_path,
                         remote_output_path=req.remote_output_path,
+                        remote_reference_cache_root=req.remote_reference_cache_root,
+                        remote_data_cache_root=req.remote_data_cache_root,
+                        cache_preflight=req.cache_preflight,
                         result_destination=req.result_destination or "local",
                     ),
                 )
@@ -411,6 +416,13 @@ async def submit_job(req: SubmitJobRequest):
                 "sample_name": req.sample_name,
                 "status": response_status,
                 "work_directory": work_directory,
+                "cache_actions": {
+                    "reference_status": job.reference_cache_status,
+                    "data_status": job.data_cache_status,
+                    "reference_cache_path": job.reference_cache_path,
+                    "data_cache_path": job.data_cache_path,
+                    "cache_preflight": job.cache_preflight_json,
+                },
             }
         
         except Exception as e:
@@ -934,11 +946,29 @@ async def create_ssh_profile(req: SSHProfileCreate):
             default_remote_input_path=req.default_remote_input_path,
             default_remote_work_path=req.default_remote_work_path,
             default_remote_output_path=req.default_remote_output_path,
+            default_remote_reference_cache_root=req.default_remote_reference_cache_root,
+            default_remote_data_cache_root=req.default_remote_data_cache_root,
         )
         session.add(profile)
-        await session.commit()
-        await session.refresh(profile)
-        return _profile_to_out(profile)
+        try:
+            await session.commit()
+            await session.refresh(profile)
+            return _profile_to_out(profile)
+        except IntegrityError as exc:
+            await session.rollback()
+            # Race-safe duplicate handling for unique(user_id, ssh_host, ssh_username)
+            if "uq_ssh_profile_user_host" in str(exc) or "UNIQUE constraint failed" in str(exc):
+                raise HTTPException(400, "A profile for this host/username already exists") from exc
+            raise
+        except OperationalError as exc:
+            await session.rollback()
+            # Surface schema drift clearly instead of a generic 500.
+            if "no such column" in str(exc) or "no such table" in str(exc):
+                raise HTTPException(
+                    503,
+                    "Launchpad database schema is out of date. Run `alembic upgrade head` and restart Launchpad.",
+                ) from exc
+            raise
 
 
 @app.get("/ssh-profiles", response_model=list[SSHProfileOut])
@@ -1175,6 +1205,8 @@ def _profile_to_out(profile: SSHProfile) -> SSHProfileOut:
         default_remote_input_path=profile.default_remote_input_path,
         default_remote_work_path=profile.default_remote_work_path,
         default_remote_output_path=profile.default_remote_output_path,
+        default_remote_reference_cache_root=profile.default_remote_reference_cache_root,
+        default_remote_data_cache_root=profile.default_remote_data_cache_root,
         is_enabled=profile.is_enabled,
         created_at=profile.created_at.isoformat() if profile.created_at else "",
         updated_at=profile.updated_at.isoformat() if profile.updated_at else "",

@@ -9,10 +9,11 @@ project linking/unlinking, and force re-download.
 import asyncio
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 from sqlalchemy import select
 
 import cortex.db as _db
@@ -90,7 +91,10 @@ def _user_file_to_out(session, uf: UserFile) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("")
-async def list_user_files(request: Request):
+async def list_user_files(
+    request: Request,
+    include_untracked: bool = Query(False, description="Include files present on disk but missing DB records"),
+):
     """List all files in the user's central data folder."""
     user = request.state.user
     session = _db.SessionLocal()
@@ -102,6 +106,51 @@ async def list_user_files(request: Request):
         ).scalars().all()
 
         files = [_user_file_to_out(session, uf) for uf in rows]
+        for item in files:
+            item["tracked"] = True
+
+        if include_untracked:
+            username = getattr(user, "username", None)
+            if username:
+                central_dir = get_user_data_dir(username)
+                tracked_paths = {
+                    str(Path(item.get("disk_path", "")).resolve(strict=False))
+                    for item in files
+                    if item.get("disk_path")
+                }
+
+                for path in sorted(central_dir.rglob("*")):
+                    if not path.is_file():
+                        continue
+                    resolved = str(path.resolve(strict=False))
+                    if resolved in tracked_paths:
+                        continue
+
+                    stat = path.stat()
+                    ts = datetime.fromtimestamp(stat.st_mtime).isoformat()
+                    files.append(
+                        {
+                            "id": f"untracked::{path.relative_to(central_dir)}",
+                            "filename": path.name,
+                            "md5_hash": None,
+                            "size_bytes": stat.st_size,
+                            "source": "filesystem",
+                            "source_url": None,
+                            "encode_accession": None,
+                            "sample_name": None,
+                            "organism": None,
+                            "tissue": None,
+                            "tags": None,
+                            "disk_path": str(path),
+                            "created_at": ts,
+                            "updated_at": ts,
+                            "projects": [],
+                            "tracked": False,
+                        }
+                    )
+
+                files.sort(key=lambda item: (item.get("filename") or "").lower())
+
         return {"files": files, "count": len(files)}
     finally:
         session.close()

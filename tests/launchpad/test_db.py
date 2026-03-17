@@ -11,7 +11,11 @@ from launchpad.db import (
     create_job,
     get_job,
     get_job_logs,
+    get_remote_input_cache_entry,
+    get_remote_reference_cache_entry,
     job_to_dict,
+    upsert_remote_input_cache_entry,
+    upsert_remote_reference_cache_entry,
     update_job_status,
 )
 from common.database import Base
@@ -191,3 +195,42 @@ class TestLogHelpers:
         logs = await get_job_logs(async_session, "run-6", limit=2)
 
         assert [log["message"] for log in logs] == ["first", "second"]
+
+
+class TestRemoteCacheHelpers:
+    @pytest.mark.asyncio
+    async def test_upsert_and_get_remote_reference_cache_entry(self):
+        await upsert_remote_reference_cache_entry(
+            user_id="user-1",
+            ssh_profile_id="profile-1",
+            reference_id="mm39",
+            source_signature="sig-1",
+            source_uri="/refs/mm39",
+            remote_path="/scratch/u1/cache/references/mm39",
+            status="READY",
+            increment_use_count=True,
+        )
+
+        entry = await get_remote_reference_cache_entry("user-1", "profile-1", "mm39")
+
+        assert entry is not None
+        assert entry.remote_path.endswith("/references/mm39")
+        assert entry.use_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_upsert_and_get_remote_input_cache_entry(self):
+        await upsert_remote_input_cache_entry(
+            user_id="user-1",
+            ssh_profile_id="profile-1",
+            reference_id="mm39",
+            input_fingerprint="abc123",
+            remote_path="/scratch/u1/cache/data/mm39/abc123",
+            status="READY",
+            increment_use_count=True,
+        )
+
+        entry = await get_remote_input_cache_entry("user-1", "profile-1", "mm39", "abc123")
+
+        assert entry is not None
+        assert entry.remote_path.endswith("/data/mm39/abc123")
+        assert entry.use_count >= 1
