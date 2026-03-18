@@ -60,7 +60,10 @@ def _ensure_socket_dir() -> None:
     if LOCAL_AUTH_SOCKET_DIR == Path("/tmp"):
         return
     try:
-        os.chmod(LOCAL_AUTH_SOCKET_DIR, 0o700)
+        # The helper broker runs as the target local Unix user, so this runtime
+        # directory must be writable across that boundary while remaining scoped
+        # to AGOUTIC rather than the global /tmp namespace.
+        os.chmod(LOCAL_AUTH_SOCKET_DIR, 0o1777)
     except PermissionError:
         logger.warning("Could not chmod local auth socket dir", path=str(LOCAL_AUTH_SOCKET_DIR))
 
@@ -173,6 +176,7 @@ def _launch_helper_via_su(local_username: str, password: str, host: str, port_fi
     command = (
         f"cd {shlex.quote(str(AGOUTIC_CODE))} && "
         f"PYTHONPATH={shlex.quote(str(AGOUTIC_CODE))} "
+        f"umask 022 && "
         f"nohup {shlex.quote(sys.executable)} {shlex.quote(str(broker_script))} "
         f"--host {shlex.quote(host)} --port-file {shlex.quote(port_file)} --pid-file {shlex.quote(pid_file)} --token {shlex.quote(auth_token)} "
         f">>{shlex.quote(log_file)} 2>&1 </dev/null &"

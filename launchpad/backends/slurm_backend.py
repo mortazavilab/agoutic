@@ -333,7 +333,7 @@ class SlurmBackend:
     ) -> dict:
         """List files on the remote host, defaulting to the profile's remote base path."""
         profile = await self._load_profile(ssh_profile_id, user_id)
-        remote_path = (path or profile.remote_base_path or "").strip()
+        remote_path = self._resolve_remote_browse_path(profile, path)
         if not remote_path:
             raise ValueError("No path provided and the SSH profile is missing remote_base_path")
 
@@ -696,6 +696,21 @@ class SlurmBackend:
             "ref_root": str(base_path / "ref"),
             "data_root": str(base_path / "data"),
         }
+
+    @staticmethod
+    def _resolve_remote_browse_path(profile: SSHProfileData, path: str | None) -> str:
+        requested = (path or "").strip()
+        base = (profile.remote_base_path or "").strip()
+        if not requested:
+            return base
+        requested_path = PurePosixPath(requested)
+        if requested_path.is_absolute():
+            return str(requested_path)
+        if any(part == ".." for part in requested_path.parts):
+            raise ValueError("Relative remote browse paths cannot contain '..'")
+        if not base:
+            return str(requested_path)
+        return str(PurePosixPath(base) / requested_path)
 
     @classmethod
     def _derive_remote_paths(cls, params: SubmitParams, profile: SSHProfileData) -> dict[str, str]:

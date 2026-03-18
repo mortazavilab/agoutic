@@ -40,6 +40,27 @@ def test_launch_helper_treats_pty_eio_as_eof(monkeypatch, tmp_path):
     _launch_helper_via_su("alice", "secret", "127.0.0.1", "/tmp/session.port", "/tmp/session.pid", str(log_file), "token-123")
 
 
+def test_launch_helper_sets_readable_umask(monkeypatch, tmp_path):
+    log_file = tmp_path / "helper.log"
+    captured = {}
+
+    monkeypatch.setattr("launchpad.backends.local_auth_sessions._ensure_socket_dir", lambda: None)
+    monkeypatch.setattr("launchpad.backends.local_auth_sessions.pty.openpty", lambda: (10, 11))
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        return DummyProcess(0)
+
+    monkeypatch.setattr("launchpad.backends.local_auth_sessions.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("launchpad.backends.local_auth_sessions.os.close", lambda fd: None)
+    monkeypatch.setattr("launchpad.backends.local_auth_sessions.select.select", lambda *args, **kwargs: ([], [], []))
+    monkeypatch.setattr("launchpad.backends.local_auth_sessions.time.time", MagicMock(side_effect=[0, 0, 999]))
+
+    _launch_helper_via_su("alice", "secret", "127.0.0.1", "/tmp/session.port", "/tmp/session.pid", str(log_file), "token-123")
+
+    assert "umask 022 && nohup" in captured["args"][3]
+
+
 @pytest.mark.asyncio
 async def test_close_session_ignores_permission_errors_on_runtime_files(monkeypatch, tmp_path):
     manager = LocalAuthSessionManager()

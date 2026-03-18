@@ -1101,6 +1101,11 @@ class TestBrowsingToolBypass:
         assert mock_mcp.call_tool.call_args.kwargs["user_id"] == "u-plot"
         payload = (resp.json().get("agent_block") or {}).get("payload", {})
         assert payload.get("skill") == "remote_execution"
+        md = payload.get("markdown", "")
+        assert "Remote directory: /remote/base" in md
+        assert "| data | dir | - |" in md
+        assert "| ref | dir | - |" in md
+        assert "did not return the expected data" not in md
 
     def test_remote_list_files_ignores_bad_skill_switch(self, SL, seed, tmp_path):
         """Remote file browsing should ignore LLM attempts to switch to analyze_job_results."""

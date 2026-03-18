@@ -7,6 +7,7 @@ for file transfers.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import pwd
 from dataclasses import dataclass

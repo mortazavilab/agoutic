@@ -149,9 +149,12 @@ async def _run_server(host: str, port_file: str, pid_file: str | None, auth_toke
         raise RuntimeError("Local auth broker did not expose a listening socket")
     listening_port = int(socket_info[1])
     port_path.write_text(str(listening_port))
+    os.chmod(port_path, 0o644)
 
     if pid_file:
-        Path(pid_file).write_text(str(os.getpid()))
+        pid_path = Path(pid_file)
+        pid_path.write_text(str(os.getpid()))
+        os.chmod(pid_path, 0o644)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

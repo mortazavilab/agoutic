@@ -5886,7 +5886,11 @@ What would you like to do?
                 if "data" in _prov_r:
                     _data = _prov_r["data"]
                     if isinstance(_data, dict):
-                        _prov_entry["rows"] = _data.get("total") or _data.get("count") or len(_data.get("experiments", _data.get("files", [])))
+                        _prov_entry["rows"] = (
+                            _data.get("total")
+                            or _data.get("count")
+                            or len(_data.get("experiments", _data.get("files", _data.get("entries", []))))
+                        )
                     elif isinstance(_data, list):
                         _prov_entry["rows"] = len(_data)
                 if "error" in _prov_r:
@@ -6017,7 +6021,7 @@ What would you like to do?
             # --- Skip second-pass LLM for pure browsing commands ---
             # "list files", "list workflows" etc. should show the file table
             # directly — no LLM re-interpretation needed.
-            _browsing_tools = {"list_job_files", "categorize_job_files"}
+            _browsing_tools = {"list_job_files", "categorize_job_files", "list_remote_files"}
             _all_tools_used = set()
             _has_download_chain = False
             for _src_results in all_results.values():

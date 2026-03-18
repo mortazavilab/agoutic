@@ -36,6 +36,10 @@ def format_results(source_key: str, results: list[dict], registry_entry: dict | 
     entry = registry_entry if registry_entry is not None else _get_registry_entry(source_key)
     emoji = entry.get("emoji", "📡")
     display_name = entry.get("display_name", source_key.upper())
+    tool_names = {result.get("tool", "") for result in results}
+    if tool_names == {"list_remote_files"}:
+        display_name = "Remote Files"
+        emoji = "📁"
     table_columns = entry.get("table_columns", [])
     count_field = entry.get("count_field")
     count_label = entry.get("count_label", "type")
@@ -115,6 +119,31 @@ def _format_data(
         return result
 
     elif isinstance(data, dict):
+        # Launchpad remote directory listing results
+        if "entries" in data and isinstance(data["entries"], list) and "path" in data:
+            entries = data["entries"]
+            remote_path = data.get("path", "")
+            result = f"**Remote directory: {remote_path}** ({len(entries)} entries)\n\n"
+            result += "| Name | Type | Size |\n"
+            result += "|---|---|---|\n"
+            for entry in entries:
+                if isinstance(entry, dict):
+                    name = entry.get("name", "")
+                    kind = entry.get("type", "")
+                    size = entry.get("size")
+                    if isinstance(size, (int, float)) and size > 0:
+                        size_str = _human_size(int(size))
+                    elif kind == "dir":
+                        size_str = "-"
+                    elif size == 0:
+                        size_str = "0 B"
+                    else:
+                        size_str = "?"
+                    result += f"| {name} | {kind} | {size_str} |\n"
+                else:
+                    result += f"| {entry} | | |\n"
+            return result
+
         # Check if this is a files-by-type dict (e.g., {"bam": [...], "fastq": [...]})
         # where values are lists of file-like objects with 'accession' keys
         if data and all(isinstance(v, list) for v in data.values()):

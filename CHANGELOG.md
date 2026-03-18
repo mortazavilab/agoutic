@@ -90,6 +90,10 @@
   Launchpad remote listing, even when the conversation was previously in a
   local results-analysis skill.
 
+- **Remote browse result rendering** — successful `list_remote_files` calls
+  now render directly as remote directory listings instead of falling through
+  to generic “query did not return the expected data” messaging.
+
 ### Fixes
 
 - **Execution mode validation** — added defensive normalization of `execution_mode`
@@ -133,10 +137,19 @@
   of falling back to direct key-file reads when the browse call is handled by
   the MCP server.
 
-- **Local auth runtime hardening** — broker session metadata now defaults to a
-  private runtime directory under `AGOUTIC_DATA` instead of `/tmp`, and shared
-  session metadata files are created atomically with `0600` permissions from
-  the start.
+- **Local auth runtime hardening** — broker runtime files now default to an
+  AGOUTIC-scoped directory under `AGOUTIC_DATA` instead of `/tmp`, while
+  shared session metadata files are created atomically with `0600`
+  permissions from the start.
+
+- **Remote browse subpath resolution** — prompts like “list files in data on
+  hpc3” now resolve relative browse paths under the SSH profile’s configured
+  `remote_base_path` instead of incorrectly treating them as paths relative to
+  the remote login directory.
+
+- **Remote browse output labeling** — Launchpad remote file listings now use a
+  browse-specific header instead of the generic “Job Execution
+  (Nextflow/Dogme)” label.
 
 ### API
 
@@ -179,6 +192,7 @@
   - MCP stage-only and remote file browsing tools
   - planner detection and template generation for remote stage-only requests
   - SLURM remote path derivation and staged input reuse
+  - remote browse markdown rendering and direct-display bypass
 
 ## [3.4.0] - 2026-03-16
 

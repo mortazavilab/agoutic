@@ -7,7 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from launchpad.backends.ssh_manager import SSHConnectionManager, SSHProfileData, resolve_key_file_path
+from launchpad.backends.ssh_manager import (
+    LocalBrokerSSHConnection,
+    SSHConnection,
+    SSHConnectionManager,
+    SSHProfileData,
+    resolve_key_file_path,
+)
 
 
 class TestResolveKeyFilePath:
@@ -180,6 +186,68 @@ class TestConnectKeyFile:
 
         assert conn.profile.id == "p1"
         assert connect_called is False
+
+
+class TestDirectoryListing:
+    @pytest.mark.asyncio
+    async def test_ssh_connection_list_dir_parses_json(self):
+        profile = SSHProfileData(
+            id="p1",
+            user_id="u1",
+            nickname="test",
+            ssh_host="example.org",
+            ssh_port=22,
+            ssh_username="alice",
+            auth_method="ssh_agent",
+            key_file_path=None,
+            local_username=None,
+            is_enabled=True,
+        )
+
+        class FakeConn:
+            async def run(self, command, check=False):
+                return SimpleNamespace(stdout='[{"name":"data","type":"dir","size":0}]')
+
+            def close(self):
+                return None
+
+            async def wait_closed(self):
+                return None
+
+        conn = SSHConnection(FakeConn(), profile)
+
+        entries = await conn.list_dir("/remote/base")
+
+        assert entries == [{"name": "data", "type": "dir", "size": 0}]
+
+    @pytest.mark.asyncio
+    async def test_local_broker_connection_list_dir_parses_json(self):
+        profile = SSHProfileData(
+            id="p1",
+            user_id="u1",
+            nickname="test",
+            ssh_host="example.org",
+            ssh_port=22,
+            ssh_username="alice",
+            auth_method="key_file",
+            key_file_path="~/.ssh/id_ed25519",
+            local_username="alice",
+            is_enabled=True,
+        )
+
+        class FakeSessionManager:
+            async def invoke(self, session_obj, payload):
+                return {
+                    "stdout": '[{"name":"ref","type":"dir","size":0}]',
+                    "stderr": "",
+                    "exit_status": 0,
+                }
+
+        conn = LocalBrokerSSHConnection(profile, FakeSessionManager(), SimpleNamespace(session_id="sess-1"))
+
+        entries = await conn.list_dir("/remote/base")
+
+        assert entries == [{"name": "ref", "type": "dir", "size": 0}]
 
     @pytest.mark.asyncio
     async def test_connect_uses_shared_broker_session_metadata(self, monkeypatch, tmp_path):
