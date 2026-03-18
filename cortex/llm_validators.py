@@ -133,6 +133,7 @@ def _validate_llm_output(
         # Launchpad (Dogme)
         "submit_dogme_job", "check_nextflow_status", "get_dogme_report",
         "stage_remote_sample", "list_remote_files",
+        "list_ssh_profiles", "test_ssh_connection", "get_slurm_defaults", "cancel_slurm_job",
         "submit_dogme_nextflow", "find_pod5_directory", "generate_dogme_config",
         "scaffold_dogme_dir", "get_job_logs", "get_job_debug",
         # Analyzer (Analysis)

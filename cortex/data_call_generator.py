@@ -86,6 +86,63 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     if _has_viz_intent and not _compound_encode_viz_search:
         return calls
 
+    # --- Remote execution defaults/profile safety net ---
+    # If the remote skill is active and the LLM emitted no DATA_CALL tags,
+    # proactively fetch SSH profiles and SLURM defaults so the assistant can
+    # present saved account/partition values instead of saying they are missing.
+    if skill_key == "remote_execution":
+        _remote_hint_patterns = [
+            r'\bslurm\b',
+            r'\bssh\s+profiles?\b',
+            r'\bremote\s+profiles?\b',
+            r'\bdefaults?\b',
+            r'\baccount\b',
+            r'\bpartition\b',
+            r'\bhpc\d+\b',
+        ]
+        _wants_remote_defaults = any(re.search(p, msg_lower) for p in _remote_hint_patterns)
+        if _wants_remote_defaults:
+            _profile_nickname = None
+            _invalid_nick_tokens = {
+                "default", "defaults", "profile", "profiles", "slurm", "ssh", "remote",
+                "account", "partition", "cpu", "gpu", "for", "use", "using",
+            }
+            _nickname_match = re.search(r'\bnickname\s+([a-zA-Z0-9._-]+)\b', user_message, re.IGNORECASE)
+            if _nickname_match:
+                _cand = _nickname_match.group(1).strip()
+                if _cand.lower() not in _invalid_nick_tokens:
+                    _profile_nickname = _cand
+            else:
+                _profile_match = re.search(r'\bprofile\s+([a-zA-Z0-9._-]+)\b', user_message, re.IGNORECASE)
+                if _profile_match:
+                    _cand = _profile_match.group(1).strip()
+                    if _cand.lower() not in _invalid_nick_tokens:
+                        _profile_nickname = _cand
+
+            if not _profile_nickname:
+                _hpc_match = re.search(r'\b(hpc\d+)\b', user_message, re.IGNORECASE)
+                if _hpc_match:
+                    _profile_nickname = _hpc_match.group(1)
+
+            calls.append({
+                "source_type": "service",
+                "source_key": "launchpad",
+                "tool": "list_ssh_profiles",
+                "params": {"user_id": "<user_id>"},
+            })
+
+            _defaults_params = {"user_id": "<user_id>"}
+            if _profile_nickname:
+                _defaults_params["profile_nickname"] = _profile_nickname
+
+            calls.append({
+                "source_type": "service",
+                "source_key": "launchpad",
+                "tool": "get_slurm_defaults",
+                "params": _defaults_params,
+            })
+            return calls
+
     # --- Browsing commands (highest priority, skill-independent) ---
     # "list workflows", "list files" etc. always route to analyzer when there
     # is a project directory, regardless of the active skill.  Must run before

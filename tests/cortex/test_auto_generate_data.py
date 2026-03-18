@@ -119,6 +119,32 @@ class TestBrowsingCommands:
         assert calls[0]["tool"] == "list_job_files"
 
 
+class TestRemoteExecutionSafetyNet:
+    def test_remote_defaults_query_auto_generates_launchpad_calls(self):
+        calls = _auto_generate_data_calls(
+            "What are my SLURM defaults for hpc3?",
+            "remote_execution",
+        )
+        assert len(calls) == 2
+        assert calls[0]["source_key"] == "launchpad"
+        assert calls[0]["tool"] == "list_ssh_profiles"
+        assert calls[0]["params"]["user_id"] == "<user_id>"
+
+        assert calls[1]["source_key"] == "launchpad"
+        assert calls[1]["tool"] == "get_slurm_defaults"
+        assert calls[1]["params"]["user_id"] == "<user_id>"
+        assert calls[1]["params"]["profile_nickname"].lower() == "hpc3"
+
+    def test_remote_defaults_phrase_does_not_capture_defaults_as_nickname(self):
+        calls = _auto_generate_data_calls(
+            "Show my SSH profiles and use profile defaults for nickname hpc3. Report cpu account/partition and gpu account/partition.",
+            "remote_execution",
+        )
+        assert len(calls) == 2
+        assert calls[1]["tool"] == "get_slurm_defaults"
+        assert calls[1]["params"]["profile_nickname"].lower() == "hpc3"
+
+
 # ---------------------------------------------------------------------------
 # ENCODE accession detection
 # ---------------------------------------------------------------------------

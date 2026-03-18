@@ -80,6 +80,47 @@ class TestGenerateConfig:
         assert f"genome: '{REFERENCE_GENOMES['mm39']['fasta']}'" in config
         assert f"annot: '{REFERENCE_GENOMES['mm39']['gtf']}'" in config
 
+    def test_local_execution_keeps_docker_runtime(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-local",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="local",
+        )
+
+        assert "executor = 'local'" in config
+        assert "docker {" in config
+        assert "singularity {" not in config
+        assert "clusterOptions = \"--account=${cpuAccount}\"" not in config
+
+    def test_slurm_execution_uses_accounts_partitions_and_singularity(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-slurm",
+            mode="RNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_cpu_partition="cpu-part",
+            slurm_gpu_partition="gpu-part",
+            slurm_cpu_account="cpu-acct",
+            slurm_gpu_account="gpu-acct",
+            max_gpu_tasks=2,
+        )
+
+        assert "executor = 'slurm'" in config
+        assert "cpuPartition = 'cpu-part'" in config
+        assert "gpuPartition = 'gpu-part'" in config
+        assert "cpuAccount = 'cpu-acct'" in config
+        assert "gpuAccount = 'gpu-acct'" in config
+        assert "clusterOptions = \"--account=${cpuAccount}\"" in config
+        assert "queue = \"${cpuPartition}\"" in config
+        assert "clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"" in config
+        assert "queue = \"${gpuPartition}\"" in config
+        assert "singularity {" in config
+        assert "autoMounts = true" in config
+        assert "docker {" not in config
+
 
 class TestWriteConfigFile:
     def test_write_config_file_creates_parent_directories(self, tmp_path):

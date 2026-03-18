@@ -493,3 +493,38 @@ class TestRemoteExecutionDetection:
         sess.close()
         assert result["staged_remote_input_path"] == "/remote/jdoe/agoutic/data/fp-1"
         assert result["remote_staged_sample"]["sample_name"] == "Jamshid"
+
+    @pytest.mark.asyncio
+    async def test_ignores_account_partition_phrase_when_extracting_path_and_partition(self):
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {"text": "Show my SSH profiles and use profile defaults for nickname hpc3. Report cpu account/partition and gpu account/partition."},
+            seq=1,
+        )
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {"text": "Analyze the mouse CDNA sample called Jamshid at /media/backup_disk/agoutic_root/testdata/CDNA/pod5 on hpc3"},
+            seq=2,
+        )
+
+        sess = self.sf()
+        with patch("cortex.app.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+                 "id": "profile-123",
+                 "nickname": "hpc3",
+                 "ssh_username": "elnaza",
+                 "default_slurm_account": "seyedam_lab",
+                 "default_slurm_partition": "standard",
+                 "default_slurm_gpu_account": "seyedam_lab_gpu",
+                 "default_slurm_gpu_partition": "gpu",
+                 "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/elnaz",
+             }])):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["sample_name"] == "Jamshid"
+        assert result["input_directory"] == "/media/backup_disk/agoutic_root/testdata/CDNA/pod5"
+        assert result["slurm_partition"] == "standard"

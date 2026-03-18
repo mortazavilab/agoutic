@@ -21,6 +21,7 @@ from launchpad.backends.resource_validator import validate_resources
 from launchpad.backends.path_validator import validate_remote_paths, check_all_paths_ok
 from launchpad.backends.file_transfer import FileTransferManager
 from launchpad.config import REFERENCE_GENOMES
+from launchpad.nextflow_executor import NextflowConfig
 
 logger = get_logger(__name__)
 
@@ -113,8 +114,10 @@ class SlurmBackend:
             # 5. Resolve reusable staging (reference + input data)
             try:
                 if params.staged_remote_input_path:
+                    logger.info(f"Reusing pre-staged input: {params.staged_remote_input_path}")
                     cache_resolution = await self._reuse_pre_staged_input(run_uuid, params)
                 else:
+                    logger.info("Resolving staging cache (fresh stage or reuse)")
                     cache_resolution = await self._resolve_staging_cache(run_uuid, params, profile, conn)
             except Exception as cache_error:
                 logger.warning(
@@ -131,8 +134,24 @@ class SlurmBackend:
             remote_output = remote_paths["remote_output"]
             remote_input = cache_resolution["remote_input"]
 
+            # Ensure workflow-local input folders point at staged cache paths.
+            await self._ensure_workflow_input_links(
+                conn=conn,
+                params=params,
+                remote_work=remote_work,
+                remote_input=remote_input,
+            )
+
+            # Build and write nextflow.config in remote workflow dir.
+            remote_config = await self._write_remote_nextflow_config(
+                params=params,
+                profile=profile,
+                conn=conn,
+                remote_work=remote_work,
+                cache_resolution=cache_resolution,
+            )
             # Build the nextflow command for the batch script
-            nf_cmd = self._build_nextflow_command(params, remote_input, remote_output)
+            nf_cmd = self._build_nextflow_command(params, remote_input, remote_output, remote_config)
 
             script = generate_sbatch_script(
                 job_name=f"agoutic-{params.sample_name}-{run_uuid[:8]}",
@@ -363,23 +382,151 @@ class SlurmBackend:
         return profile
 
     def _build_nextflow_command(
-        self, params: SubmitParams, remote_input: str, remote_output: str
+        self,
+        params: SubmitParams,
+        remote_input: str,
+        remote_output: str,
+        config_path: str,
     ) -> str:
         """Build the Nextflow command line for the sbatch script."""
         genome_list = ",".join(params.reference_genome)
         cmd_parts = [
-            "nextflow run main.nf",
+            "nextflow run mortazavilab/dogme",
             f"--sample_name {shlex.quote(params.sample_name)}",
             f"--mode {shlex.quote(params.mode)}",
             f"--input {shlex.quote(remote_input)}",
             f"--outdir {shlex.quote(remote_output)}",
             f"--reference_genome {shlex.quote(genome_list)}",
+            f"-c {shlex.quote(config_path)}",
         ]
         if params.modifications:
             cmd_parts.append(f"--modifications {shlex.quote(params.modifications)}")
         if params.entry_point:
             cmd_parts.append(f"-entry {shlex.quote(params.entry_point)}")
         return " \\\n    ".join(cmd_parts)
+
+    async def _write_remote_nextflow_config(
+        self,
+        *,
+        params: SubmitParams,
+        profile: SSHProfileData,
+        conn,
+        remote_work: str,
+        cache_resolution: dict,
+    ) -> str:
+        """Generate and write Nextflow config in the remote workflow directory."""
+        cpu_account = (params.slurm_account or profile.default_slurm_account or "default").strip()
+        cpu_partition = (params.slurm_partition or profile.default_slurm_partition or "standard").strip()
+        gpu_account = (profile.default_slurm_gpu_account or cpu_account).strip()
+        gpu_partition = (profile.default_slurm_gpu_partition or cpu_partition).strip()
+
+        # Prefer staged remote reference cache paths so config does not point at local host paths.
+        ref_overrides: dict[str, dict[str, str]] = {}
+        remote_reference_paths = {
+            str(k).strip().lower(): str(v)
+            for k, v in (cache_resolution.get("remote_reference_paths") or {}).items()
+            if k and v
+        }
+        logger.info(
+            "Building reference overrides",
+            cache_resolution_keys=list(cache_resolution.keys()) if cache_resolution else None,
+            remote_reference_paths=remote_reference_paths,
+            requested_genomes=params.reference_genome,
+        )
+        
+        if not remote_reference_paths and params.reference_cache_path and params.reference_genome:
+            first_ref = self._normalize_reference_id((params.reference_genome or ["default"])[0])
+            remote_reference_paths[first_ref] = params.reference_cache_path
+            logger.info(f"Using fallback reference_cache_path for {first_ref}: {params.reference_cache_path}")
+
+        # Final safety net: derive reference roots from remote base path when cache metadata is absent.
+        if not remote_reference_paths and params.reference_genome:
+            derived_ref_root = self._derive_remote_roots(params, profile)["ref_root"]
+            for genome_name in params.reference_genome or []:
+                ref_id = self._normalize_reference_id(genome_name)
+                remote_reference_paths[ref_id] = str(PurePosixPath(derived_ref_root) / ref_id)
+            logger.info(
+                "Derived remote reference paths from remote base root",
+                remote_reference_paths=remote_reference_paths,
+            )
+
+        lower_map = {k.lower(): k for k in REFERENCE_GENOMES.keys()}
+        for genome_name in params.reference_genome or []:
+            ref_id = self._normalize_reference_id(genome_name)
+            remote_ref_root = remote_reference_paths.get(ref_id)
+            if not remote_ref_root:
+                logger.warning(f"No remote reference path found for {genome_name} (normalized: {ref_id}); will use defaults")
+                continue
+
+            canonical_name = lower_map.get(str(genome_name).lower(), genome_name)
+            ref_cfg = REFERENCE_GENOMES.get(canonical_name, REFERENCE_GENOMES.get("mm39", {}))
+            fasta_src = ref_cfg.get("fasta")
+            gtf_src = ref_cfg.get("gtf")
+            if not fasta_src or not gtf_src:
+                continue
+
+            ref_overrides[str(genome_name)] = {
+                "fasta": str(PurePosixPath(remote_ref_root) / Path(fasta_src).name),
+                "gtf": str(PurePosixPath(remote_ref_root) / Path(gtf_src).name),
+            }
+            logger.info(
+                f"Override reference paths for {genome_name}",
+                override=ref_overrides[str(genome_name)],
+            )
+
+        logger.info(
+            "Final reference_overrides passed to config generator",
+            reference_overrides=ref_overrides,
+        )
+
+        config = NextflowConfig.generate_config(
+            sample_name=params.sample_name,
+            mode=params.mode,
+            input_dir=params.input_directory,
+            reference_genome=params.reference_genome,
+            reference_overrides=ref_overrides,
+            modifications=params.modifications,
+            modkit_filter_threshold=params.modkit_filter_threshold,
+            min_cov=params.min_cov,
+            per_mod=params.per_mod,
+            accuracy=params.accuracy,
+            max_gpu_tasks=params.max_gpu_tasks,
+            execution_mode="slurm",
+            slurm_cpu_partition=cpu_partition,
+            slurm_gpu_partition=gpu_partition,
+            slurm_cpu_account=cpu_account,
+            slurm_gpu_account=gpu_account,
+        )
+
+        config_path = f"{remote_work}/nextflow.config"
+        quoted_config_path = shlex.quote(config_path)
+        await conn.mkdir_p(remote_work)
+        await conn.run(f"cat > {quoted_config_path} << 'AGOUTIC_EOF'\n{config}\nAGOUTIC_EOF", check=True)
+        return config_path
+
+    async def _ensure_workflow_input_links(
+        self,
+        *,
+        conn,
+        params: SubmitParams,
+        remote_work: str,
+        remote_input: str,
+    ) -> None:
+        """Create workflow-local symlink for the staged input folder expected by the Dogme pipeline."""
+        input_type = (params.input_type or "pod5").strip().lower()
+        link_dir_name = {
+            "pod5": "pod5",
+            "bam": "bams",
+            "fastq": "fastqs",
+            "fq": "fastqs",
+        }.get(input_type, "pod5")
+
+        link_path = str(PurePosixPath(remote_work) / link_dir_name)
+        await conn.mkdir_p(remote_work)
+        await conn.run(
+            f"ln -sfn {shlex.quote(remote_input)} {shlex.quote(link_path)}",
+            check=True,
+        )
 
     async def _update_job_stage(self, run_uuid: str, stage: RunStage) -> None:
         """Update the run_stage on the DogmeJob record."""
@@ -576,6 +723,12 @@ class SlurmBackend:
                 },
             )
 
+        logger.info(
+            "Stage_sample_inputs completed",
+            reference_statuses=reference_statuses,
+            remote_reference_paths=remote_reference_paths,
+        )
+        
         return {
             "reference_cache_path": reference_cache_path,
             "data_cache_path": data_cache_path,
@@ -603,6 +756,12 @@ class SlurmBackend:
                 "reference_cache_path": params.reference_cache_path,
             },
         )
+
+        remote_reference_paths: dict[str, str] = {}
+        if params.reference_cache_path and params.reference_genome:
+            first_ref = self._normalize_reference_id((params.reference_genome or ["default"])[0])
+            remote_reference_paths[first_ref] = params.reference_cache_path
+
         return {
             "reference_cache_path": params.reference_cache_path,
             "data_cache_path": remote_input,
@@ -610,7 +769,7 @@ class SlurmBackend:
             "reference_cache_status": "reused",
             "data_cache_status": "reused",
             "reference_cache_statuses": {},
-            "remote_reference_paths": {},
+            "remote_reference_paths": remote_reference_paths,
         }
 
     async def _fallback_stage_inputs(
@@ -668,12 +827,19 @@ class SlurmBackend:
             },
         )
 
+        # Build remote_reference_paths for all genomes (fallback case)
+        remote_reference_paths: dict[str, str] = {}
+        for ref_raw in params.reference_genome or []:
+            ref_id = self._normalize_reference_id(ref_raw)
+            remote_reference_paths[ref_id] = str(PurePosixPath(ref_root) / ref_id)
+
         return {
             "reference_cache_path": reference_cache_path,
             "data_cache_path": remote_input,
             "remote_input": remote_input,
             "reference_cache_status": reference_status,
             "data_cache_status": "fallback",
+            "remote_reference_paths": remote_reference_paths,
         }
 
     @staticmethod

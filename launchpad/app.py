@@ -881,6 +881,7 @@ async def debug_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             "files": {},
             "process_info": {},
             "logs_preview": {},
+            "workdir_listing": [],
         }
         
         if work_dir and work_dir.exists():
@@ -909,7 +910,7 @@ async def debug_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                     debug_info["process_info"]["error"] = "Could not parse PID"
             
             # Check key files
-            files_to_check = ["nextflow.config", ".nextflow.log", "report.html", "pod5"]
+            files_to_check = ["nextflow.config", ".nextflow.log", "report.html", "timeline.html", "trace.txt", "pod5", "work"]
             for filename in files_to_check:
                 filepath = work_dir / filename
                 if filepath.exists():
@@ -935,6 +936,24 @@ async def debug_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                         }
                 else:
                     debug_info["files"][filename] = {"exists": False}
+
+            # Include a compact top-level directory listing for quick triage.
+            try:
+                entries = []
+                for p in sorted(work_dir.iterdir(), key=lambda x: x.name.lower()):
+                    entry = {
+                        "name": p.name,
+                        "type": "dir" if p.is_dir() else ("symlink" if p.is_symlink() else "file"),
+                    }
+                    if p.is_file():
+                        try:
+                            entry["size"] = p.stat().st_size
+                        except Exception:
+                            entry["size"] = None
+                    entries.append(entry)
+                debug_info["workdir_listing"] = entries[:200]
+            except Exception as e:
+                debug_info["workdir_listing"] = [{"error": str(e)}]
             
             # Get log previews
             from launchpad.config import LAUNCHPAD_LOGS_DIR
@@ -971,6 +990,30 @@ async def debug_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                     }
                 except Exception as e:
                     debug_info["logs_preview"][".nextflow.log"] = {"error": str(e)}
+
+            # Capture SLURM logs produced by remote submissions.
+            for slurm_log in sorted(work_dir.glob("slurm-*.out")) + sorted(work_dir.glob("slurm-*.err")):
+                try:
+                    content = slurm_log.read_text()
+                    lines = content.split("\n")
+                    debug_info["logs_preview"][slurm_log.name] = {
+                        "size": slurm_log.stat().st_size,
+                        "lines": len(lines),
+                        "last_40_lines": lines[-40:] if len(lines) > 40 else lines,
+                    }
+                except Exception as e:
+                    debug_info["logs_preview"][slurm_log.name] = {"error": str(e)}
+
+            # Parse .nextflow.log error-focused snippets to surface root causes quickly.
+            if nextflow_log.exists() and ".nextflow.log" in debug_info["logs_preview"]:
+                try:
+                    content = nextflow_log.read_text().split("\n")
+                    patterns = ("ERROR", "WARN", "Exception", "Caused by", "singularity", "apptainer", "denied", "timeout")
+                    focused = [line for line in content if any(p in line for p in patterns)]
+                    debug_info["logs_preview"][".nextflow.log"]["focused_lines"] = focused[-80:] if len(focused) > 80 else focused
+                    debug_info["logs_preview"][".nextflow.log"]["first_60_lines"] = content[:60]
+                except Exception:
+                    pass
         
         return debug_info
     

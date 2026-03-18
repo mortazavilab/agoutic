@@ -42,6 +42,10 @@ class SSHProfileData:
     local_username: str | None  # Local Unix user used for per-session SSH access via broker
     is_enabled: bool
     remote_base_path: str | None = None
+    default_slurm_account: str | None = None
+    default_slurm_partition: str | None = None
+    default_slurm_gpu_account: str | None = None
+    default_slurm_gpu_partition: str | None = None
 
 
 class SSHConnectionManager:

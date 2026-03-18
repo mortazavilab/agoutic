@@ -1,3 +1,43 @@
+## [3.4.2] - 2026-03-18
+
+### Fixes
+
+- **Remote reference-path correctness for SLURM configs** — remote submissions
+  now consistently generate `genome_annot_refs` using staged remote reference
+  cache paths instead of local host reference paths.
+
+- **Workflow-local input linking for remote runs** — SLURM submissions now
+  ensure workflow-local `pod5`/`bams`/`fastqs` links point to staged remote
+  input cache locations expected by the Dogme pipeline.
+
+- **Correct Dogme launch target in SLURM scripts** — remote jobs now invoke
+  `nextflow run mortazavilab/dogme` instead of `nextflow run main.nf`.
+
+- **Cluster-agnostic runtime bootstrap for sbatch scripts** — generated scripts
+  now attempt module-based Java/container runtime setup when available,
+  validate required runtime commands, and support apptainer-only environments
+  via a local `singularity` compatibility shim.
+
+- **Sbatch script generation stability** — fixed nested-heredoc delimiter
+  collisions that could truncate submit scripts and cause pre-launch bash
+  syntax errors.
+
+- **Improved remote failure surfacing** — on Nextflow failure, generated SLURM
+  scripts now emit focused `.nextflow.log` diagnostics (error scan + head/tail)
+  to make cluster/runtime root causes visible in `slurm-*.out`.
+
+- **Launchpad debug endpoint visibility** — `/jobs/{run_uuid}/debug` now
+  reports richer failed-run context including top-level workflow listing,
+  discovered `slurm-*.out/.err` previews, and focused `.nextflow.log` lines.
+
+### Tests
+
+- Added/updated tests for:
+  - remote reference override behavior when cache metadata is partial/missing
+  - SLURM submit script target (`mortazavilab/dogme`)
+  - portable runtime bootstrap and apptainer shim generation
+  - enhanced sbatch failure diagnostics output
+
 ## [3.4.1] - 2026-03-17
 
 - **Per-user cross-project SLURM cache reuse** — added cache preflight planning

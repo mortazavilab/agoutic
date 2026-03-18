@@ -173,6 +173,22 @@ Common remote prompts:
 | `list files in data on localCluster` | Lists `{remote_base_path}/data` |
 | `stage sample sampleA to localCluster` | Stages references and input data without submitting a job |
 
+### Remote SLURM Runtime Bootstrap (Portable)
+
+Generated SLURM scripts now include a cluster-agnostic runtime bootstrap:
+
+- Attempts module-based setup when available (`java`, `singularity`, `apptainer`)
+- Verifies Java exists before running Nextflow
+- Uses a local `singularity` shim when only `apptainer` exists
+- Sets `NXF_SINGULARITY_CACHEDIR` under the workflow directory
+
+If a remote run fails before task execution, inspect:
+
+```bash
+tail -n 200 slurm-<jobid>.out
+grep -nEi "error|exception|caused by|singularity|apptainer|denied|timeout" .nextflow.log | tail -n 120
+```
+
 ## Documentation
 
 - 📖 **[CONFIGURATION.md](CONFIGURATION.md)** - Complete guide

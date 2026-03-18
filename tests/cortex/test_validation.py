@@ -97,6 +97,11 @@ class TestUnknownTools:
         cleaned, violations = _validate_llm_output(response, "ENCODE_Search")
         assert not any("Unknown tool" in v for v in violations)
 
+    def test_remote_launchpad_tool_not_flagged(self):
+        response = "[[DATA_CALL: service=launchpad, tool=list_ssh_profiles, user_id=<user_id>]]"
+        cleaned, violations = _validate_llm_output(response, "remote_execution")
+        assert not any("Unknown tool" in v for v in violations)
+
 
 class TestMixedSources:
     def test_mixed_unrelated_sources_flagged(self):

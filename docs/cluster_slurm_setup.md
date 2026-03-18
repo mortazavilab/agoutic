@@ -7,6 +7,12 @@
 - Nextflow installed and available in your `$PATH` on the cluster
 - AGOUTIC running locally with a user account
 
+For many clusters, Java and container runtime commands are exposed through
+environment modules. Ensure compute nodes provide either:
+
+- `singularity`, or
+- `apptainer` (with singularity compatibility)
+
 In the examples below, the saved SSH profile nickname is `localCluster`.
 Replace the sample hostnames, usernames, accounts, and filesystem paths with
 values from your own environment.
@@ -207,6 +213,18 @@ cache entries when possible.
    output transfer.
 
 If that completes successfully, the remote SLURM integration is working.
+
+## Runtime Sanity Check (Recommended)
+
+Run this in the same cluster environment where SLURM jobs execute:
+
+```bash
+which java
+which singularity || which apptainer
+```
+
+If these are missing, load appropriate modules in your cluster environment
+before submitting jobs.
 
 ## Troubleshooting
 

@@ -31,6 +31,11 @@ What would you like to do?
 
 Based on the user's answer, switch to the appropriate skill:
 
+**Remote execution / SSH / SLURM management** (mentions "slurm", "cluster", "hpc", "ssh profile", "ssh profiles", "remote", "partition", "account", "stage on", "submit on hpc", "list remote files"):
+```
+[[SKILL_SWITCH_TO: remote_execution]]
+```
+
 **Analyzing an existing completed job or browsing files** (mentions "use UUID", "UUID:", "parse", "analyze results", "job results", "check results", "completed job", "list files", "list data", "show files", "show my files", "list workflows", or option 4):
 ```
 [[SKILL_SWITCH_TO: analyze_job_results]]

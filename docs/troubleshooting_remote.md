@@ -120,6 +120,31 @@ sbatch: error: Batch job submission failed: Job violates accounting/QOS policy
 
 ## Job Failures
 
+### Nextflow Aborts Before Any Tasks Start
+
+Symptoms often include:
+
+- `ERROR ~ Execution aborted due to an unexpected error`
+- no `.nextflow_success` / `.nextflow_failed` marker files
+- workflow stats showing zero submitted/succeeded/failed tasks
+- failure around container initialization/pull
+
+**Fixes:**
+1. Ensure Java and container runtime are available on compute nodes
+   (module-based clusters usually need Java + Singularity/Apptainer).
+2. Verify runtime commands in the same cluster environment used by jobs:
+   ```bash
+   which java
+   which singularity || which apptainer
+   ```
+3. Check focused Nextflow log lines for root cause:
+   ```bash
+   grep -nEi "error|exception|caused by|singularity|apptainer|denied|timeout|network|no space left" .nextflow.log | tail -n 120
+   sed -n '1,220p' .nextflow.log
+   ```
+4. If your cluster is apptainer-only, use a singularity compatibility shim or
+   configure Nextflow container runtime accordingly.
+
 ### Out of Memory (OOM)
 
 ```

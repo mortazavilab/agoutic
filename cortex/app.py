@@ -1638,13 +1638,21 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     if gpu_account_match:
         params["slurm_gpu_account"] = gpu_account_match.group(1)
 
-    partition_match = re.search(r"\b(?:partition|queue)\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
+    _invalid_partition_tokens = {
+        "and", "or", "cpu", "gpu", "account", "partition", "queue",
+        "override", "default", "defaults", "for", "on", "in", "with",
+    }
+    partition_match = re.search(r"(?<!/)\b(?:partition|queue)\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
     if partition_match:
-        params["slurm_partition"] = partition_match.group(1)
+        _cand_partition = partition_match.group(1)
+        if _cand_partition.lower() not in _invalid_partition_tokens:
+            params["slurm_partition"] = _cand_partition
 
     gpu_partition_match = re.search(r"\bgpu\s+(?:partition|queue)\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
     if gpu_partition_match:
-        params["slurm_gpu_partition"] = gpu_partition_match.group(1)
+        _cand_gpu_partition = gpu_partition_match.group(1)
+        if _cand_gpu_partition.lower() not in _invalid_partition_tokens:
+            params["slurm_gpu_partition"] = _cand_gpu_partition
 
     cpus_match = re.search(r"\b(\d+)\s*(?:cpus?|cores?)\b", all_user_text, re.IGNORECASE)
     if cpus_match:
@@ -1736,7 +1744,8 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     _rel_path_pattern = r'\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq|fq|fast5))\b'
     _rel_paths = re.findall(_rel_path_pattern, all_user_text_original)
     # Second try: absolute paths
-    _abs_path_pattern = r'(/[^\s,]+(?:/[^\s,]+)*)'
+    # Avoid false positives like "account/partition" by requiring a sensible prefix.
+    _abs_path_pattern = r'(?:(?<=^)|(?<=[\s"\'(]))(/[^\s,]+(?:/[^\s,]+)*)'
     _abs_paths = re.findall(_abs_path_pattern, all_user_text_original)
     
     if _rel_paths:
@@ -5276,7 +5285,11 @@ What would you like to do?
         if not has_any_tags and auto_calls:
             for ac in auto_calls:
                 _ac_tool = ac["tool"]
-                _ac_params = dict(ac["params"])
+                _ac_params = _hydrate_request_placeholders(
+                    dict(ac["params"]),
+                    user_id=user.id,
+                    project_id=req.project_id,
+                )
                 _ac_source = ac["source_key"]
 
                 # Apply the same corrections as LLM-generated tags
@@ -5427,6 +5440,67 @@ What would you like to do?
                     project_id=req.project_id,
                 ),
             })
+
+        # Remote execution hardening: if the LLM only asked for SSH profiles,
+        # also fetch SLURM defaults so account/partition values are available.
+        if active_skill == "remote_execution":
+            _remote_defaults_intent = bool(re.search(
+                r'\b(defaults?|account|partition|slurm|hpc\d+)\b',
+                req.message,
+                re.IGNORECASE,
+            ))
+            if _remote_defaults_intent:
+                _launchpad_calls = calls_by_source.setdefault("launchpad", [])
+                _has_list_profiles = any(c.get("tool") == "list_ssh_profiles" for c in _launchpad_calls)
+                _has_get_defaults = any(c.get("tool") == "get_slurm_defaults" for c in _launchpad_calls)
+                if _has_list_profiles and not _has_get_defaults:
+                    _nickname = None
+                    _invalid_nick_tokens = {
+                        "default", "defaults", "profile", "profiles", "slurm", "ssh", "remote",
+                        "account", "partition", "cpu", "gpu", "for", "use", "using",
+                    }
+                    _nick_match = re.search(
+                        r'\bnickname\s+([a-zA-Z0-9._-]+)\b',
+                        req.message,
+                        re.IGNORECASE,
+                    )
+                    if _nick_match:
+                        _cand = _nick_match.group(1).strip()
+                        if _cand.lower() not in _invalid_nick_tokens:
+                            _nickname = _cand
+
+                    if not _nickname:
+                        _profile_match = re.search(
+                            r'\bprofile\s+([a-zA-Z0-9._-]+)\b',
+                            req.message,
+                            re.IGNORECASE,
+                        )
+                        if _profile_match:
+                            _cand = _profile_match.group(1).strip()
+                            if _cand.lower() not in _invalid_nick_tokens:
+                                _nickname = _cand
+
+                    if not _nickname:
+                        _hpc_match = re.search(r'\b(hpc\d+)\b', req.message, re.IGNORECASE)
+                        if _hpc_match:
+                            _nickname = _hpc_match.group(1)
+
+                    _defaults_params: dict[str, str] = {"user_id": user.id}
+                    if req.project_id:
+                        _defaults_params["project_id"] = req.project_id
+                    if _nickname:
+                        _defaults_params["profile_nickname"] = _nickname
+
+                    _launchpad_calls.append({
+                        "tool": "get_slurm_defaults",
+                        "params": _defaults_params,
+                    })
+                    logger.info(
+                        "Augmented remote_execution call set with get_slurm_defaults",
+                        user_id=user.id,
+                        project_id=req.project_id,
+                        profile_nickname=_nickname,
+                    )
         
         # 6b. Deduplicate tool calls within each source.
         # The LLM sometimes emits both a DATA_CALL and a legacy ENCODE_CALL

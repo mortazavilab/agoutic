@@ -250,3 +250,42 @@ class TestGenerateSbatchScript:
             conda_env="dogme_env",
         )
         assert "conda activate dogme_env" in script
+
+    def test_failure_diagnostics_print_nextflow_log(self):
+        script = generate_sbatch_script(
+            job_name="diag_job",
+            account="acc",
+            partition="standard",
+            nextflow_command="nextflow run mortazavilab/dogme",
+        )
+        assert "nf_exit=$?" in script
+        assert "grep -nEi" in script
+        assert "sed -n \"1,200p\" .nextflow.log" in script
+        assert "tail -n 200 .nextflow.log" in script
+        assert "Nextflow failed with exit code" in script
+
+    def test_sets_singularity_cache_dir_when_work_dir_present(self):
+        script = generate_sbatch_script(
+            job_name="cache_job",
+            account="acc",
+            partition="standard",
+            work_dir="/scratch/user/workflow1",
+            nextflow_command="nextflow run mortazavilab/dogme",
+        )
+        assert "export NXF_SINGULARITY_CACHEDIR=/scratch/user/workflow1/.nxf-singularity-cache" in script
+        assert "mkdir -p \"$NXF_SINGULARITY_CACHEDIR\"" in script
+
+    def test_includes_cluster_agnostic_runtime_bootstrap(self):
+        script = generate_sbatch_script(
+            job_name="portable_job",
+            account="acc",
+            partition="standard",
+            nextflow_command="nextflow run mortazavilab/dogme",
+        )
+        assert "module load java/17" in script
+        assert "module load singularity/3.11.3" in script
+        assert "module load apptainer/1.4.5" in script
+        assert "if ! command -v java" in script
+        assert "if ! command -v singularity >/dev/null 2>&1 && command -v apptainer >/dev/null 2>&1; then" in script
+        assert "exec apptainer \"$@\"" in script
+        assert "neither singularity nor apptainer is available" in script

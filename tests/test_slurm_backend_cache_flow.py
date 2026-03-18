@@ -1,17 +1,20 @@
 """Behavioral tests for SLURM cache flow (hit/miss/refresh/fallback)."""
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
 from launchpad.backends.base import SubmitParams
 from launchpad.backends.slurm_backend import SlurmBackend
 from launchpad.backends.ssh_manager import SSHProfileData
+from launchpad.config import REFERENCE_GENOMES
 
 
 class _FakeConn:
     def __init__(self, existing_paths=None):
         self.existing_paths = set(existing_paths or [])
+        self.commands = []
 
     async def path_exists(self, path: str) -> bool:
         return path in self.existing_paths
@@ -20,9 +23,11 @@ class _FakeConn:
         self.existing_paths.add(path)
 
     async def run(self, command: str, check: bool = False):
+        self.commands.append(command)
         return SimpleNamespace(stdout="", stderr="", exit_status=0)
 
     async def run_checked(self, command: str) -> str:
+        self.commands.append(command)
         if "sbatch --parsable" in command:
             return "12345\n"
         return ""
@@ -45,6 +50,10 @@ def profile() -> SSHProfileData:
         local_username=None,
         remote_base_path="/remote/eli/agoutic",
         is_enabled=True,
+        default_slurm_account="cpu-default",
+        default_slurm_partition="cpu-part-default",
+        default_slurm_gpu_account="gpu-default",
+        default_slurm_gpu_partition="gpu-part-default",
     )
 
 
@@ -107,6 +116,7 @@ async def test_resolve_staging_cache_reuses_reference_and_data(monkeypatch, prof
     monkeypatch.setattr(launchpad_db, "get_remote_input_cache_entry", _get_data)
     monkeypatch.setattr(launchpad_db, "upsert_remote_reference_cache_entry", _noop)
     monkeypatch.setattr(launchpad_db, "upsert_remote_input_cache_entry", _noop)
+    monkeypatch.setattr(launchpad_db, "upsert_remote_staged_sample", _noop)
     monkeypatch.setattr(launchpad_db, "update_job_fields", _noop)
 
     result = await backend._resolve_staging_cache("run-1", params, profile, conn)
@@ -167,6 +177,7 @@ async def test_resolve_staging_cache_refreshes_stale_reference(monkeypatch, prof
     monkeypatch.setattr(launchpad_db, "get_remote_input_cache_entry", _get_data)
     monkeypatch.setattr(launchpad_db, "upsert_remote_reference_cache_entry", _noop)
     monkeypatch.setattr(launchpad_db, "upsert_remote_input_cache_entry", _noop)
+    monkeypatch.setattr(launchpad_db, "upsert_remote_staged_sample", _noop)
     monkeypatch.setattr(launchpad_db, "update_job_fields", _noop)
 
     result = await backend._resolve_staging_cache("run-2", params, profile, conn)
@@ -235,3 +246,150 @@ async def test_submit_uses_fallback_when_cache_resolution_fails(monkeypatch, pro
     run_uuid = await backend.submit("run-3", params)
 
     assert run_uuid == "run-3"
+
+
+@pytest.mark.asyncio
+async def test_submit_writes_remote_config_and_references_it(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeConn()
+
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        project_slug="proj-1",
+        sample_name="sample",
+        mode="DNA",
+        input_directory="/tmp/input",
+        reference_genome=["mm39"],
+        ssh_profile_id="profile-1",
+        slurm_account="cpu-request",
+        slurm_partition="cpu-part-request",
+        workflow_number=4,
+        remote_base_path="/remote/eli/agoutic",
+    )
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _fallback(*args, **kwargs):
+        return {
+            "remote_input": "/remote/eli/agoutic/data/fallback-input",
+            "reference_cache_status": "fallback",
+            "data_cache_status": "fallback",
+            "remote_reference_paths": {
+                "mm39": "/remote/eli/agoutic/ref/mm39",
+            },
+        }
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+    monkeypatch.setattr(backend, "_resolve_staging_cache", _fallback)
+    monkeypatch.setattr(backend, "_update_job_stage", _noop)
+    monkeypatch.setattr(backend, "_update_job_slurm_info", _noop)
+
+    from launchpad.backends import slurm_backend as slurm_module
+
+    async def _validate_remote_paths(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(slurm_module, "validate_remote_paths", _validate_remote_paths)
+    monkeypatch.setattr(slurm_module, "check_all_paths_ok", lambda *_: (True, []))
+    monkeypatch.setattr(slurm_module, "generate_sbatch_script", lambda **kwargs: kwargs["nextflow_command"])
+
+    await backend.submit("run-4", params)
+
+    config_write = [c for c in conn.commands if "nextflow.config" in c and "cat >" in c]
+    assert config_write, "Expected remote nextflow.config write command"
+
+    sbatch_cmds = [c for c in conn.commands if "sbatch --parsable" in c]
+    assert sbatch_cmds, "Expected sbatch submission command"
+
+    # The generated batch script content should include nextflow -c pointing to remote workflow config.
+    submit_script_payloads = [c for c in conn.commands if "submit_run-4.sh" in c and "cat >" in c]
+    assert submit_script_payloads
+    assert "nextflow run mortazavilab/dogme" in submit_script_payloads[0]
+    assert "-c /remote/eli/agoutic/proj-1/workflow4/nextflow.config" in submit_script_payloads[0]
+
+    # CPU values come from request; GPU values come from profile defaults.
+    assert "cpuAccount = 'cpu-request'" in config_write[0]
+    assert "cpuPartition = 'cpu-part-request'" in config_write[0]
+    assert "gpuAccount = 'gpu-default'" in config_write[0]
+    assert "gpuPartition = 'gpu-part-default'" in config_write[0]
+
+    # Remote staged reference cache should be used in genome_annot_refs.
+    mm39_cfg = REFERENCE_GENOMES["mm39"]
+    assert f"/remote/eli/agoutic/ref/mm39/{Path(mm39_cfg['fasta']).name}" in config_write[0]
+    assert f"/remote/eli/agoutic/ref/mm39/{Path(mm39_cfg['gtf']).name}" in config_write[0]
+
+    # Staged input cache should be symlinked to workflow-local pod5 directory.
+    symlink_cmds = [c for c in conn.commands if "ln -sfn" in c and "/workflow4/pod5" in c]
+    assert symlink_cmds
+    assert "/remote/eli/agoutic/data/fallback-input" in symlink_cmds[0]
+
+
+@pytest.mark.asyncio
+async def test_submit_derives_reference_paths_when_cache_metadata_missing(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeConn()
+
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        project_slug="proj-1",
+        sample_name="sample",
+        mode="DNA",
+        input_directory="/tmp/input",
+        reference_genome=["mm39"],
+        ssh_profile_id="profile-1",
+        slurm_account="cpu-request",
+        slurm_partition="cpu-part-request",
+        workflow_number=5,
+        remote_base_path="/remote/eli/agoutic",
+    )
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _resolve_stage(*args, **kwargs):
+        # Simulate reuse/fallback metadata path where reference mappings are absent.
+        return {
+            "remote_input": "/remote/eli/agoutic/data/reused-input",
+            "reference_cache_status": "reused",
+            "data_cache_status": "reused",
+        }
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+    monkeypatch.setattr(backend, "_resolve_staging_cache", _resolve_stage)
+    monkeypatch.setattr(backend, "_update_job_stage", _noop)
+    monkeypatch.setattr(backend, "_update_job_slurm_info", _noop)
+
+    from launchpad.backends import slurm_backend as slurm_module
+
+    async def _validate_remote_paths(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(slurm_module, "validate_remote_paths", _validate_remote_paths)
+    monkeypatch.setattr(slurm_module, "check_all_paths_ok", lambda *_: (True, []))
+    monkeypatch.setattr(slurm_module, "generate_sbatch_script", lambda **kwargs: kwargs["nextflow_command"])
+
+    await backend.submit("run-5", params)
+
+    config_write = [c for c in conn.commands if "nextflow.config" in c and "cat >" in c]
+    assert config_write, "Expected remote nextflow.config write command"
+
+    mm39_cfg = REFERENCE_GENOMES["mm39"]
+    assert f"/remote/eli/agoutic/ref/mm39/{Path(mm39_cfg['fasta']).name}" in config_write[0]
+    assert f"/remote/eli/agoutic/ref/mm39/{Path(mm39_cfg['gtf']).name}" in config_write[0]

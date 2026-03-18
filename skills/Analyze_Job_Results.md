@@ -33,6 +33,11 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
   - "Submit a new job"
   - "Process these pod5 files"
 
+- **Remote execution / SSH / SLURM profile setup** → `[[SKILL_SWITCH_TO: remote_execution]]`
+  - "Show my SSH profiles"
+  - "What are my SLURM defaults for hpc3?"
+  - "List remote files on the cluster"
+
 - **ENCODE data lookup** → `[[SKILL_SWITCH_TO: encode_search]]`
   - "How many files for ENCSR160HKZ?"
   - "Search ENCODE for experiments"
@@ -50,6 +55,7 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 
 **If user asks about:**
 - **New local data** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
+- **SSH profiles / SLURM account-partition / remote cluster setup** → `[[SKILL_SWITCH_TO: remote_execution]]`
 - **ENCODE searches** → `[[SKILL_SWITCH_TO: encode_search]]`
 - **General help** → `[[SKILL_SWITCH_TO: welcome]]`
 

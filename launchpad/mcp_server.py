@@ -269,11 +269,13 @@ async def test_ssh_connection(
 async def get_slurm_defaults(
     user_id: str,
     project_id: str | None = None,
+    ssh_profile_id: str | None = None,
+    profile_nickname: str | None = None,
 ) -> str:
-    """Get saved SLURM resource defaults for a user/project."""
+    """Get saved SLURM resource defaults, with SSH profile defaults as fallback."""
     from sqlalchemy import select
     from common.database import AsyncSessionLocal
-    from launchpad.models import SlurmDefaults
+    from launchpad.models import SlurmDefaults, SSHProfile
     async with AsyncSessionLocal() as session:
         query = select(SlurmDefaults).where(SlurmDefaults.user_id == user_id)
         if project_id:
@@ -282,17 +284,76 @@ async def get_slurm_defaults(
             query = query.where(SlurmDefaults.project_id.is_(None))
         result = await session.execute(query)
         defaults = result.scalar_one_or_none()
-        if not defaults:
-            return json.dumps({"found": False, "message": "No saved defaults"})
+
+        profile_query = select(SSHProfile).where(SSHProfile.user_id == user_id, SSHProfile.is_enabled.is_(True))
+        profile_result = await session.execute(profile_query)
+        profiles = list(profile_result.scalars().all())
+
+        if ssh_profile_id:
+            profiles = [p for p in profiles if p.id == ssh_profile_id]
+        elif profile_nickname:
+            wanted = profile_nickname.strip().lower()
+            profiles = [p for p in profiles if (p.nickname or "").strip().lower() == wanted]
+
+        profile_defaults = []
+        for p in profiles:
+            profile_defaults.append({
+                "ssh_profile_id": p.id,
+                "nickname": p.nickname,
+                "default_slurm_account": p.default_slurm_account,
+                "default_slurm_partition": p.default_slurm_partition,
+                "default_slurm_gpu_account": p.default_slurm_gpu_account,
+                "default_slurm_gpu_partition": p.default_slurm_gpu_partition,
+                "remote_base_path": p.remote_base_path,
+            })
+
+        selected_profile = profile_defaults[0] if profile_defaults else None
+        has_profile_defaults = bool(
+            selected_profile
+            and (
+                selected_profile.get("default_slurm_account")
+                or selected_profile.get("default_slurm_partition")
+                or selected_profile.get("default_slurm_gpu_account")
+                or selected_profile.get("default_slurm_gpu_partition")
+            )
+        )
+
+        if defaults:
+            return json.dumps({
+                "found": True,
+                "source": "slurm_defaults",
+                "account": defaults.account,
+                "partition": defaults.partition,
+                "cpus": defaults.cpus,
+                "memory_gb": defaults.memory_gb,
+                "walltime": defaults.walltime,
+                "gpus": defaults.gpus,
+                "gpu_type": defaults.gpu_type,
+                "ssh_profile_defaults": profile_defaults,
+                "selected_profile_defaults": selected_profile,
+            }, indent=2)
+
+        if has_profile_defaults:
+            return json.dumps({
+                "found": True,
+                "source": "ssh_profile_defaults",
+                "account": selected_profile.get("default_slurm_account"),
+                "partition": selected_profile.get("default_slurm_partition"),
+                "cpus": None,
+                "memory_gb": None,
+                "walltime": None,
+                "gpus": None,
+                "gpu_type": None,
+                "ssh_profile_defaults": profile_defaults,
+                "selected_profile_defaults": selected_profile,
+                "message": "Using defaults saved on SSH profile.",
+            }, indent=2)
+
         return json.dumps({
-            "found": True,
-            "account": defaults.account,
-            "partition": defaults.partition,
-            "cpus": defaults.cpus,
-            "memory_gb": defaults.memory_gb,
-            "walltime": defaults.walltime,
-            "gpus": defaults.gpus,
-            "gpu_type": defaults.gpu_type,
+            "found": False,
+            "source": "none",
+            "ssh_profile_defaults": profile_defaults,
+            "message": "No saved defaults in slurm_defaults or SSH profile defaults.",
         }, indent=2)
 
 

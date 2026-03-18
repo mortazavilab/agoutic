@@ -35,12 +35,18 @@ class NextflowConfig:
         mode: str,  # "DNA", "RNA", "CDNA"
         input_dir: str,
         reference_genome: list,  # Now a list of genome names
+        reference_overrides: Optional[dict[str, dict[str, str]]] = None,
         modifications: Optional[str] = None,
         modkit_filter_threshold: float = 0.9,
         min_cov: Optional[int] = None,
         per_mod: int = 5,
         accuracy: str = "sup",
         max_gpu_tasks: int = 1,
+        execution_mode: str = "local",
+        slurm_cpu_partition: str | None = None,
+        slurm_gpu_partition: str | None = None,
+        slurm_cpu_account: str | None = None,
+        slurm_gpu_account: str | None = None,
     ) -> str:
         """
         Generate a Nextflow configuration string for Dogme pipeline.
@@ -63,8 +69,15 @@ class NextflowConfig:
         genome_refs_lines = []
         for genome_name in reference_genome:
             genome_config = REFERENCE_GENOMES.get(genome_name, REFERENCE_GENOMES["mm39"])
-            fasta = genome_config.get("fasta", "/home/seyedam/genRefs/IGVFFI9282QLXO.fasta")
-            gtf = genome_config.get("gtf", "/home/seyedam/genRefs/IGVFFI4777RDZK.gtf")
+            override = (reference_overrides or {}).get(genome_name, {})
+            fasta = override.get("fasta") or genome_config.get("fasta", "/home/seyedam/genRefs/IGVFFI9282QLXO.fasta")
+            gtf = override.get("gtf") or genome_config.get("gtf", "/home/seyedam/genRefs/IGVFFI4777RDZK.gtf")
+            logger.debug(
+                f"Config paths for {genome_name}",
+                has_override=bool(override),
+                using_fasta=fasta,
+                using_gtf=gtf,
+            )
             genome_refs_lines.append(f"        [name: '{genome_name}', genome: '{fasta}', annot: '{gtf}']")
         
         # Use first genome for kallisto index (TODO: support per-genome kallisto)
@@ -84,6 +97,12 @@ class NextflowConfig:
         # Determine minCov based on mode if not explicitly provided
         if min_cov is None:
             min_cov = 1 if mode == "DNA" else 3
+
+        is_slurm = (execution_mode or "local").strip().lower() == "slurm"
+        cpu_partition = (slurm_cpu_partition or "standard").strip() or "standard"
+        gpu_partition = (slurm_gpu_partition or cpu_partition).strip() or cpu_partition
+        cpu_account = (slurm_cpu_account or "default").strip() or "default"
+        gpu_account = (slurm_gpu_account or cpu_account).strip() or cpu_account
         
         # Build config string matching example format
         config_lines = []
@@ -116,47 +135,63 @@ class NextflowConfig:
         config_lines.append(f"    genome_annot_refs = [")
         # Add all genome references
         config_lines.extend(genome_refs_lines)
-        config_lines.append(f"    ]")
-        config_lines.append(f"    ")
+        config_lines.append("    ]")
+        config_lines.append("")
         # Use primary genome for kallisto
         kallisto_index = primary_config.get("kallisto_index", "/home/seyedam/genRefs/mm39GencM36_k63.idx")
         kallisto_t2g = primary_config.get("kallisto_t2g", "/home/seyedam/genRefs/mm39GencM36_k63.t2g")
         config_lines.append(f"    kallistoIndex = '{kallisto_index}'")
         config_lines.append(f"    t2g = '{kallisto_t2g}'")
-        config_lines.append(f"")
-        config_lines.append(f"    //default accuracy is sup")
+        config_lines.append("")
+        config_lines.append("    //default accuracy is sup")
         config_lines.append(f"    accuracy = \"{accuracy}\"")
-        config_lines.append(f"    // change this value if 0.9 is too strict")
-        config_lines.append(f"    // if set to null or '' then modkit will determine its threshold by sampling reads.")
-        config_lines.append(f"    modkitFilterThreshold = {modkit_filter_threshold} ")
-        config_lines.append(f"")
-        config_lines.append(f"")
-        config_lines.append(f"    // these paths are all based on the topDir and sample name")
-        config_lines.append(f"    // dogme will populate all of these folders with its output")
-        config_lines.append(f'    modDir = "${{topDir}}/dorModels"')
-        config_lines.append(f'    dorDir = "${{topDir}}/dor12-${{sample}}"')
-        config_lines.append(f'    podDir = "${{topDir}}/pod5"')
-        config_lines.append(f'    bamDir = "${{topDir}}/bams"')
-        config_lines.append(f'    annotDir = "${{topDir}}/annot"')
-        config_lines.append(f'    bedDir = "${{topDir}}/bedMethyl"')
-        config_lines.append(f'    fastqDir = "${{topDir}}/fastqs"')
-        config_lines.append(f'    kallistoDir = "${{topDir}}/kallisto"')
-        config_lines.append(f"    tmpDir = '/tmp'  // Temporary directory for disk-based sorting")
+        config_lines.append("    // change this value if 0.9 is too strict")
+        config_lines.append("    // if set to null or '' then modkit will determine its threshold by sampling reads.")
+        config_lines.append(f"    modkitFilterThreshold = {modkit_filter_threshold}")
+        config_lines.append("")
+        config_lines.append("    // these paths are all based on the topDir and sample name")
+        config_lines.append("    // dogme will populate all of these folders with its output")
+        config_lines.append('    modDir = "${topDir}/dorModels"')
+        config_lines.append('    dorDir = "${topDir}/dor12-${sample}"')
+        config_lines.append('    podDir = "${topDir}/pod5"')
+        config_lines.append('    bamDir = "${topDir}/bams"')
+        config_lines.append('    annotDir = "${topDir}/annot"')
+        config_lines.append('    bedDir = "${topDir}/bedMethyl"')
+        config_lines.append('    fastqDir = "${topDir}/fastqs"')
+        config_lines.append('    kallistoDir = "${topDir}/kallisto"')
+        config_lines.append("    tmpDir = '/tmp'  // Temporary directory for disk-based sorting")
         config_lines.append("}")
         config_lines.append("")
         config_lines.append("process {")
         config_lines.append("    // <-- Container Settings --->")
         config_lines.append("    container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'")
-        config_lines.append(f"    containerOptions = \"-v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
+        if is_slurm:
+            config_lines.append(f"    containerOptions = \"--bind {AGOUTIC_DATA},{AGOUTIC_CODE}\"")
+        else:
+            config_lines.append(f"    containerOptions = \"-v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    beforeScript = 'export PATH=/opt/conda/bin:$PATH'")
         config_lines.append("")
-        config_lines.append("")
-        config_lines.append("    executor='local'")
-        config_lines.append("")
-        config_lines.append("    // General default settings - adjust as necessary")
-        config_lines.append("    cpus = 1")
-        config_lines.append("    memory = '32 GB'")
-        config_lines.append("    time = '8:00:00'")
+        if is_slurm:
+            config_lines.append("    // --- Slurm Executor ---")
+            config_lines.append("    executor = 'slurm'")
+            config_lines.append(f"    cpuPartition = '{cpu_partition}'")
+            config_lines.append(f"    gpuPartition = '{gpu_partition}'")
+            config_lines.append(f"    cpuAccount = '{cpu_account}'")
+            config_lines.append(f"    gpuAccount = '{gpu_account}'")
+            config_lines.append("")
+            config_lines.append("    // General default settings - adjust as necessary")
+            config_lines.append("    cpus = 12")
+            config_lines.append("    memory = '64 GB'")
+            config_lines.append("    time = '8:00:00'")
+            config_lines.append("    clusterOptions = \"--account=${cpuAccount}\"")
+            config_lines.append("    queue = \"${cpuPartition}\"")
+        else:
+            config_lines.append("    executor = 'local'")
+            config_lines.append("")
+            config_lines.append("    // General default settings - adjust as necessary")
+            config_lines.append("    cpus = 1")
+            config_lines.append("    memory = '32 GB'")
+            config_lines.append("    time = '8:00:00'")
         config_lines.append("")
         config_lines.append("    withName: 'extractfastqTask' {")
         config_lines.append("        // Matches the script's thread count and gives safe memory buffer")
@@ -166,24 +201,42 @@ class NextflowConfig:
         config_lines.append("    }")
         config_lines.append("")
         config_lines.append("    withName: 'doradoTask' {")
+        if is_slurm:
+            config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
+            config_lines.append("        queue = \"${gpuPartition}\"")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
         config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
-        config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
+        if is_slurm:
+            config_lines.append(f"        containerOptions = \"--nv --bind {AGOUTIC_DATA},{AGOUTIC_CODE}\"")
+        else:
+            config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("    ")
         config_lines.append("    withName: 'openChromatinTaskBg' {")
+        if is_slurm:
+            config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
+            config_lines.append("        queue = \"${gpuPartition}\"")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
         config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
-        config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
+        if is_slurm:
+            config_lines.append(f"        containerOptions = \"--nv --bind {AGOUTIC_DATA},{AGOUTIC_CODE}\"")
+        else:
+            config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("")
         config_lines.append("    withName: 'openChromatinTaskBed' {")
+        if is_slurm:
+            config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
+            config_lines.append("        queue = \"${gpuPartition}\"")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
         config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
-        config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
+        if is_slurm:
+            config_lines.append(f"        containerOptions = \"--nv --bind {AGOUTIC_DATA},{AGOUTIC_CODE}\"")
+        else:
+            config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("")
         config_lines.append("    withName: 'minimapTask' {")
@@ -191,10 +244,16 @@ class NextflowConfig:
         config_lines.append("    }")
         config_lines.append("}")
         config_lines.append("")
-        config_lines.append("docker {")
-        config_lines.append("    enabled = true")
-        config_lines.append("    runOptions = '-u $(id -u):$(id -g)'")
-        config_lines.append("}")
+        if is_slurm:
+            config_lines.append("singularity {")
+            config_lines.append("    enabled = true")
+            config_lines.append("    autoMounts = true")
+            config_lines.append("}")
+        else:
+            config_lines.append("docker {")
+            config_lines.append("    enabled = true")
+            config_lines.append("    runOptions = '-u $(id -u):$(id -g)'")
+            config_lines.append("}")
         config_lines.append("")
         config_lines.append("timeline {")
         config_lines.append("    enabled = true")

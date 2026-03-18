@@ -3,31 +3,24 @@
 **Version:** 3.4.2
 **Status:** Active Prototype 
 
-## Latest Updates (2026-03-17)
+## Latest Updates (2026-03-18)
 
-- **Execution mode validation fix** — added defensive normalization of execution_mode
-  parameter to prevent incorrect backend selection. Local jobs are now reliably
-  routed to NextflowExecutor even with malformed parameters, preventing accidental
-  SLURM backend activation that would fail trying to create `/scratch` directories.
-- **Backend routing safeguards** — Cortex and Launchpad now validate and log
-  execution_mode selection, with automatic fallback to "local" for invalid values.
-- Added SLURM approval form reuse improvements:
-  approval gates now support selecting a saved SSH profile directly, with
-  auto-filled SLURM defaults and remote paths; subsequent runs in the same
-  project can also seed SLURM settings from the most recent approved run.
-- Added per-user, cross-project SLURM staging cache reuse with preflight metadata.
-  AGOUTIC now computes cache actions (reuse/stage/refresh/fallback) for
-  references and input data before submission and surfaces those actions through
-  gate payloads and run status.
-- Added persistent remote cache metadata in Launchpad for references and input
-  fingerprints, plus new DB migrations for cache tables and job/profile fields.
-- Expanded SSH profile defaults to include remote cache root templates.
-- Hardened SSH profile creation errors in Launchpad:
-  duplicate profile conflicts now return actionable `400` errors, and schema
-  drift conditions return `503` with migration guidance.
-- Improved My Data in UI/Cortex:
-  optional inclusion of untracked filesystem files, clear tracked/untracked
-  behavior, folder column, and full disk path visibility in file details.
+- **Remote SLURM config-path correctness** — generated `nextflow.config` for
+  remote submissions now prioritizes staged remote reference cache paths in
+  `genome_annot_refs`, avoiding local host path leakage in cluster runs.
+- **Remote workflow input linking** — submissions now ensure workflow-local
+  `pod5`/`bams`/`fastqs` links map to staged remote input cache paths expected
+  by Dogme.
+- **Correct remote pipeline target** — SLURM submit scripts now run
+  `nextflow run mortazavilab/dogme`.
+- **Portable cluster runtime bootstrap** — generated sbatch scripts now attempt
+  module-based Java/container runtime setup where available and provide
+  `apptainer` compatibility for singularity-based Nextflow configs.
+- **Actionable failure diagnostics in SLURM logs** — failed jobs now include a
+  focused `.nextflow.log` error scan plus head/tail snippets in job output.
+- **Expanded Launchpad debug visibility** — `/jobs/{run_uuid}/debug` now
+  surfaces discovered `slurm-*.out/.err` previews and focused Nextflow log
+  context for failed remote jobs.
 
 ## 🧬 Overview
 

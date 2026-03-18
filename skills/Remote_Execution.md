@@ -78,6 +78,14 @@ Use these values as prefilled suggestions:
 - Result destination: default to `local` unless user specifies `remote` or `both`
 - Remote base path: use the saved profile `remote_base_path`
 
+**Important default precedence:**
+- If `get_slurm_defaults` returns no project-level defaults, still use per-profile defaults from `list_ssh_profiles`:
+   - `default_slurm_account`
+   - `default_slurm_partition`
+   - `default_slurm_gpu_account`
+   - `default_slurm_gpu_partition`
+- Do **not** report "no defaults" when these profile fields are present.
+
 Only ask the user for values that have no saved preference.
 
 ### Stage 2: Execution Mode
