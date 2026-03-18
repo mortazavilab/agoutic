@@ -96,4 +96,4 @@ SSH_AGENT_FORWARDING = os.getenv("SSH_AGENT_FORWARDING", "false").strip().lower(
 # Local auth broker sessions for per-user SSH access via `su`
 LOCAL_AUTH_SESSION_TTL_SECONDS = int(os.getenv("LOCAL_AUTH_SESSION_TTL_SECONDS", "3600"))
 LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS = int(os.getenv("LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS", "20"))
-LOCAL_AUTH_SOCKET_DIR = Path(os.getenv("LOCAL_AUTH_SOCKET_DIR", "/tmp"))
+LOCAL_AUTH_SOCKET_DIR = Path(os.getenv("LOCAL_AUTH_SOCKET_DIR", AGOUTIC_DATA / "runtime" / "local_auth"))

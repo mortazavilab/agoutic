@@ -1,5 +1,7 @@
 """Tests for launchpad/backends/ssh_manager.py."""
 
+from datetime import datetime, timezone
+import json
 import sys
 from types import SimpleNamespace
 
@@ -159,6 +161,69 @@ class TestConnectKeyFile:
                 return fake_session
 
         monkeypatch.setattr("launchpad.backends.ssh_manager.get_local_auth_session_manager", lambda: FakeSessionManager())
+
+        connect_called = False
+
+        async def fake_connect(**kwargs):
+            nonlocal connect_called
+            connect_called = True
+            class _Conn:
+                def close(self):
+                    return None
+                async def wait_closed(self):
+                    return None
+            return _Conn()
+
+        monkeypatch.setitem(sys.modules, "asyncssh", SimpleNamespace(connect=fake_connect))
+
+        conn = await manager.connect(profile)
+
+        assert conn.profile.id == "p1"
+        assert connect_called is False
+
+    @pytest.mark.asyncio
+    async def test_connect_uses_shared_broker_session_metadata(self, monkeypatch, tmp_path):
+        manager = SSHConnectionManager()
+        profile = SSHProfileData(
+            id="p1",
+            user_id="u1",
+            nickname="test",
+            ssh_host="example.org",
+            ssh_port=22,
+            ssh_username="alice",
+            auth_method="key_file",
+            key_file_path="~/.ssh/id_ed25519",
+            local_username="alice",
+            is_enabled=True,
+        )
+        now = datetime.now(timezone.utc)
+        metadata_path = tmp_path / "agoutic-local-auth-session-u1-p1.json"
+        metadata_path.write_text(json.dumps({
+            "session_id": "sess-1",
+            "profile_id": "p1",
+            "user_id": "u1",
+            "local_username": "alice",
+            "helper_host": "127.0.0.1",
+            "helper_port": 12345,
+            "port_file": "/tmp/session.port",
+            "pid_file": "/tmp/session.pid",
+            "log_file": "/tmp/session.log",
+            "auth_token": "token-123",
+            "helper_pid": 999,
+            "created_at": now.isoformat(),
+            "last_used_at": now.isoformat(),
+        }), encoding="utf-8")
+
+        from launchpad.backends.local_auth_sessions import LocalAuthSessionManager
+
+        session_manager = LocalAuthSessionManager()
+
+        async def fake_invoke(session_obj, payload):
+            return {"ok": True}
+
+        monkeypatch.setattr(session_manager, "invoke", fake_invoke)
+        monkeypatch.setattr("launchpad.backends.local_auth_sessions.LOCAL_AUTH_SOCKET_DIR", tmp_path)
+        monkeypatch.setattr("launchpad.backends.ssh_manager.get_local_auth_session_manager", lambda: session_manager)
 
         connect_called = False
 

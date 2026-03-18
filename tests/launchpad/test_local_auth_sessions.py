@@ -86,3 +86,89 @@ async def test_close_session_ignores_permission_errors_on_runtime_files(monkeypa
     assert await manager.close_session("sess-1") is True
     assert not pid_file.exists()
     assert not log_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_get_active_session_loads_shared_metadata_from_disk(monkeypatch, tmp_path):
+    monkeypatch.setattr("launchpad.backends.local_auth_sessions.LOCAL_AUTH_SOCKET_DIR", tmp_path)
+
+    now = datetime.now(timezone.utc)
+    metadata_path = tmp_path / "agoutic-local-auth-session-u1-p1.json"
+    metadata_path.write_text(
+        """
+{
+  "session_id": "sess-1",
+  "profile_id": "p1",
+  "user_id": "u1",
+  "local_username": "alice",
+  "helper_host": "127.0.0.1",
+  "helper_port": 12345,
+  "port_file": "/tmp/session.port",
+  "pid_file": "/tmp/session.pid",
+  "log_file": "/tmp/session.log",
+  "auth_token": "token-123",
+  "helper_pid": 999,
+  "created_at": "%s",
+  "last_used_at": "%s"
+}
+        """.strip() % (now.isoformat(), now.isoformat()),
+        encoding="utf-8",
+    )
+
+    manager = LocalAuthSessionManager()
+    profile = SimpleNamespace(id="p1", user_id="u1")
+    calls = []
+
+    async def fake_invoke(session_obj, payload):
+        calls.append((session_obj.session_id, payload["op"]))
+        return {"ok": True}
+
+    monkeypatch.setattr(manager, "invoke", fake_invoke)
+
+    session = await manager.get_active_session(profile)
+
+    assert session is not None
+    assert session.session_id == "sess-1"
+    assert calls == [("sess-1", "ping")]
+
+
+@pytest.mark.asyncio
+async def test_close_session_removes_shared_metadata_file(monkeypatch, tmp_path):
+    monkeypatch.setattr("launchpad.backends.local_auth_sessions.LOCAL_AUTH_SOCKET_DIR", tmp_path)
+
+    manager = LocalAuthSessionManager()
+    now = datetime.now(timezone.utc)
+    port_file = tmp_path / "session.port"
+    pid_file = tmp_path / "session.pid"
+    log_file = tmp_path / "session.log"
+    metadata_file = tmp_path / "agoutic-local-auth-session-u1-p1.json"
+    port_file.write_text("12345")
+    pid_file.write_text("999")
+    log_file.write_text("log")
+    metadata_file.write_text("{}")
+
+    session = LocalAuthSession(
+        session_id="sess-1",
+        profile_id="p1",
+        user_id="u1",
+        local_username="alice",
+        helper_host="127.0.0.1",
+        helper_port=12345,
+        port_file=str(port_file),
+        pid_file=str(pid_file),
+        log_file=str(log_file),
+        auth_token="token-123",
+        helper_pid=None,
+        created_at=now,
+        last_used_at=now,
+    )
+    manager._sessions[session.session_id] = session
+    manager._by_profile[(session.user_id, session.profile_id)] = session.session_id
+
+    async def fake_invoke(session_obj, payload):
+        return {"ok": True}
+
+    monkeypatch.setattr(manager, "invoke", fake_invoke)
+
+    assert await manager.close_session("sess-1") is True
+    assert not metadata_file.exists()

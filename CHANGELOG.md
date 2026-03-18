@@ -81,6 +81,15 @@
   separate progress sections for references and sample data. Cached parts are
   shown as already complete, while only the missing part remains active.
 
+- **Generic remote browsing prompts** — remote file browsing now recognizes
+  saved SSH profile nicknames generically instead of relying on hardcoded
+  profile names, so prompts like “list files on <nickname>” route correctly.
+
+- **Deterministic remote browse execution** — explicit remote browsing requests
+  now bypass incorrect LLM clarifications or skill switches and directly invoke
+  Launchpad remote listing, even when the conversation was previously in a
+  local results-analysis skill.
+
 ### Fixes
 
 - **Execution mode validation** — added defensive normalization of `execution_mode`
@@ -118,6 +127,16 @@
   `local_username` now prefers an active local auth broker session for rsync
   transfers, matching the SSH connection test/auth path and avoiding local key
   read permission failures during staging.
+
+- **Brokered auth reuse for remote browsing** — remote directory listing now
+  reuses the same local auth broker session across Launchpad processes instead
+  of falling back to direct key-file reads when the browse call is handled by
+  the MCP server.
+
+- **Local auth runtime hardening** — broker session metadata now defaults to a
+  private runtime directory under `AGOUTIC_DATA` instead of `/tmp`, and shared
+  session metadata files are created atomically with `0600` permissions from
+  the start.
 
 ### API
 

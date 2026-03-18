@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import pty
+import re
 import select
 import shlex
 import signal
@@ -55,11 +56,11 @@ def _session_key(user_id: str, profile_id: str) -> tuple[str, str]:
 
 
 def _ensure_socket_dir() -> None:
+    LOCAL_AUTH_SOCKET_DIR.mkdir(parents=True, exist_ok=True)
     if LOCAL_AUTH_SOCKET_DIR == Path("/tmp"):
         return
-    LOCAL_AUTH_SOCKET_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        os.chmod(LOCAL_AUTH_SOCKET_DIR, 0o1777)
+        os.chmod(LOCAL_AUTH_SOCKET_DIR, 0o700)
     except PermissionError:
         logger.warning("Could not chmod local auth socket dir", path=str(LOCAL_AUTH_SOCKET_DIR))
 
@@ -87,6 +88,83 @@ def _safe_remove_runtime_file(path: str) -> None:
         logger.warning("Could not remove local auth runtime file owned by another user", path=str(file_path))
     except OSError:
         logger.warning("Could not remove local auth runtime file", path=str(file_path))
+
+
+def _safe_path_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", value)
+
+
+def _session_metadata_path(user_id: str, profile_id: str) -> Path:
+    _ensure_socket_dir()
+    return LOCAL_AUTH_SOCKET_DIR / (
+        f"agoutic-local-auth-session-{_safe_path_component(user_id)}-{_safe_path_component(profile_id)}.json"
+    )
+
+
+def _write_session_metadata(session: LocalAuthSession) -> None:
+    metadata_path = _session_metadata_path(session.user_id, session.profile_id)
+    payload = {
+        "session_id": session.session_id,
+        "profile_id": session.profile_id,
+        "user_id": session.user_id,
+        "local_username": session.local_username,
+        "helper_host": session.helper_host,
+        "helper_port": session.helper_port,
+        "port_file": session.port_file,
+        "pid_file": session.pid_file,
+        "log_file": session.log_file,
+        "auth_token": session.auth_token,
+        "helper_pid": session.helper_pid,
+        "created_at": session.created_at.isoformat(),
+        "last_used_at": session.last_used_at.isoformat(),
+    }
+    tmp_path = metadata_path.with_name(f"{metadata_path.name}.{uuid.uuid4().hex}.tmp")
+    fd = None
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
+            json.dump(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, metadata_path)
+    except Exception:
+        _safe_remove_runtime_file(str(tmp_path))
+        raise
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _load_session_metadata(user_id: str, profile_id: str) -> LocalAuthSession | None:
+    metadata_path = _session_metadata_path(user_id, profile_id)
+    if not metadata_path.exists():
+        return None
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return LocalAuthSession(
+            session_id=payload["session_id"],
+            profile_id=payload["profile_id"],
+            user_id=payload["user_id"],
+            local_username=payload["local_username"],
+            helper_host=payload["helper_host"],
+            helper_port=int(payload["helper_port"]),
+            port_file=payload["port_file"],
+            pid_file=payload["pid_file"],
+            log_file=payload["log_file"],
+            auth_token=payload["auth_token"],
+            helper_pid=payload.get("helper_pid"),
+            created_at=datetime.fromisoformat(payload["created_at"]),
+            last_used_at=datetime.fromisoformat(payload["last_used_at"]),
+        )
+    except Exception:
+        logger.warning("Could not load local auth session metadata", path=str(metadata_path))
+        _safe_remove_runtime_file(str(metadata_path))
+        return None
+
+
+def _remove_session_metadata(user_id: str, profile_id: str) -> None:
+    _safe_remove_runtime_file(str(_session_metadata_path(user_id, profile_id)))
 
 
 def _launch_helper_via_su(local_username: str, password: str, host: str, port_file: str, pid_file: str, log_file: str, auth_token: str) -> None:
@@ -168,6 +246,13 @@ class LocalAuthSessionManager:
             existing_id = self._by_profile.get(key)
         if existing_id:
             await self.close_session(existing_id)
+        else:
+            existing_session = _load_session_metadata(profile.user_id, profile.id)
+            if existing_session is not None:
+                async with self._lock:
+                    self._sessions[existing_session.session_id] = existing_session
+                    self._by_profile[key] = existing_session.session_id
+                await self.close_session(existing_session.session_id)
 
         session_id = uuid.uuid4().hex
         helper_host = "127.0.0.1"
@@ -207,6 +292,7 @@ class LocalAuthSessionManager:
         async with self._lock:
             self._sessions[session_id] = session
             self._by_profile[key] = session_id
+        _write_session_metadata(session)
         return session
 
     async def get_active_session(self, profile: Any) -> LocalAuthSession | None:
@@ -216,6 +302,18 @@ class LocalAuthSessionManager:
             session_id = self._by_profile.get(key)
             session = self._sessions.get(session_id) if session_id else None
         if session is None:
+            session = _load_session_metadata(profile.user_id, profile.id)
+            if session is not None:
+                async with self._lock:
+                    self._sessions[session.session_id] = session
+                    self._by_profile[key] = session.session_id
+        if session is None:
+            return None
+        if session.expires_at <= datetime.now(timezone.utc):
+            try:
+                await self.close_session(session.session_id)
+            except Exception:
+                logger.warning("Failed to close expired local auth session", session_id=session.session_id)
             return None
         try:
             await self.invoke(session, {"op": "ping"})
@@ -246,6 +344,7 @@ class LocalAuthSessionManager:
             raise RuntimeError("Local auth broker closed the connection unexpectedly")
         response = json.loads(raw.decode())
         session.last_used_at = datetime.now(timezone.utc)
+        _write_session_metadata(session)
         return response
 
     async def close_session(self, session_id: str) -> bool:
@@ -267,6 +366,7 @@ class LocalAuthSessionManager:
 
         for path in (session.port_file, session.pid_file, session.log_file):
             _safe_remove_runtime_file(path)
+        _remove_session_metadata(session.user_id, session.profile_id)
         return True
 
     async def close_session_for_profile(self, profile: Any) -> bool:
