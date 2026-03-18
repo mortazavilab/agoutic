@@ -1,4 +1,4 @@
-# Skill: Remote HPC3/SLURM Execution (`remote_execution`)
+# Skill: Remote SLURM Execution (`remote_execution`)
 
 ## Description
 
@@ -22,10 +22,10 @@ Guides the agent through collecting execution mode, SSH profile, SLURM resources
 **Example questions:**
 - "Run this on the cluster"
 - "Submit to SLURM with 32 CPUs"
-- "Use my HPC3 profile"
-- "Stage Jamshid on hpc3"
-- "Analyze Jamshid on hpc3"
-- "List files on hpc3"
+- "Use my localCluster profile"
+- "Stage Jamshid on localCluster"
+- "Analyze Jamshid on localCluster"
+- "List files on localCluster"
 - "What's the status of my remote job?"
 - "Why is my job still pending?"
 - "Cancel the SLURM job"
@@ -73,7 +73,7 @@ Before asking any questions, use only available Launchpad tools to derive defaul
 There is no `get_user_preferences` MCP tool. Do not call it.
 
 Use these values as prefilled suggestions:
-- Execution mode: infer from user intent (`slurm`/`hpc3` implies SLURM; otherwise ask)
+- Execution mode: infer from user intent (`slurm` or an explicit cluster/profile nickname implies SLURM; otherwise ask)
 - SSH profile: use explicit nickname from user message when present; else ask user to pick from listed profiles
 - Result destination: default to `local` unless user specifies `remote` or `both`
 - Remote base path: use the saved profile `remote_base_path`
@@ -119,7 +119,7 @@ Present a summary of all collected details and ask for explicit approval before 
 │           Remote Job Submission Summary      │
 ├─────────────────────────────────────────────┤
 │ Execution Mode:   SLURM                     │
-│ SSH Profile:      hpc3-main (hpc3.uci.edu)  │
+│ SSH Profile:      localCluster (login.cluster.example.edu) │
 │ Account:          lab_account                │
 │ Partition:        standard                   │
 │ CPUs:             16                         │
@@ -198,7 +198,7 @@ The following stages are reported to the user during execution:
 
 *Agent checks preferences: execution_mode=slurm, ssh_profile_id=prof_123, result_destination=sync_local*
 
-**Agent:** "I'll submit this to SLURM using your default HPC3 profile. Here are the resource defaults:"
+**Agent:** "I'll submit this to SLURM using your default localCluster profile. Here are the resource defaults:"
 *(presents approval summary with defaults)*
 
 **User:** "Looks good, but use 32 CPUs"
@@ -228,7 +228,7 @@ The following stages are reported to the user during execution:
 - Check saved preferences before asking questions
 - Use only tools listed in this skill; never invent tool names
 - Prefer `remote_base_path` from the saved profile; do not invent `/scratch/...` fallbacks
-- For "Analyze Jamshid on hpc3", prefer reuse of an existing staged sample before restaging
+- For "Analyze Jamshid on localCluster", prefer reuse of an existing staged sample before restaging
 - Present the approval summary before every submission
 - Report stage transitions clearly with human-readable labels
 - Explain scheduler states and pending reasons in plain language

@@ -5,7 +5,7 @@
 ### Connection Timeout
 
 ```
-ssh: connect to host hpc3.rc.uci.edu port 22: Connection timed out
+ssh: connect to host login.cluster.example.edu port 22: Connection timed out
 ```
 
 **Causes:**
@@ -13,7 +13,7 @@ ssh: connect to host hpc3.rc.uci.edu port 22: Connection timed out
 - Firewall blocking the port
 
 **Fixes:**
-1. Verify network connectivity: `ping hpc3.rc.uci.edu`
+1. Verify network connectivity: `ping login.cluster.example.edu`
 2. Check if a VPN connection is required
 3. Try a different port if configured: `ssh -p 2222 user@host`
 4. Contact cluster admins if the host is down
@@ -30,10 +30,10 @@ Permission denied (publickey,password)
 - Key file has incorrect permissions
 
 **Fixes:**
-1. Re-copy the public key: `ssh-copy-id -i ~/.ssh/agoutic_hpc3.pub user@host`
+1. Re-copy the public key: `ssh-copy-id -i ~/.ssh/agoutic_localcluster.pub user@host`
 2. Verify username matches your cluster account
-3. Fix key permissions: `chmod 600 ~/.ssh/agoutic_hpc3`
-4. Test manually: `ssh -i ~/.ssh/agoutic_hpc3 -v user@host`
+3. Fix key permissions: `chmod 600 ~/.ssh/agoutic_localcluster`
+4. Test manually: `ssh -i ~/.ssh/agoutic_localcluster -v user@host`
 
 ### Key File Not Found
 
@@ -54,7 +54,18 @@ Host key verification failed.
 
 **Fixes:**
 1. Connect manually once to accept the host key: `ssh user@host`
-2. Or add the key programmatically: `ssh-keyscan hpc3.rc.uci.edu >> ~/.ssh/known_hosts`
+2. Or add the key programmatically: `ssh-keyscan login.cluster.example.edu >> ~/.ssh/known_hosts`
+
+### Unlock or Broker Session Problems
+
+Symptoms include a locked-profile error during remote browsing or staging, or a
+connection test that succeeds only when you manually type a password outside AGOUTIC.
+
+**Fixes:**
+1. If the profile uses `key_file + local_username`, unlock it again in **Settings → SSH Profiles**
+2. Confirm the `local_username` in the profile matches your actual local Unix account
+3. Retry the auth session from the API or UI before testing or browsing again
+4. If unlock fails immediately, verify the AGOUTIC host can run `su <local_username>` for that account
 
 ---
 
@@ -176,8 +187,8 @@ rsync: mkstemp failed: Permission denied (13)
 **Fixes:**
 1. Verify you own the target directory on the cluster
 2. Check directory permissions: `ls -la /path/to/remote/dir`
-3. Ensure the remote path config points to directories you control
-4. Create missing directories: `mkdir -p ~/agoutic/{inputs,work,outputs}`
+3. Ensure `remote_base_path` points to a directory tree you control
+4. Create the root if needed: `mkdir -p /scratch/$USER/agoutic`
 
 ### Disk Full
 
@@ -193,7 +204,7 @@ rsync: write failed: No space left on device (28)
    ```
 2. Clean up old job outputs and work directories
 3. Use a different filesystem with more space (e.g., scratch)
-4. Update `remote_work_path` to point to the larger filesystem
+4. Update `remote_base_path` to point to the larger filesystem
 
 ---
 
@@ -219,6 +230,16 @@ File upload to the cluster is stalled or failed.
 1. Check network connectivity
 2. Look at transfer logs in the UI
 3. Cancel and resubmit — the transfer will restart
+
+### Browse Fails for a Relative Path
+
+Remote browse prompts such as `list files in data on localCluster` resolve under
+the profile's saved `remote_base_path`.
+
+**Fixes:**
+1. Confirm the SSH profile has `remote_base_path` set
+2. Retry with `list files on localCluster` to confirm the base directory itself is valid
+3. If you need an absolute path, specify it explicitly instead of a relative subpath
 
 ### Job Stuck in `queued`
 
@@ -284,5 +305,5 @@ squeue -u $USER
 sacct -j <slurm_job_id> --format=JobID,State,ExitCode,Elapsed
 
 # Manually retrieve results
-scp -r user@hpc3:~/agoutic/outputs/<job_id>/ ./local_results/
+scp -r user@login.cluster.example.edu:/scratch/$USER/agoutic/<project_slug>/workflowN/output/ ./local_results/
 ```

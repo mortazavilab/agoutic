@@ -156,6 +156,23 @@ These commands are handled by Cortex's safety net (`_auto_generate_data_calls`) 
 
 **Tip:** Use `list project files` to always target the project root. If `list files in <folder>` can't find the folder, it shows suggestions for alternative commands.
 
+## Remote Cluster Docs
+
+For AGOUTIC's remote SLURM workflow, use these references:
+
+- **Setup guide:** [docs/cluster_slurm_setup.md](docs/cluster_slurm_setup.md)
+- **Architecture:** [docs/remote_execution_architecture.md](docs/remote_execution_architecture.md)
+- **Execution modes:** [docs/user_guide_execution_modes.md](docs/user_guide_execution_modes.md)
+- **Troubleshooting:** [docs/troubleshooting_remote.md](docs/troubleshooting_remote.md)
+
+Common remote prompts:
+
+| Command | What it does |
+|---|---|
+| `list files on localCluster` | Lists the saved profile's `remote_base_path` |
+| `list files in data on localCluster` | Lists `{remote_base_path}/data` |
+| `stage sample sampleA to localCluster` | Stages references and input data without submitting a job |
+
 ## Documentation
 
 - 📖 **[CONFIGURATION.md](CONFIGURATION.md)** - Complete guide

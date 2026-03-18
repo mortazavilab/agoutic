@@ -1,189 +1,377 @@
 # Remote Execution Architecture
 
-## Overview
+## Scope
 
-AGOUTIC supports dual execution modes:
+This document describes the **current implemented architecture** for AGOUTIC
+remote execution support as of `3.4.1`, with emphasis on the parts that are
+already live in code:
 
-| Mode | Description |
-|------|-------------|
-| **Local** | Jobs run on the machine hosting AGOUTIC (default) |
-| **HPC3/SLURM** | Jobs are submitted to a remote SLURM cluster via SSH |
+- saved SSH profiles
+- broker-mediated unlock and session reuse
+- remote path layout derived from `remote_base_path`
+- stage-only remote intake and cache reuse
+- remote file browsing through Launchpad
 
-Both modes share the same prompt staging, approval, and monitoring workflows. The execution backend is selected per-job based on user preference or Cortex instruction.
+It intentionally does **not** try to freeze the final shape of the full remote
+submission and result-collection flow. That area is still being refined and is
+expected to change in the next round of commits.
 
-## Backend Abstraction
+## Current Model
 
-Execution backends live in `launchpad/backends/` and implement the `ExecutionBackend` protocol:
+AGOUTIC supports two execution modes:
 
-```python
-class ExecutionBackend(Protocol):
-    async def submit(self, job: DogmeJob) -> str: ...
-    async def poll_status(self, job: DogmeJob) -> JobStatus: ...
-    async def cancel(self, job: DogmeJob) -> bool: ...
-    async def fetch_results(self, job: DogmeJob) -> Path: ...
-```
+| Mode | Purpose |
+|------|---------|
+| `local` | Run DOGME/Nextflow on the AGOUTIC host |
+| `slurm` | Use a saved SSH profile plus Launchpad's SLURM backend |
 
-### Implementations
+For remote work, Cortex does not talk to clusters directly. It routes all
+remote operations through Launchpad.
 
-- **`LocalBackend`** — Runs Nextflow/commands directly on the host. No file transfer required.
-- **`SlurmBackend`** — Connects via SSH, transfers inputs, submits `sbatch` jobs, polls `sacct`/`squeue`, retrieves outputs.
+## High-Level Components
 
-## Data Flow (Remote Execution)
+| Component | Current responsibility |
+|-----------|------------------------|
+| `cortex` | Extract parameters, enforce approval/unlock preconditions, route remote browse and stage actions, maintain conversation/workflow state |
+| `launchpad` REST API | SSH profile CRUD, unlock endpoints, stage-only endpoint, remote file listing endpoint, remote job submission endpoint |
+| `launchpad` MCP server | Exposes Launchpad tools such as `stage_remote_sample` and `list_remote_files` to Cortex |
+| `launchpad.backends.slurm_backend.SlurmBackend` | Derives remote paths, validates remote directories, stages references/data, browses remote files, submits and polls SLURM jobs |
+| `launchpad.backends.ssh_manager` | Creates SSH connections and decides whether to use broker-backed or direct transport |
+| `launchpad.backends.local_auth_sessions` | Starts, persists, discovers, expires, and closes per-profile local auth broker sessions |
+| `launchpad.backends.local_user_broker` | Runs as the target local Unix user and executes `ssh` / `rsync` operations on behalf of Launchpad |
+| UI | Lets users unlock profiles, approve remote staging, inspect remote browse results, and observe staging/job state |
 
-```
-User
-  → Cortex (staged prompts, approval, state management)
-    → Launchpad (backend selection based on execution_mode)
-      → SlurmBackend
-        → SSH connection (via SSHProfile)
-          → rsync/sftp input files to remote_input_path
-          → sbatch submit (SLURM script with SlurmDefaults)
-          → poll squeue/sacct for completion
-          → rsync/sftp results back to local
-      → Results returned to Launchpad
-    → UI displays status updates
-```
+## Remote Path Model
 
-## Component Responsibilities
+Remote filesystem layout is now derived from a **single root**:
 
-| Component | Responsibility |
-|-----------|---------------|
-| **Cortex** | Prompt staging, user approval, conversation state, execution mode selection |
-| **Launchpad** | Backend dispatch, file transfer orchestration, job monitoring, audit logging |
-| **UI** | Display job stages, resource usage, transfer progress, logs |
-| **Analyzer** | Post-run analysis on local files (Phase 1: local-only) |
+- `remote_base_path`
 
-## New Database Models
+The active remote roots are:
 
-### SSHProfile
+| Derived path | Meaning |
+|-------------|---------|
+| `{remote_base_path}` | Root for all AGOUTIC-managed remote artifacts on that profile |
+| `{remote_base_path}/ref` | Reference cache root |
+| `{remote_base_path}/data` | Input-data cache root |
+| `{remote_base_path}/{project_slug}/workflowN` | Per-workflow remote working directory |
+| `{remote_base_path}/{project_slug}/workflowN/output` | Per-workflow output directory |
 
-Stores SSH connection details per user. See [SSH Profile Security](ssh_profile_security.md).
+This replaces the older architecture that treated remote input/work/output
+paths as independent primary configuration.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID | Primary key |
-| user_id | UUID | Owner |
-| nickname | str | Display name |
-| host | str | Hostname or IP |
-| port | int | SSH port (default 22) |
-| username | str | Remote username |
-| auth_method | enum | `key_file` or `ssh_agent` |
-| key_file_path | str | Path to private key on server filesystem (nullable) |
+### Browse Path Resolution
 
-### SlurmDefaults
+Remote browsing also uses `remote_base_path` as its anchor:
 
-Default SLURM resource parameters per SSH profile.
+- `list files on localCluster` lists `{remote_base_path}`
+- `list files in data on localCluster` lists `{remote_base_path}/data`
+- absolute paths are allowed and remain absolute
+- relative browse paths containing `..` are rejected
 
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID | Primary key |
-| ssh_profile_id | UUID | FK → SSHProfile |
-| account | str | SLURM account/allocation |
-| partition | str | Partition name |
-| cpus | int | CPUs per task |
-| memory_gb | int | Memory in GB |
-| walltime | str | Max walltime (HH:MM:SS) |
-| gpus | int | GPU count (0 = none) |
-| extra_flags | str | Additional sbatch flags |
+## SSH Authentication Model
 
-### RemotePathConfig
+### Supported Architecture for Remote Execution
 
-Remote filesystem paths per SSH profile.
+For AGOUTIC-managed remote execution in this deployment, SSH access is expected
+to flow through the **local auth broker** when profiles use:
 
-| Column | Type | Description |
-|--------|------|-------------|
-| ssh_profile_id | UUID | FK → SSHProfile |
-| remote_input_path | str | Where input files are staged |
-| remote_work_path | str | Nextflow work directory |
-| remote_output_path | str | Where results are written |
+- `auth_method = key_file`
+- `local_username` set
 
-### RunAuditLog
+That is the operational path used for:
 
-Audit trail for all execution events.
+- SSH connection tests after unlock
+- remote staging
+- remote file listing
+- broker-preferred rsync transfers
 
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID | Primary key |
-| job_id | UUID | FK → DogmeJob |
-| ssh_profile_id | UUID | FK → SSHProfile (nullable) |
-| event | str | Event type |
-| timestamp | datetime | When it occurred |
-| details | JSON | Additional context |
+In other words, the architecture AGOUTIC now documents and relies on for
+shared-user deployments is:
 
-### UserExecutionPreference
+1. user selects a saved SSH profile
+2. user unlocks it with their **local Unix password**
+3. Launchpad starts a broker process under `su <local_username>`
+4. Launchpad stores session metadata under `AGOUTIC_DATA/runtime/local_auth`
+5. later SSH and rsync operations reuse that broker session across Launchpad
+   processes
 
-Per-user default execution settings.
+### Unlock Flow
 
-| Column | Type | Description |
-|--------|------|-------------|
-| user_id | UUID | FK → User |
-| default_mode | enum | `local` or `slurm` |
-| default_ssh_profile_id | UUID | FK → SSHProfile (nullable) |
-| result_destination | enum | `remote_only`, `local_only`, `both` |
+Unlock is handled by Launchpad REST endpoints:
 
-## DogmeJob Extensions
+- `GET /ssh-profiles/{profile_id}/auth-session`
+- `POST /ssh-profiles/{profile_id}/auth-session`
+- `DELETE /ssh-profiles/{profile_id}/auth-session`
 
-New columns on the `DogmeJob` model for remote execution:
+The current flow is:
 
-| Column | Type | Description |
-|--------|------|-------------|
-| execution_mode | enum | `local` or `slurm` |
-| slurm_job_id | str | SLURM job ID (from sbatch) |
-| slurm_account | str | Account used |
-| slurm_partition | str | Partition used |
-| slurm_cpus | int | CPUs allocated |
-| slurm_memory_gb | int | Memory allocated |
-| slurm_walltime | str | Walltime limit |
-| slurm_gpus | int | GPUs allocated |
-| remote_input_path | str | Actual remote input path for this run |
-| remote_work_path | str | Actual remote work path |
-| remote_output_path | str | Actual remote output path |
-| transfer_state | enum | `pending`, `uploading`, `uploaded`, `downloading`, `downloaded`, `transfer_failed` |
-| run_stage | enum | See stage state machine below |
+1. UI sends the local Unix password to `POST /ssh-profiles/{profile_id}/auth-session`
+2. Launchpad loads the saved SSH profile
+3. `LocalAuthSessionManager` launches `local_user_broker.py` via `su`
+4. the broker binds a loopback TCP port and writes runtime files into
+   `AGOUTIC_DATA/runtime/local_auth`
+5. Launchpad records session metadata with an auth token in a `0600` JSON file
+6. all later Launchpad processes can rediscover the session from that metadata
 
-## Stage State Machine
+### Runtime Files and Hardening
 
-A job progresses through up to 13 stages:
+Broker runtime artifacts now live under:
 
-```
-awaiting_details
-  → staged
-    → approved
-      → preparing_inputs
-        → transferring_inputs
-          → queued
-            → running
-              → transferring_outputs
-                → post_processing
-                  → completed
+- `AGOUTIC_DATA/runtime/local_auth`
 
-Any stage can transition to:
-  → failed
-  → cancelled
-```
+Important details:
 
-| Stage | Description |
-|-------|-------------|
-| `awaiting_details` | Cortex is gathering parameters from user |
-| `staged` | Job is fully specified, awaiting approval |
-| `approved` | User approved; execution about to begin |
-| `preparing_inputs` | Local input files being assembled |
-| `transferring_inputs` | rsync/sftp uploading inputs to cluster |
-| `queued` | sbatch submitted; waiting in SLURM queue |
-| `running` | SLURM job is executing |
-| `transferring_outputs` | Downloading results from cluster |
-| `post_processing` | Local post-processing (e.g., indexing) |
-| `completed` | Job finished successfully |
-| `failed` | Job failed at any stage |
-| `cancelled` | User or system cancelled the job |
+- the directory is AGOUTIC-scoped, not global `/tmp`
+- the directory must remain writable across the service-user / target-user
+  boundary, so it uses sticky shared semantics rather than private `0700`
+- session metadata files are created atomically with `0600`
+- port and pid files are readable enough for the Launchpad service process to
+  detect broker startup
 
-## File Transfer
+### What the Broker Actually Does
 
-- **Upload (inputs):** `rsync -az` or SFTP from local to `remote_input_path`
-- **Download (outputs):** `rsync -az` or SFTP from `remote_output_path` to local
-- **Tracking:** `transfer_state` on DogmeJob reflects current transfer status
-- **Retry:** Failed transfers can be retried without resubmitting the SLURM job
+The broker is deliberately small. It accepts authenticated JSON requests for:
 
-## Phase 1 Limitation
+- `ping`
+- `shutdown`
+- `ssh_run`
+- `rsync_transfer`
 
-> **Analyzer operates on local-accessible files only.** After a remote job completes, results must be transferred back to the local filesystem before analysis can run. This is handled automatically when `result_destination` is `local_only` or `both`. If `remote_only`, the user must trigger a manual download before running analysis.
+It does not expose a general shell API to Cortex. Only Launchpad talks to it.
+
+### Cross-Process Reuse
+
+Launchpad's REST API and MCP server are separate processes. Because of that,
+broker session state cannot live only in process memory.
+
+The current implementation solves this by persisting broker session metadata to
+the runtime directory so that:
+
+- unlock can happen in the REST process
+- remote browsing can happen in the MCP process
+- staging can happen in either process
+- all of them can reuse the same unlocked broker session
+
+## SSH Profile Model
+
+The current `SSHProfile` fields that matter to remote execution are:
+
+| Field | Meaning |
+|------|---------|
+| `nickname` | User-facing profile name, also used in prompts like `on localCluster` |
+| `ssh_host`, `ssh_port`, `ssh_username` | Remote endpoint identity |
+| `auth_method` | `key_file` or `ssh_agent` |
+| `key_file_path` | Path reference to the key file |
+| `local_username` | Local Unix account that owns the key and must launch the broker |
+| `default_slurm_account`, `default_slurm_partition`, `default_slurm_gpu_account`, `default_slurm_gpu_partition` | Approval defaults |
+| `remote_base_path` | Canonical root for ref/data/project workflow paths and remote browsing |
+
+### Architecture Note About Direct SSH Paths
+
+The codebase still contains fallback paths for:
+
+- readable direct key-file access without a broker
+- `ssh_agent`
+
+Those are implementation details of `SSHConnectionManager`. They are not the
+recommended or primary architecture for AGOUTIC's current shared-user remote
+execution workflow, which is broker-first and unlock-driven.
+
+## Stage-Only Remote Intake
+
+Stage-only remote intake is already a first-class flow.
+
+### Entry Points
+
+- Launchpad REST: `POST /remote/stage`
+- Launchpad MCP: `stage_remote_sample`
+- Cortex approval/task flow: `remote_action = stage_only`
+
+### Purpose
+
+This flow stages:
+
+- reference assets into the remote `ref/` cache
+- sample input data into the remote `data/` cache
+
+without submitting a SLURM job.
+
+### Current Stage Flow
+
+1. Cortex extracts remote-stage intent and required parameters
+2. Cortex requires a saved SSH profile and `remote_base_path`
+3. if the profile is a brokered key-file profile, Cortex requires an active
+   unlock session before approval can proceed
+4. approval creates a dedicated `STAGING_TASK`, not a generic execution job
+5. Launchpad validates `{remote_base_path}`, `ref/`, and `data/`
+6. references and sample data are staged with cache reuse when possible
+7. Cortex/UI render separate References and Data progress/status sections
+
+### Remote Cache Persistence
+
+Remote staging persists reusable metadata in:
+
+| Model | Purpose |
+|------|---------|
+| `RemoteReferenceCache` | Reuse reference assets by `reference_id` |
+| `RemoteInputCache` | Reuse staged sample input by fingerprint |
+| `RemoteStagedSample` | Reuse a previously staged sample by sample identity and profile |
+
+### Input Data Naming
+
+Remote sample data paths are intentionally fingerprint-based, not semantic.
+
+Current behavior:
+
+- references stage under `ref/{reference_id}`
+- sample data stages under `data/{input_fingerprint_prefix}`
+
+This is deliberate cache behavior, not a UI naming bug.
+
+## Remote File Browsing
+
+Remote browsing is now an implemented, deterministic path.
+
+### Entry Points
+
+- Launchpad REST: `GET /remote/files`
+- Launchpad MCP: `list_remote_files`
+- Cortex chat override for prompts like:
+   - `list files on localCluster`
+   - `list files in data on localCluster`
+
+### Current Browse Flow
+
+1. Cortex detects explicit remote browse language before trusting LLM tags
+2. Cortex resolves the SSH profile nickname to a saved profile
+3. Cortex synthesizes a Launchpad `list_remote_files` tool call directly
+4. Launchpad resolves the requested path against `remote_base_path`
+5. `SlurmBackend.list_remote_files()` connects via the broker-aware SSH layer
+6. the remote directory is listed with a one-level Python `os.scandir()` script
+7. Cortex renders the results directly as a browse view instead of sending them
+   through second-pass analysis
+
+### Current Rendering Behavior
+
+Successful remote browse results now:
+
+- render as `Remote Files`
+- show the resolved remote directory path
+- show a table of `Name`, `Type`, and `Size`
+- bypass the generic “query did not return the expected data” fallback
+
+## Cortex Responsibilities for Remote Work
+
+Cortex currently handles several remote-specific behaviors that are important to
+the architecture:
+
+- remote browse request extraction from plain language
+- generic SSH nickname resolution instead of hardcoded profile names
+- approval-time enforcement that locked brokered profiles must be unlocked
+- stage-only planner support and `STAGING_TASK` lifecycle
+- deterministic override of bad LLM clarifications or wrong skill switches for
+  remote browsing
+
+This means remote browsing and remote staging are no longer dependent on the
+LLM correctly inventing the right tool call tags.
+
+## Current REST and MCP Surface
+
+### Launchpad REST
+
+Relevant implemented endpoints:
+
+- `POST /remote/stage`
+- `GET /remote/files`
+- `GET /ssh-profiles`
+- `POST /ssh-profiles/{profile_id}/test`
+- `GET /ssh-profiles/{profile_id}/auth-session`
+- `POST /ssh-profiles/{profile_id}/auth-session`
+- `DELETE /ssh-profiles/{profile_id}/auth-session`
+- `POST /jobs/submit`
+
+### Launchpad MCP
+
+Relevant implemented tools:
+
+- `stage_remote_sample`
+- `list_remote_files`
+- `submit_dogme_job`
+- `check_nextflow_status`
+- `get_job_logs`
+- `cancel_slurm_job`
+
+## State Models That Matter Today
+
+### Current Remote Job / Task State
+
+Remote execution uses `RunStage` values from `launchpad.backends.stage_machine`:
+
+- `awaiting_details`
+- `awaiting_approval`
+- `validating_connection`
+- `preparing_remote_dirs`
+- `transferring_inputs`
+- `submitting_job`
+- `queued`
+- `running`
+- `collecting_outputs`
+- `syncing_results`
+- `completed`
+- `failed`
+- `cancelled`
+
+### Important UI Distinction
+
+Current UI semantics distinguish between:
+
+- `STAGING_TASK` for stage-only remote intake
+- `EXECUTION_JOB` for actual job execution
+
+This distinction is deliberate and should remain in docs and UI copy.
+
+## Data Model Notes
+
+### Still Relevant
+
+The following models are active in the current architecture:
+
+- `SSHProfile`
+- `SlurmDefaults`
+- `DogmeJob` remote columns
+- `RunAuditLog`
+- `RemoteReferenceCache`
+- `RemoteInputCache`
+- `RemoteStagedSample`
+
+### Legacy / No Longer Canonical
+
+`RemotePathConfig` still exists in the schema, but it is no longer the primary
+architecture for remote path derivation. New remote behavior should be described
+in terms of `remote_base_path`.
+
+## What This Document Deliberately Defers
+
+The following areas are still in flux and should be updated in the next round
+of commits rather than over-specified here:
+
+- the final end-to-end remote job submission narrative
+- the exact submission-time cache-preflight details in approval payloads
+- the final result-destination and sync architecture for completed remote jobs
+- any future analyzer-on-remote or remote-first postprocessing workflow
+
+## Practical Summary
+
+If you need the shortest accurate mental model of remote execution **today**, it
+is this:
+
+1. save an SSH profile with `remote_base_path`
+2. if it uses `key_file + local_username`, unlock it first
+3. unlock starts a broker under the target local Unix user
+4. Launchpad reuses that broker for SSH commands and rsync transfers
+5. remote staging writes into `{remote_base_path}/ref` and
+   `{remote_base_path}/data`
+6. remote browsing lists `{remote_base_path}` or a relative subpath under it
+7. full remote submission exists, but its final architecture writeup is being
+   deferred to the next change set

@@ -21,7 +21,7 @@
   later.
 
 - **Remote staged-sample reuse by name** — introduced persistent
-  `RemoteStagedSample` records so prompts like “Analyze Jamshid on hpc3” can
+  `RemoteStagedSample` records so prompts like “Analyze Jamshid on localCluster” can
   reuse an existing staged remote dataset when the profile, sample, and genome
   match.
 
@@ -143,7 +143,7 @@
   permissions from the start.
 
 - **Remote browse subpath resolution** — prompts like “list files in data on
-  hpc3” now resolve relative browse paths under the SSH profile’s configured
+  localCluster” now resolve relative browse paths under the SSH profile’s configured
   `remote_base_path` instead of incorrectly treating them as paths relative to
   the remote login directory.
 
@@ -198,8 +198,8 @@
 
 ### Features
 
-- **HPC3/SLURM remote execution (Phase 1)** — AGOUTIC now supports dual
-  execution modes: local (existing behavior, unchanged) and remote HPC3/SLURM
+- **Remote SLURM execution (Phase 1)** — AGOUTIC now supports dual
+  execution modes: local (existing behavior, unchanged) and remote SLURM
   via SSH.  Users can save SSH connection profiles, configure SLURM resources,
   set remote paths, and choose where final results are stored.
 
@@ -289,9 +289,9 @@
 
 - `docs/remote_execution_architecture.md` — architecture and data flow
 - `docs/ssh_profile_security.md` — credential handling and security model
-- `docs/hpc3_slurm_setup.md` — setup guide for HPC3 cluster connection
+- `docs/cluster_slurm_setup.md` — setup guide for a generic remote SLURM cluster connection
 - `docs/troubleshooting_remote.md` — common issues and fixes
-- `docs/user_guide_execution_modes.md` — local vs HPC3 usage guide
+- `docs/user_guide_execution_modes.md` — local vs remote SLURM usage guide
 - README updated with execution modes section
 
 ### Tests
