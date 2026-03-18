@@ -52,6 +52,10 @@ def generate_sbatch_script(
     lines.append("")
     lines.append("# --- Environment setup ---")
     lines.append("set -euo pipefail")
+    lines.append('echo "AGOUTIC bootstrap start: $(date)"')
+    lines.append("")
+
+    lines.append('export PATH="$HOME/bin:$HOME/.local/bin:$PATH"')
     lines.append("")
 
     # Cluster-agnostic runtime bootstrap:
@@ -67,6 +71,19 @@ def generate_sbatch_script(
 
     lines.append("if ! command -v java >/dev/null 2>&1; then")
     lines.append('    echo "ERROR: java is not available on PATH. Load a Java module or configure PATH before running Nextflow."')
+    lines.append("    exit 127")
+    lines.append("fi")
+    lines.append("")
+
+    lines.append('AGOUTIC_NEXTFLOW_BIN=""')
+    lines.append('if [[ -x "$HOME/bin/nextflow" ]]; then')
+    lines.append('    AGOUTIC_NEXTFLOW_BIN="$HOME/bin/nextflow"')
+    lines.append('elif [[ -x "$HOME/.local/bin/nextflow" ]]; then')
+    lines.append('    AGOUTIC_NEXTFLOW_BIN="$HOME/.local/bin/nextflow"')
+    lines.append('elif command -v nextflow >/dev/null 2>&1; then')
+    lines.append('    AGOUTIC_NEXTFLOW_BIN="$(command -v nextflow)"')
+    lines.append('else')
+    lines.append('    echo "ERROR: nextflow is not available on PATH. SLURM jobs run in a non-login shell; add nextflow to a shared PATH, install it via modules, or expose it from $HOME/bin or $HOME/.local/bin."')
     lines.append("    exit 127")
     lines.append("fi")
     lines.append("")
@@ -113,6 +130,9 @@ def generate_sbatch_script(
     lines.append(f"echo \"AGOUTIC SLURM job started: $(date)\"")
     lines.append(f"echo \"Job ID: $SLURM_JOB_ID\"")
     lines.append(f"echo \"Node: $SLURM_NODELIST\"")
+    lines.append('echo "Nextflow: $AGOUTIC_NEXTFLOW_BIN"')
+    lines.append('echo "Java: $(command -v java)"')
+    lines.append('if command -v singularity >/dev/null 2>&1; then echo "Container runtime: $(command -v singularity)"; else echo "Container runtime: $(command -v apptainer)"; fi')
     lines.append("")
 
     if nextflow_command:

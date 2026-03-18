@@ -117,9 +117,31 @@ class TestGenerateConfig:
         assert "queue = \"${cpuPartition}\"" in config
         assert "clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"" in config
         assert "queue = \"${gpuPartition}\"" in config
+        assert f"--bind {REFERENCE_GENOMES['mm39']['fasta']}" not in config
+        assert "containerOptions = \"--nv\"" in config
         assert "singularity {" in config
         assert "autoMounts = true" in config
         assert "docker {" not in config
+
+    def test_slurm_reference_overrides_replace_kallisto_sidecars(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-remote",
+            mode="RNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            reference_overrides={
+                "mm39": {
+                    "fasta": "/remote/ref/mm39/IGVFFI9282QLXO.fasta",
+                    "gtf": "/remote/ref/mm39/IGVFFI4777RDZK.gtf",
+                    "kallisto_index": "/remote/ref/mm39/mm39.idx",
+                    "kallisto_t2g": "/remote/ref/mm39/mm39.t2g",
+                }
+            },
+            execution_mode="slurm",
+        )
+
+        assert "kallistoIndex = '/remote/ref/mm39/mm39.idx'" in config
+        assert "t2g = '/remote/ref/mm39/mm39.t2g'" in config
 
 
 class TestWriteConfigFile:

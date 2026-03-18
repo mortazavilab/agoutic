@@ -36,6 +36,21 @@ class _FakeConn:
         return None
 
 
+class _FakeStatusConn(_FakeConn):
+    def __init__(self, sacct_output: str = "", squeue_output: str = ""):
+        super().__init__()
+        self.sacct_output = sacct_output
+        self.squeue_output = squeue_output
+
+    async def run(self, command: str, check: bool = False):
+        self.commands.append(command)
+        if "sacct -j" in command:
+            return SimpleNamespace(stdout=self.sacct_output, stderr="", exit_status=0)
+        if "squeue -j" in command:
+            return SimpleNamespace(stdout=self.squeue_output, stderr="", exit_status=0)
+        return await super().run(command, check=check)
+
+
 @pytest.fixture()
 def profile() -> SSHProfileData:
     return SSHProfileData(
@@ -307,13 +322,16 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
     config_write = [c for c in conn.commands if "nextflow.config" in c and "cat >" in c]
     assert config_write, "Expected remote nextflow.config write command"
 
+    dogme_profile_write = [c for c in conn.commands if "dogme.profile" in c and "cat >" in c]
+    assert dogme_profile_write, "Expected remote dogme.profile write command"
+
     sbatch_cmds = [c for c in conn.commands if "sbatch --parsable" in c]
     assert sbatch_cmds, "Expected sbatch submission command"
 
     # The generated batch script content should include nextflow -c pointing to remote workflow config.
     submit_script_payloads = [c for c in conn.commands if "submit_run-4.sh" in c and "cat >" in c]
     assert submit_script_payloads
-    assert "nextflow run mortazavilab/dogme" in submit_script_payloads[0]
+    assert '"${AGOUTIC_NEXTFLOW_BIN:-nextflow}" run mortazavilab/dogme' in submit_script_payloads[0]
     assert "-c /remote/eli/agoutic/proj-1/workflow4/nextflow.config" in submit_script_payloads[0]
 
     # CPU values come from request; GPU values come from profile defaults.
@@ -331,6 +349,72 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
     symlink_cmds = [c for c in conn.commands if "ln -sfn" in c and "/workflow4/pod5" in c]
     assert symlink_cmds
     assert "/remote/eli/agoutic/data/fallback-input" in symlink_cmds[0]
+
+
+@pytest.mark.asyncio
+async def test_check_status_includes_sacct_failure_reason(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeStatusConn(sacct_output="FAILED|127:0|NonZeroExitCode\n")
+
+    from launchpad import db as launchpad_db
+
+    async def _get_job_by_uuid(*args, **kwargs):
+        return SimpleNamespace(
+            run_uuid="run-5",
+            status="RUNNING",
+            run_stage="queued",
+            slurm_job_id="50042924",
+            transfer_state=None,
+            result_destination="local",
+            ssh_profile_id="profile-1",
+            user_id="user-1",
+            slurm_state=None,
+        )
+
+    updates = []
+
+    async def _update_job_slurm_state(run_uuid, raw_state, agoutic_status, *, error_message=None):
+        updates.append(
+            {
+                "run_uuid": run_uuid,
+                "raw_state": raw_state,
+                "agoutic_status": agoutic_status,
+                "error_message": error_message,
+            }
+        )
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    monkeypatch.setattr(launchpad_db, "get_job_by_uuid", _get_job_by_uuid)
+    monkeypatch.setattr(backend, "_update_job_slurm_state", _update_job_slurm_state)
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+
+    status = await backend.check_status("run-5")
+
+    assert status.status == "FAILED"
+    assert status.slurm_state == "FAILED"
+    assert "exit code 127:0" in status.message
+    assert "non-zero exit code" in status.message.lower()
+    assert updates[0]["error_message"] == status.message
+
+
+def test_controller_resources_prefer_cpu_defaults(profile):
+    backend = SlurmBackend()
+    params = SubmitParams(
+        slurm_account="gpu-request",
+        slurm_partition="gpu-request",
+        slurm_gpus=1,
+    )
+
+    account, partition = backend._resolve_controller_resources(params, profile)
+
+    assert account == "cpu-default"
+    assert partition == "cpu-part-default"
 
 
 @pytest.mark.asyncio

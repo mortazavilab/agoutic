@@ -83,6 +83,7 @@ class NextflowConfig:
         # Use first genome for kallisto index (TODO: support per-genome kallisto)
         primary_genome = reference_genome[0]
         primary_config = REFERENCE_GENOMES.get(primary_genome, REFERENCE_GENOMES["mm39"])
+        primary_override = (reference_overrides or {}).get(primary_genome, {})
         
         # Determine modifications based on mode
         if modifications:
@@ -138,8 +139,8 @@ class NextflowConfig:
         config_lines.append("    ]")
         config_lines.append("")
         # Use primary genome for kallisto
-        kallisto_index = primary_config.get("kallisto_index", "/home/seyedam/genRefs/mm39GencM36_k63.idx")
-        kallisto_t2g = primary_config.get("kallisto_t2g", "/home/seyedam/genRefs/mm39GencM36_k63.t2g")
+        kallisto_index = primary_override.get("kallisto_index") or primary_config.get("kallisto_index", "/home/seyedam/genRefs/mm39GencM36_k63.idx")
+        kallisto_t2g = primary_override.get("kallisto_t2g") or primary_config.get("kallisto_t2g", "/home/seyedam/genRefs/mm39GencM36_k63.t2g")
         config_lines.append(f"    kallistoIndex = '{kallisto_index}'")
         config_lines.append(f"    t2g = '{kallisto_t2g}'")
         config_lines.append("")
@@ -166,7 +167,7 @@ class NextflowConfig:
         config_lines.append("    // <-- Container Settings --->")
         config_lines.append("    container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'")
         if is_slurm:
-            config_lines.append(f"    containerOptions = \"--bind {AGOUTIC_DATA},{AGOUTIC_CODE}\"")
+            config_lines.append("    // Remote SLURM runs must not inject local workstation bind paths.")
         else:
             config_lines.append(f"    containerOptions = \"-v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    beforeScript = 'export PATH=/opt/conda/bin:$PATH'")
@@ -208,7 +209,7 @@ class NextflowConfig:
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
         config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
-            config_lines.append(f"        containerOptions = \"--nv --bind {AGOUTIC_DATA},{AGOUTIC_CODE}\"")
+            config_lines.append("        containerOptions = \"--nv\"")
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
@@ -221,7 +222,7 @@ class NextflowConfig:
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
         config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
-            config_lines.append(f"        containerOptions = \"--nv --bind {AGOUTIC_DATA},{AGOUTIC_CODE}\"")
+            config_lines.append("        containerOptions = \"--nv\"")
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
@@ -234,7 +235,7 @@ class NextflowConfig:
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
         config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
-            config_lines.append(f"        containerOptions = \"--nv --bind {AGOUTIC_DATA},{AGOUTIC_CODE}\"")
+            config_lines.append("        containerOptions = \"--nv\"")
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")

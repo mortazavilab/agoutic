@@ -30,6 +30,32 @@
   reports richer failed-run context including top-level workflow listing,
   discovered `slurm-*.out/.err` previews, and focused `.nextflow.log` lines.
 
+- **Deterministic SLURM submit bootstrap** — generated sbatch scripts now avoid
+  sourcing interactive shell startup files, resolve `nextflow` explicitly from
+  safe locations like `$HOME/bin`, and emit early runtime breadcrumbs so remote
+  startup failures are visible in `slurm-*.out`.
+
+- **Preserved scheduler failure details** — Launchpad now stores and surfaces
+  SLURM batch exit details for failed remote jobs instead of collapsing them to
+  a generic “Job failed” message.
+
+- **Remote container bind-path correctness** — SLURM Nextflow configs no longer
+  inject local workstation paths such as `/media/backup_disk/...` into remote
+  Singularity/Apptainer container options, preventing container launch failures
+  on the cluster.
+
+- **Remote reference sidecar overrides** — staged remote reference overrides now
+  also replace auxiliary assets like `kallistoIndex` and `t2g`, not just FASTA
+  and GTF paths.
+
+- **CPU-only Nextflow controller jobs** — the outer sbatch job that launches
+  Nextflow now uses CPU/default account and partition resources, leaving GPU
+  requests to individual pipeline tasks configured inside `nextflow.config`.
+
+- **Remote Dogme profile staging** — SLURM workflow setup now writes an empty
+  `dogme.profile` file alongside `nextflow.config` so remote Dogme tasks can
+  safely source `${launchDir}/dogme.profile`.
+
 ### Tests
 
 - Added/updated tests for:
@@ -37,6 +63,9 @@
   - SLURM submit script target (`mortazavilab/dogme`)
   - portable runtime bootstrap and apptainer shim generation
   - enhanced sbatch failure diagnostics output
+  - remote `kallistoIndex`/`t2g` override rendering for SLURM configs
+  - CPU/default controller resource selection for remote Nextflow head jobs
+  - remote `dogme.profile` creation during SLURM workflow staging
 
 ## [3.4.1] - 2026-03-17
 

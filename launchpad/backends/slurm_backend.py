@@ -15,7 +15,7 @@ from common.logging_config import get_logger
 from launchpad.backends.base import ExecutionBackend, SubmitParams, JobStatus, LogEntry
 from launchpad.backends.ssh_manager import SSHConnectionManager, SSHProfileData
 from launchpad.backends.sbatch_generator import generate_sbatch_script
-from launchpad.backends.slurm_states import map_slurm_state, explain_pending_reason
+from launchpad.backends.slurm_states import map_slurm_state, explain_pending_reason, explain_failure
 from launchpad.backends.stage_machine import RunStage
 from launchpad.backends.resource_validator import validate_resources
 from launchpad.backends.path_validator import validate_remote_paths, check_all_paths_ok
@@ -87,6 +87,7 @@ class SlurmBackend:
 
         # 2. Load SSH profile
         profile = await self._load_profile(params.ssh_profile_id, params.user_id)
+        controller_account, controller_partition = self._resolve_controller_resources(params, profile)
         remote_paths = self._derive_remote_paths(params, profile)
 
         # 3. Connect and validate
@@ -155,13 +156,13 @@ class SlurmBackend:
 
             script = generate_sbatch_script(
                 job_name=f"agoutic-{params.sample_name}-{run_uuid[:8]}",
-                account=params.slurm_account or "default",
-                partition=params.slurm_partition or "standard",
+                account=controller_account,
+                partition=controller_partition,
                 cpus=params.slurm_cpus or 4,
                 memory_gb=params.slurm_memory_gb or 16,
                 walltime=params.slurm_walltime or "04:00:00",
-                gpus=params.slurm_gpus or 0,
-                gpu_type=params.slurm_gpu_type,
+                gpus=0,
+                gpu_type=None,
                 output_log=f"{remote_work}/slurm-%j.out",
                 error_log=f"{remote_work}/slurm-%j.err",
                 work_dir=remote_work,
@@ -230,12 +231,28 @@ class SlurmBackend:
                     reason = ""
 
                 agoutic_status, message = map_slurm_state(raw_state)
+                base_state = raw_state.split()[0].upper() if raw_state else "UNKNOWN"
 
-                if raw_state == "PENDING" and reason:
+                if base_state == "PENDING" and reason:
                     message += f" — {explain_pending_reason(reason)}"
+                elif agoutic_status == "FAILED":
+                    details: list[str] = []
+                    if exit_code and exit_code != "0:0":
+                        details.append(f"exit code {exit_code}")
+                    if reason:
+                        details.append(explain_failure(reason))
+                    if details:
+                        message += f" — {'; '.join(details)}"
+                elif agoutic_status == "CANCELLED" and reason:
+                    message += f" — {reason}"
 
                 # Update DB with latest state
-                await self._update_job_slurm_state(run_uuid, raw_state, agoutic_status)
+                await self._update_job_slurm_state(
+                    run_uuid,
+                    raw_state,
+                    agoutic_status,
+                    error_message=message if agoutic_status in {"FAILED", "CANCELLED"} else None,
+                )
 
                 return JobStatus(
                     run_uuid=run_uuid,
@@ -391,7 +408,7 @@ class SlurmBackend:
         """Build the Nextflow command line for the sbatch script."""
         genome_list = ",".join(params.reference_genome)
         cmd_parts = [
-            "nextflow run mortazavilab/dogme",
+            '"${AGOUTIC_NEXTFLOW_BIN:-nextflow}" run mortazavilab/dogme',
             f"--sample_name {shlex.quote(params.sample_name)}",
             f"--mode {shlex.quote(params.mode)}",
             f"--input {shlex.quote(remote_input)}",
@@ -404,6 +421,20 @@ class SlurmBackend:
         if params.entry_point:
             cmd_parts.append(f"-entry {shlex.quote(params.entry_point)}")
         return " \\\n    ".join(cmd_parts)
+
+    def _resolve_controller_resources(
+        self,
+        params: SubmitParams,
+        profile: SSHProfileData,
+    ) -> tuple[str, str]:
+        """Choose CPU resources for the Nextflow controller job.
+
+        The controller only orchestrates the workflow; GPU requests belong to
+        the individual pipeline tasks configured in nextflow.config.
+        """
+        cpu_account = (profile.default_slurm_account or params.slurm_account or "default").strip() or "default"
+        cpu_partition = (profile.default_slurm_partition or params.slurm_partition or "standard").strip() or "standard"
+        return cpu_account, cpu_partition
 
     async def _write_remote_nextflow_config(
         self,
@@ -469,6 +500,16 @@ class SlurmBackend:
                 "fasta": str(PurePosixPath(remote_ref_root) / Path(fasta_src).name),
                 "gtf": str(PurePosixPath(remote_ref_root) / Path(gtf_src).name),
             }
+            kallisto_src = ref_cfg.get("kallisto_index")
+            t2g_src = ref_cfg.get("kallisto_t2g")
+            if kallisto_src:
+                ref_overrides[str(genome_name)]["kallisto_index"] = str(
+                    PurePosixPath(remote_ref_root) / Path(kallisto_src).name
+                )
+            if t2g_src:
+                ref_overrides[str(genome_name)]["kallisto_t2g"] = str(
+                    PurePosixPath(remote_ref_root) / Path(t2g_src).name
+                )
             logger.info(
                 f"Override reference paths for {genome_name}",
                 override=ref_overrides[str(genome_name)],
@@ -500,8 +541,11 @@ class SlurmBackend:
 
         config_path = f"{remote_work}/nextflow.config"
         quoted_config_path = shlex.quote(config_path)
+        profile_path = f"{remote_work}/dogme.profile"
+        quoted_profile_path = shlex.quote(profile_path)
         await conn.mkdir_p(remote_work)
         await conn.run(f"cat > {quoted_config_path} << 'AGOUTIC_EOF'\n{config}\nAGOUTIC_EOF", check=True)
+        await conn.run(f"cat > {quoted_profile_path} << 'AGOUTIC_EOF'\nAGOUTIC_EOF", check=True)
         return config_path
 
     async def _ensure_workflow_input_links(
@@ -550,14 +594,24 @@ class SlurmBackend:
         })
 
     async def _update_job_slurm_state(
-        self, run_uuid: str, raw_state: str, agoutic_status: str
+        self,
+        run_uuid: str,
+        raw_state: str,
+        agoutic_status: str,
+        *,
+        error_message: str | None = None,
     ) -> None:
         """Update SLURM state and map to AGOUTIC status."""
         from launchpad.db import update_job_fields
-        await update_job_fields(run_uuid, {
+        fields = {
             "slurm_state": raw_state,
             "status": agoutic_status,
-        })
+        }
+        if error_message is not None:
+            fields["error_message"] = error_message
+        elif agoutic_status == "COMPLETED":
+            fields["error_message"] = None
+        await update_job_fields(run_uuid, fields)
 
     async def _resolve_staging_cache(
         self,

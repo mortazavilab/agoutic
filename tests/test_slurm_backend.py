@@ -282,10 +282,16 @@ class TestGenerateSbatchScript:
             partition="standard",
             nextflow_command="nextflow run mortazavilab/dogme",
         )
+        assert 'echo "AGOUTIC bootstrap start: $(date)"' in script
         assert "module load java/17" in script
         assert "module load singularity/3.11.3" in script
         assert "module load apptainer/1.4.5" in script
+        assert 'export PATH="$HOME/bin:$HOME/.local/bin:$PATH"' in script
         assert "if ! command -v java" in script
+        assert 'AGOUTIC_NEXTFLOW_BIN=""' in script
+        assert 'if [[ -x "$HOME/bin/nextflow" ]]; then' in script
+        assert "SLURM jobs run in a non-login shell" in script
+        assert 'echo "Nextflow: $AGOUTIC_NEXTFLOW_BIN"' in script
         assert "if ! command -v singularity >/dev/null 2>&1 && command -v apptainer >/dev/null 2>&1; then" in script
         assert "exec apptainer \"$@\"" in script
         assert "neither singularity nor apptainer is available" in script
