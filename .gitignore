@@ -28,3 +28,4 @@ data/logs/agoutic.jsonl
 data/logs/encode-mcp.jsonl
 data/logs/cortex.jsonl
 data/logs/analyzer-rest.jsonl
+data/logs/launchpad-mcp.jsonl
