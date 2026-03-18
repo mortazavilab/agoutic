@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from common.logging_config import setup_logging, get_logger
 from common.logging_middleware import RequestLoggingMiddleware
 from launchpad.config import (
+    AGOUTIC_DATA,
     JobStatus,
     MAX_CONCURRENT_JOBS,
     DEFAULT_MAX_GPU_TASKS,
@@ -40,6 +41,8 @@ from launchpad.models import DogmeJob, SSHProfile
 from launchpad.nextflow_executor import NextflowExecutor
 from launchpad.schemas import (
     SubmitJobRequest,
+    StageRemoteSampleRequest,
+    StageRemoteSampleResponse,
     JobStatusResponse,
     JobStatusExtendedResponse,
     JobDetailsResponse,
@@ -271,6 +274,51 @@ async def list_genomes():
         "count": len(REFERENCE_GENOMES)
     }
 
+
+@app.post("/remote/stage", response_model=StageRemoteSampleResponse)
+async def stage_remote_sample(req: StageRemoteSampleRequest):
+    """Stage references and input data remotely without submitting a scheduler job."""
+    backend = get_backend("slurm")
+    try:
+        return await backend.stage_remote_sample(
+            SubmitParams(
+                project_id=req.project_id,
+                user_id=req.user_id,
+                username=req.username,
+                project_slug=req.project_slug,
+                sample_name=req.sample_name,
+                mode=req.mode,
+                input_directory=req.input_directory,
+                reference_genome=req.reference_genome,
+                ssh_profile_id=req.ssh_profile_id,
+                remote_base_path=req.remote_base_path,
+            )
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=_describe_exception(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_describe_exception(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+    except Exception as exc:
+        logger.exception("Remote stage failed", sample_name=req.sample_name, ssh_profile_id=req.ssh_profile_id)
+        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+
+
+@app.get("/remote/files")
+async def list_remote_files(
+    user_id: str = Query(..., min_length=1),
+    ssh_profile_id: str = Query(..., min_length=1),
+    path: str | None = Query(None),
+):
+    """List remote files for an SSH profile, defaulting to its configured remote base path."""
+    backend = get_backend("slurm")
+    return await backend.list_remote_files(
+        user_id=user_id,
+        ssh_profile_id=ssh_profile_id,
+        path=path,
+    )
+
 # --- JOB SUBMISSION ---
 @app.post("/jobs/submit", response_model=JobSubmitResponse)
 async def submit_job(req: SubmitJobRequest):
@@ -308,8 +356,6 @@ async def submit_job(req: SubmitJobRequest):
         job.slurm_walltime = req.slurm_walltime
         job.slurm_gpus = req.slurm_gpus
         job.slurm_gpu_type = req.slurm_gpu_type
-        job.remote_work_dir = req.remote_work_path
-        job.remote_output_dir = req.remote_output_path
         job.result_destination = req.result_destination
         job.cache_preflight_json = req.cache_preflight
         await session.commit()
@@ -337,6 +383,28 @@ async def submit_job(req: SubmitJobRequest):
                 exec_mode = "local"
             
             if exec_mode == "slurm":
+                workflow_number = None
+                local_workflow_dir = None
+                if req.resume_from_dir:
+                    local_workflow_dir = Path(req.resume_from_dir)
+                    if local_workflow_dir.name.startswith("workflow"):
+                        try:
+                            workflow_number = int(local_workflow_dir.name[len("workflow"):])
+                        except ValueError:
+                            workflow_number = None
+
+                if workflow_number is None:
+                    user_key = req.username or req.user_id or "user"
+                    project_key = req.project_slug or req.project_id
+                    project_dir = AGOUTIC_DATA / "users" / user_key / project_key
+                    project_dir.mkdir(parents=True, exist_ok=True)
+                    workflow_number = NextflowExecutor._next_workflow_number(project_dir)
+                    local_workflow_dir = project_dir / f"workflow{workflow_number}"
+                    local_workflow_dir.mkdir(parents=True, exist_ok=True)
+
+                job.nextflow_work_dir = str(local_workflow_dir) if local_workflow_dir else None
+                await session.commit()
+
                 backend = get_backend("slurm")
                 await backend.submit(
                     run_uuid,
@@ -367,11 +435,9 @@ async def submit_job(req: SubmitJobRequest):
                         slurm_walltime=req.slurm_walltime,
                         slurm_gpus=req.slurm_gpus,
                         slurm_gpu_type=req.slurm_gpu_type,
-                        remote_input_path=req.remote_input_path,
-                        remote_work_path=req.remote_work_path,
-                        remote_output_path=req.remote_output_path,
-                        remote_reference_cache_root=req.remote_reference_cache_root,
-                        remote_data_cache_root=req.remote_data_cache_root,
+                        remote_base_path=req.remote_base_path,
+                        workflow_number=workflow_number,
+                        staged_remote_input_path=req.staged_remote_input_path,
                         cache_preflight=req.cache_preflight,
                         result_destination=req.result_destination or "local",
                     ),
@@ -379,7 +445,7 @@ async def submit_job(req: SubmitJobRequest):
                 await session.refresh(job)
                 job.started_at = datetime.utcnow()
                 await session.commit()
-                work_directory = job.remote_work_dir or req.remote_work_path or ""
+                work_directory = job.remote_work_dir or ""
                 response_status = job.status or JobStatus.PENDING
                 logger.info("Job submitted to SLURM backend", run_uuid=run_uuid,
                            sample_name=req.sample_name, remote_work=work_directory)
@@ -969,11 +1035,7 @@ async def create_ssh_profile(req: SSHProfileCreate):
             default_slurm_partition=req.default_slurm_partition,
             default_slurm_gpu_account=req.default_slurm_gpu_account,
             default_slurm_gpu_partition=req.default_slurm_gpu_partition,
-            default_remote_input_path=req.default_remote_input_path,
-            default_remote_work_path=req.default_remote_work_path,
-            default_remote_output_path=req.default_remote_output_path,
-            default_remote_reference_cache_root=req.default_remote_reference_cache_root,
-            default_remote_data_cache_root=req.default_remote_data_cache_root,
+            remote_base_path=req.remote_base_path,
         )
         session.add(profile)
         try:
@@ -1223,16 +1285,13 @@ def _profile_to_out(profile: SSHProfile) -> SSHProfileOut:
         ssh_username=profile.ssh_username,
         auth_method=profile.auth_method,
         has_key_file=bool(profile.key_file_path),
+        key_file_path=profile.key_file_path,
         local_username=profile.local_username,
         default_slurm_account=profile.default_slurm_account,
         default_slurm_partition=profile.default_slurm_partition,
         default_slurm_gpu_account=profile.default_slurm_gpu_account,
         default_slurm_gpu_partition=profile.default_slurm_gpu_partition,
-        default_remote_input_path=profile.default_remote_input_path,
-        default_remote_work_path=profile.default_remote_work_path,
-        default_remote_output_path=profile.default_remote_output_path,
-        default_remote_reference_cache_root=profile.default_remote_reference_cache_root,
-        default_remote_data_cache_root=profile.default_remote_data_cache_root,
+        remote_base_path=profile.remote_base_path,
         is_enabled=profile.is_enabled,
         created_at=profile.created_at.isoformat() if profile.created_at else "",
         updated_at=profile.updated_at.isoformat() if profile.updated_at else "",

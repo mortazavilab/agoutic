@@ -43,6 +43,7 @@ def profile() -> SSHProfileData:
         auth_method="ssh_agent",
         key_file_path=None,
         local_username=None,
+        remote_base_path="/remote/eli/agoutic",
         is_enabled=True,
     )
 
@@ -52,8 +53,8 @@ async def test_resolve_staging_cache_reuses_reference_and_data(monkeypatch, prof
     backend = SlurmBackend()
     conn = _FakeConn(
         existing_paths={
-            "/scratch/eli/agoutic/.agoutic_cache/user-1/profile-1/references/mm39",
-            "/scratch/eli/agoutic/.agoutic_cache/user-1/profile-1/data/mm39/fp1234567890abcd",
+            "/remote/eli/agoutic/ref/mm39",
+            "/remote/eli/agoutic/data/fp1234567890abcd",
         }
     )
 
@@ -64,6 +65,9 @@ async def test_resolve_staging_cache_reuses_reference_and_data(monkeypatch, prof
         input_directory="/tmp/input",
         reference_genome=["mm39"],
         ssh_profile_id="profile-1",
+        project_slug="project-a",
+        workflow_number=1,
+        remote_base_path="/remote/eli/agoutic",
     )
 
     monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda _: SimpleNamespace())
@@ -88,14 +92,14 @@ async def test_resolve_staging_cache_reuses_reference_and_data(monkeypatch, prof
 
     async def _get_ref(*args, **kwargs):
         return SimpleNamespace(
-            remote_path="/scratch/eli/agoutic/.agoutic_cache/user-1/profile-1/references/mm39",
+            remote_path="/remote/eli/agoutic/ref/mm39",
             source_signature="sig-1",
             last_validated_at=None,
         )
 
     async def _get_data(*args, **kwargs):
         return SimpleNamespace(
-            remote_path="/scratch/eli/agoutic/.agoutic_cache/user-1/profile-1/data/mm39/fp1234567890abcd",
+            remote_path="/remote/eli/agoutic/data/fp1234567890abcd",
             last_used_at=None,
         )
 
@@ -115,7 +119,7 @@ async def test_resolve_staging_cache_reuses_reference_and_data(monkeypatch, prof
 @pytest.mark.asyncio
 async def test_resolve_staging_cache_refreshes_stale_reference(monkeypatch, profile):
     backend = SlurmBackend()
-    conn = _FakeConn(existing_paths={"/scratch/eli/agoutic/.agoutic_cache/user-1/profile-1/data/mm39/fpdeadbeefcafebabe"})
+    conn = _FakeConn(existing_paths={"/remote/eli/agoutic/data/fpdeadbeefcafebabe"})
 
     params = SubmitParams(
         user_id="user-1",
@@ -124,6 +128,9 @@ async def test_resolve_staging_cache_refreshes_stale_reference(monkeypatch, prof
         input_directory="/tmp/input",
         reference_genome=["mm39"],
         ssh_profile_id="profile-1",
+        project_slug="project-a",
+        workflow_number=1,
+        remote_base_path="/remote/eli/agoutic",
     )
 
     monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda _: SimpleNamespace())
@@ -177,6 +184,7 @@ async def test_submit_uses_fallback_when_cache_resolution_fails(monkeypatch, pro
     params = SubmitParams(
         project_id="proj-1",
         user_id="user-1",
+        project_slug="proj-1",
         sample_name="sample",
         mode="DNA",
         input_directory="/tmp/input",
@@ -184,6 +192,8 @@ async def test_submit_uses_fallback_when_cache_resolution_fails(monkeypatch, pro
         ssh_profile_id="profile-1",
         slurm_account="acc",
         slurm_partition="standard",
+        workflow_number=1,
+        remote_base_path="/remote/eli/agoutic",
     )
 
     async def _load_profile(*args, **kwargs):

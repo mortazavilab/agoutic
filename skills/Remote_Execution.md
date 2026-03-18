@@ -2,7 +2,7 @@
 
 ## Description
 
-Guides the agent through collecting execution mode, SSH profile, SLURM resources, remote paths, result destination, and approval before submitting remote jobs. Uses staged prompting to minimize unnecessary questions by checking saved preferences first.
+Guides the agent through collecting execution mode, SSH profile, SLURM resources, remote base path, result destination, stage-only requests, remote file browsing, and approval before submitting remote jobs. Uses staged prompting to minimize unnecessary questions by checking saved preferences first.
 
 ## Skill Scope & Routing
 
@@ -11,6 +11,9 @@ Guides the agent through collecting execution mode, SSH profile, SLURM resources
 - SSH profile selection and connection testing
 - SLURM resource configuration (CPUs, memory, walltime, GPUs, partition, account)
 - Remote path setup (work directory, output directory)
+- Remote base path setup and browsing
+- Stage-only remote sample preparation
+- Reuse of already staged remote samples by name
 - Result destination choice (keep remote, sync to local, both)
 - Approval summary presentation before submission
 - Run stage monitoring and status reporting
@@ -20,6 +23,9 @@ Guides the agent through collecting execution mode, SSH profile, SLURM resources
 - "Run this on the cluster"
 - "Submit to SLURM with 32 CPUs"
 - "Use my HPC3 profile"
+- "Stage Jamshid on hpc3"
+- "Analyze Jamshid on hpc3"
+- "List files on hpc3"
 - "What's the status of my remote job?"
 - "Why is my job still pending?"
 - "Cancel the SLURM job"
@@ -70,6 +76,7 @@ Use these values as prefilled suggestions:
 - Execution mode: infer from user intent (`slurm`/`hpc3` implies SLURM; otherwise ask)
 - SSH profile: use explicit nickname from user message when present; else ask user to pick from listed profiles
 - Result destination: default to `local` unless user specifies `remote` or `both`
+- Remote base path: use the saved profile `remote_base_path`
 
 Only ask the user for values that have no saved preference.
 
@@ -95,9 +102,10 @@ Collect or confirm the following in order:
    - CPUs (default: 4), memory (default: 16 GB), walltime (default: 04:00:00)
    - GPUs (default: 0)
 
-3. **Remote Paths** — Ask for or confirm:
-   - Work directory (where pipeline runs)
-   - Output directory (where results land)
+3. **Remote Base Path** — Ask for or confirm the top-level folder used for remote staging and runs.
+   - References stage under `{remote_base_path}/ref/{reference_id}`
+   - Input data stages under `{remote_base_path}/data/{input_fingerprint}`
+   - Runs stage under `{remote_base_path}/{project_slug}/workflowN`
 
 4. **Result Destination** — if `preferred_result_destination` is not set:
    > "After completion, should results stay **remote**, be **synced to local**, or **both**?"
@@ -118,8 +126,7 @@ Present a summary of all collected details and ask for explicit approval before 
 │ Memory:           64 GB                      │
 │ Walltime:         12:00:00                   │
 │ GPUs:             0                          │
-│ Remote Work Dir:  /scratch/user/dogme/work   │
-│ Remote Out Dir:   /scratch/user/dogme/out    │
+│ Remote Base:      /remote/user/agoutic       │
 │ Result Dest:      sync to local              │
 └─────────────────────────────────────────────┘
 ```
@@ -134,19 +141,29 @@ After approval:
    ```
    [[DATA_CALL: service=launchpad, tool=test_ssh_connection, profile_id=<id>]]
    ```
-2. Submit the job:
+2. If the user asked to browse files, call:
+   ```
+   [[DATA_CALL: service=launchpad, tool=list_remote_files, user_id=<user_id>, ssh_profile_id=<id>]]
+   ```
+3. If the user asked for stage-only, call:
+   ```
+   [[DATA_CALL: service=launchpad, tool=stage_remote_sample, project_id=<project_id>, user_id=<user_id>, sample_name=<sample>, mode=<mode>, input_directory=<path>, ssh_profile_id=<id>]]
+   ```
+4. Otherwise submit the job:
    ```
    [[DATA_CALL: service=launchpad, tool=submit_dogme_job, execution_mode=slurm, ...]]
    ```
-3. Report stage transitions as they occur
-4. If job enters PENDING: explain the pending reason using `explain_pending_reason`
-5. If job fails: explain the failure using `explain_failure` and suggest fixes
+5. Report stage transitions as they occur
+6. If job enters PENDING: explain the pending reason using `explain_pending_reason`
+7. If job fails: explain the failure using `explain_failure` and suggest fixes
 
 ## Available MCP Tools
 
 | Tool | Purpose |
 |------|---------|
 | `submit_dogme_job` | Submit a job with `execution_mode` param (local/slurm) |
+| `stage_remote_sample` | Stage data and references remotely without submitting a job |
+| `list_remote_files` | Browse the configured remote base path or a subdirectory |
 | `list_ssh_profiles` | List user's saved SSH profiles |
 | `test_ssh_connection` | Test connectivity to an SSH profile |
 | `get_slurm_defaults` | Retrieve default SLURM resources for a profile |
@@ -210,6 +227,8 @@ The following stages are reported to the user during execution:
 **DO:**
 - Check saved preferences before asking questions
 - Use only tools listed in this skill; never invent tool names
+- Prefer `remote_base_path` from the saved profile; do not invent `/scratch/...` fallbacks
+- For "Analyze Jamshid on hpc3", prefer reuse of an existing staged sample before restaging
 - Present the approval summary before every submission
 - Report stage transitions clearly with human-readable labels
 - Explain scheduler states and pending reasons in plain language

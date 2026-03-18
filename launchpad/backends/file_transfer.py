@@ -19,6 +19,51 @@ logger = get_logger(__name__)
 class FileTransferManager:
     """Handles file transfers between local and remote systems."""
 
+    async def _try_broker_transfer(
+        self,
+        profile: SSHProfileData,
+        source: str,
+        dest: str,
+        exclude_patterns: list[str] | None,
+        direction: str,
+    ) -> dict | None:
+        """Use a local auth broker session when one is active for the profile."""
+        if profile.auth_method != "key_file" or not profile.local_username or not profile.key_file_path:
+            return None
+
+        session_manager = get_local_auth_session_manager()
+        session = await session_manager.get_active_session(profile)
+        if session is None:
+            return None
+
+        response = await session_manager.invoke(
+            session,
+            {
+                "op": "rsync_transfer",
+                "profile": {
+                    "ssh_host": profile.ssh_host,
+                    "ssh_port": profile.ssh_port,
+                    "ssh_username": profile.ssh_username,
+                    "auth_method": profile.auth_method,
+                    "key_file_path": profile.key_file_path,
+                },
+                "source": source,
+                "dest": dest,
+                "exclude_patterns": exclude_patterns or [],
+            },
+        )
+        if response.get("ok"):
+            return {
+                "ok": True,
+                "message": f"{direction.title()} completed",
+                "bytes_transferred": int(response.get("bytes_transferred", 0)),
+            }
+        return {
+            "ok": False,
+            "message": f"{direction.title()} failed: {response.get('stderr') or response.get('error') or 'unknown error'}",
+            "bytes_transferred": 0,
+        }
+
     async def upload_inputs(
         self,
         profile: SSHProfileData,
@@ -30,6 +75,13 @@ class FileTransferManager:
 
         Returns: {ok: bool, message: str, bytes_transferred: int}
         """
+        candidate = Path(local_path).expanduser()
+        if not candidate.exists():
+            return {
+                "ok": False,
+                "message": f"Local source path does not exist on the Launchpad server: {candidate}",
+                "bytes_transferred": 0,
+            }
         return await self._rsync_transfer(
             profile=profile,
             source=local_path,
@@ -89,6 +141,16 @@ class FileTransferManager:
         logger.info(f"Starting {direction}: {source} → {dest}")
 
         try:
+            broker_result = await self._try_broker_transfer(
+                profile=profile,
+                source=source,
+                dest=dest,
+                exclude_patterns=exclude_patterns,
+                direction=direction,
+            )
+            if broker_result is not None:
+                return broker_result
+
             if profile.auth_method == "key_file" and profile.local_username and profile.key_file_path:
                 resolved_key = Path(resolve_key_file_path(profile))
                 if not resolved_key.exists():
@@ -98,39 +160,9 @@ class FileTransferManager:
                         "bytes_transferred": 0,
                     }
                 if not resolved_key.is_file() or not os.access(resolved_key, os.R_OK):
-                    session_manager = get_local_auth_session_manager()
-                    session = await session_manager.get_active_session(profile)
-                    if session is None:
-                        return {
-                            "ok": False,
-                            "message": "No active local auth session for this profile. Unlock the profile in Remote Profiles first.",
-                            "bytes_transferred": 0,
-                        }
-                    response = await session_manager.invoke(
-                        session,
-                        {
-                            "op": "rsync_transfer",
-                            "profile": {
-                                "ssh_host": profile.ssh_host,
-                                "ssh_port": profile.ssh_port,
-                                "ssh_username": profile.ssh_username,
-                                "auth_method": profile.auth_method,
-                                "key_file_path": profile.key_file_path,
-                            },
-                            "source": source,
-                            "dest": dest,
-                            "exclude_patterns": exclude_patterns or [],
-                        },
-                    )
-                    if response.get("ok"):
-                        return {
-                            "ok": True,
-                            "message": f"{direction.title()} completed",
-                            "bytes_transferred": int(response.get("bytes_transferred", 0)),
-                        }
                     return {
                         "ok": False,
-                        "message": f"{direction.title()} failed: {response.get('stderr') or response.get('error') or 'unknown error'}",
+                        "message": "No active local auth session for this profile. Unlock the profile in Remote Profiles first.",
                         "bytes_transferred": 0,
                     }
 

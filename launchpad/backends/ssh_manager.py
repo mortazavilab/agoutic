@@ -40,6 +40,7 @@ class SSHProfileData:
     key_file_path: str | None
     local_username: str | None  # Local Unix user used for per-session SSH access via broker
     is_enabled: bool
+    remote_base_path: str | None = None
 
 
 class SSHConnectionManager:
@@ -170,6 +171,27 @@ class SSHConnection:
         """Create a remote directory (with parents)."""
         await self._conn.run(f"mkdir -p {path!r}", check=True)
 
+    async def list_dir(self, path: str) -> list[dict[str, str | int | None]]:
+        """List one level of directory contents on the remote host."""
+        script = (
+            "python3 - <<'PY'\n"
+            "import json, os\n"
+            f"path = {path!r}\n"
+            "entries = []\n"
+            "with os.scandir(path) as it:\n"
+            "    for entry in sorted(it, key=lambda item: item.name):\n"
+            "        try:\n"
+            "            stat = entry.stat(follow_symlinks=False)\n"
+            "            kind = 'dir' if entry.is_dir(follow_symlinks=False) else 'symlink' if entry.is_symlink() else 'file'\n"
+            "            entries.append({'name': entry.name, 'type': kind, 'size': int(stat.st_size)})\n"
+            "        except OSError:\n"
+            "            entries.append({'name': entry.name, 'type': 'unknown', 'size': None})\n"
+            "print(json.dumps(entries))\n"
+            "PY"
+        )
+        result = await self._conn.run(script, check=True)
+        return json.loads(result.stdout or "[]")
+
     async def close(self) -> None:
         """Close the SSH connection."""
         self._conn.close()
@@ -222,6 +244,26 @@ class LocalBrokerSSHConnection:
 
     async def mkdir_p(self, path: str) -> None:
         await self.run(f"mkdir -p {path!r}", check=True)
+
+    async def list_dir(self, path: str) -> list[dict[str, str | int | None]]:
+        script = (
+            "python3 - <<'PY'\n"
+            "import json, os\n"
+            f"path = {path!r}\n"
+            "entries = []\n"
+            "with os.scandir(path) as it:\n"
+            "    for entry in sorted(it, key=lambda item: item.name):\n"
+            "        try:\n"
+            "            stat = entry.stat(follow_symlinks=False)\n"
+            "            kind = 'dir' if entry.is_dir(follow_symlinks=False) else 'symlink' if entry.is_symlink() else 'file'\n"
+            "            entries.append({'name': entry.name, 'type': kind, 'size': int(stat.st_size)})\n"
+            "        except OSError:\n"
+            "            entries.append({'name': entry.name, 'type': 'unknown', 'size': None})\n"
+            "print(json.dumps(entries))\n"
+            "PY"
+        )
+        result = await self.run(script, check=True)
+        return json.loads(result.stdout or "[]")
 
     async def close(self) -> None:
         return None

@@ -31,7 +31,7 @@ user_id = user.get("id") or user.get("user_id", "")
 
 st.title("🔌 Remote Connection Profiles")
 st.caption("Manage SSH connection profiles for remote HPC/SLURM execution")
-st.caption("Path defaults may use placeholders like {ssh_username}, {project_slug}, {sample_name}, {workflow_slug}, {remote_root}, and {remote_work_path}.")
+st.caption("Remote base path may use placeholders like {ssh_username}, {project_slug}, {sample_name}, and {workflow_slug}.")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ with st.expander("➕ Create Profile", expanded=False):
         if auth_method == "key_file":
             key_file_path = st.text_input(
                 "Key File Path",
-                value="~/.ssh/id_rsa",
+                value="",
                 help="Path to the private key file on the server",
             )
 
@@ -144,12 +144,10 @@ with st.expander("➕ Create Profile", expanded=False):
         with def_col1:
             default_slurm_account = st.text_input("Default CPU Account")
             default_slurm_gpu_account = st.text_input("Default GPU Account")
-            default_remote_input_path = st.text_input("Default Remote Input Path")
-            default_remote_work_path = st.text_input("Default Remote Work Path")
+            remote_base_path = st.text_input("Remote Base Path")
         with def_col2:
             default_slurm_partition = st.text_input("Default CPU Partition")
             default_slurm_gpu_partition = st.text_input("Default GPU Partition")
-            default_remote_output_path = st.text_input("Default Remote Output Path")
 
         submitted = st.form_submit_button("🔧 Create Profile", type="primary")
 
@@ -187,12 +185,8 @@ with st.expander("➕ Create Profile", expanded=False):
                     payload["default_slurm_gpu_account"] = default_slurm_gpu_account.strip()
                 if default_slurm_gpu_partition.strip():
                     payload["default_slurm_gpu_partition"] = default_slurm_gpu_partition.strip()
-                if default_remote_input_path.strip():
-                    payload["default_remote_input_path"] = default_remote_input_path.strip()
-                if default_remote_work_path.strip():
-                    payload["default_remote_work_path"] = default_remote_work_path.strip()
-                if default_remote_output_path.strip():
-                    payload["default_remote_output_path"] = default_remote_output_path.strip()
+                if remote_base_path.strip():
+                    payload["remote_base_path"] = remote_base_path.strip()
 
                 try:
                     resp = make_authenticated_request(
@@ -409,7 +403,7 @@ for idx, profile in enumerate(profiles):
                     if new_auth == "key_file":
                         new_key_path = st.text_input(
                             "Key File Path",
-                            value=profile.get("key_file_path", "~/.ssh/id_rsa"),
+                            value=profile.get("key_file_path", "") or "",
                             key=f"ek_{idx}",
                         )
 
@@ -433,15 +427,10 @@ for idx, profile in enumerate(profiles):
                             value=profile.get("default_slurm_gpu_account", ""),
                             key=f"edgpuacct_{idx}",
                         )
-                        new_default_remote_input_path = st.text_input(
-                            "Default Remote Input Path",
-                            value=profile.get("default_remote_input_path", ""),
-                            key=f"edrinput_{idx}",
-                        )
-                        new_default_remote_work_path = st.text_input(
-                            "Default Remote Work Path",
-                            value=profile.get("default_remote_work_path", ""),
-                            key=f"edrwork_{idx}",
+                        new_remote_base_path = st.text_input(
+                            "Remote Base Path",
+                            value=profile.get("remote_base_path", ""),
+                            key=f"edrbase_{idx}",
                         )
                     with ed2:
                         new_default_slurm_partition = st.text_input(
@@ -453,11 +442,6 @@ for idx, profile in enumerate(profiles):
                             "Default GPU Partition",
                             value=profile.get("default_slurm_gpu_partition", ""),
                             key=f"edgpupart_{idx}",
-                        )
-                        new_default_remote_output_path = st.text_input(
-                            "Default Remote Output Path",
-                            value=profile.get("default_remote_output_path", ""),
-                            key=f"edroutput_{idx}",
                         )
 
                     new_enabled = st.checkbox(
@@ -477,9 +461,7 @@ for idx, profile in enumerate(profiles):
                             "default_slurm_partition": new_default_slurm_partition.strip() or None,
                             "default_slurm_gpu_account": new_default_slurm_gpu_account.strip() or None,
                             "default_slurm_gpu_partition": new_default_slurm_gpu_partition.strip() or None,
-                            "default_remote_input_path": new_default_remote_input_path.strip() or None,
-                            "default_remote_work_path": new_default_remote_work_path.strip() or None,
-                            "default_remote_output_path": new_default_remote_output_path.strip() or None,
+                            "remote_base_path": new_remote_base_path.strip() or None,
                             "is_enabled": new_enabled,
                         }
                         if new_auth == "key_file" and new_key_path.strip():

@@ -103,9 +103,8 @@ class TestSubmitDogmeJob:
                 slurm_walltime="12:00:00",
                 slurm_gpus=1,
                 slurm_gpu_type="a100",
-                remote_input_path="/remote/input",
-                remote_work_path="/remote/work",
-                remote_output_path="/remote/output",
+                remote_base_path="/remote/agoutic",
+                staged_remote_input_path="/remote/agoutic/data/fp123",
                 result_destination="both",
             )
 
@@ -141,13 +140,51 @@ class TestSubmitDogmeJob:
             "slurm_walltime": "12:00:00",
             "slurm_gpus": 1,
             "slurm_gpu_type": "a100",
-            "remote_input_path": "/remote/input",
-            "remote_work_path": "/remote/work",
-            "remote_output_path": "/remote/output",
+            "remote_base_path": "/remote/agoutic",
+            "staged_remote_input_path": "/remote/agoutic/data/fp123",
             "result_destination": "both",
         }
         assert "modifications" not in kwargs["json"]
         assert "entry_point" not in kwargs["json"]
+
+    @pytest.mark.asyncio
+    async def test_stage_remote_sample_posts_expected_payload(self, monkeypatch):
+        fake_client = FakeAsyncClient(
+            post_response=FakeResponse(
+                json_data={"remote_data_path": "/remote/agoutic/data/fp1", "data_cache_status": "reused"}
+            )
+        )
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            result = await tools.stage_remote_sample(
+                project_id="proj-1",
+                user_id="user-1",
+                username="alim",
+                project_slug="project-a",
+                sample_name="Jamshid",
+                mode="CDNA",
+                input_directory="/data/pod5",
+                reference_genome=["mm39"],
+                ssh_profile_id="profile-1",
+                remote_base_path="/remote/agoutic",
+            )
+
+        assert result["remote_data_path"] == "/remote/agoutic/data/fp1"
+        url, kwargs = fake_client.post_calls[0]
+        assert url == "http://launchpad.local/remote/stage"
+        assert kwargs["json"] == {
+            "project_id": "proj-1",
+            "user_id": "user-1",
+            "sample_name": "Jamshid",
+            "mode": "CDNA",
+            "input_directory": "/data/pod5",
+            "reference_genome": ["mm39"],
+            "ssh_profile_id": "profile-1",
+            "username": "alim",
+            "project_slug": "project-a",
+            "remote_base_path": "/remote/agoutic",
+        }
 
     @pytest.mark.asyncio
     async def test_submit_dogme_job_wraps_transport_errors(self):

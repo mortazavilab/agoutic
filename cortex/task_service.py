@@ -151,6 +151,21 @@ def _workflow_action_for_step(step: dict) -> tuple[str | None, str | None]:
     if kind == "REQUEST_APPROVAL":
         _gate_target = _build_target("block", block_id=step["gate_block_id"]) if step.get("gate_block_id") else None
         return _action_for_status(status, pending_label="Review", completed_label="Approved"), _gate_target
+    if kind in ("check_remote_stage", "CHECK_REMOTE_STAGE"):
+        return _action_for_status(status, pending_label="Checking", completed_label="Checked"), None
+    if kind == "CHECK_REMOTE_PROFILE_AUTH":
+        if status == "FOLLOW_UP":
+            return "Unlock profile", None
+        return _action_for_status(status, pending_label="Checking", completed_label="Authorized"), None
+    if kind in ("remote_stage", "REMOTE_STAGE"):
+        if status == "COMPLETED":
+            decision = step.get("decision") or "stage"
+            return ("Reuse staged data" if decision == "reuse" else "Staged"), None
+        if status == "RUNNING":
+            return "Staging", None
+        return "Waiting", None
+    if kind in ("complete_stage_only", "COMPLETE_STAGE_ONLY"):
+        return _action_for_status(status, pending_label="Finishing", completed_label="Staged"), None
     if kind in ("DOWNLOAD_DATA", "SUBMIT_WORKFLOW", "MONITOR_WORKFLOW",
                 "RUN_DE_ANALYSIS", "COMPARE_SAMPLES", "RUN_DE_PIPELINE"):
         _step_target = _build_target("block", block_id=step["block_id"], run_uuid=step.get("run_uuid")) if step.get("block_id") else None
@@ -441,6 +456,39 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             for child_spec in _iter_download_file_specs(project_id, download_task.id, block, payload):
                 seen_sources.add(child_spec["source_key"])
                 _upsert_task(session, existing_by_source, child_spec, owner_id=owner_id)
+            continue
+
+        if block.type == "STAGING_TASK":
+            task_status = {
+                "RUNNING": "RUNNING",
+                "DONE": "COMPLETED",
+                "FAILED": "FAILED",
+            }.get(block.status, "PENDING")
+            source_key = f"stage-transfer:{block.id}"
+            seen_sources.add(source_key)
+            _upsert_task(
+                session,
+                existing_by_source,
+                {
+                    "project_id": project_id,
+                    "source_key": source_key,
+                    "kind": "stage_transfer",
+                    "title": f"Stage remote input for {payload.get('sample_name') or 'sample'}",
+                    "status": task_status,
+                    "priority": "high" if task_status == "FAILED" else "normal",
+                    "source_type": "block",
+                    "source_id": block.id,
+                    "action_label": _action_for_status(task_status, pending_label="View transfer", completed_label="Staged"),
+                    "action_target": _build_target("block", block_id=block.id),
+                    "metadata": {
+                        "sample_name": payload.get("sample_name"),
+                        "mode": payload.get("mode"),
+                        "progress_percent": payload.get("progress_percent", 0),
+                        "remote_data_path": payload.get("remote_data_path"),
+                    },
+                },
+                owner_id=owner_id,
+            )
             continue
 
         if block.type != "EXECUTION_JOB":

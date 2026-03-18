@@ -32,6 +32,39 @@ class SlurmBackend:
         self._ssh_manager = SSHConnectionManager()
         self._transfer_manager = FileTransferManager()
 
+    async def stage_remote_sample(self, params: SubmitParams) -> dict:
+        """Stage references and input data on the remote system without submitting a job."""
+        profile = await self._load_profile(params.ssh_profile_id, params.user_id)
+        remote_roots = self._derive_remote_roots(params, profile)
+
+        conn = await self._ssh_manager.connect(profile)
+        try:
+            results = await validate_remote_paths(
+                conn,
+                {
+                    "base": remote_roots["remote_base_path"],
+                    "ref": remote_roots["ref_root"],
+                    "data": remote_roots["data_root"],
+                },
+            )
+            ok, path_errors = check_all_paths_ok(results)
+            if not ok:
+                raise ValueError(f"Remote path validation failed: {'; '.join(path_errors)}")
+
+            stage_result = await self._stage_sample_inputs(params, profile, conn, run_uuid=None)
+            return {
+                "sample_name": params.sample_name,
+                "ssh_profile_id": profile.id,
+                "ssh_profile_nickname": profile.nickname,
+                "remote_base_path": remote_roots["remote_base_path"],
+                "remote_data_path": stage_result["remote_input"],
+                "remote_reference_paths": stage_result["remote_reference_paths"],
+                "data_cache_status": stage_result["data_cache_status"],
+                "reference_cache_statuses": stage_result["reference_cache_statuses"],
+            }
+        finally:
+            await conn.close()
+
     async def submit(self, run_uuid: str, params: SubmitParams) -> str:
         """Submit a job to SLURM via SSH.
 
@@ -53,6 +86,7 @@ class SlurmBackend:
 
         # 2. Load SSH profile
         profile = await self._load_profile(params.ssh_profile_id, params.user_id)
+        remote_paths = self._derive_remote_paths(params, profile)
 
         # 3. Connect and validate
         await self._update_job_stage(run_uuid, RunStage.VALIDATING_CONNECTION)
@@ -61,21 +95,27 @@ class SlurmBackend:
         try:
             # 4. Validate/create remote paths
             await self._update_job_stage(run_uuid, RunStage.PREPARING_REMOTE_DIRS)
-            paths_to_validate = {}
-            if params.remote_work_path:
-                paths_to_validate["work"] = params.remote_work_path
-            if params.remote_output_path:
-                paths_to_validate["output"] = params.remote_output_path
-
-            if paths_to_validate:
-                results = await validate_remote_paths(conn, paths_to_validate)
-                ok, path_errors = check_all_paths_ok(results)
-                if not ok:
-                    raise ValueError(f"Remote path validation failed: {'; '.join(path_errors)}")
+            results = await validate_remote_paths(
+                conn,
+                {
+                    "base": remote_paths["remote_base_path"],
+                    "ref": remote_paths["ref_root"],
+                    "data": remote_paths["data_root"],
+                    "project": remote_paths["project_root"],
+                    "work": remote_paths["remote_work"],
+                    "output": remote_paths["remote_output"],
+                },
+            )
+            ok, path_errors = check_all_paths_ok(results)
+            if not ok:
+                raise ValueError(f"Remote path validation failed: {'; '.join(path_errors)}")
 
             # 5. Resolve reusable staging (reference + input data)
             try:
-                cache_resolution = await self._resolve_staging_cache(run_uuid, params, profile, conn)
+                if params.staged_remote_input_path:
+                    cache_resolution = await self._reuse_pre_staged_input(run_uuid, params)
+                else:
+                    cache_resolution = await self._resolve_staging_cache(run_uuid, params, profile, conn)
             except Exception as cache_error:
                 logger.warning(
                     "Cache resolution degraded; falling back to direct staging",
@@ -87,24 +127,8 @@ class SlurmBackend:
             # 6. Generate and submit sbatch script
             await self._update_job_stage(run_uuid, RunStage.SUBMITTING_JOB)
 
-            # Validate remote work path - must be explicitly provided or default to /scratch
-            # CRITICAL: If neither provided, fail explicitly rather than trying to create /scratch
-            if not params.remote_work_path:
-                if not profile or not profile.ssh_username:
-                    raise ValueError(
-                        "SLURM execution requires either explicit remote_work_path or a valid SSH profile with username"
-                    )
-                default_remote_work = f"/scratch/{profile.ssh_username}/agoutic/{run_uuid}"
-                logger.warning(
-                    "No explicit remote_work_path provided; using default /scratch path",
-                    run_uuid=run_uuid,
-                    default_remote_work=default_remote_work,
-                )
-                remote_work = default_remote_work
-            else:
-                remote_work = params.remote_work_path
-            
-            remote_output = params.remote_output_path or f"{remote_work}/output"
+            remote_work = remote_paths["remote_work"]
+            remote_output = remote_paths["remote_output"]
             remote_input = cache_resolution["remote_input"]
 
             # Build the nextflow command for the batch script
@@ -300,6 +324,31 @@ class SlurmBackend:
             logger.error(f"Failed to clean up remote job: {e}")
             return False
 
+    async def list_remote_files(
+        self,
+        *,
+        ssh_profile_id: str,
+        user_id: str,
+        path: str | None = None,
+    ) -> dict:
+        """List files on the remote host, defaulting to the profile's remote base path."""
+        profile = await self._load_profile(ssh_profile_id, user_id)
+        remote_path = (path or profile.remote_base_path or "").strip()
+        if not remote_path:
+            raise ValueError("No path provided and the SSH profile is missing remote_base_path")
+
+        conn = await self._ssh_manager.connect(profile)
+        try:
+            entries = await conn.list_dir(remote_path)
+            return {
+                "ssh_profile_id": profile.id,
+                "ssh_profile_nickname": profile.nickname,
+                "path": remote_path,
+                "entries": entries,
+            }
+        finally:
+            await conn.close()
+
     # --- Internal helpers ---
 
     async def _load_profile(self, profile_id: str | None, user_id: str | None = None) -> SSHProfileData:
@@ -371,20 +420,36 @@ class SlurmBackend:
         conn,
     ) -> dict:
         """Resolve per-user reusable cache paths for references and input data."""
+        return await self._stage_sample_inputs(params, profile, conn, run_uuid=run_uuid)
+
+    async def _stage_sample_inputs(
+        self,
+        params: SubmitParams,
+        profile: SSHProfileData,
+        conn,
+        *,
+        run_uuid: str | None,
+    ) -> dict:
+        """Stage or reuse remote references and sample data, optionally updating a job record."""
         from launchpad.db import (
             get_remote_reference_cache_entry,
             get_remote_input_cache_entry,
+            upsert_remote_staged_sample,
             upsert_remote_reference_cache_entry,
             upsert_remote_input_cache_entry,
             update_job_fields,
         )
 
         user_key = self._cache_user_key(params, profile)
-        ref_root, data_root = self._derive_cache_roots(params, profile, user_key)
+        remote_roots = self._derive_remote_roots(params, profile)
+        ref_root = remote_roots["ref_root"]
+        data_root = remote_roots["data_root"]
         primary_ref = self._normalize_reference_id((params.reference_genome or ["default"])[0])
 
         reference_cache_path = None
         reference_status = "skipped"
+        reference_statuses: dict[str, str] = {}
+        remote_reference_paths: dict[str, str] = {}
 
         for ref_raw in params.reference_genome or []:
             ref_id = self._normalize_reference_id(ref_raw)
@@ -407,8 +472,9 @@ class SlurmBackend:
             )
 
             if needs_refresh:
-                await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
-                await self._update_job_transfer_state(run_uuid, "uploading_inputs")
+                if run_uuid:
+                    await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
+                    await self._update_job_transfer_state(run_uuid, "uploading_inputs")
                 await conn.mkdir_p(cache_path)
                 result = await self._transfer_manager.upload_inputs(
                     profile=profile,
@@ -416,11 +482,15 @@ class SlurmBackend:
                     remote_path=cache_path,
                 )
                 if not result["ok"]:
-                    await self._update_job_transfer_state(run_uuid, "transfer_failed")
+                    if run_uuid:
+                        await self._update_job_transfer_state(run_uuid, "transfer_failed")
                     raise RuntimeError(f"Reference cache stage failed for {ref_id}: {result['message']}")
                 reference_status = "refreshed" if cache_entry else "staged"
             else:
                 reference_status = "reused"
+
+            reference_statuses[ref_id] = reference_status
+            remote_reference_paths[ref_id] = cache_path
 
             await upsert_remote_reference_cache_entry(
                 user_id=params.user_id or user_key,
@@ -438,7 +508,7 @@ class SlurmBackend:
 
         input_fingerprint = self._compute_input_fingerprint(params.input_directory)
         data_cache_key = input_fingerprint[:16]
-        target_data_remote = str(PurePosixPath(data_root) / primary_ref / data_cache_key)
+        target_data_remote = str(PurePosixPath(data_root) / data_cache_key)
         data_entry = await get_remote_input_cache_entry(
             params.user_id or user_key,
             profile.id,
@@ -452,8 +522,9 @@ class SlurmBackend:
         if data_entry is not None and data_exists:
             data_status = "reused"
         else:
-            await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
-            await self._update_job_transfer_state(run_uuid, "uploading_inputs")
+            if run_uuid:
+                await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
+                await self._update_job_transfer_state(run_uuid, "uploading_inputs")
             await conn.mkdir_p(data_cache_path)
             result = await self._transfer_manager.upload_inputs(
                 profile=profile,
@@ -461,7 +532,8 @@ class SlurmBackend:
                 remote_path=data_cache_path,
             )
             if not result["ok"]:
-                await self._update_job_transfer_state(run_uuid, "transfer_failed")
+                if run_uuid:
+                    await self._update_job_transfer_state(run_uuid, "transfer_failed")
                 raise RuntimeError(f"Input transfer failed: {result['message']}")
             data_status = "staged"
 
@@ -474,17 +546,35 @@ class SlurmBackend:
             status="READY",
             increment_use_count=True,
         )
-        await self._update_job_transfer_state(run_uuid, "inputs_uploaded")
-
-        await update_job_fields(
-            run_uuid,
-            {
-                "reference_cache_status": reference_status,
-                "data_cache_status": data_status,
-                "reference_cache_path": reference_cache_path,
-                "data_cache_path": data_cache_path,
-            },
+        sample_slug = self._slugify(params.sample_name or "sample")
+        await upsert_remote_staged_sample(
+            user_id=params.user_id or user_key,
+            ssh_profile_id=profile.id,
+            ssh_profile_nickname=profile.nickname,
+            sample_name=params.sample_name,
+            sample_slug=sample_slug,
+            mode=params.mode,
+            reference_genome=list(params.reference_genome or []),
+            source_path=params.input_directory,
+            input_fingerprint=input_fingerprint,
+            remote_base_path=remote_roots["remote_base_path"],
+            remote_data_path=data_cache_path,
+            remote_reference_paths=remote_reference_paths,
+            status="READY",
+            mark_used=True,
         )
+
+        if run_uuid:
+            await self._update_job_transfer_state(run_uuid, "inputs_uploaded")
+            await update_job_fields(
+                run_uuid,
+                {
+                    "reference_cache_status": reference_status,
+                    "data_cache_status": data_status,
+                    "reference_cache_path": reference_cache_path,
+                    "data_cache_path": data_cache_path,
+                },
+            )
 
         return {
             "reference_cache_path": reference_cache_path,
@@ -492,6 +582,35 @@ class SlurmBackend:
             "remote_input": data_cache_path,
             "reference_cache_status": reference_status,
             "data_cache_status": data_status,
+            "reference_cache_statuses": reference_statuses,
+            "remote_reference_paths": remote_reference_paths,
+        }
+
+    async def _reuse_pre_staged_input(self, run_uuid: str, params: SubmitParams) -> dict:
+        """Use a previously staged remote data path without restaging local inputs."""
+        from launchpad.db import update_job_fields
+
+        remote_input = (params.staged_remote_input_path or "").strip()
+        if not remote_input:
+            raise ValueError("staged_remote_input_path is required when reusing a staged remote sample")
+
+        await update_job_fields(
+            run_uuid,
+            {
+                "reference_cache_status": "reused",
+                "data_cache_status": "reused",
+                "data_cache_path": remote_input,
+                "reference_cache_path": params.reference_cache_path,
+            },
+        )
+        return {
+            "reference_cache_path": params.reference_cache_path,
+            "data_cache_path": remote_input,
+            "remote_input": remote_input,
+            "reference_cache_status": "reused",
+            "data_cache_status": "reused",
+            "reference_cache_statuses": {},
+            "remote_reference_paths": {},
         }
 
     async def _fallback_stage_inputs(
@@ -504,9 +623,9 @@ class SlurmBackend:
         """Fallback path when cache metadata/services are unavailable."""
         from launchpad.db import update_job_fields
 
-        user_key = self._cache_user_key(params, profile)
-        ref_root, _ = self._derive_cache_roots(params, profile, user_key)
-        remote_input = params.remote_input_path or f"/scratch/{profile.ssh_username}/agoutic/{run_uuid}/input"
+        remote_paths = self._derive_remote_paths(params, profile)
+        ref_root = remote_paths["ref_root"]
+        remote_input = str(PurePosixPath(remote_paths["data_root"]) / self._compute_input_fingerprint(params.input_directory)[:16])
 
         reference_status = "fallback"
         reference_cache_path = None
@@ -566,22 +685,44 @@ class SlurmBackend:
         return (reference_id or "default").strip().lower()
 
     @staticmethod
-    def _derive_cache_roots(params: SubmitParams, profile: SSHProfileData, user_key: str) -> tuple[str, str]:
-        if params.remote_reference_cache_root and params.remote_data_cache_root:
-            return params.remote_reference_cache_root, params.remote_data_cache_root
+    def _derive_remote_roots(params: SubmitParams, profile: SSHProfileData) -> dict[str, str]:
+        remote_base_path = (params.remote_base_path or profile.remote_base_path or "").strip()
+        if not remote_base_path:
+            raise ValueError("SLURM execution requires remote_base_path on the request or SSH profile")
 
-        cache_root = f"/scratch/{profile.ssh_username}/agoutic/.agoutic_cache/{user_key}/{profile.id}"
-        if params.remote_reference_cache_root and not params.remote_data_cache_root:
-            data_root = str(PurePosixPath(params.remote_reference_cache_root).parent / "data")
-            return params.remote_reference_cache_root, data_root
-        if params.remote_data_cache_root and not params.remote_reference_cache_root:
-            ref_root = str(PurePosixPath(params.remote_data_cache_root).parent / "references")
-            return ref_root, params.remote_data_cache_root
+        base_path = PurePosixPath(remote_base_path)
+        return {
+            "remote_base_path": str(base_path),
+            "ref_root": str(base_path / "ref"),
+            "data_root": str(base_path / "data"),
+        }
 
-        return (
-            str(PurePosixPath(cache_root) / "references"),
-            str(PurePosixPath(cache_root) / "data"),
-        )
+    @classmethod
+    def _derive_remote_paths(cls, params: SubmitParams, profile: SSHProfileData) -> dict[str, str]:
+        remote_roots = cls._derive_remote_roots(params, profile)
+
+        workflow_number = params.workflow_number
+        if workflow_number is None or workflow_number < 1:
+            raise ValueError("SLURM execution requires a positive workflow_number")
+
+        project_slug = (params.project_slug or params.project_id or "project").strip()
+        base_path = PurePosixPath(remote_roots["remote_base_path"])
+        project_root = base_path / project_slug
+        remote_work = project_root / f"workflow{workflow_number}"
+        remote_output = remote_work / "output"
+        return {
+            **remote_roots,
+            "project_root": str(project_root),
+            "remote_work": str(remote_work),
+            "remote_output": str(remote_output),
+        }
+
+    @staticmethod
+    def _slugify(value: str) -> str:
+        cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in (value or ""))
+        while "--" in cleaned:
+            cleaned = cleaned.replace("--", "-")
+        return cleaned.strip("-") or "sample"
 
     @staticmethod
     def _resolve_reference_source_dir(reference_id: str) -> Path | None:

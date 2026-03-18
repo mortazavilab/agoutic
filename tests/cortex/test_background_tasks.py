@@ -33,6 +33,7 @@ from cortex.app import (
     handle_rejection,
     download_after_approval,
     submit_job_after_approval,
+    _auto_execute_plan_steps,
     poll_job_status,
     _auto_trigger_analysis,
     _build_auto_analysis_context,
@@ -42,6 +43,7 @@ from cortex.app import (
     _create_block_internal,
     _active_downloads,
 )
+from cortex.planner import _template_remote_stage_workflow
 
 
 # ---------------------------------------------------------------------------
@@ -819,6 +821,331 @@ class TestSubmitJobAfterApproval:
         submitted = mock_client.call_tool.call_args.kwargs
         assert submitted["execution_mode"] == "slurm"
         assert submitted["ssh_profile_id"] == "profile-123"
+
+    @pytest.mark.asyncio
+    async def test_stage_only_remote_request_calls_stage_remote_sample(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "gate_action": "remote_stage",
+            "extracted_params": {
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "input_directory": "/data/pod5",
+                "reference_genome": ["mm39"],
+                "execution_mode": "slurm",
+                "ssh_profile_nickname": "hpc3",
+                "remote_action": "stage_only",
+                "gate_action": "remote_stage",
+                "remote_base_path": "/remote/u1/agoutic",
+                "cache_preflight": {
+                    "status": "ready",
+                    "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
+                    "data_action": {"action": "stage"},
+                },
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "remote_data_path": "/remote/u1/agoutic/data/fp1",
+            "data_cache_status": "reused",
+            "reference_cache_statuses": {"mm39": "reused"},
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.app.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.await_count == 1
+        assert mock_client.call_tool.call_args.args[0] == "stage_remote_sample"
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["ssh_profile_id"] == "profile-123"
+        assert submitted["sample_name"] == "Jamshid"
+
+        sess = session_factory()
+        workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
+        payload = get_block_payload(workflow_block)
+        assert payload["workflow_type"] == "remote_sample_intake"
+        assert payload["steps"][1]["status"] == "COMPLETED"
+        assert payload["steps"][2]["status"] == "COMPLETED"
+        staging_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "STAGING_TASK").one()
+        staging_payload = get_block_payload(staging_block)
+        assert staging_block.status == "DONE"
+        assert staging_payload["remote_data_path"] == "/remote/u1/agoutic/data/fp1"
+        assert staging_payload["stage_parts"]["references"]["status"] == "COMPLETED"
+        assert staging_payload["stage_parts"]["references"]["progress_percent"] == 100
+        assert "already staged" in staging_payload["stage_parts"]["references"]["message"].lower()
+        assert staging_payload["stage_parts"]["data"]["status"] == "COMPLETED"
+        assert staging_payload["stage_parts"]["data"]["progress_percent"] == 100
+        assert sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all() == []
+        sess.close()
+
+
+    
+    @pytest.mark.asyncio
+    async def test_stage_only_remote_failure_creates_failed_staging_task(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "gate_action": "remote_stage",
+            "extracted_params": {
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "input_directory": "/data/pod5",
+                "reference_genome": ["mm39"],
+                "execution_mode": "slurm",
+                "ssh_profile_nickname": "hpc3",
+                "remote_action": "stage_only",
+                "gate_action": "remote_stage",
+                "remote_base_path": "/remote/u1/agoutic",
+                "cache_preflight": {
+                    "status": "ready",
+                    "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
+                    "data_action": {"action": "stage"},
+                },
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=RuntimeError("Failed to stage remote sample: HTTP 400 from http://localhost:8003/remote/stage - {\"detail\":\"Local source path does not exist on the Launchpad server: /data/pod5\"}"))
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.app.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        sess = session_factory()
+        staging_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "STAGING_TASK").one()
+        staging_payload = get_block_payload(staging_block)
+        assert staging_block.status == "FAILED"
+        assert "Local source path does not exist" in staging_payload["error"]
+        assert staging_payload["stage_parts"]["references"]["status"] == "COMPLETED"
+        assert staging_payload["stage_parts"]["data"]["status"] == "FAILED"
+        assert "Sample data staging failed" in staging_payload["stage_parts"]["data"]["message"]
+        assert sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all() == []
+        workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
+        workflow_payload = get_block_payload(workflow_block)
+        assert workflow_payload["steps"][1]["status"] == "FAILED"
+        sess.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_execute_plan_steps_creates_gate_for_waiting_remote_stage_plan(session_factory, seed_data):
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "title": "Stage remote sample for Jamshid",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_remote_stage",
+            "steps": [
+                {
+                    "id": "check_remote_profile_auth",
+                    "kind": "CHECK_REMOTE_PROFILE_AUTH",
+                    "title": "Check remote profile authorization for Jamshid",
+                    "status": "COMPLETED",
+                },
+                {
+                    "id": "approve_remote_stage",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve remote staging for Jamshid",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                }
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+    workflow_block_id = workflow_block.id
+    sess.commit()
+    sess.close()
+
+    user = type("UserStub", (), {"id": "u-bg"})()
+
+    with _patch_session(session_factory), \
+         patch("cortex.app.AgentEngine") as mock_engine_cls, \
+         patch("cortex.plan_executor.execute_plan", new=AsyncMock(return_value=None)), \
+         patch(
+             "cortex.app.extract_job_parameters_from_conversation",
+             new=AsyncMock(return_value={
+                 "sample_name": "Jamshid",
+                 "execution_mode": "slurm",
+                 "gate_action": "remote_stage",
+                 "remote_action": "stage_only",
+                 "cache_preflight": {"status": "needs_remote_base_path"},
+             }),
+         ):
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine_cls.return_value = mock_engine
+        await _auto_execute_plan_steps("proj-bg", workflow_block_id, user, "test-model")
+
+    sess = session_factory()
+    gates = sess.query(ProjectBlock).filter(ProjectBlock.type == "APPROVAL_GATE").all()
+    assert len(gates) == 1
+    gate_payload = get_block_payload(gates[0])
+    assert gates[0].parent_id == workflow_block_id
+    assert gate_payload["gate_action"] == "remote_stage"
+    assert gate_payload["skill"] == "remote_execution"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_execute_plan_steps_executes_remote_stage_plan_to_approval(session_factory, seed_data, tmp_path):
+    source_dir = tmp_path / "pod5"
+    source_dir.mkdir()
+    (source_dir / "read_001.pod5").write_text("pod5")
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        _template_remote_stage_workflow({
+            "sample_name": "Jamshid",
+            "input_directory": str(source_dir),
+        }),
+        status="PENDING",
+        owner_id="u-bg",
+    )
+    workflow_block_id = workflow_block.id
+    sess.commit()
+    sess.close()
+
+    user = type("UserStub", (), {"id": "u-bg"})()
+
+    with _patch_session(session_factory), \
+         patch("cortex.app.AgentEngine") as mock_engine_cls, \
+         patch(
+             "cortex.plan_executor._call_mcp_tool",
+             new=AsyncMock(return_value={"success": True, "file_count": 1, "files": [{"name": "read_001.pod5"}]}),
+         ), \
+         patch(
+             "cortex.app.extract_job_parameters_from_conversation",
+             new=AsyncMock(return_value={
+                 "sample_name": "Jamshid",
+                 "execution_mode": "slurm",
+                 "ssh_profile_id": "profile-123",
+                 "ssh_profile_nickname": "hpc3",
+                 "remote_base_path": "/remote/u1/agoutic",
+                 "gate_action": "remote_stage",
+             }),
+         ), \
+         patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+         patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+             "id": "profile-123",
+             "nickname": "hpc3",
+             "ssh_host": "hpc3.example.edu",
+             "auth_method": "key_file",
+             "local_username": "alim",
+         }])), \
+         patch("cortex.app._get_ssh_profile_auth_session", new=AsyncMock(return_value={"active": True})):
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine_cls.return_value = mock_engine
+        await _auto_execute_plan_steps("proj-bg", workflow_block_id, user, "test-model")
+
+    sess = session_factory()
+    workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block_id).one()
+    workflow_payload = get_block_payload(workflow)
+    assert workflow_payload["steps"][0]["status"] == "COMPLETED"
+    assert workflow_payload["steps"][1]["status"] == "COMPLETED"
+    assert workflow_payload["steps"][2]["status"] == "COMPLETED"
+    assert workflow_payload["steps"][3]["status"] == "COMPLETED"
+    assert workflow_payload["steps"][4]["status"] == "WAITING_APPROVAL"
+
+    gate = sess.query(ProjectBlock).filter(ProjectBlock.type == "APPROVAL_GATE").one()
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["gate_action"] == "remote_stage"
+    assert gate_payload["skill"] == "remote_execution"
+    assert "stage these input files" in gate_payload["label"]
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_execute_plan_steps_blocks_when_remote_profile_locked(session_factory, seed_data):
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "title": "Stage remote sample for Jamshid",
+            "status": "RUNNING",
+            "current_step_id": "check_remote_profile_auth",
+            "steps": [
+                {
+                    "id": "check_remote_profile_auth",
+                    "kind": "CHECK_REMOTE_PROFILE_AUTH",
+                    "title": "Check remote profile authorization for Jamshid",
+                    "status": "RUNNING",
+                },
+                {
+                    "id": "approve_remote_stage",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve remote staging for Jamshid",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+    workflow_block_id = workflow_block.id
+    sess.commit()
+    sess.close()
+
+    user = type("UserStub", (), {"id": "u-bg"})()
+
+    with _patch_session(session_factory), \
+         patch("cortex.app.AgentEngine") as mock_engine_cls, \
+         patch("cortex.plan_executor.execute_plan", new=AsyncMock(return_value=None)), \
+         patch(
+             "cortex.app.extract_job_parameters_from_conversation",
+             new=AsyncMock(return_value={
+                 "sample_name": "Jamshid",
+                 "execution_mode": "slurm",
+                 "ssh_profile_id": "profile-123",
+                 "ssh_profile_nickname": "hpc3",
+                 "remote_base_path": "/remote/u1/agoutic",
+                 "gate_action": "remote_stage",
+             }),
+         ), \
+         patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+         patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+             "id": "profile-123",
+             "nickname": "hpc3",
+             "ssh_host": "hpc3.example.edu",
+             "auth_method": "key_file",
+             "local_username": "alim",
+         }])), \
+         patch("cortex.app._get_ssh_profile_auth_session", new=AsyncMock(return_value={"active": False})):
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine_cls.return_value = mock_engine
+        await _auto_execute_plan_steps("proj-bg", workflow_block_id, user, "test-model")
+
+    sess = session_factory()
+    workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block_id).one()
+    workflow_payload = get_block_payload(workflow)
+    assert workflow_payload["status"] == "FOLLOW_UP"
+    assert workflow_payload["steps"][0]["status"] == "FOLLOW_UP"
+    assert "locked" in (workflow_payload["steps"][0].get("error") or "")
+
+    gates = sess.query(ProjectBlock).filter(ProjectBlock.type == "APPROVAL_GATE").all()
+    assert gates == []
+
+    notes = sess.query(ProjectBlock).filter(ProjectBlock.type == "AGENT_PLAN").all()
+    assert any("unlock" in (get_block_payload(note).get("markdown", "").lower()) for note in notes)
+    sess.close()
 
 
 # ---------------------------------------------------------------------------

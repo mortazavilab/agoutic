@@ -1,31 +1,4 @@
-# Changelog - March 2026
-
-## [3.4.2] - 2026-03-17
-
-### Fixes
-
-- **Execution mode validation** — added defensive normalization of `execution_mode`
-  parameter in Cortex and Launchpad to prevent incorrect backend selection. Local
-  jobs with malformed or uppercase execution_mode values are now correctly routed
-  to NextflowExecutor instead of accidentally triggering SLURM backend paths
-  (which tried to create `/scratch` directories on macOS, causing permission errors).
-
-- **Backend routing safeguards** — Cortex now validates `execution_mode` before
-  passing to Launchpad, includes logging of selected backend, and defaults to
-  "local" for any invalid values (None, empty, uppercase, or unrecognized).
-
-- **Launchpad submission consistency** — improved error messages and logging when
-  execution_mode is normalized or corrected, making debugging backend selection
-  issues easier.
-
-### Tests
-
-- Verified execution_mode normalization handles edge cases: None, empty string,
-  whitespace-padded values, uppercase variants, and invalid values.
-
 ## [3.4.1] - 2026-03-17
-
-### Features
 
 - **Per-user cross-project SLURM cache reuse** — added cache preflight planning
   and execution for remote references and input datasets. Jobs now carry cache
@@ -35,6 +8,30 @@
 - **Remote cache persistence** — introduced remote cache metadata storage for
   staged references and input fingerprints, including use counters and
   validation timestamps for reuse decisions.
+
+- **Remote base path layout for SLURM runs** — remote execution now derives all
+  staging and run directories from a single `remote_base_path` instead of a
+  bundle of per-path fields or invented `/scratch` fallbacks. References stage
+  under `ref/`, sample data under `data/`, and each remote run under
+  `{project_slug}/workflowN/output`.
+
+- **Stage-only remote sample intake** — added a dedicated remote staging flow
+  that stages references and sample inputs without submitting a scheduler job.
+  This supports a two-step workflow where a sample can be staged first and run
+  later.
+
+- **Remote staged-sample reuse by name** — introduced persistent
+  `RemoteStagedSample` records so prompts like “Analyze Jamshid on hpc3” can
+  reuse an existing staged remote dataset when the profile, sample, and genome
+  match.
+
+- **Remote file browsing** — added `list_remote_files` support so users can
+  browse the configured remote base path, including top-level `ref/`, `data/`,
+  and project workflow folders.
+
+- **Planner-native remote stage workflow** — remote stage-only requests are now
+  recognized as a first-class multi-step planner template with explicit
+  validation, approval, remote staging, and completion steps.
 
 - **My Data filesystem visibility** — `/user/data` now supports an
   `include_untracked` mode so users can view files present on disk even when
@@ -52,13 +49,85 @@
   recent approved SLURM run in the same project cycle, reducing repeat data
   entry on reruns.
 
-- **Safer SSH profile create errors** — Launchpad now maps duplicate profile
-  conflicts to `400` with clear messaging, and schema drift (`no such table` /
-  `no such column`) to `503` with explicit migration guidance.
+- **Local and remote workflow numbering alignment** — SLURM submissions now
+  create local `workflowN` directories before submission and use the same
+  workflow number for the remote project run directory.
+
+- **Approval and extraction clarity for remote runs** — Cortex now carries
+  `remote_base_path`, `staged_remote_input_path`, stage-only intent, and staged
+  sample metadata through extraction, approval, and submission flows.
+
+- **Profile and UI simplification** — SSH profiles and SLURM approval forms now
+  use a single `remote_base_path` field instead of separate remote input/work/
+  output path defaults.
 
 - **Workflow planning visibility** — planner templates now include
   `FIND_REFERENCE_CACHE` and `FIND_DATA_CACHE` steps before approval for remote
   runs, with cache preflight details attached to gate payloads.
+
+- **Safer SSH profile create errors** — Launchpad now maps duplicate profile
+  conflicts to `400` with clear messaging, and schema drift (`no such table` /
+  `no such column`) to `503` with explicit migration guidance.
+
+- **Remote cache preflight behavior** — missing profile path configuration now
+  degrades to an explicit `needs_remote_base_path` state instead of attempting
+  unsafe path assumptions.
+
+- **Remote staging task UX** — stage-only remote approvals now produce a
+  dedicated staging task instead of a generic Nextflow job card, with
+  stage-specific approval copy and completion/failure messaging.
+
+- **Split staging progress visibility** — remote stage-only tasks now show
+  separate progress sections for references and sample data. Cached parts are
+  shown as already complete, while only the missing part remains active.
+
+### Fixes
+
+- **Execution mode validation** — added defensive normalization of `execution_mode`
+  parameter in Cortex and Launchpad to prevent incorrect backend selection. Local
+  jobs with malformed or uppercase execution_mode values are now correctly routed
+  to NextflowExecutor instead of accidentally triggering SLURM backend paths
+  (which tried to create `/scratch` directories on macOS, causing permission errors).
+
+- **Backend routing safeguards** — Cortex now validates `execution_mode` before
+  passing to Launchpad, includes logging of selected backend, and defaults to
+  "local" for any invalid values (None, empty, uppercase, or unrecognized).
+
+- **Launchpad submission consistency** — improved error messages and logging when
+  execution_mode is normalized or corrected, making debugging backend selection
+  issues easier.
+
+- **Remote stage plan execution** — fixed stage-only workflow plans that could
+  stall before approval because `VALIDATE_INPUTS` was still routed through a
+  placeholder analyzer tool path instead of performing real local input
+  validation.
+
+- **Workflow step state refresh** — fixed planner auto-execution to re-read the
+  persisted workflow payload between steps so remote staging progress and
+  dependency checks observe current step status instead of stale in-memory data.
+
+- **Stage-only error routing** — remote staging failures now stay in
+  `STAGING_TASK` blocks rather than surfacing as failed `EXECUTION_JOB` cards
+  with missing run UUIDs.
+
+- **Server-side stage error clarity** — Launchpad `/remote/stage` now translates
+  backend exceptions into explicit HTTP details, including source-path and
+  reference-cache upload failures.
+
+- **Brokered transfer auth parity** — file staging for `key_file` profiles with
+  `local_username` now prefers an active local auth broker session for rsync
+  transfers, matching the SSH connection test/auth path and avoiding local key
+  read permission failures during staging.
+
+### API
+
+- Added `POST /remote/stage` for stage-only remote staging.
+
+- Added `GET /remote/files` for browsing remote directories via a saved SSH
+  profile.
+
+- Updated job submission and MCP tool payloads to use `remote_base_path` and
+  optional `staged_remote_input_path` reuse.
 
 ### Database
 
@@ -68,12 +137,29 @@
   - `cache_preflight_json` on `dogme_jobs`
   - default remote cache roots on `ssh_profiles`
 
+- Added Alembic migration `6d2c9a4f1b7e` to consolidate old remote path fields
+  on `ssh_profiles` into a single `remote_base_path`.
+
+- Added Alembic migration `1a7c0b4d2e9f` to create
+  `remote_staged_samples` for persistent staged-sample tracking and reuse.
+
 ### Tests
 
 - Added coverage for:
   - planner cache preflight steps
   - SLURM backend cache hit/miss/refresh/fallback behavior
+  - stage-only remote workflow auto-execution through approval
+  - dedicated staging-task success/failure behavior in Cortex
+  - broker-preferred rsync transfers for locked key-file SSH profiles
   - remote cache DB upsert/retrieval helpers
+
+- Added focused coverage for:
+  - execution_mode normalization edge cases
+  - stage-only remote submission and workflow/task updates
+  - staged sample DB upsert and lookup helpers
+  - MCP stage-only and remote file browsing tools
+  - planner detection and template generation for remote stage-only requests
+  - SLURM remote path derivation and staged input reuse
 
 ## [3.4.0] - 2026-03-16
 

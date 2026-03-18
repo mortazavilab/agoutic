@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool  # To run LLM without blocking
 from pydantic import BaseModel
 from sqlalchemy import select, desc, func, text
+from sqlalchemy.exc import OperationalError
 
 # ✅ Import from your package
 from cortex.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
@@ -704,21 +705,12 @@ async def _ensure_gate_remote_profile_unlocked(user_id: str, gate_payload: dict)
             detail="SLURM execution requires a saved SSH profile. Select one in the approval gate, then unlock it if needed.",
         )
 
-    missing_remote_fields = []
-    for field_name, label in (
-        ("remote_input_path", "Remote Input Path"),
-        ("remote_work_path", "Remote Work Path"),
-        ("remote_output_path", "Remote Output Path"),
-    ):
-        if not (job_params.get(field_name) or "").strip():
-            missing_remote_fields.append(label)
-
-    if missing_remote_fields:
+    if not (job_params.get("remote_base_path") or "").strip():
         raise HTTPException(
             status_code=400,
             detail=(
-                "SLURM execution requires explicit remote paths before approval. "
-                f"Fill in: {', '.join(missing_remote_fields)}."
+                "SLURM execution requires a remote base path before approval. "
+                "Fill in Remote Base Path or configure it on the saved SSH profile."
             ),
         )
 
@@ -742,9 +734,104 @@ async def _ensure_gate_remote_profile_unlocked(user_id: str, gate_payload: dict)
         ),
     )
 
+def _extract_remote_browse_request(user_message: str) -> dict | None:
+    msg = (user_message or "").strip()
+    if not re.search(
+        r"\b(?:list|show|browse|what)\s+(?:the\s+)?(?:top\s+)?(?:files?|folders?|directories?)\b",
+        msg,
+        re.IGNORECASE,
+    ):
+        return None
+
+    profile_pattern = re.compile(
+        r"\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)([a-zA-Z0-9_-]+)(?:\s+profile)?(?:[?.!,]|$)|(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile)\b",
+        re.IGNORECASE,
+    )
+    profile_match = profile_pattern.search(msg)
+    nickname = None
+    if profile_match:
+        nickname = profile_match.group(1) or profile_match.group(2)
+
+    msg_wo_profile = profile_pattern.sub("", msg).strip()
+    path_match = re.search(
+        r"\b(?:list|show|browse|what)\s+(?:the\s+)?(?:top\s+)?(?:files?|folders?|directories?)\s+(?:in|under|at|of)\s+(.+?)\s*$",
+        msg_wo_profile,
+        re.IGNORECASE,
+    )
+    path = None
+    if path_match:
+        path = path_match.group(1).strip().strip('"\'`')
+
+    if not nickname:
+        return None
+    return {
+        "ssh_profile_nickname": nickname,
+        "path": path or None,
+    }
+
 
 def _normalize_reference_id(reference_id: str | None) -> str:
     return (reference_id or "default").strip().lower()
+
+
+def _staged_sample_payload(entry) -> dict:
+    return {
+        "id": entry.id,
+        "sample_name": entry.sample_name,
+        "sample_slug": entry.sample_slug,
+        "mode": entry.mode,
+        "source_path": entry.source_path,
+        "remote_base_path": entry.remote_base_path,
+        "remote_data_path": entry.remote_data_path,
+        "remote_reference_paths": entry.remote_reference_paths_json or {},
+        "reference_genome": entry.reference_genome_json or [],
+        "status": entry.status,
+        "last_staged_at": entry.last_staged_at.isoformat() if entry.last_staged_at else None,
+        "last_used_at": entry.last_used_at.isoformat() if entry.last_used_at else None,
+    }
+
+
+def _find_remote_staged_sample(
+    session,
+    *,
+    owner_id: str,
+    ssh_profile_id: str | None,
+    sample_name: str | None,
+    mode: str | None,
+    input_directory: str | None,
+    input_directory_explicit: bool,
+):
+    if not ssh_profile_id or not sample_name:
+        return None
+
+    from launchpad.models import RemoteStagedSample
+
+    query = select(RemoteStagedSample).where(
+        RemoteStagedSample.user_id == owner_id,
+        RemoteStagedSample.ssh_profile_id == ssh_profile_id,
+        RemoteStagedSample.sample_name == sample_name,
+    )
+    if mode:
+        query = query.where(RemoteStagedSample.mode == mode)
+
+    try:
+        entry = session.execute(query.order_by(RemoteStagedSample.updated_at.desc())).scalar_one_or_none()
+    except OperationalError:
+        logger.info(
+            "Remote staged sample lookup unavailable; continuing without staged reuse metadata",
+            owner_id=owner_id,
+            ssh_profile_id=ssh_profile_id,
+        )
+        return None
+    if entry is None:
+        return None
+
+    if input_directory_explicit and input_directory:
+        source_path = str(entry.source_path or "")
+        if source_path and source_path != str(input_directory):
+            return None
+
+    return entry
 
 
 def _compute_local_input_fingerprint(local_path: str) -> str:
@@ -844,18 +931,23 @@ async def _build_slurm_cache_preflight(
         except Exception:
             logger.info("SLURM cache preflight: profile enrichment unavailable", project_id=project_id)
 
-    profile_key = ssh_profile_id or "default-profile"
-    cache_base = f"/scratch/{ssh_username}/agoutic/.agoutic_cache/{owner_id}/{profile_key}"
-    normalized["remote_reference_cache_root"] = (
-        normalized.get("remote_reference_cache_root")
-        or profile_defaults.get("default_remote_reference_cache_root")
-        or f"{cache_base}/references"
-    )
-    normalized["remote_data_cache_root"] = (
-        normalized.get("remote_data_cache_root")
-        or profile_defaults.get("default_remote_data_cache_root")
-        or f"{cache_base}/data"
-    )
+    normalized["remote_base_path"] = normalized.get("remote_base_path") or profile_defaults.get("remote_base_path")
+    if normalized.get("remote_base_path"):
+        remote_base_path = str(normalized["remote_base_path"]).rstrip("/")
+        normalized["remote_reference_cache_root"] = f"{remote_base_path}/ref"
+        normalized["remote_data_cache_root"] = f"{remote_base_path}/data"
+    else:
+        normalized["cache_preflight"] = {
+            "scope": "per_user_cross_project",
+            "status": "needs_remote_base_path",
+            "project_id": project_id,
+            "user_id": owner_id,
+            "ssh_profile_id": ssh_profile_id,
+            "reference_actions": [],
+            "data_action": None,
+            "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+        }
+        return normalized
 
     ref_ids_raw = normalized.get("reference_genome") or ["mm39"]
     if isinstance(ref_ids_raw, str):
@@ -881,7 +973,7 @@ async def _build_slurm_cache_preflight(
         "data_action": {
             "reference_id": primary_ref,
             "input_fingerprint": input_fingerprint,
-            "cache_path": f"{normalized['remote_data_cache_root']}/{primary_ref}/{data_key}",
+            "cache_path": f"{normalized['remote_data_cache_root']}/{data_key}",
             "action": "stage",
             "reason": "cache_miss",
         },
@@ -1035,7 +1127,6 @@ async def _prepare_remote_execution_params(
         except (ValueError, httpx.HTTPError, OSError):
             pass
 
-    remote_root = f"/scratch/{ssh_username or 'agoutic'}/agoutic/{project_slug}/{workflow_slug}"
     normalized["slurm_account"] = normalized.get("slurm_account") or profile_defaults.get("default_slurm_account")
     normalized["slurm_partition"] = normalized.get("slurm_partition") or profile_defaults.get("default_slurm_partition")
     normalized["slurm_gpu_account"] = normalized.get("slurm_gpu_account") or profile_defaults.get("default_slurm_gpu_account")
@@ -1049,33 +1140,55 @@ async def _prepare_remote_execution_params(
         "workflow_slug": workflow_slug,
         "ssh_username": ssh_username or "agoutic",
         "local_workflow_directory": normalized["local_workflow_directory"],
-        "remote_root": remote_root,
     }
-    remote_input_default = _render_profile_default(profile_defaults.get("default_remote_input_path"), template_context)
-    normalized["remote_input_path"] = normalized.get("remote_input_path") or remote_input_default or f"{remote_root}/input"
-
-    template_context["remote_input_path"] = normalized["remote_input_path"]
-    remote_work_default = _render_profile_default(profile_defaults.get("default_remote_work_path"), template_context)
-    normalized["remote_work_path"] = normalized.get("remote_work_path") or remote_work_default or f"{remote_root}/work"
-
-    template_context["remote_work_path"] = normalized["remote_work_path"]
-    remote_output_default = _render_profile_default(profile_defaults.get("default_remote_output_path"), template_context)
-    normalized["remote_output_path"] = normalized.get("remote_output_path") or remote_output_default or f"{normalized['remote_work_path']}/output"
-
-    profile_key = ssh_profile_id or "default-profile"
-    cache_root_default = f"/scratch/{ssh_username or 'agoutic'}/agoutic/.agoutic_cache/{owner_id}/{profile_key}"
-    normalized["remote_reference_cache_root"] = (
-        normalized.get("remote_reference_cache_root")
-        or profile_defaults.get("default_remote_reference_cache_root")
-        or f"{cache_root_default}/references"
-    )
-    normalized["remote_data_cache_root"] = (
-        normalized.get("remote_data_cache_root")
-        or profile_defaults.get("default_remote_data_cache_root")
-        or f"{cache_root_default}/data"
-    )
+    remote_base_default = _render_profile_default(profile_defaults.get("remote_base_path"), template_context)
+    normalized["remote_base_path"] = normalized.get("remote_base_path") or remote_base_default
+    if normalized.get("remote_base_path"):
+        remote_base_path = str(normalized["remote_base_path"]).rstrip("/")
+        normalized["remote_reference_cache_root"] = f"{remote_base_path}/ref"
+        normalized["remote_data_cache_root"] = f"{remote_base_path}/data"
 
     normalized = await _build_slurm_cache_preflight(session, project_id, owner_id, normalized)
+
+    if normalized.get("remote_action") != "stage_only":
+        staged_entry = _find_remote_staged_sample(
+            session,
+            owner_id=owner_id,
+            ssh_profile_id=normalized.get("ssh_profile_id"),
+            sample_name=normalized.get("sample_name"),
+            mode=normalized.get("mode"),
+            input_directory=normalized.get("input_directory"),
+            input_directory_explicit=bool(normalized.get("input_directory_explicit")),
+        )
+        if staged_entry is not None:
+            staged_payload = _staged_sample_payload(staged_entry)
+            normalized["staged_remote_input_path"] = staged_payload["remote_data_path"]
+            normalized["remote_staged_sample"] = staged_payload
+            normalized["remote_base_path"] = normalized.get("remote_base_path") or staged_payload["remote_base_path"]
+            preflight = normalized.get("cache_preflight") or {}
+            if isinstance(preflight, dict):
+                preflight["status"] = "ready"
+                preflight["staged_sample"] = staged_payload
+                preflight["data_action"] = {
+                    "reference_id": _normalize_reference_id((normalized.get("reference_genome") or ["default"])[0]),
+                    "input_fingerprint": staged_entry.input_fingerprint,
+                    "cache_path": staged_payload["remote_data_path"],
+                    "action": "reuse",
+                    "reason": "staged_sample_match",
+                }
+                ref_actions = []
+                for ref_id, ref_path in (staged_payload["remote_reference_paths"] or {}).items():
+                    ref_actions.append(
+                        {
+                            "reference_id": ref_id,
+                            "cache_path": ref_path,
+                            "action": "reuse",
+                            "reason": "staged_sample_match",
+                        }
+                    )
+                if ref_actions:
+                    preflight["reference_actions"] = ref_actions
+                normalized["cache_preflight"] = preflight
     return normalized
 
 
@@ -1150,8 +1263,7 @@ async def resubmit_job(run_uuid: str, request: Request):
             "slurm_walltime": job.slurm_walltime,
             "slurm_gpus": job.slurm_gpus,
             "slurm_gpu_type": job.slurm_gpu_type,
-            "remote_work_path": job.remote_work_dir,
-            "remote_output_path": job.remote_output_dir,
+            "remote_base_path": str(Path(job.remote_work_dir).parent.parent) if job.remote_work_dir else None,
             "result_destination": job.result_destination,
         }
         if job.modifications:
@@ -1322,6 +1434,7 @@ async def update_block(
                 _plan_block = _find_workflow_plan(session, block.project_id,
                                                   workflow_block_id=block.parent_id)
                 if _plan_block:
+                    _mark_workflow_plan_approval_complete(session, _plan_block, block.id)
                     asyncio.create_task(
                         _auto_execute_plan_steps(
                             block.project_id, _plan_block.id,
@@ -1429,9 +1542,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
                 "slurm_walltime": seed_params.get("slurm_walltime"),
                 "slurm_gpus": seed_params.get("slurm_gpus"),
                 "slurm_gpu_type": seed_params.get("slurm_gpu_type"),
-                "remote_input_path": seed_params.get("remote_input_path"),
-                "remote_work_path": seed_params.get("remote_work_path"),
-                "remote_output_path": seed_params.get("remote_output_path"),
+                "remote_base_path": seed_params.get("remote_base_path"),
                 "result_destination": seed_params.get("result_destination"),
                 "max_gpu_tasks": seed_params.get("max_gpu_tasks"),
             }
@@ -1460,6 +1571,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         "sample_name": None,
         "mode": None,
         "input_directory": None,
+        "input_directory_explicit": False,
         "input_type": "pod5",  # Default to pod5
         "entry_point": None,  # Dogme entry point
         "reference_genome": [],  # Now a list for multi-genome support
@@ -1482,18 +1594,32 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         "slurm_walltime": slurm_reuse_seed.get("slurm_walltime"),
         "slurm_gpus": slurm_reuse_seed.get("slurm_gpus"),
         "slurm_gpu_type": slurm_reuse_seed.get("slurm_gpu_type"),
-        "remote_input_path": slurm_reuse_seed.get("remote_input_path"),
-        "remote_work_path": slurm_reuse_seed.get("remote_work_path"),
-        "remote_output_path": slurm_reuse_seed.get("remote_output_path"),
+        "remote_base_path": slurm_reuse_seed.get("remote_base_path"),
+        "staged_remote_input_path": None,
+        "remote_staged_sample": None,
         "result_destination": slurm_reuse_seed.get("result_destination"),
+        "remote_action": "job",
+        "gate_action": "job",
     }
 
-    if re.search(r"\b(slurm|sbatch|hpc3|cluster|remote(?:ly|\s+execution)?)\b", all_user_text):
+    if re.search(r"\b(slurm|sbatch|cluster|remote(?:ly|\s+execution)?)\b", all_user_text):
         params["execution_mode"] = "slurm"
 
-    if re.search(r"\bhpc3\b", all_user_text):
+    profile_target_match = re.search(
+        r"\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)([a-zA-Z0-9_-]+)(?:\s+profile)?(?:[?.!,]|$)|(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile)\b",
+        all_user_text_original,
+        re.IGNORECASE,
+    )
+    if profile_target_match:
         params["execution_mode"] = "slurm"
-        params["ssh_profile_nickname"] = "hpc3"
+        params["ssh_profile_nickname"] = profile_target_match.group(1) or profile_target_match.group(2)
+
+    if re.search(r"\bstage(?:\s+only)?\b", all_user_text) and (
+        re.search(r"\b(slurm|cluster|remote)\b", all_user_text) or profile_target_match
+    ):
+        params["execution_mode"] = "slurm"
+        params["remote_action"] = "stage_only"
+        params["gate_action"] = "remote_stage"
 
     profile_match = re.search(
         r"\b(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile\b",
@@ -1615,6 +1741,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     
     if _rel_paths:
         cleaned_path = _rel_paths[0].rstrip('.,;:!?')
+        params["input_directory_explicit"] = True
         # Resolve relative path against project directory
         _proj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
         _owner_id = None
@@ -1637,6 +1764,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     elif _abs_paths:
         cleaned_path = _abs_paths[0].rstrip('.,;:!?')
         params["input_directory"] = cleaned_path
+        params["input_directory_explicit"] = True
     else:
         params["input_directory"] = "/data/samples/test"
     
@@ -1650,6 +1778,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         r'called\s+([a-zA-Z0-9_-]+)',  # "called Ali1"
         r'(?:the\s+)?sample\s+([a-zA-Z0-9_-]+)',  # "the sample c2c12r1" / "sample c2c12r1"
         r'analyze\s+(?:the\s+)?(?:sample\s+)?([a-zA-Z0-9_-]+)\s+using',  # "analyze c2c12r1 using"
+        r'analyze\s+(?:the\s+)?(?:sample\s+)?([a-zA-Z0-9_-]+)\s+on',  # "analyze Jamshid on hpc3"
     ]
     _skip_words = {'is', 'the', 'a', 'an', 'this', 'that', 'it', 'at', 'in', 'on',
                    'mm39', 'grch38', 'hg38', 'mm10', 'name', 'type', 'data', 'file',
@@ -2074,6 +2203,7 @@ async def download_after_approval(project_id: str, gate_block_id: str):
 
 _WORKFLOW_PLAN_TYPE = "WORKFLOW_PLAN"
 _LOCAL_SAMPLE_WORKFLOW = "local_sample_intake"
+_REMOTE_SAMPLE_WORKFLOW = "remote_sample_intake"
 
 
 async def _auto_execute_plan_steps(
@@ -2111,10 +2241,232 @@ async def _auto_execute_plan_steps(
             request_id=request_id,
             emit_progress=_emit_progress,
         )
+
+        session.refresh(workflow_block)
+        auth_result = await _handle_workflow_plan_remote_profile_auth(
+            session,
+            workflow_block,
+            owner_id=user.id,
+            model_name=engine.model_name,
+        )
+        if auth_result == "resume":
+            session.refresh(workflow_block)
+            await execute_plan(
+                session,
+                workflow_block,
+                engine=engine,
+                user=user,
+                project_id=project_id,
+                request_id=request_id,
+                emit_progress=_emit_progress,
+            )
+            session.refresh(workflow_block)
+        elif auth_result == "blocked":
+            return
+
+        await _ensure_workflow_plan_approval_gate(
+            session,
+            workflow_block,
+            owner_id=user.id,
+            model_name=engine.model_name,
+        )
     except Exception as e:
         logger.error("Plan auto-execution failed", error=str(e), exc_info=True)
     finally:
         session.close()
+
+
+async def _ensure_workflow_plan_approval_gate(
+    session,
+    workflow_block: ProjectBlock,
+    *,
+    owner_id: str,
+    model_name: str,
+) -> ProjectBlock | None:
+    """Create an approval gate when a workflow plan pauses at REQUEST_APPROVAL."""
+    payload = get_block_payload(workflow_block)
+    current_step_id = payload.get("current_step_id")
+    if not current_step_id:
+        return None
+
+    current_step = next(
+        (step for step in payload.get("steps", []) if step.get("id") == current_step_id),
+        None,
+    )
+    if not current_step:
+        return None
+    if current_step.get("kind") != "REQUEST_APPROVAL" or current_step.get("status") != "WAITING_APPROVAL":
+        return None
+
+    existing_gate = session.execute(
+        select(ProjectBlock)
+        .where(
+            ProjectBlock.project_id == workflow_block.project_id,
+            ProjectBlock.type == "APPROVAL_GATE",
+            ProjectBlock.parent_id == workflow_block.id,
+            ProjectBlock.status == "PENDING",
+        )
+        .order_by(ProjectBlock.seq.desc())
+    ).scalar_one_or_none()
+    if existing_gate is not None:
+        return existing_gate
+
+    extracted_params = await extract_job_parameters_from_conversation(session, workflow_block.project_id)
+    gate_action = "job"
+    gate_skill = payload.get("skill") or "welcome"
+    if isinstance(extracted_params, dict):
+        gate_action = extracted_params.get("gate_action") or gate_action
+        if (extracted_params.get("execution_mode") or "local") == "slurm":
+            gate_skill = "remote_execution"
+
+    gate_label = "Do you authorize the Agent to proceed with this plan?"
+    if gate_action == "remote_stage":
+        gate_label = "Do you authorize the Agent to stage these input files to the selected remote profile?"
+
+    gate_block = _create_block_internal(
+        session,
+        workflow_block.project_id,
+        "APPROVAL_GATE",
+        {
+            "label": gate_label,
+            "extracted_params": extracted_params,
+            "cache_preflight": extracted_params.get("cache_preflight") if isinstance(extracted_params, dict) else None,
+            "gate_action": gate_action,
+            "attempt_number": 1,
+            "rejection_history": [],
+            "skill": gate_skill,
+            "model": model_name,
+            "workflow_block_id": workflow_block.id,
+        },
+        status="PENDING",
+        owner_id=owner_id,
+    )
+    gate_block.parent_id = workflow_block.id
+    session.commit()
+    session.refresh(gate_block)
+    sync_project_tasks(session, workflow_block.project_id)
+    return gate_block
+
+
+async def _handle_workflow_plan_remote_profile_auth(
+    session,
+    workflow_block: ProjectBlock,
+    *,
+    owner_id: str,
+    model_name: str,
+) -> str | None:
+    """Resolve or block the remote-profile authorization step for workflow plans."""
+    payload = get_block_payload(workflow_block)
+    current_step_id = payload.get("current_step_id")
+    if not current_step_id:
+        return None
+
+    current_step = next(
+        (step for step in payload.get("steps", []) if step.get("id") == current_step_id),
+        None,
+    )
+    if not current_step or current_step.get("kind") != "CHECK_REMOTE_PROFILE_AUTH":
+        return None
+
+    job_params = await extract_job_parameters_from_conversation(session, workflow_block.project_id)
+    if (job_params.get("execution_mode") or "local") != "slurm":
+        current_step["status"] = "COMPLETED"
+        current_step["auth_status"] = "not_required"
+        current_step.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+        payload["status"] = "RUNNING"
+        _persist_workflow_plan(session, workflow_block, payload)
+        return "resume"
+
+    ssh_profile_id, ssh_profile_nickname = await _resolve_ssh_profile_reference(
+        owner_id,
+        job_params.get("ssh_profile_id"),
+        job_params.get("ssh_profile_nickname"),
+    )
+    profiles = await _list_user_ssh_profiles(owner_id)
+    profile = next((item for item in profiles if item.get("id") == ssh_profile_id), None)
+
+    if not profile:
+        current_step["status"] = "FOLLOW_UP"
+        current_step["error"] = "Select a saved SSH profile before remote staging can continue."
+        payload["status"] = "FOLLOW_UP"
+        _persist_workflow_plan(session, workflow_block, payload)
+        _create_block_internal(
+            session,
+            workflow_block.project_id,
+            "AGENT_PLAN",
+            {
+                "markdown": "Remote staging is paused because no saved SSH profile is selected. Pick a profile in the approval flow, then try again.",
+                "skill": "remote_execution",
+                "model": model_name,
+            },
+            status="DONE",
+            owner_id=owner_id,
+        )
+        return "blocked"
+
+    if not profile.get("local_username") or profile.get("auth_method") != "key_file":
+        current_step["status"] = "COMPLETED"
+        current_step["auth_status"] = "not_required"
+        current_step.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+        payload["status"] = "RUNNING"
+        _persist_workflow_plan(session, workflow_block, payload)
+        return "resume"
+
+    session_info = await _get_ssh_profile_auth_session(owner_id, ssh_profile_id)
+    if session_info.get("active"):
+        current_step["status"] = "COMPLETED"
+        current_step["auth_status"] = "active"
+        current_step["ssh_profile_id"] = ssh_profile_id
+        current_step["ssh_profile_nickname"] = ssh_profile_nickname
+        current_step.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+        payload["status"] = "RUNNING"
+        _persist_workflow_plan(session, workflow_block, payload)
+        return "resume"
+
+    profile_label = profile.get("nickname") or ssh_profile_nickname or profile.get("ssh_host") or ssh_profile_id
+    message = (
+        f"Remote staging is paused because profile `{profile_label}` is locked. "
+        "Open Remote Connection Profiles and unlock the session for that profile, then try again."
+    )
+    current_step["status"] = "FOLLOW_UP"
+    current_step["error"] = message
+    current_step["ssh_profile_id"] = ssh_profile_id
+    current_step["ssh_profile_nickname"] = ssh_profile_nickname
+    payload["status"] = "FOLLOW_UP"
+    _persist_workflow_plan(session, workflow_block, payload)
+    _create_block_internal(
+        session,
+        workflow_block.project_id,
+        "AGENT_PLAN",
+        {
+            "markdown": message,
+            "skill": "remote_execution",
+            "model": model_name,
+        },
+        status="DONE",
+        owner_id=owner_id,
+    )
+    return "blocked"
+
+
+def _mark_workflow_plan_approval_complete(session, workflow_block: ProjectBlock, gate_block_id: str) -> None:
+    """Mark the current approval step complete after its gate is approved."""
+    payload = get_block_payload(workflow_block)
+    current_step_id = payload.get("current_step_id")
+    if not current_step_id:
+        return
+
+    for step in payload.get("steps", []):
+        if step.get("id") != current_step_id:
+            continue
+        if step.get("kind") != "REQUEST_APPROVAL":
+            return
+        step["status"] = "COMPLETED"
+        step["approval_gate_id"] = gate_block_id
+        step.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+        payload["status"] = "RUNNING"
+        _persist_workflow_plan(session, workflow_block, payload)
+        return
 
 
 def _workflow_step_index(payload: dict, step_id: str) -> int | None:
@@ -2177,6 +2529,36 @@ def _set_workflow_step_status(
     return payload
 
 
+def _resolve_workflow_step_id(payload: dict, *identifiers: str, kinds: tuple[str, ...] = ()) -> str | None:
+    steps = payload.get("steps", [])
+    for identifier in identifiers:
+        if not identifier:
+            continue
+        for step in steps:
+            if step.get("id") == identifier:
+                return identifier
+    if kinds:
+        for step in steps:
+            if step.get("kind") in kinds:
+                return step.get("id")
+    return None
+
+
+def _update_project_block_payload(session, block_id: str, updates: dict, *, status: str | None = None) -> ProjectBlock | None:
+    block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
+    if not block:
+        return None
+    payload = get_block_payload(block)
+    payload.update(updates)
+    block.payload_json = json.dumps(payload)
+    if status is not None:
+        block.status = status
+    session.commit()
+    session.refresh(block)
+    sync_project_tasks(session, block.project_id)
+    return block
+
+
 def _apply_slurm_cache_preflight_to_workflow(
     session,
     workflow_block: ProjectBlock | None,
@@ -2212,9 +2594,204 @@ def _apply_slurm_cache_preflight_to_workflow(
             updated["cache_root"] = (cache_preflight.get("cache_roots") or {}).get("data_root")
             updated.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
             steps[idx] = updated
+        elif kind in {"check_remote_stage", "CHECK_REMOTE_STAGE"}:
+            updated = dict(step)
+            updated["status"] = "COMPLETED"
+            updated["cache_preflight_status"] = preflight_status
+            updated["reference_actions"] = reference_actions
+            updated["data_action"] = data_action
+            updated["cache_root"] = (cache_preflight.get("cache_roots") or {}).get("data_root")
+            updated.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+            steps[idx] = updated
 
     payload["steps"] = steps
     _persist_workflow_plan(session, workflow_block, payload)
+
+
+def _make_stage_part(status: str, progress_percent: int, message: str, details: list[dict] | None = None) -> dict:
+    part = {
+        "status": status,
+        "progress_percent": progress_percent,
+        "message": message,
+    }
+    if details is not None:
+        part["details"] = details
+    return part
+
+
+def _stage_part_progress(parts: dict | None) -> int:
+    values: list[int] = []
+    for key in ("references", "data"):
+        part = (parts or {}).get(key) or {}
+        try:
+            values.append(max(0, min(int(part.get("progress_percent", 0) or 0), 100)))
+        except (TypeError, ValueError):
+            values.append(0)
+    if not values:
+        return 0
+    return int(sum(values) / len(values))
+
+
+def _reference_stage_message(reference_statuses: dict[str, str]) -> tuple[str, list[dict]]:
+    if not reference_statuses:
+        return "Reference assets are ready.", []
+
+    details = []
+    counts: dict[str, int] = {}
+    for ref_id, raw_status in reference_statuses.items():
+        status = (raw_status or "unknown").strip().lower()
+        counts[status] = counts.get(status, 0) + 1
+        if status == "reused":
+            message = f"{ref_id} already staged on the remote profile."
+        elif status == "refreshed":
+            message = f"{ref_id} refreshed on the remote profile."
+        elif status == "staged":
+            message = f"{ref_id} staged to the remote profile."
+        elif status == "fallback":
+            message = f"{ref_id} staged to the remote profile via fallback."
+        else:
+            message = f"{ref_id} status: {raw_status}"
+        details.append({"reference_id": ref_id, "status": status, "message": message})
+
+    if counts.get("reused") == len(reference_statuses):
+        return "Reference assets already staged on the remote profile.", details
+
+    summary = []
+    for key in ("reused", "refreshed", "staged", "fallback"):
+        count = counts.get(key, 0)
+        if count:
+            label = "already staged" if key == "reused" else key
+            summary.append(f"{count} {label}")
+    if summary:
+        return f"Reference assets ready ({', '.join(summary)}).", details
+    return "Reference assets are ready.", details
+
+
+def _initial_stage_parts(cache_preflight: dict | None) -> dict:
+    cache_preflight = cache_preflight or {}
+    reference_actions = cache_preflight.get("reference_actions") or []
+    data_action = cache_preflight.get("data_action") or {}
+
+    reference_details = []
+    reference_needs_transfer = False
+    for item in reference_actions:
+        action = (item.get("action") or "stage").strip().lower()
+        ref_id = item.get("reference_id") or "reference"
+        if action == "reuse":
+            reference_details.append({
+                "reference_id": ref_id,
+                "status": "reused",
+                "message": f"{ref_id} already staged on the remote profile.",
+            })
+        else:
+            reference_needs_transfer = True
+            action_label = "refreshing" if action == "refresh" else "staging"
+            reference_details.append({
+                "reference_id": ref_id,
+                "status": "pending",
+                "message": f"{action_label.capitalize()} {ref_id} on the remote profile.",
+            })
+
+    if reference_actions and not reference_needs_transfer:
+        references = _make_stage_part(
+            "COMPLETED",
+            100,
+            "Reference assets already staged on the remote profile.",
+            reference_details,
+        )
+    else:
+        references = _make_stage_part(
+            "RUNNING",
+            40,
+            "Staging reference assets on the remote profile...",
+            reference_details,
+        )
+
+    data_action_name = (data_action.get("action") or "stage").strip().lower()
+    if data_action_name == "reuse":
+        data = _make_stage_part(
+            "COMPLETED",
+            100,
+            "Sample data already staged on the remote profile.",
+        )
+    elif references.get("status") == "COMPLETED":
+        data = _make_stage_part(
+            "RUNNING",
+            35,
+            "Staging sample data on the remote profile...",
+        )
+    else:
+        data = _make_stage_part(
+            "PENDING",
+            0,
+            "Waiting for reference staging to finish.",
+        )
+
+    return {"references": references, "data": data}
+
+
+def _final_stage_parts(stage_result: dict, existing_parts: dict | None = None) -> dict:
+    reference_statuses = stage_result.get("reference_cache_statuses") or {}
+    references_message, reference_details = _reference_stage_message(reference_statuses)
+    references = _make_stage_part("COMPLETED", 100, references_message, reference_details)
+
+    data_status = (stage_result.get("data_cache_status") or "staged").strip().lower()
+    if data_status == "reused":
+        data_message = "Sample data already staged on the remote profile."
+    elif data_status == "fallback":
+        data_message = "Sample data staged to the remote profile via fallback."
+    else:
+        data_message = "Sample data staged to the remote profile."
+    data = _make_stage_part("COMPLETED", 100, data_message)
+
+    if not reference_statuses and existing_parts:
+        references = dict((existing_parts or {}).get("references") or references)
+        references["status"] = "COMPLETED"
+        references["progress_percent"] = 100
+
+    return {"references": references, "data": data}
+
+
+def _failed_stage_parts(parts: dict | None, error_message: str) -> dict:
+    parts = {
+        "references": dict((parts or {}).get("references") or _make_stage_part("RUNNING", 40, "Staging reference assets on the remote profile...")),
+        "data": dict((parts or {}).get("data") or _make_stage_part("PENDING", 0, "Waiting for reference staging to finish.")),
+    }
+    lowered = (error_message or "").lower()
+
+    if "reference cache stage failed" in lowered or "reference cache" in lowered:
+        parts["references"].update({
+            "status": "FAILED",
+            "message": f"Reference staging failed: {error_message}",
+        })
+        if parts["data"].get("status") != "COMPLETED":
+            parts["data"].update({
+                "status": "PENDING",
+                "progress_percent": 0,
+                "message": "Sample data did not start because reference staging failed.",
+            })
+        return parts
+
+    if "input transfer failed" in lowered or "local source path does not exist" in lowered:
+        if parts["references"].get("status") != "COMPLETED":
+            parts["references"].update({
+                "status": "COMPLETED",
+                "progress_percent": 100,
+                "message": "Reference assets are ready on the remote profile.",
+            })
+        parts["data"].update({
+            "status": "FAILED",
+            "message": f"Sample data staging failed: {error_message}",
+        })
+        return parts
+
+    for part in parts.values():
+        if part.get("status") != "COMPLETED":
+            part.update({
+                "status": "FAILED",
+                "message": error_message,
+            })
+    return parts
 
 
 def _find_workflow_plan(session, project_id: str, workflow_block_id: str | None = None, run_uuid: str | None = None) -> ProjectBlock | None:
@@ -2292,6 +2869,109 @@ def _build_local_sample_workflow_payload(job_data: dict, *, gate_block_id: str) 
     }
 
 
+def _build_remote_sample_workflow_payload(job_data: dict, *, gate_block_id: str, stage_only: bool) -> dict:
+    sample_name = job_data["sample_name"]
+    source_path = str(job_data.get("input_directory") or "")
+    staged_path = str(job_data.get("staged_remote_input_path") or "")
+    steps = [
+        {
+            "id": "check_remote_stage",
+            "kind": "check_remote_stage",
+            "title": f"Check remote staged data for {sample_name}",
+            "status": "PENDING",
+            "order_index": 0,
+        },
+        {
+            "id": "stage_input",
+            "kind": "remote_stage",
+            "title": f"Stage or reuse remote input for {sample_name}",
+            "status": "PENDING",
+            "source_path": source_path,
+            "staged_input_directory": staged_path,
+            "order_index": 1,
+        },
+    ]
+    if stage_only:
+        steps.append(
+            {
+                "id": "complete_stage_only",
+                "kind": "complete_stage_only",
+                "title": f"Finish remote staging for {sample_name}",
+                "status": "PENDING",
+                "order_index": 2,
+            }
+        )
+    else:
+        steps.extend(
+            [
+                {
+                    "id": "run_dogme",
+                    "kind": "run",
+                    "title": f"Run Dogme for {sample_name}",
+                    "status": "PENDING",
+                    "order_index": 2,
+                },
+                {
+                    "id": "analyze_results",
+                    "kind": "analysis",
+                    "title": f"Analyze results for {sample_name}",
+                    "status": "PENDING",
+                    "order_index": 3,
+                },
+            ]
+        )
+
+    return {
+        "workflow_type": _REMOTE_SAMPLE_WORKFLOW,
+        "title": f"{'Stage' if stage_only else 'Run remote analysis for'} {sample_name}",
+        "sample_name": sample_name,
+        "mode": job_data.get("mode"),
+        "source_path": source_path,
+        "staged_input_directory": staged_path,
+        "remote_base_path": job_data.get("remote_base_path"),
+        "ssh_profile_id": job_data.get("ssh_profile_id"),
+        "gate_block_id": gate_block_id,
+        "run_uuid": None,
+        "remote_action": "stage_only" if stage_only else "job",
+        "steps": steps,
+    }
+
+
+def _ensure_remote_sample_workflow(
+    session,
+    project_id: str,
+    owner_id: str,
+    gate_block_id: str,
+    job_data: dict,
+    *,
+    workflow_block_id: str | None = None,
+    stage_only: bool,
+) -> ProjectBlock:
+    workflow_block = _find_workflow_plan(session, project_id, workflow_block_id=workflow_block_id)
+    if workflow_block is not None:
+        payload = get_block_payload(workflow_block)
+        payload["sample_name"] = job_data["sample_name"]
+        payload["mode"] = job_data.get("mode")
+        payload["source_path"] = str(job_data.get("input_directory") or "")
+        payload["staged_input_directory"] = str(job_data.get("staged_remote_input_path") or "")
+        payload["remote_base_path"] = job_data.get("remote_base_path")
+        payload["ssh_profile_id"] = job_data.get("ssh_profile_id")
+        payload["remote_action"] = "stage_only" if stage_only else "job"
+        _persist_workflow_plan(session, workflow_block, payload)
+        return workflow_block
+
+    workflow_block = _create_block_internal(
+        session,
+        project_id,
+        _WORKFLOW_PLAN_TYPE,
+        _build_remote_sample_workflow_payload(job_data, gate_block_id=gate_block_id, stage_only=stage_only),
+        status="PENDING",
+        owner_id=owner_id,
+    )
+    sync_project_tasks(session, project_id)
+    return workflow_block
+
+
 def _ensure_local_sample_workflow(session, project_id: str, owner_id: str, gate_block_id: str, job_data: dict, workflow_block_id: str | None = None) -> ProjectBlock:
     workflow_block = _find_workflow_plan(session, project_id, workflow_block_id=workflow_block_id)
     if workflow_block is not None:
@@ -2364,6 +3044,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
     """
     session = SessionLocal()
     
+    stage_task_block = None
     try:
         # Get the gate block to check for edited params
         gate_block = session.query(ProjectBlock).filter(ProjectBlock.id == gate_block_id).first()
@@ -2479,23 +3160,34 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "slurm_walltime": (job_params.get("slurm_resources") or {}).get("walltime") or job_params.get("slurm_walltime"),
             "slurm_gpus": (job_params.get("slurm_resources") or {}).get("gpus") or job_params.get("slurm_gpus"),
             "slurm_gpu_type": (job_params.get("slurm_resources") or {}).get("gpu_type") or job_params.get("slurm_gpu_type"),
-            "remote_input_path": (job_params.get("remote_paths") or {}).get("remote_input_path") or job_params.get("remote_input_path"),
-            "remote_work_path": (job_params.get("remote_paths") or {}).get("remote_work_path") or job_params.get("remote_work_path"),
-            "remote_output_path": (job_params.get("remote_paths") or {}).get("remote_output_path") or job_params.get("remote_output_path"),
-            "remote_reference_cache_root": job_params.get("remote_reference_cache_root"),
-            "remote_data_cache_root": job_params.get("remote_data_cache_root"),
+            "remote_base_path": (job_params.get("remote_paths") or {}).get("remote_base_path") or job_params.get("remote_base_path"),
+            "staged_remote_input_path": job_params.get("staged_remote_input_path"),
             "cache_preflight": job_params.get("cache_preflight"),
             "result_destination": job_params.get("result_destination"),
         }
 
         workflow_block = None
         gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
+        remote_stage_only = execution_mode == "slurm" and (
+            gate_action == "remote_stage" or job_params.get("remote_action") == "stage_only"
+        )
         workflow_block_id = job_params.get("workflow_block_id")
 
         if workflow_block_id:
             workflow_block = _find_workflow_plan(session, project_id, workflow_block_id=workflow_block_id)
         if workflow_block is None and job_params.get("run_uuid"):
             workflow_block = _find_workflow_plan(session, project_id, run_uuid=job_params.get("run_uuid"))
+
+        if execution_mode == "slurm":
+            workflow_block = _ensure_remote_sample_workflow(
+                session,
+                project_id,
+                owner_id,
+                gate_block_id,
+                job_data,
+                workflow_block_id=workflow_block_id,
+                stage_only=remote_stage_only,
+            )
 
         _apply_slurm_cache_preflight_to_workflow(session, workflow_block, job_data.get("cache_preflight"))
 
@@ -2628,6 +3320,174 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
 
         submission_payload = dict(job_data)
         submission_payload.pop("staged_input_directory", None)
+
+        workflow_payload = get_block_payload(workflow_block) if workflow_block is not None else None
+        check_remote_stage_step_id = None
+        stage_input_step_id = None
+        complete_stage_only_step_id = None
+        if workflow_payload is not None:
+            check_remote_stage_step_id = _resolve_workflow_step_id(
+                workflow_payload,
+                "check_remote_stage",
+                kinds=("check_remote_stage", "CHECK_REMOTE_STAGE"),
+            )
+            stage_input_step_id = _resolve_workflow_step_id(
+                workflow_payload,
+                "stage_input",
+                kinds=("remote_stage", "REMOTE_STAGE"),
+            )
+            complete_stage_only_step_id = _resolve_workflow_step_id(
+                workflow_payload,
+                "complete_stage_only",
+                kinds=("complete_stage_only", "COMPLETE_STAGE_ONLY"),
+            )
+
+        if execution_mode == "slurm" and workflow_block is not None and check_remote_stage_step_id:
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                check_remote_stage_step_id,
+                "COMPLETED",
+                extra={"cache_preflight": job_data.get("cache_preflight")},
+            )
+
+        if remote_stage_only:
+            stage_parts = _initial_stage_parts(job_data.get("cache_preflight"))
+            stage_task_block = _create_block_internal(
+                session,
+                project_id,
+                "STAGING_TASK",
+                {
+                    "sample_name": job_data["sample_name"],
+                    "mode": job_data["mode"],
+                    "input_directory": job_data.get("input_directory"),
+                    "ssh_profile_id": ssh_profile_id,
+                    "ssh_profile_nickname": ssh_profile_nickname,
+                    "remote_base_path": job_data.get("remote_base_path"),
+                    "workflow_plan_block_id": workflow_block.id if workflow_block is not None else None,
+                    "progress_percent": _stage_part_progress(stage_parts),
+                    "message": "Preparing remote staging...",
+                    "stage_parts": stage_parts,
+                    "status": "RUNNING",
+                },
+                status="RUNNING",
+                owner_id=owner_id,
+            )
+            if workflow_block is not None and stage_input_step_id:
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    stage_input_step_id,
+                    "RUNNING",
+                    extra={
+                        "source_path": job_data.get("input_directory"),
+                        "remote_base_path": job_data.get("remote_base_path"),
+                        "block_id": stage_task_block.id if stage_task_block is not None else None,
+                    },
+                )
+
+            if stage_task_block is not None:
+                stage_parts = dict(stage_parts)
+                if stage_parts.get("references", {}).get("status") == "COMPLETED" and stage_parts.get("data", {}).get("status") == "PENDING":
+                    stage_parts["data"] = _make_stage_part(
+                        "RUNNING",
+                        35,
+                        "Staging sample data on the remote profile...",
+                    )
+                _update_project_block_payload(
+                    session,
+                    stage_task_block.id,
+                    {
+                        "progress_percent": _stage_part_progress(stage_parts),
+                        "message": "Uploading input files and reference assets to the remote profile...",
+                        "stage_parts": stage_parts,
+                    },
+                    status="RUNNING",
+                )
+
+            try:
+                launchpad_url = get_service_url("launchpad")
+                client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=900.0)
+                await client.connect()
+                try:
+                    stage_result = await client.call_tool(
+                        "stage_remote_sample",
+                        project_id=project_id,
+                        user_id=owner_id,
+                        username=_username,
+                        project_slug=_project_slug,
+                        sample_name=job_data["sample_name"],
+                        mode=job_data["mode"],
+                        input_directory=job_data["input_directory"],
+                        reference_genome=job_data["reference_genome"],
+                        ssh_profile_id=ssh_profile_id,
+                        remote_base_path=job_data.get("remote_base_path"),
+                    )
+                finally:
+                    await client.disconnect()
+            except Exception as e:
+                _err = str(e).strip() or f"{type(e).__name__}: {e!r}"
+                raise Exception(f"MCP call to Launchpad failed: {_err}")
+
+            if workflow_block is not None and stage_input_step_id:
+                decision = "reuse" if stage_result.get("data_cache_status") == "reused" else "stage"
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    stage_input_step_id,
+                    "COMPLETED",
+                    extra={
+                        "decision": decision,
+                        "staged_input_directory": stage_result.get("remote_data_path"),
+                        "reference_cache_statuses": stage_result.get("reference_cache_statuses"),
+                    },
+                )
+            if workflow_block is not None and complete_stage_only_step_id:
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    complete_stage_only_step_id,
+                    "COMPLETED",
+                    extra={"staged_input_directory": stage_result.get("remote_data_path")},
+                )
+
+            if stage_task_block is not None:
+                stage_parts = _final_stage_parts(stage_result, stage_parts)
+                _update_project_block_payload(
+                    session,
+                    stage_task_block.id,
+                    {
+                        "status": "COMPLETED",
+                        "progress_percent": _stage_part_progress(stage_parts),
+                        "message": f"Remote staging complete: {stage_result.get('remote_data_path', '')}",
+                        "remote_data_path": stage_result.get("remote_data_path"),
+                        "remote_reference_paths": stage_result.get("remote_reference_paths"),
+                        "data_cache_status": stage_result.get("data_cache_status"),
+                        "reference_cache_statuses": stage_result.get("reference_cache_statuses"),
+                        "stage_parts": stage_parts,
+                    },
+                    status="DONE",
+                )
+
+            _create_block_internal(
+                session,
+                project_id,
+                "AGENT_PLAN",
+                {
+                    "markdown": (
+                        f"### Remote staging complete\n\n"
+                        f"Sample `{job_data['sample_name']}` is staged on `{ssh_profile_nickname or ssh_profile_id}` at `{stage_result.get('remote_data_path', '')}`."
+                    ),
+                    "skill": gate_payload.get("skill", "remote_execution"),
+                    "model": gate_payload.get("model", "default"),
+                    "stage_result": stage_result,
+                    "workflow_plan_block_id": workflow_block.id if workflow_block is not None else None,
+                },
+                status="DONE",
+                owner_id=owner_id,
+            )
+            logger.info("Remote stage-only request completed", project_id=project_id, sample_name=job_data["sample_name"])
+            return
         
         # Submit job to Launchpad via MCP (single call — Nextflow handles multi-genome)
         try:
@@ -2650,6 +3510,22 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 payload = get_block_payload(workflow_block)
                 payload["run_uuid"] = run_uuid
                 _persist_workflow_plan(session, workflow_block, payload)
+
+                if execution_mode == "slurm":
+                    cache_actions = result.get("cache_actions") if isinstance(result, dict) else {}
+                    decision = "reuse" if (cache_actions or {}).get("data_status") == "reused" else "stage"
+                    _set_workflow_step_status(
+                        session,
+                        workflow_block,
+                        "stage_input",
+                        "COMPLETED",
+                        extra={
+                            "decision": decision,
+                            "staged_input_directory": job_data.get("staged_remote_input_path") or (cache_actions or {}).get("data_cache_path"),
+                            "reference_cache_status": (cache_actions or {}).get("reference_status"),
+                            "data_cache_status": (cache_actions or {}).get("data_status"),
+                        },
+                    )
             
             # Create EXECUTION_JOB block
             # Include model_name so _auto_trigger_analysis can call the same LLM
@@ -2734,32 +3610,76 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         error_trace = traceback.format_exc()
         error_msg = str(e)
         if 'workflow_block' in locals() and workflow_block is not None:
+            failing_step_id = "run_dogme"
+            if locals().get("remote_stage_only"):
+                _workflow_payload = get_block_payload(workflow_block)
+                failing_step_id = _resolve_workflow_step_id(
+                    _workflow_payload,
+                    "stage_input",
+                    kinds=("remote_stage", "REMOTE_STAGE"),
+                ) or "stage_input"
             _set_workflow_step_status(
                 session,
                 workflow_block,
-                "run_dogme",
+                failing_step_id,
                 "FAILED",
                 extra={"error": error_msg},
             )
-        _create_block_internal(
-            session,
-            project_id,
-            "EXECUTION_JOB",
-            {
-                "sample_name": locals().get("job_data", {}).get("sample_name", ""),
-                "mode": locals().get("job_data", {}).get("mode", ""),
-                "error": error_msg,
-                "message": f"Failed to submit job to Launchpad: {error_msg}",
-                "job_status": {
-                    "status": "FAILED",
-                    "progress_percent": 0,
-                    "message": f"Error: {error_msg}",
-                    "tasks": {}
-                }
-            },
-            status="FAILED",
-            owner_id=owner_id
-        )
+        if locals().get("remote_stage_only"):
+            if stage_task_block is not None:
+                current_stage_parts = locals().get("stage_parts") or {}
+                current_stage_parts = _failed_stage_parts(current_stage_parts, error_msg)
+                _update_project_block_payload(
+                    session,
+                    stage_task_block.id,
+                    {
+                        "status": "FAILED",
+                        "progress_percent": _stage_part_progress(current_stage_parts),
+                        "error": error_msg,
+                        "message": error_msg,
+                        "stage_parts": current_stage_parts,
+                        "traceback": error_trace,
+                    },
+                    status="FAILED",
+                )
+            else:
+                current_stage_parts = _failed_stage_parts({}, error_msg)
+                _create_block_internal(
+                    session,
+                    project_id,
+                    "STAGING_TASK",
+                    {
+                        "sample_name": locals().get("job_data", {}).get("sample_name", ""),
+                        "mode": locals().get("job_data", {}).get("mode", ""),
+                        "status": "FAILED",
+                        "progress_percent": _stage_part_progress(current_stage_parts),
+                        "error": error_msg,
+                        "message": error_msg,
+                        "stage_parts": current_stage_parts,
+                    },
+                    status="FAILED",
+                    owner_id=owner_id
+                )
+        else:
+            _create_block_internal(
+                session,
+                project_id,
+                "EXECUTION_JOB",
+                {
+                    "sample_name": locals().get("job_data", {}).get("sample_name", ""),
+                    "mode": locals().get("job_data", {}).get("mode", ""),
+                    "error": error_msg,
+                    "message": f"Failed to submit job to Launchpad: {error_msg}",
+                    "job_status": {
+                        "status": "FAILED",
+                        "progress_percent": 0,
+                        "message": f"Error: {error_msg}",
+                        "tasks": {}
+                    }
+                },
+                status="FAILED",
+                owner_id=owner_id
+            )
         logger.error("Job submission error", error=error_msg, traceback=error_trace, project_id=project_id)
     finally:
         session.close()
@@ -3604,6 +4524,7 @@ What would you like to do?
         
         # 3. Parse for Skill Switch Tag
         skill_switch_match = re.search(r'\[\[SKILL_SWITCH_TO:\s*(\w+)\]\]', raw_response)
+        _remote_browse_request = _extract_remote_browse_request(req.message)
         _skill_switch_debug = {
             "tag_found": bool(skill_switch_match),
             "pre_switch_skill": _pre_switch_skill,
@@ -3623,7 +4544,19 @@ What would you like to do?
             new_skill = _SKILL_ALIASES.get(new_skill, new_skill)
             _skill_switch_debug["requested_skill"] = new_skill
             _skill_switch_debug["in_registry"] = new_skill in SKILLS_REGISTRY
-            if new_skill in SKILLS_REGISTRY:
+            if (
+                _remote_browse_request
+                and new_skill == "analyze_job_results"
+            ):
+                logger.warning(
+                    "Ignoring incorrect skill switch for remote browsing request",
+                    from_skill=active_skill,
+                    requested_skill=new_skill,
+                    message=req.message,
+                )
+                _skill_switch_debug["ignored"] = True
+                _skill_switch_debug["ignore_reason"] = "remote_browse_request"
+            elif new_skill in SKILLS_REGISTRY:
                 logger.info("Agent switching skill", from_skill=active_skill, to_skill=new_skill)
                 _emit_progress(req.request_id, "switching", f"Switching to {new_skill} skill...")
                 if _is_cancelled(req.request_id):
@@ -4178,7 +5111,52 @@ What would you like to do?
                     skill=active_skill, calls=len(auto_calls),
                 )
 
-        if not _is_user_data_override and not _is_browsing_override and not has_any_tags and (not _injected_previous_data or _injected_was_capped):
+        _is_remote_browsing_override = False
+        _remote_browse_request = _extract_remote_browse_request(req.message)
+        if _remote_browse_request:
+            try:
+                _ssh_profile_id, _ssh_profile_nickname = await _resolve_ssh_profile_reference(
+                    user.id,
+                    None,
+                    _remote_browse_request.get("ssh_profile_nickname"),
+                )
+            except Exception as _remote_browse_err:
+                logger.warning(
+                    "Remote browsing override could not resolve SSH profile",
+                    message=req.message,
+                    error=str(_remote_browse_err),
+                )
+            else:
+                active_skill = "remote_execution"
+                _remote_params = {
+                    "user_id": user.id,
+                    "ssh_profile_id": _ssh_profile_id,
+                }
+                if _remote_browse_request.get("path"):
+                    _remote_params["path"] = _remote_browse_request["path"]
+                auto_calls = [{
+                    "source_type": "service",
+                    "source_key": "launchpad",
+                    "tool": "list_remote_files",
+                    "params": _remote_params,
+                }]
+                _is_remote_browsing_override = True
+                data_call_matches = []
+                legacy_encode_matches = []
+                legacy_analysis_matches = []
+                has_any_tags = False
+                clean_markdown = ""
+                needs_approval = False
+                plot_specs = []
+                _injected_dfs = {}
+                _injected_previous_data = False
+                logger.warning(
+                    "Remote browsing override: replacing LLM response with Launchpad browse call",
+                    skill=active_skill,
+                    profile=_ssh_profile_nickname,
+                )
+
+        if not _is_user_data_override and not _is_browsing_override and not _is_remote_browsing_override and not has_any_tags and (not _injected_previous_data or _injected_was_capped):
             # Case 1: LLM produced no tags at all — auto-generate
             auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history,
                                                      history_blocks=history_blocks,
@@ -5785,6 +6763,8 @@ What would you like to do?
             else:
                 # Job gate: extract Dogme pipeline parameters
                 extracted_params = await extract_job_parameters_from_conversation(session, req.project_id)
+                if isinstance(extracted_params, dict):
+                    gate_action = extracted_params.get("gate_action") or gate_action
                 if (extracted_params.get("execution_mode") or "local") == "slurm":
                     gate_skill = "remote_execution"
             

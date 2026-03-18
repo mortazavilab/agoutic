@@ -18,6 +18,7 @@ from sqlalchemy.pool import StaticPool
 from common.database import Base
 from cortex.models import User, Project, ProjectAccess, ProjectBlock
 from cortex.app import extract_job_parameters_from_conversation
+from launchpad.models import RemoteStagedSample
 
 
 @pytest.fixture()
@@ -366,6 +367,16 @@ class TestRemoteExecutionDetection:
         assert result["ssh_profile_nickname"] == "hpc3"
 
     @pytest.mark.asyncio
+    async def test_detects_arbitrary_profile_nickname(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 on mycluster"})
+        sess = self.sf()
+        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert result["execution_mode"] == "slurm"
+        assert result["ssh_profile_nickname"] == "mycluster"
+
+    @pytest.mark.asyncio
     async def test_applies_profile_defaults_for_slurm_paths_and_accounts(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 on hpc3"})
         sess = self.sf()
@@ -379,9 +390,7 @@ class TestRemoteExecutionDetection:
                  "default_slurm_partition": "cpu-part",
                  "default_slurm_gpu_account": "gpu-acct",
                  "default_slurm_gpu_partition": "gpu-part",
-                 "default_remote_input_path": "/scratch/{ssh_username}/incoming/{project_slug}/{workflow_slug}",
-                 "default_remote_work_path": "/scratch/{ssh_username}/runs/{project_slug}/{workflow_slug}",
-                 "default_remote_output_path": "{remote_work_path}/results",
+                 "remote_base_path": "/remote/{ssh_username}/agoutic",
              }])):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
@@ -389,9 +398,7 @@ class TestRemoteExecutionDetection:
         assert result["slurm_partition"] == "cpu-part"
         assert result["slurm_gpu_account"] == "gpu-acct"
         assert result["slurm_gpu_partition"] == "gpu-part"
-        assert result["remote_input_path"].endswith("/incoming/test/jamshid3")
-        assert result["remote_work_path"].endswith("/runs/test/jamshid3")
-        assert result["remote_output_path"].endswith("/runs/test/jamshid3/results")
+        assert result["remote_base_path"] == "/remote/jdoe/agoutic"
 
     @pytest.mark.asyncio
     async def test_reuses_previous_approved_slurm_settings_on_next_cycle(self):
@@ -409,9 +416,7 @@ class TestRemoteExecutionDetection:
                     "slurm_memory_gb": 32,
                     "slurm_walltime": "08:00:00",
                     "slurm_gpus": 1,
-                    "remote_input_path": "/scratch/u1/agoutic/proj/work/input",
-                    "remote_work_path": "/scratch/u1/agoutic/proj/work",
-                    "remote_output_path": "/scratch/u1/agoutic/proj/work/output",
+                    "remote_base_path": "/remote/u1/agoutic",
                     "result_destination": "local",
                 }
             },
@@ -429,4 +434,62 @@ class TestRemoteExecutionDetection:
         assert result["ssh_profile_nickname"] == "hpc3"
         assert result["slurm_account"] == "acct-a"
         assert result["slurm_partition"] == "part-a"
-        assert result["remote_input_path"] == "/scratch/u1/agoutic/proj/work/input"
+        assert result["remote_base_path"] == "/remote/u1/agoutic"
+
+    @pytest.mark.asyncio
+    async def test_detects_stage_only_remote_action(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Stage the mouse cDNA sample called Jamshid at /data/pod5 on hpc3"})
+        sess = self.sf()
+        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert result["execution_mode"] == "slurm"
+        assert result["remote_action"] == "stage_only"
+        assert result["gate_action"] == "remote_stage"
+
+    @pytest.mark.asyncio
+    async def test_detects_stage_only_remote_action_for_arbitrary_profile_nickname(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Stage the mouse cDNA sample called Jamshid at /data/pod5 on mycluster"})
+        sess = self.sf()
+        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert result["execution_mode"] == "slurm"
+        assert result["ssh_profile_nickname"] == "mycluster"
+        assert result["remote_action"] == "stage_only"
+        assert result["gate_action"] == "remote_stage"
+
+    @pytest.mark.asyncio
+    async def test_reuses_matching_remote_staged_sample_when_no_explicit_input_path(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Analyze Jamshid on hpc3"})
+        sess = self.sf()
+        staged = RemoteStagedSample(
+            id="stage-1",
+            user_id="u1",
+            ssh_profile_id="profile-123",
+            ssh_profile_nickname="hpc3",
+            sample_name="Jamshid",
+            sample_slug="jamshid",
+            mode="DNA",
+            reference_genome_json=["mm39"],
+            source_path="/data/pod5",
+            input_fingerprint="fp-1",
+            remote_base_path="/remote/jdoe/agoutic",
+            remote_data_path="/remote/jdoe/agoutic/data/fp-1",
+            remote_reference_paths_json={"mm39": "/remote/jdoe/agoutic/ref/mm39"},
+            status="READY",
+        )
+        sess.add(staged)
+        sess.commit()
+        with patch("cortex.app.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+                 "id": "profile-123",
+                 "nickname": "hpc3",
+                 "ssh_username": "jdoe",
+                 "remote_base_path": "/remote/{ssh_username}/agoutic",
+             }])):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert result["staged_remote_input_path"] == "/remote/jdoe/agoutic/data/fp-1"
+        assert result["remote_staged_sample"]["sample_name"] == "Jamshid"

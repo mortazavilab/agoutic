@@ -17,6 +17,7 @@ def _profile() -> SSHProfileData:
         auth_method="ssh_agent",
         key_file_path=None,
         local_username=None,
+        remote_base_path="/remote/eli/agoutic",
         is_enabled=True,
     )
 
@@ -25,22 +26,30 @@ def test_normalize_reference_id_lowercases():
     assert SlurmBackend._normalize_reference_id("GRCh38") == "grch38"
 
 
-def test_derive_cache_roots_are_user_profile_scoped():
-    params = SubmitParams(remote_input_path="/scratch/eli/agoutic/projA/sample/input")
-    ref_root, data_root = SlurmBackend._derive_cache_roots(params, _profile(), "user-1")
+def test_derive_remote_paths_are_base_scoped():
+    params = SubmitParams(
+        project_id="proj-a",
+        project_slug="project-a",
+        workflow_number=3,
+        remote_base_path="/remote/eli/agoutic",
+    )
+    paths = SlurmBackend._derive_remote_paths(params, _profile())
 
-    assert ref_root == "/scratch/eli/agoutic/.agoutic_cache/user-1/profile-1/references"
-    assert data_root == "/scratch/eli/agoutic/.agoutic_cache/user-1/profile-1/data"
+    assert paths["ref_root"] == "/remote/eli/agoutic/ref"
+    assert paths["data_root"] == "/remote/eli/agoutic/data"
+    assert paths["remote_work"] == "/remote/eli/agoutic/project-a/workflow3"
+    assert paths["remote_output"] == "/remote/eli/agoutic/project-a/workflow3/output"
 
 
-def test_derive_cache_roots_cross_project_reuse_same_user_profile():
-    params_a = SubmitParams(remote_input_path="/scratch/eli/agoutic/projA/wf/input")
-    params_b = SubmitParams(remote_input_path="/scratch/eli/agoutic/projB/wf/input")
+def test_derive_remote_paths_reuses_same_base_across_projects():
+    params_a = SubmitParams(project_id="proj-a", project_slug="proj-a", workflow_number=1, remote_base_path="/remote/eli/agoutic")
+    params_b = SubmitParams(project_id="proj-b", project_slug="proj-b", workflow_number=2, remote_base_path="/remote/eli/agoutic")
 
-    roots_a = SlurmBackend._derive_cache_roots(params_a, _profile(), "user-1")
-    roots_b = SlurmBackend._derive_cache_roots(params_b, _profile(), "user-1")
+    paths_a = SlurmBackend._derive_remote_paths(params_a, _profile())
+    paths_b = SlurmBackend._derive_remote_paths(params_b, _profile())
 
-    assert roots_a == roots_b
+    assert paths_a["ref_root"] == paths_b["ref_root"]
+    assert paths_a["data_root"] == paths_b["data_root"]
 
 
 def test_compute_input_fingerprint_changes_with_content(tmp_path: Path):

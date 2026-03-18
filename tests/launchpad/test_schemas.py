@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from launchpad.schemas import (
     SubmitJobRequest,
+    StageRemoteSampleRequest,
     JobStatusResponse,
     JobDetailsResponse,
     JobSubmitResponse,
@@ -103,7 +104,7 @@ class TestSubmitJobRequest:
                 execution_mode="slurm",
             )
 
-    def test_slurm_accepts_remote_fields(self):
+    def test_slurm_accepts_remote_base_path(self):
         req = SubmitJobRequest(
             project_id="p",
             user_id="user-1",
@@ -114,12 +115,40 @@ class TestSubmitJobRequest:
             ssh_profile_id="prof-1",
             slurm_account="lab",
             slurm_partition="gpu",
-            remote_work_path="/scratch/user/work",
+            remote_base_path="/remote/agoutic",
             result_destination="both",
         )
         assert req.execution_mode == "slurm"
         assert req.ssh_profile_id == "prof-1"
+        assert req.remote_base_path == "/remote/agoutic"
         assert req.result_destination == "both"
+
+    def test_slurm_accepts_staged_remote_input_reuse(self):
+        req = SubmitJobRequest(
+            project_id="p",
+            user_id="user-1",
+            sample_name="s",
+            mode="DNA",
+            input_directory="/d",
+            execution_mode="slurm",
+            ssh_profile_id="prof-1",
+            staged_remote_input_path="/remote/agoutic/data/abc123",
+        )
+        assert req.staged_remote_input_path == "/remote/agoutic/data/abc123"
+
+
+class TestStageRemoteSampleRequest:
+    def test_normalizes_reference_genome_to_list(self):
+        req = StageRemoteSampleRequest(
+            project_id="proj-1",
+            user_id="user-1",
+            sample_name="Jamshid",
+            mode="CDNA",
+            input_directory="/data/pod5",
+            ssh_profile_id="profile-1",
+            reference_genome="mm39",
+        )
+        assert req.reference_genome == ["mm39"]
 
 
 class TestJobStatusResponse:

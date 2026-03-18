@@ -123,11 +123,7 @@ class SSHProfile(Base):
     default_slurm_partition: Mapped[str | None] = mapped_column(String, nullable=True)
     default_slurm_gpu_account: Mapped[str | None] = mapped_column(String, nullable=True)
     default_slurm_gpu_partition: Mapped[str | None] = mapped_column(String, nullable=True)
-    default_remote_input_path: Mapped[str | None] = mapped_column(String, nullable=True)
-    default_remote_work_path: Mapped[str | None] = mapped_column(String, nullable=True)
-    default_remote_output_path: Mapped[str | None] = mapped_column(String, nullable=True)
-    default_remote_reference_cache_root: Mapped[str | None] = mapped_column(String, nullable=True)
-    default_remote_data_cache_root: Mapped[str | None] = mapped_column(String, nullable=True)
+    remote_base_path: Mapped[str | None] = mapped_column(String, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
@@ -261,6 +257,37 @@ class RemoteInputCache(Base):
     status: Mapped[str] = mapped_column(String, default="READY", nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     use_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class RemoteStagedSample(Base):
+    """User-visible remote staged sample metadata for reuse by sample name."""
+    __tablename__ = "remote_staged_samples"
+    __table_args__ = (
+        UniqueConstraint("user_id", "ssh_profile_id", "sample_slug", name="uq_remote_staged_sample_user_profile_slug"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    ssh_profile_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    ssh_profile_nickname: Mapped[str | None] = mapped_column(String, nullable=True)
+    sample_name: Mapped[str] = mapped_column(String, nullable=False)
+    sample_slug: Mapped[str] = mapped_column(String, nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    reference_genome_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    source_path: Mapped[str] = mapped_column(String, nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    remote_base_path: Mapped[str] = mapped_column(String, nullable=False)
+    remote_data_path: Mapped[str] = mapped_column(String, nullable=False)
+    remote_reference_paths_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="READY", nullable=False)
+    last_staged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,

@@ -14,7 +14,14 @@ from common.database import (
     AsyncSessionLocal as SessionLocal,
     init_db_async as init_db,
 )
-from launchpad.models import DogmeJob, JobLog, SSHProfile, RemoteReferenceCache, RemoteInputCache
+from launchpad.models import (
+    DogmeJob,
+    JobLog,
+    SSHProfile,
+    RemoteReferenceCache,
+    RemoteInputCache,
+    RemoteStagedSample,
+)
 from launchpad.backends.ssh_manager import SSHProfileData
 
 
@@ -204,6 +211,7 @@ async def get_ssh_profile(profile_id: str, user_id: str | None = None) -> SSHPro
             auth_method=row.auth_method,
             key_file_path=row.key_file_path,
             local_username=row.local_username,
+            remote_base_path=row.remote_base_path,
             is_enabled=row.is_enabled,
         )
 
@@ -343,3 +351,122 @@ async def upsert_remote_input_cache_entry(
                 entry.use_count = (entry.use_count or 0) + 1
                 entry.last_used_at = now
         await session.commit()
+
+
+async def get_remote_staged_sample(
+    user_id: str,
+    ssh_profile_id: str,
+    sample_name: str,
+    *,
+    mode: str | None = None,
+) -> RemoteStagedSample | None:
+    """Fetch one staged sample by user/profile/sample name, optionally filtered by mode."""
+    async with SessionLocal() as session:
+        query = select(RemoteStagedSample).where(
+            RemoteStagedSample.user_id == user_id,
+            RemoteStagedSample.ssh_profile_id == ssh_profile_id,
+            RemoteStagedSample.sample_name == sample_name,
+        )
+        if mode:
+            query = query.where(RemoteStagedSample.mode == mode)
+        query = query.order_by(RemoteStagedSample.updated_at.desc())
+        result = await session.execute(query)
+        return result.scalar_one_or_none()
+
+
+async def list_remote_staged_samples(
+    user_id: str,
+    ssh_profile_id: str,
+    *,
+    mode: str | None = None,
+    reference_genome: list[str] | None = None,
+) -> list[RemoteStagedSample]:
+    """List staged samples for a user/profile, optionally filtered by mode and genome overlap."""
+    async with SessionLocal() as session:
+        query = select(RemoteStagedSample).where(
+            RemoteStagedSample.user_id == user_id,
+            RemoteStagedSample.ssh_profile_id == ssh_profile_id,
+        ).order_by(RemoteStagedSample.sample_name.asc())
+        if mode:
+            query = query.where(RemoteStagedSample.mode == mode)
+        result = await session.execute(query)
+        rows = list(result.scalars().all())
+        if not reference_genome:
+            return rows
+        wanted = {ref.strip().lower() for ref in reference_genome if ref}
+        filtered: list[RemoteStagedSample] = []
+        for row in rows:
+            row_refs = row.reference_genome_json or []
+            normalized = {str(ref).strip().lower() for ref in row_refs}
+            if normalized & wanted:
+                filtered.append(row)
+        return filtered
+
+
+async def upsert_remote_staged_sample(
+    *,
+    user_id: str,
+    ssh_profile_id: str,
+    ssh_profile_nickname: str | None,
+    sample_name: str,
+    sample_slug: str,
+    mode: str,
+    reference_genome: list[str],
+    source_path: str,
+    input_fingerprint: str,
+    remote_base_path: str,
+    remote_data_path: str,
+    remote_reference_paths: dict[str, str],
+    status: str = "READY",
+    mark_used: bool = False,
+) -> RemoteStagedSample:
+    """Create or update user-visible staged sample metadata."""
+    now = datetime.now(timezone.utc)
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(RemoteStagedSample).where(
+                RemoteStagedSample.user_id == user_id,
+                RemoteStagedSample.ssh_profile_id == ssh_profile_id,
+                RemoteStagedSample.sample_slug == sample_slug,
+            )
+        )
+        entry = result.scalar_one_or_none()
+        if entry is None:
+            entry = RemoteStagedSample(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                ssh_profile_id=ssh_profile_id,
+                ssh_profile_nickname=ssh_profile_nickname,
+                sample_name=sample_name,
+                sample_slug=sample_slug,
+                mode=mode,
+                reference_genome_json=reference_genome,
+                source_path=source_path,
+                input_fingerprint=input_fingerprint,
+                remote_base_path=remote_base_path,
+                remote_data_path=remote_data_path,
+                remote_reference_paths_json=remote_reference_paths,
+                status=status,
+                last_staged_at=now,
+                last_used_at=now if mark_used else None,
+                updated_at=now,
+            )
+            session.add(entry)
+        else:
+            entry.ssh_profile_nickname = ssh_profile_nickname
+            entry.sample_name = sample_name
+            entry.mode = mode
+            entry.reference_genome_json = reference_genome
+            entry.source_path = source_path
+            entry.input_fingerprint = input_fingerprint
+            entry.remote_base_path = remote_base_path
+            entry.remote_data_path = remote_data_path
+            entry.remote_reference_paths_json = remote_reference_paths
+            entry.status = status
+            entry.last_staged_at = now
+            entry.updated_at = now
+            if mark_used:
+                entry.last_used_at = now
+        await session.commit()
+        await session.refresh(entry)
+        return entry

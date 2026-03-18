@@ -6,8 +6,9 @@ Three request classes:
   - SINGLE_TOOL: One tool call, no plan needed (existing flow)
   - MULTI_STEP: Requires a structured plan (new flow)
 
-Eight plan templates:
+Nine plan templates:
   - run_workflow: Analyze a local sample (stage → run → analyze)
+    - remote_stage_workflow: Stage a sample on a remote SLURM target for later reuse
   - compare_samples: Compare two or more samples
   - download_analyze: Download from ENCODE/URL, then analyze
   - summarize_results: Summarize existing completed job results
@@ -38,6 +39,8 @@ logger = get_logger(__name__)
 
 # Patterns that signal a MULTI_STEP request
 _MULTI_STEP_PATTERNS: list[re.Pattern] = [
+    # Remote stage-only flows
+    re.compile(r"stage\s+.+\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)[a-zA-Z0-9_-]+(?:\s+profile)?(?:[?.!,]|$)|on\s+slurm|using\s+slurm|remotely|on\s+the\s+cluster|(?:using|via)\s+(?:the\s+)?[a-zA-Z0-9_-]+\s+profile)", re.I),
     # Download + analyze
     re.compile(r"download.*(?:and|then)\s+(?:run|analyze|process)", re.I),
     re.compile(r"get.*from\s+encode.*(?:and|then)\s+(?:run|analyze|dogme)", re.I),
@@ -143,6 +146,89 @@ def _make_step(
 
 
 # ---- Template: run_workflow ------------------------------------------------
+
+def _template_remote_stage_workflow(params: dict) -> dict:
+    """
+    Deterministic plan for staging a sample on a remote SLURM target.
+    Steps: locate → validate → check remote stage → check profile auth → approval → stage → complete
+    """
+    sample_name = params.get("sample_name", "sample")
+    work_dir = params.get("work_dir", "")
+    input_dir = params.get("input_directory", "")
+
+    steps = []
+    idx = 0
+
+    s_locate = _make_step(
+        "LOCATE_DATA",
+        f"Locate data for {sample_name}",
+        idx,
+        tool_calls=[{"source_key": "analyzer", "tool": "list_job_files", "params": {"work_dir": input_dir or work_dir}}],
+    )
+    s_locate["id"] = "locate_data"
+    steps.append(s_locate)
+    idx += 1
+
+    s_validate = _make_step("VALIDATE_INPUTS", f"Validate input files for {sample_name}", idx, depends_on=[s_locate["id"]])
+    s_validate["id"] = "validate_inputs"
+    steps.append(s_validate)
+    idx += 1
+
+    s_check = _make_step("check_remote_stage", f"Check remote staged data for {sample_name}", idx, depends_on=[s_validate["id"]])
+    s_check["id"] = "check_remote_stage"
+    steps.append(s_check)
+    idx += 1
+
+    s_auth = _make_step(
+        "CHECK_REMOTE_PROFILE_AUTH",
+        f"Check remote profile authorization for {sample_name}",
+        idx,
+        depends_on=[s_check["id"]],
+    )
+    s_auth["id"] = "check_remote_profile_auth"
+    steps.append(s_auth)
+    idx += 1
+
+    s_approve = _make_step(
+        "REQUEST_APPROVAL",
+        f"Approve remote staging for {sample_name}",
+        idx,
+        requires_approval=True,
+        depends_on=[s_auth["id"]],
+    )
+    s_approve["id"] = "approve_remote_stage"
+    steps.append(s_approve)
+    idx += 1
+
+    s_stage = _make_step(
+        "remote_stage",
+        f"Stage remote input for {sample_name}",
+        idx,
+        depends_on=[s_approve["id"]],
+    )
+    s_stage["id"] = "stage_input"
+    steps.append(s_stage)
+    idx += 1
+
+    s_complete = _make_step("complete_stage_only", f"Complete remote staging for {sample_name}", idx, depends_on=[s_stage["id"]])
+    s_complete["id"] = "complete_stage_only"
+    steps.append(s_complete)
+
+    return {
+        "plan_type": "remote_stage_workflow",
+        "title": f"Stage remote sample for {sample_name}",
+        "goal": params.get("goal", f"Stage {sample_name} on remote execution target"),
+        "workflow_type": "remote_sample_intake",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "sample_name": sample_name,
+        "input_directory": input_dir,
+        "work_dir": work_dir,
+        "remote_action": "stage_only",
+        "steps": steps,
+        "artifacts": [],
+    }
 
 def _template_run_workflow(params: dict) -> dict:
     """
@@ -444,6 +530,10 @@ _RUN_WORKFLOW_PATTERNS = [
     re.compile(r"analyze\s+(?:my\s+)?(?:local\s+)?(?:sample|data)", re.I),
 ]
 
+_REMOTE_STAGE_PATTERNS = [
+    re.compile(r"stage(?:\s+only)?\s+(?:the\s+)?(?:sample\s+)?(?:.+?)\s+(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)[a-zA-Z0-9_-]+(?:\s+profile)?(?:[?.!,]|$)|on\s+slurm|using\s+slurm|remotely|on\s+the\s+cluster|(?:using|via)\s+(?:the\s+)?[a-zA-Z0-9_-]+\s+profile)", re.I),
+]
+
 _ENRICHMENT_PATTERNS = [
     re.compile(r"(?:run|do|perform)\s+(?:a\s+)?(?:GO|gene\s+ontology|enrichment|pathway)\s+(?:analysis|enrichment)", re.I),
     re.compile(r"(?:GO|gene\s+ontology|enrichment|pathway)\s+(?:analysis|enrichment)\s+(?:on|for|of)", re.I),
@@ -486,7 +576,11 @@ def _detect_plan_type(message: str) -> str | None:
     for pat in _PARSE_PLOT_PATTERNS:
         if pat.search(message):
             return "parse_plot_interpret"
-    # 8. Run workflow
+    # 8. Remote stage workflow
+    for pat in _REMOTE_STAGE_PATTERNS:
+        if pat.search(message):
+            return "remote_stage_workflow"
+    # 9. Run workflow
     for pat in _RUN_WORKFLOW_PATTERNS:
         if pat.search(message):
             return "run_workflow"
@@ -577,7 +671,18 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         params["plot_type"] = _select_plot_type(message)
         # Fall through to pick up sample_name / work_dir below
 
-    # run_workflow / summarize_results / parse_plot_interpret
+    if plan_type == "remote_stage_workflow":
+        sample_match = re.search(r'(?:called|named)\s+([a-zA-Z0-9_-]+)', message, re.I)
+        if not sample_match:
+            sample_match = re.search(r'(?:the\s+)?sample\s+([a-zA-Z0-9_-]+)', message, re.I)
+        if sample_match:
+            params["sample_name"] = sample_match.group(1)
+
+        input_match = re.search(r"(?:at|from)\s+(\S+)", message, re.I)
+        if input_match:
+            params["input_directory"] = input_match.group(1).rstrip(".,;:!?")
+
+    # run_workflow / remote_stage_workflow / summarize_results / parse_plot_interpret
     if conv_state.sample_name:
         params["sample_name"] = conv_state.sample_name
     if conv_state.work_dir:
@@ -997,6 +1102,10 @@ def generate_plan(
         return plan
     if plan_type == "compare_workflows":
         plan = _template_compare_workflows(params)
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return plan
+    if plan_type == "remote_stage_workflow":
+        plan = _template_remote_stage_workflow(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return plan
     if plan_type == "run_workflow":

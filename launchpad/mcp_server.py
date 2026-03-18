@@ -72,11 +72,8 @@ async def submit_dogme_job(
     slurm_walltime: str | None = None,
     slurm_gpus: int | None = None,
     slurm_gpu_type: str | None = None,
-    remote_input_path: str | None = None,
-    remote_work_path: str | None = None,
-    remote_output_path: str | None = None,
-    remote_reference_cache_root: str | None = None,
-    remote_data_cache_root: str | None = None,
+    remote_base_path: str | None = None,
+    staged_remote_input_path: str | None = None,
     cache_preflight: dict | None = None,
     result_destination: str | None = None,
 ) -> str:
@@ -110,13 +107,39 @@ async def submit_dogme_job(
         slurm_walltime=slurm_walltime,
         slurm_gpus=slurm_gpus,
         slurm_gpu_type=slurm_gpu_type,
-        remote_input_path=remote_input_path,
-        remote_work_path=remote_work_path,
-        remote_output_path=remote_output_path,
-        remote_reference_cache_root=remote_reference_cache_root,
-        remote_data_cache_root=remote_data_cache_root,
+        remote_base_path=remote_base_path,
+        staged_remote_input_path=staged_remote_input_path,
         cache_preflight=cache_preflight,
         result_destination=result_destination,
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def stage_remote_sample(
+    project_id: str,
+    user_id: str,
+    sample_name: str,
+    mode: str,
+    input_directory: str,
+    ssh_profile_id: str,
+    reference_genome: str | list[str] = "mm39",
+    username: str | None = None,
+    project_slug: str | None = None,
+    remote_base_path: str | None = None,
+) -> str:
+    """Stage a sample and references remotely without submitting a SLURM job."""
+    result = await tools.stage_remote_sample(
+        project_id=project_id,
+        user_id=user_id,
+        username=username,
+        project_slug=project_slug,
+        sample_name=sample_name,
+        mode=mode,
+        input_directory=input_directory,
+        reference_genome=reference_genome,
+        ssh_profile_id=ssh_profile_id,
+        remote_base_path=remote_base_path,
     )
     return json.dumps(result, indent=2)
 
@@ -282,6 +305,24 @@ async def cancel_slurm_job(
     backend = get_backend("slurm")
     ok = await backend.cancel(run_uuid)
     return json.dumps({"ok": ok, "run_uuid": run_uuid})
+
+
+@mcp.tool()
+async def list_remote_files(
+    user_id: str,
+    ssh_profile_id: str,
+    path: str | None = None,
+) -> str:
+    """List files for an SSH profile, defaulting to its configured remote base path."""
+    from launchpad.backends import get_backend
+
+    backend = get_backend("slurm")
+    result = await backend.list_remote_files(
+        user_id=user_id,
+        ssh_profile_id=ssh_profile_id,
+        path=path,
+    )
+    return json.dumps(result, indent=2)
 
 if __name__ == "__main__":
     import argparse

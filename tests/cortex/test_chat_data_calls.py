@@ -1067,6 +1067,103 @@ class TestBrowsingToolBypass:
         resp = _chat(client, "list files", skill="analyze_job_results")
         assert resp.status_code == 200
 
+    def test_remote_list_files_on_profile_uses_launchpad_override(self, SL, seed, tmp_path):
+        """Remote file browsing should bypass bad LLM clarification and call Launchpad directly."""
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool.return_value = {
+            "ssh_profile_id": "profile-123",
+            "ssh_profile_nickname": "hpc3",
+            "path": "/remote/base",
+            "entries": [
+                {"name": "data", "type": "dir", "size": 0},
+                {"name": "ref", "type": "dir", "size": 0},
+            ],
+        }
+
+        def think(msg, skill, history):
+            return (
+                "I need more information to help you list files on HPC3.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "list files on hpc3", skill="remote_execution")
+        assert resp.status_code == 200
+        assert mock_mcp.call_tool.await_count == 1
+        assert mock_mcp.call_tool.call_args.args[0] == "list_remote_files"
+        assert mock_mcp.call_tool.call_args.kwargs["ssh_profile_id"] == "profile-123"
+        assert mock_mcp.call_tool.call_args.kwargs["user_id"] == "u-plot"
+        payload = (resp.json().get("agent_block") or {}).get("payload", {})
+        assert payload.get("skill") == "remote_execution"
+
+    def test_remote_list_files_ignores_bad_skill_switch(self, SL, seed, tmp_path):
+        """Remote file browsing should ignore LLM attempts to switch to analyze_job_results."""
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool.return_value = {
+            "ssh_profile_id": "profile-123",
+            "ssh_profile_nickname": "hpc3",
+            "path": "/remote/base",
+            "entries": [],
+        }
+
+        def think(msg, skill, history):
+            return (
+                "Switching skills.\n[[SKILL_SWITCH_TO: analyze_job_results]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "list files on hpc3", skill="remote_execution")
+        assert resp.status_code == 200
+        payload = (resp.json().get("agent_block") or {}).get("payload", {})
+        assert payload.get("skill") == "remote_execution"
+        assert mock_mcp.call_tool.await_count == 1
+
+    def test_remote_list_files_from_analyzer_skill_uses_launchpad_override(self, SL, seed, tmp_path):
+        """Explicit remote browsing should force Launchpad browsing even from analyze_job_results."""
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool.return_value = {
+            "ssh_profile_id": "profile-123",
+            "ssh_profile_nickname": "hpc3",
+            "path": "/remote/base",
+            "entries": [
+                {"name": "data", "type": "dir", "size": 0},
+            ],
+        }
+
+        def think(msg, skill, history):
+            return (
+                "Which analysis output directory do you want?",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "list files on hpc3", skill="analyze_job_results")
+        assert resp.status_code == 200
+        payload = (resp.json().get("agent_block") or {}).get("payload", {})
+        assert payload.get("skill") == "remote_execution"
+        assert mock_mcp.call_tool.await_count == 1
+        assert mock_mcp.call_tool.call_args.args[0] == "list_remote_files"
+        assert mock_mcp.call_tool.call_args.kwargs["ssh_profile_id"] == "profile-123"
+
 
 class TestDownloadWorkflow:
     def test_download_skill_skip_second_pass(self, SL, seed, tmp_path):

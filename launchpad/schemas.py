@@ -33,11 +33,8 @@ class SubmitJobRequest(BaseModel):
     slurm_walltime: Optional[str] = None
     slurm_gpus: Optional[int] = None
     slurm_gpu_type: Optional[str] = None
-    remote_input_path: Optional[str] = None
-    remote_work_path: Optional[str] = None
-    remote_output_path: Optional[str] = None
-    remote_reference_cache_root: Optional[str] = None
-    remote_data_cache_root: Optional[str] = None
+    remote_base_path: Optional[str] = None
+    staged_remote_input_path: Optional[str] = None
     cache_preflight: Optional[dict] = None
     result_destination: Optional[Literal["local", "remote", "both"]] = None
 
@@ -96,6 +93,39 @@ class JobSubmitResponse(BaseModel):
     work_directory: str
     cache_actions: Optional[dict] = None
 
+
+class StageRemoteSampleRequest(BaseModel):
+    """Request to stage a sample and references on a remote system without submitting a job."""
+    project_id: str = Field(..., min_length=1)
+    user_id: str = Field(..., min_length=1)
+    username: Optional[str] = None
+    project_slug: Optional[str] = None
+    sample_name: str = Field(..., min_length=1)
+    mode: str = Field(..., min_length=1)
+    input_directory: str = Field(..., min_length=1)
+    reference_genome: Union[str, List[str]] = "mm39"
+    ssh_profile_id: str = Field(..., min_length=1)
+    remote_base_path: Optional[str] = None
+
+    @field_validator("reference_genome")
+    @classmethod
+    def normalize_stage_genomes_to_list(cls, v):
+        if isinstance(v, str):
+            return [v]
+        return v
+
+
+class StageRemoteSampleResponse(BaseModel):
+    """Response from stage-only remote staging."""
+    sample_name: str
+    ssh_profile_id: str
+    ssh_profile_nickname: Optional[str] = None
+    remote_base_path: str
+    remote_data_path: str
+    remote_reference_paths: dict[str, str]
+    data_cache_status: str
+    reference_cache_statuses: dict[str, str]
+
 class JobListResponse(BaseModel):
     """Response with list of jobs."""
     jobs: list[JobDetailsResponse]
@@ -138,11 +168,7 @@ class SSHProfileCreate(BaseModel):
     default_slurm_partition: Optional[str] = None
     default_slurm_gpu_account: Optional[str] = None
     default_slurm_gpu_partition: Optional[str] = None
-    default_remote_input_path: Optional[str] = None
-    default_remote_work_path: Optional[str] = None
-    default_remote_output_path: Optional[str] = None
-    default_remote_reference_cache_root: Optional[str] = None
-    default_remote_data_cache_root: Optional[str] = None
+    remote_base_path: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_auth_method(self):
@@ -164,11 +190,7 @@ class SSHProfileUpdate(BaseModel):
     default_slurm_partition: Optional[str] = None
     default_slurm_gpu_account: Optional[str] = None
     default_slurm_gpu_partition: Optional[str] = None
-    default_remote_input_path: Optional[str] = None
-    default_remote_work_path: Optional[str] = None
-    default_remote_output_path: Optional[str] = None
-    default_remote_reference_cache_root: Optional[str] = None
-    default_remote_data_cache_root: Optional[str] = None
+    remote_base_path: Optional[str] = None
     is_enabled: Optional[bool] = None
 
 
@@ -182,16 +204,13 @@ class SSHProfileOut(BaseModel):
     ssh_username: str
     auth_method: str
     has_key_file: bool = False
+    key_file_path: Optional[str] = None
     local_username: Optional[str] = None
     default_slurm_account: Optional[str] = None
     default_slurm_partition: Optional[str] = None
     default_slurm_gpu_account: Optional[str] = None
     default_slurm_gpu_partition: Optional[str] = None
-    default_remote_input_path: Optional[str] = None
-    default_remote_work_path: Optional[str] = None
-    default_remote_output_path: Optional[str] = None
-    default_remote_reference_cache_root: Optional[str] = None
-    default_remote_data_cache_root: Optional[str] = None
+    remote_base_path: Optional[str] = None
     is_enabled: bool = True
     created_at: str
     updated_at: str

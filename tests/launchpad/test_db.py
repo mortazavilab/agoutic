@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -13,13 +14,16 @@ from launchpad.db import (
     get_job_logs,
     get_remote_input_cache_entry,
     get_remote_reference_cache_entry,
+    get_remote_staged_sample,
     job_to_dict,
+    list_remote_staged_samples,
     upsert_remote_input_cache_entry,
     upsert_remote_reference_cache_entry,
+    upsert_remote_staged_sample,
     update_job_status,
 )
 from common.database import Base
-from launchpad.models import DogmeJob, JobLog
+from launchpad.models import DogmeJob, JobLog, RemoteStagedSample
 
 
 @pytest.fixture()
@@ -234,3 +238,33 @@ class TestRemoteCacheHelpers:
         assert entry is not None
         assert entry.remote_path.endswith("/data/mm39/abc123")
         assert entry.use_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_upsert_and_get_remote_staged_sample(self, async_session):
+        session_factory = async_sessionmaker(async_session.bind, expire_on_commit=False, class_=AsyncSession)
+
+        with patch("launchpad.db.SessionLocal", session_factory):
+            await upsert_remote_staged_sample(
+                user_id="user-1",
+                ssh_profile_id="profile-1",
+                ssh_profile_nickname="hpc3",
+                sample_name="Jamshid",
+                sample_slug="jamshid",
+                mode="CDNA",
+                reference_genome=["mm39"],
+                source_path="/data/pod5",
+                input_fingerprint="fp-1",
+                remote_base_path="/remote/u1/agoutic",
+                remote_data_path="/remote/u1/agoutic/data/fp-1",
+                remote_reference_paths={"mm39": "/remote/u1/agoutic/ref/mm39"},
+                status="READY",
+                mark_used=True,
+            )
+
+            entry = await get_remote_staged_sample("user-1", "profile-1", "Jamshid", mode="CDNA")
+            rows = await list_remote_staged_samples("user-1", "profile-1", mode="CDNA", reference_genome=["mm39"])
+
+        assert entry is not None
+        assert entry.remote_data_path == "/remote/u1/agoutic/data/fp-1"
+        assert entry.remote_reference_paths_json == {"mm39": "/remote/u1/agoutic/ref/mm39"}
+        assert len(rows) == 1

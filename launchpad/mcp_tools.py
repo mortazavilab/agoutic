@@ -64,11 +64,8 @@ class LaunchpadMCPTools:
         slurm_walltime: Optional[str] = None,
         slurm_gpus: Optional[int] = None,
         slurm_gpu_type: Optional[str] = None,
-        remote_input_path: Optional[str] = None,
-        remote_work_path: Optional[str] = None,
-        remote_output_path: Optional[str] = None,
-        remote_reference_cache_root: Optional[str] = None,
-        remote_data_cache_root: Optional[str] = None,
+        remote_base_path: Optional[str] = None,
+        staged_remote_input_path: Optional[str] = None,
         cache_preflight: Optional[dict] = None,
         result_destination: Optional[str] = None,
     ) -> dict:
@@ -152,16 +149,10 @@ class LaunchpadMCPTools:
             payload["slurm_gpus"] = slurm_gpus
         if slurm_gpu_type is not None:
             payload["slurm_gpu_type"] = slurm_gpu_type
-        if remote_input_path is not None:
-            payload["remote_input_path"] = remote_input_path
-        if remote_work_path is not None:
-            payload["remote_work_path"] = remote_work_path
-        if remote_output_path is not None:
-            payload["remote_output_path"] = remote_output_path
-        if remote_reference_cache_root is not None:
-            payload["remote_reference_cache_root"] = remote_reference_cache_root
-        if remote_data_cache_root is not None:
-            payload["remote_data_cache_root"] = remote_data_cache_root
+        if remote_base_path is not None:
+            payload["remote_base_path"] = remote_base_path
+        if staged_remote_input_path is not None:
+            payload["staged_remote_input_path"] = staged_remote_input_path
         if cache_preflight is not None:
             payload["cache_preflight"] = cache_preflight
         if result_destination is not None:
@@ -192,6 +183,88 @@ class LaunchpadMCPTools:
             )
         except Exception as e:
             raise RuntimeError(f"Failed to submit job: {_describe_exception(e)}")
+
+    async def stage_remote_sample(
+        self,
+        project_id: str,
+        user_id: str,
+        sample_name: str,
+        mode: str,
+        input_directory: str,
+        ssh_profile_id: str,
+        reference_genome: str | list[str] = "mm39",
+        username: Optional[str] = None,
+        project_slug: Optional[str] = None,
+        remote_base_path: Optional[str] = None,
+    ) -> dict:
+        """Stage a sample and references on the remote host without submitting a SLURM job."""
+        payload = {
+            "project_id": project_id,
+            "user_id": user_id,
+            "sample_name": sample_name,
+            "mode": mode,
+            "input_directory": input_directory,
+            "reference_genome": reference_genome,
+            "ssh_profile_id": ssh_profile_id,
+        }
+        if username is not None:
+            payload["username"] = username
+        if project_slug is not None:
+            payload["project_slug"] = project_slug
+        if remote_base_path is not None:
+            payload["remote_base_path"] = remote_base_path
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.server_url}/remote/stage",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=httpx.Timeout(self.submit_timeout, connect=30.0),
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = e.response.text
+            except Exception:
+                detail = ""
+            if detail:
+                raise RuntimeError(
+                    f"Failed to stage remote sample: HTTP {e.response.status_code} from {e.request.url} - {detail}"
+                )
+            raise RuntimeError(
+                f"Failed to stage remote sample: HTTP {e.response.status_code} from {e.request.url}"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to stage remote sample: {_describe_exception(e)}")
+
+    async def list_remote_files(
+        self,
+        user_id: str,
+        ssh_profile_id: str,
+        path: Optional[str] = None,
+    ) -> dict:
+        """List files on a remote host for a given SSH profile."""
+        payload = {
+            "user_id": user_id,
+            "ssh_profile_id": ssh_profile_id,
+        }
+        if path is not None:
+            payload["path"] = path
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.server_url}/remote/files",
+                    params=payload,
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to list remote files: {_describe_exception(e)}")
     
     async def check_nextflow_status(self, run_uuid: str) -> dict:
         """
@@ -569,15 +642,45 @@ TOOL_REGISTRY = {
                 "slurm_walltime": {"type": "string", "description": "Requested walltime (HH:MM:SS or D-HH:MM:SS)"},
                 "slurm_gpus": {"type": "integer", "description": "Requested GPU count"},
                 "slurm_gpu_type": {"type": "string", "description": "Optional GPU type"},
-                "remote_input_path": {"type": "string", "description": "Remote path for staged inputs"},
-                "remote_work_path": {"type": "string", "description": "Remote Nextflow work directory"},
-                "remote_output_path": {"type": "string", "description": "Remote results directory"},
-                "remote_reference_cache_root": {"type": "string", "description": "Remote root for per-user reference cache"},
-                "remote_data_cache_root": {"type": "string", "description": "Remote root for per-user input-data cache"},
+                "remote_base_path": {"type": "string", "description": "Top-level remote folder used for ref/, data/, and project workflow directories"},
+                "staged_remote_input_path": {"type": "string", "description": "Previously staged remote data path to reuse instead of restaging local input"},
                 "cache_preflight": {"type": "object", "description": "Planner/approval cache preflight metadata"},
                 "result_destination": {"type": "string", "enum": ["local", "remote", "both"], "description": "Where final outputs should be kept"},
             },
             "required": ["sample_name", "mode", "input_directory"],
+        }
+    },
+    "stage_remote_sample": {
+        "description": "Stage a sample and references on a remote host without submitting a job",
+        "tool_function": "stage_remote_sample",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Project identifier"},
+                "user_id": {"type": "string", "description": "User who owns the profile and sample"},
+                "username": {"type": "string", "description": "Optional username for local project layout"},
+                "project_slug": {"type": "string", "description": "Optional project slug"},
+                "sample_name": {"type": "string", "description": "Sample name to register for staged reuse"},
+                "mode": {"type": "string", "description": "Dogme mode such as DNA, RNA, or CDNA"},
+                "input_directory": {"type": "string", "description": "Local input directory to stage remotely"},
+                "reference_genome": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}], "description": "Reference genome or genomes to stage"},
+                "ssh_profile_id": {"type": "string", "description": "SSH profile identifier"},
+                "remote_base_path": {"type": "string", "description": "Optional remote base path override"}
+            },
+            "required": ["project_id", "user_id", "sample_name", "mode", "input_directory", "ssh_profile_id"]
+        }
+    },
+    "list_remote_files": {
+        "description": "List remote files for an SSH profile, defaulting to its remote base path",
+        "tool_function": "list_remote_files",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "User who owns the SSH profile"},
+                "ssh_profile_id": {"type": "string", "description": "SSH profile identifier"},
+                "path": {"type": "string", "description": "Optional subpath to browse instead of remote_base_path"}
+            },
+            "required": ["user_id", "ssh_profile_id"]
         }
     },
     "check_nextflow_status": {

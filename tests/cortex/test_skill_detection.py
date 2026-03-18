@@ -80,6 +80,36 @@ class TestRemoteExecution:
         )
         assert result == "remote_execution"
 
+    def test_stage_on_hpc3_routes_remote_execution(self):
+        result = _auto_detect_skill_switch(
+            "Stage the mouse cDNA sample called Jamshid at /data/pod5 on hpc3", "welcome"
+        )
+        assert result == "remote_execution"
+
+    def test_on_arbitrary_profile_nickname_routes_remote_execution(self):
+        result = _auto_detect_skill_switch(
+            "Run the mouse cDNA sample Jamshid3 at /data/pod5 on mycluster", "welcome"
+        )
+        assert result == "remote_execution"
+
+    def test_list_files_on_hpc3_routes_remote_execution(self):
+        result = _auto_detect_skill_switch(
+            "list files on hpc3", "welcome"
+        )
+        assert result == "remote_execution"
+
+    def test_list_files_on_arbitrary_profile_nickname_routes_remote_execution(self):
+        result = _auto_detect_skill_switch(
+            "list files on mycluster", "welcome"
+        )
+        assert result == "remote_execution"
+
+    def test_show_files_on_cluster_switches_from_job_results(self):
+        result = _auto_detect_skill_switch(
+            "show files on the cluster", "analyze_job_results"
+        )
+        assert result == "remote_execution"
+
 
 class TestEncodeSearch:
     """Tests for routing to ENCODE_Search skill."""

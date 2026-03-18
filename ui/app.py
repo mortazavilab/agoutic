@@ -1422,6 +1422,187 @@ def render_block(block, expected_project_id: str = ""):
                         )
                         st.rerun()
 
+                elif _gate_action == "remote_stage":
+                    st.write("**📤 Remote Staging Plan**")
+
+                    _current_user_id = user.get("id") or user.get("user_id", "")
+                    _saved_profiles = _load_user_ssh_profiles(_current_user_id)
+                    _profile_by_id = {
+                        profile.get("id"): profile
+                        for profile in _saved_profiles
+                        if profile.get("id")
+                    }
+
+                    with st.form(key=f"remote_stage_form_{block_id}"):
+                        sample_name = st.text_input(
+                            "Sample Name",
+                            value=extracted_params.get("sample_name", ""),
+                            help="Name to register for the staged sample."
+                        )
+
+                        mode_options = ["DNA", "RNA", "CDNA"]
+                        current_mode = extracted_params.get("mode", "DNA")
+                        mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
+                        mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
+
+                        input_directory = st.text_input(
+                            "Input Directory",
+                            value=extracted_params.get("input_directory", ""),
+                            help="Local source folder that will be staged to the remote data cache."
+                        )
+
+                        genome_options = ["GRCh38", "mm39"]
+                        current_genomes = extracted_params.get("reference_genome", ["mm39"])
+                        if isinstance(current_genomes, str):
+                            if current_genomes.startswith("["):
+                                try:
+                                    import json as _json
+                                    current_genomes = _json.loads(current_genomes)
+                                except (ValueError, TypeError):
+                                    current_genomes = [current_genomes]
+                            else:
+                                current_genomes = [current_genomes]
+                        current_genomes = [g for g in current_genomes if g in genome_options] or ["mm39"]
+                        reference_genomes = st.multiselect(
+                            "Reference Genome(s)",
+                            genome_options,
+                            default=current_genomes,
+                            help="Reference assets that should be available under the remote ref/ cache."
+                        )
+
+                        input_type = extracted_params.get("input_type", "pod5")
+                        st.caption(f"Input type: `{input_type}`")
+
+                        ssh_profile_id = extracted_params.get("ssh_profile_id") or ""
+                        ssh_profile_nickname = extracted_params.get("ssh_profile_nickname", "") or ""
+                        remote_base_path = extracted_params.get("remote_base_path", "") or ""
+
+                        _selected_profile_id = ssh_profile_id if ssh_profile_id in _profile_by_id else ""
+                        if not _selected_profile_id and ssh_profile_nickname:
+                            _nickname = ssh_profile_nickname.strip().lower()
+                            _match = next(
+                                (
+                                    profile
+                                    for profile in _saved_profiles
+                                    if (
+                                        (profile.get("nickname") or "").strip().lower() == _nickname
+                                        or (profile.get("ssh_host") or "").strip().lower() == _nickname
+                                    )
+                                ),
+                                None,
+                            )
+                            _selected_profile_id = (_match or {}).get("id") or ""
+                        if not _selected_profile_id and len(_saved_profiles) == 1:
+                            _selected_profile_id = _saved_profiles[0].get("id") or ""
+
+                        _profile_options = [""] + list(_profile_by_id.keys())
+                        _selected_profile_id = st.selectbox(
+                            "Saved SSH Profile",
+                            options=_profile_options,
+                            index=_profile_options.index(_selected_profile_id) if _selected_profile_id in _profile_options else 0,
+                            format_func=lambda profile_id: (
+                                "(manual entry)"
+                                if not profile_id
+                                else (
+                                    _profile_by_id[profile_id].get("nickname")
+                                    or _profile_by_id[profile_id].get("ssh_host")
+                                    or profile_id
+                                )
+                            ),
+                            key=f"remote_stage_profile_{block_id}",
+                            help="Choose the remote profile that will receive the staged sample data.",
+                        )
+
+                        _selected_profile = _profile_by_id.get(_selected_profile_id) if _selected_profile_id else None
+                        if _selected_profile:
+                            ssh_profile_id = _selected_profile_id
+                            ssh_profile_nickname = (
+                                _selected_profile.get("nickname")
+                                or _selected_profile.get("ssh_host")
+                                or ssh_profile_nickname
+                            )
+                            if not remote_base_path:
+                                _project_slug = _active_project_slug()
+                                _template_context = {
+                                    "user_id": _current_user_id,
+                                    "project_id": st.session_state.get("active_project_id", ""),
+                                    "project_slug": _project_slug,
+                                    "sample_name": sample_name or "sample",
+                                    "workflow_slug": _slugify_project_name(sample_name or "sample"),
+                                    "ssh_username": _selected_profile.get("ssh_username") or "agoutic",
+                                }
+                                remote_base_path = (
+                                    _render_profile_path_template(
+                                        _selected_profile.get("remote_base_path"),
+                                        _template_context,
+                                    )
+                                    or ""
+                                )
+
+                        ssh_profile_nickname = st.text_input(
+                            "SSH Profile Nickname",
+                            value=ssh_profile_nickname,
+                            help="Saved Remote Profile nickname, such as hpc3."
+                        )
+                        if ssh_profile_id:
+                            st.caption(f"Existing SSH profile ID will be reused unless you change the nickname: {ssh_profile_id}")
+
+                        remote_base_path = st.text_input(
+                            "Remote Base Path",
+                            value=remote_base_path,
+                            help="Top-level remote folder that contains ref/, data/, and project workflow folders."
+                        )
+
+                        local_workflow_directory = extracted_params.get("local_workflow_directory", "") or ""
+                        if local_workflow_directory:
+                            st.caption(f"Local workflow folder: {local_workflow_directory}")
+
+                        st.divider()
+                        col1, col2 = st.columns(2)
+                        submit_approve = col1.form_submit_button("✅ Approve Staging", width="stretch")
+                        submit_reject = col2.form_submit_button("❌ Cancel Staging", width="stretch")
+
+                        if submit_approve:
+                            edited_params = {
+                                "sample_name": sample_name,
+                                "mode": mode,
+                                "input_type": input_type,
+                                "input_directory": input_directory,
+                                "reference_genome": reference_genomes,
+                                "execution_mode": "slurm",
+                                "remote_action": "stage_only",
+                                "gate_action": "remote_stage",
+                                "ssh_profile_id": ssh_profile_id or None,
+                                "ssh_profile_nickname": ssh_profile_nickname or None,
+                                "remote_base_path": remote_base_path or None,
+                                "local_workflow_directory": local_workflow_directory or None,
+                            }
+                            payload_update = dict(content)
+                            payload_update["edited_params"] = edited_params
+                            resp = make_authenticated_request(
+                                "PATCH",
+                                f"{API_URL}/block/{block_id}",
+                                json={"status": "APPROVED", "payload": payload_update}
+                            )
+                            if resp.status_code == 200:
+                                st.rerun()
+                            else:
+                                try:
+                                    error_detail = resp.json().get("detail") or resp.text
+                                except Exception:
+                                    error_detail = resp.text
+                                st.error(f"Approval failed: {error_detail}")
+
+                        if submit_reject:
+                            payload_update = dict(content)
+                            payload_update["rejection_reason"] = "User cancelled remote staging"
+                            make_authenticated_request(
+                                "PATCH",
+                                f"{API_URL}/block/{block_id}",
+                                json={"status": "REJECTED", "payload": payload_update}
+                            )
+                            st.rerun()
+
                 elif extracted_params:
                     st.write("**📋 Extracted Parameters** (edit if needed):")
                     
@@ -1530,9 +1711,7 @@ def render_block(block, expected_project_id: str = ""):
                         slurm_walltime = extracted_params.get("slurm_walltime", "04:00:00") or "04:00:00"
                         slurm_gpus = max(int(extracted_params.get("slurm_gpus") or 1), 1)
                         slurm_gpu_type = extracted_params.get("slurm_gpu_type", "") or ""
-                        remote_input_path = extracted_params.get("remote_input_path", "") or ""
-                        remote_work_path = extracted_params.get("remote_work_path", "") or ""
-                        remote_output_path = extracted_params.get("remote_output_path", "") or ""
+                        remote_base_path = extracted_params.get("remote_base_path", "") or ""
                         local_workflow_directory = extracted_params.get("local_workflow_directory", "") or ""
                         result_destination_default = extracted_params.get("result_destination") or "local"
 
@@ -1607,36 +1786,15 @@ def render_block(block, expected_project_id: str = ""):
                                     "sample_name": sample_name or "workflow",
                                     "workflow_slug": _workflow_slug,
                                     "ssh_username": _ssh_username,
-                                    "remote_root": _remote_root,
                                 }
 
-                                if not remote_input_path:
-                                    remote_input_path = (
+                                if not remote_base_path:
+                                    remote_base_path = (
                                         _render_profile_path_template(
-                                            _selected_profile.get("default_remote_input_path"),
+                                            _selected_profile.get("remote_base_path"),
                                             _template_context,
                                         )
-                                        or f"{_remote_root}/input"
-                                    )
-
-                                _template_context["remote_input_path"] = remote_input_path
-                                if not remote_work_path:
-                                    remote_work_path = (
-                                        _render_profile_path_template(
-                                            _selected_profile.get("default_remote_work_path"),
-                                            _template_context,
-                                        )
-                                        or f"{_remote_root}/work"
-                                    )
-
-                                _template_context["remote_work_path"] = remote_work_path
-                                if not remote_output_path:
-                                    remote_output_path = (
-                                        _render_profile_path_template(
-                                            _selected_profile.get("default_remote_output_path"),
-                                            _template_context,
-                                        )
-                                        or f"{remote_work_path}/output"
+                                        or ""
                                     )
                             elif not _saved_profiles:
                                 st.caption("No saved SSH profiles found. Create one from Remote Profiles to avoid re-entering SLURM settings.")
@@ -1657,14 +1815,12 @@ def render_block(block, expected_project_id: str = ""):
                                 slurm_gpu_account = st.text_input("GPU Account Override", value=slurm_gpu_account, help="Optional account to use when GPUs are requested.")
                                 slurm_cpus = st.number_input("SLURM CPUs", min_value=1, max_value=256, value=slurm_cpus)
                                 slurm_walltime = st.text_input("SLURM Walltime", value=slurm_walltime, help="Format HH:MM:SS or D-HH:MM:SS")
-                                remote_input_path = st.text_input("Remote Input Path", value=remote_input_path)
-                                remote_work_path = st.text_input("Remote Work Path", value=remote_work_path)
+                                remote_base_path = st.text_input("Remote Base Path", value=remote_base_path)
                             with col_slurm_2:
                                 slurm_partition = st.text_input("SLURM Partition", value=slurm_partition)
                                 slurm_gpu_partition = st.text_input("GPU Partition Override", value=slurm_gpu_partition, help="Optional partition to use when GPUs are requested.")
                                 slurm_memory_gb = st.number_input("SLURM Memory (GB)", min_value=1, max_value=2048, value=slurm_memory_gb)
                                 slurm_gpus = st.number_input("SLURM GPUs", min_value=1, max_value=32, value=slurm_gpus)
-                                remote_output_path = st.text_input("Remote Output Path", value=remote_output_path)
 
                             slurm_gpu_type = st.text_input("GPU Type (optional)", value=slurm_gpu_type)
                             result_destination = st.selectbox(
@@ -1766,9 +1922,7 @@ def render_block(block, expected_project_id: str = ""):
                                     "slurm_walltime": slurm_walltime or None,
                                     "slurm_gpus": int(slurm_gpus),
                                     "slurm_gpu_type": slurm_gpu_type or None,
-                                    "remote_input_path": remote_input_path or None,
-                                    "remote_work_path": remote_work_path or None,
-                                    "remote_output_path": remote_output_path or None,
+                                    "remote_base_path": remote_base_path or None,
                                     "result_destination": result_destination,
                                 })
                             else:
@@ -1785,9 +1939,7 @@ def render_block(block, expected_project_id: str = ""):
                                     "slurm_walltime": None,
                                     "slurm_gpus": None,
                                     "slurm_gpu_type": None,
-                                    "remote_input_path": None,
-                                    "remote_work_path": None,
-                                    "remote_output_path": None,
+                                    "remote_base_path": None,
                                     "result_destination": None,
                                 })
                             # Preserve resume_from_dir for resubmit-resume flow
@@ -1849,6 +2001,92 @@ def render_block(block, expected_project_id: str = ""):
     
     elif btype == "WORKFLOW_PLAN":
         return
+
+    elif btype == "STAGING_TASK":
+        with st.chat_message("assistant", avatar="📤"):
+            sample_name = content.get("sample_name", "Unknown")
+            mode = content.get("mode", "Unknown")
+            message = content.get("message", "Preparing remote staging...")
+            progress = int(content.get("progress_percent", 0) or 0)
+            remote_profile = content.get("ssh_profile_nickname") or content.get("ssh_profile_id") or "remote profile"
+            remote_data_path = content.get("remote_data_path", "")
+            stage_parts = content.get("stage_parts") or {}
+
+            st.write(f"### 📤 Remote Staging: {sample_name} ({mode})")
+            st.caption(f"Target profile: `{remote_profile}`")
+
+            def _render_stage_part(label: str, part: dict):
+                state = (part.get("status") or "PENDING").upper()
+                part_progress = max(min(int(part.get("progress_percent", 0) or 0), 100), 0)
+                part_message = part.get("message", "")
+                details = part.get("details") or []
+
+                st.write(f"**{label}**")
+                st.progress(part_progress / 100)
+                if state == "COMPLETED":
+                    st.caption(f"✅ {part_message}")
+                elif state == "FAILED":
+                    st.error(part_message)
+                elif state == "RUNNING":
+                    st.caption(f"🔄 {part_message}")
+                else:
+                    st.caption(f"⏳ {part_message}")
+
+                if details:
+                    for detail in details:
+                        detail_message = detail.get("message") or ""
+                        if detail_message:
+                            st.caption(f"• {detail_message}")
+
+            if block.get("status") == "RUNNING":
+                st.info(f"📤 {message}")
+                st.progress(max(min(progress, 100), 0) / 100)
+                _render_stage_part("References", stage_parts.get("references") or {
+                    "status": "RUNNING",
+                    "progress_percent": 40,
+                    "message": "Staging reference assets on the remote profile...",
+                })
+                _render_stage_part("Data", stage_parts.get("data") or {
+                    "status": "PENDING",
+                    "progress_percent": 0,
+                    "message": "Waiting for reference staging to finish.",
+                })
+            elif block.get("status") == "DONE":
+                st.success(f"✅ {message}")
+                _render_stage_part("References", stage_parts.get("references") or {
+                    "status": "COMPLETED",
+                    "progress_percent": 100,
+                    "message": "Reference assets are ready.",
+                })
+                _render_stage_part("Data", stage_parts.get("data") or {
+                    "status": "COMPLETED",
+                    "progress_percent": 100,
+                    "message": "Sample data is ready.",
+                })
+                if remote_data_path:
+                    st.caption(f"Remote data path: `{remote_data_path}`")
+                ref_statuses = content.get("reference_cache_statuses") or {}
+                if ref_statuses:
+                    with st.expander("Reference cache status", expanded=False):
+                        st.json(ref_statuses)
+            else:
+                st.error(f"❌ {content.get('error') or message}")
+                _render_stage_part("References", stage_parts.get("references") or {
+                    "status": "FAILED",
+                    "progress_percent": 0,
+                    "message": content.get("error") or message,
+                })
+                _render_stage_part("Data", stage_parts.get("data") or {
+                    "status": "FAILED",
+                    "progress_percent": 0,
+                    "message": content.get("error") or message,
+                })
+                if remote_data_path:
+                    st.caption(f"Remote data path: `{remote_data_path}`")
+                traceback_text = content.get("traceback")
+                if traceback_text:
+                    with st.expander("Traceback", expanded=False):
+                        st.code(traceback_text)
 
     elif btype == "EXECUTION_JOB":
         # Job execution monitoring with Nextflow progress visualization
@@ -2389,6 +2627,10 @@ def _render_chat():
         if btype == "EXECUTION_JOB" and bstatus == "RUNNING":
             _has_running_job = True
         if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
+            _has_finished_job = True
+        if btype == "STAGING_TASK" and bstatus == "RUNNING":
+            _has_running_job = True
+        if btype == "STAGING_TASK" and bstatus in ("DONE", "FAILED"):
             _has_finished_job = True
         if btype == "APPROVAL_GATE" and bstatus == "APPROVED":
             _has_pending_submission = True

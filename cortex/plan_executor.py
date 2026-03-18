@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from common import MCPHttpClient
@@ -89,7 +90,6 @@ def should_auto_execute(step: dict) -> bool:
 # None means the step requires special handling (not a simple MCP call).
 STEP_TOOL_DEFAULTS: dict[str, list[dict] | None] = {
     "LOCATE_DATA": [{"source_key": "analyzer", "tool": "list_job_files"}],
-    "VALIDATE_INPUTS": [{"source_key": "analyzer", "tool": "find_file"}],
     "SEARCH_ENCODE": [{"source_key": "encode", "tool": "search_by_biosample"}],
     "DOWNLOAD_DATA": None,          # handled via existing download flow
     "SUBMIT_WORKFLOW": None,        # handled via existing submit/approval flow
@@ -195,8 +195,53 @@ async def execute_step(
     if kind == "REQUEST_APPROVAL":
         # Pause execution — the caller handles creating the approval gate
         step["status"] = "WAITING_APPROVAL"
+        plan_payload["status"] = "WAITING_APPROVAL"
         _persist_step_update(session, workflow_block, plan_payload)
         return StepResult(success=True, data={"action": "approval_required"})
+
+    if kind == "VALIDATE_INPUTS":
+        input_path = (
+            plan_payload.get("input_directory")
+            or plan_payload.get("source_path")
+            or plan_payload.get("work_dir")
+        )
+        if not input_path:
+            step["status"] = "FAILED"
+            step["error"] = "No input path is available for validation."
+            step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+            _persist_step_update(session, workflow_block, plan_payload)
+            return StepResult(success=False, error=step["error"])
+
+        candidate = Path(str(input_path)).expanduser()
+        if not candidate.exists():
+            step["status"] = "FAILED"
+            step["error"] = f"Input path does not exist: {candidate}"
+            step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+            _persist_step_update(session, workflow_block, plan_payload)
+            return StepResult(success=False, error=step["error"])
+
+        file_count = 1 if candidate.is_file() else sum(1 for path in candidate.rglob("*") if path.is_file())
+        if file_count == 0:
+            step["status"] = "FAILED"
+            step["error"] = f"Input path contains no files: {candidate}"
+            step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+            _persist_step_update(session, workflow_block, plan_payload)
+            return StepResult(success=False, error=step["error"])
+
+        step["status"] = "COMPLETED"
+        step["result"] = {
+            "input_path": str(candidate),
+            "is_directory": candidate.is_dir(),
+            "file_count": file_count,
+        }
+        step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+        _persist_step_update(session, workflow_block, plan_payload)
+        return StepResult(success=True, data=step["result"])
+
+    if kind == "CHECK_REMOTE_PROFILE_AUTH":
+        step["status"] = "RUNNING"
+        _persist_step_update(session, workflow_block, plan_payload)
+        return StepResult(success=True, data={"action": "special_handling", "kind": kind})
 
     if kind in ("SUBMIT_WORKFLOW", "DOWNLOAD_DATA", "RUN_DE_ANALYSIS",
                 "COMPARE_SAMPLES", "GENERATE_PLOT", "WRITE_SUMMARY",
@@ -295,12 +340,20 @@ async def execute_plan(
         _persist_step_update(session, workflow_block, plan_payload)
         return
 
-    for step in steps:
+    step_index = 0
+    while True:
+        plan_payload = get_block_payload(workflow_block)
+        steps = plan_payload.get("steps", [])
+        if step_index >= len(steps):
+            break
+
+        step = steps[step_index]
         step_id = step.get("id")
         status = step.get("status", "PENDING")
 
         # Skip already-finished steps
         if status in ("COMPLETED", "SKIPPED", "CANCELLED"):
+            step_index += 1
             continue
 
         # Check dependencies
@@ -364,6 +417,7 @@ async def execute_plan(
         )
         if updated:
             plan_payload = updated
+        step_index += 1
 
     # Check if all steps completed
     plan_payload = get_block_payload(workflow_block)

@@ -41,12 +41,10 @@ class SubmitParams:
     slurm_walltime: str | None = None
     slurm_gpus: int | None = None
     slurm_gpu_type: str | None = None
-    remote_input_path: str | None = None
-    remote_work_path: str | None = None
-    remote_output_path: str | None = None
+    remote_base_path: str | None = None
+    workflow_number: int | None = None
+    staged_remote_input_path: str | None = None
     result_destination: str = "local"  # "local", "remote", "both"
-    remote_reference_cache_root: str | None = None
-    remote_data_cache_root: str | None = None
     cache_preflight: dict | None = None
     reference_cache_path: str | None = None
     data_cache_path: str | None = None

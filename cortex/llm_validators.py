@@ -132,6 +132,7 @@ def _validate_llm_output(
         "search",
         # Launchpad (Dogme)
         "submit_dogme_job", "check_nextflow_status", "get_dogme_report",
+        "stage_remote_sample", "list_remote_files",
         "submit_dogme_nextflow", "find_pod5_directory", "generate_dogme_config",
         "scaffold_dogme_dir", "get_job_logs", "get_job_debug",
         # Analyzer (Analysis)
@@ -190,11 +191,21 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
             return "differential_expression"
 
     # --- Early remote execution pre-check ---
-    _remote_words_early = ["slurm", "sbatch", "hpc3", "cluster", "remote execution"]
+    _remote_words_early = ["slurm", "sbatch", "cluster", "remote execution"]
     _has_remote_word_early = any(w in msg_lower for w in _remote_words_early)
-    _has_run_intent_early = any(w in msg_lower for w in ["run", "submit", "launch", "analyze", "analyse", "process"])
-    if current_skill != "remote_execution" and _has_remote_word_early and _has_run_intent_early:
+    _has_run_intent_early = any(w in msg_lower for w in ["run", "submit", "launch", "analyze", "analyse", "process", "stage", "staging"])
+    _has_remote_browse_intent_early = bool(re.search(
+        r'\b(?:list|show|browse|what)\s+(?:the\s+)?(?:top\s+)?(?:files?|folders?|directories?)\b',
+        msg_lower,
+    ))
+    _has_remote_profile_phrase_early = bool(re.search(
+        r'\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)[a-zA-Z0-9_-]+(?:\s+profile)?(?:[?.!,]|$)|(?:using|via)\s+(?:the\s+)?[a-zA-Z0-9_-]+\s+profile)\b',
+        msg_lower,
+    ))
+    if current_skill != "remote_execution" and (_has_remote_word_early or _has_remote_profile_phrase_early) and (_has_run_intent_early or _has_remote_browse_intent_early):
         return "remote_execution"
+    if current_skill == "remote_execution" and (_has_remote_word_early or _has_remote_profile_phrase_early) and _has_remote_browse_intent_early:
+        return None
 
     # --- Signals for analyze_local_sample ---
     # User mentions a local file path + analysis intent
