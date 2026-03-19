@@ -143,6 +143,75 @@ Set your default in **Settings → Execution Preferences**. Override per-job whe
 
 ---
 
+## Post-Execution Analysis
+
+After a run completes, AGOUTIC can move from execution monitoring into
+scientific interpretation.
+
+### What Analysis Is For
+
+The analysis layer is designed to help you:
+- review QC and run completeness
+- inspect transcript- and gene-level outputs
+- summarize RNA/DNA modification signals
+- run optional differential expression and enrichment analysis
+- compare outputs across workflows, samples, or conditions
+
+### Supported Analysis Types
+
+- **QC analysis:** run summaries, alignment stats, basecalling summaries, and file completeness checks
+- **Transcriptomic analysis:** gene/transcript quantification, isoform-aware interpretation, and splice-aware review
+- **Modification analysis:** RNA/DNA modification summaries and `bedMethyl` parsing
+- **Differential analysis:** edgePython DE workflows with FDR/logFC filtering and annotated top genes
+- **Functional interpretation:** GO (BP/MF/CC), Reactome, and KEGG enrichment plus gene ID translation
+
+### Typical Analysis Flow
+
+Pipeline execution
+   ↓
+Result discovery
+   ↓
+QC parsing and summary
+   ↓
+Expression / isoform / modification extraction
+   ↓
+Optional differential expression
+   ↓
+Functional enrichment
+   ↓
+Visualization and biological interpretation
+
+### Example Analysis Prompts
+
+- _"Summarize QC for workflow2"_
+- _"List important files in workflow1/annot"_
+- _"Parse bedMethyl and summarize methylation patterns"_
+- _"Show top expressed genes from this result file"_
+- _"Run differential expression between control and treatment"_
+- _"Run GO enrichment on upregulated genes"_
+- _"Compare workflow1 and workflow2 outputs"_
+
+### Analysis Inputs and Outputs
+
+**Inputs**
+- workflow result folders
+- CSV/TSV/BED/bedMethyl files
+- count/stat tables and annotation outputs
+- user-selected workflow files
+
+**Outputs**
+- parsed result tables and QC summaries
+- DE/enrichment tables and annotated gene lists
+- interactive plots (bar/scatter/heatmap/box/histogram/pie)
+- chat-readable scientific summaries
+
+### Analysis Limitation in Phase 1
+
+- Analyzer operates on local-accessible files only
+- Remote-only results must be copied back before downstream analysis
+
+---
+
 ## Monitoring Remote Jobs and Staging
 
 AGOUTIC now distinguishes between:

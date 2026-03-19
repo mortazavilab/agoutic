@@ -21,6 +21,10 @@
 - **Expanded Launchpad debug visibility** — `/jobs/{run_uuid}/debug` now
   surfaces discovered `slurm-*.out/.err` previews and focused Nextflow log
   context for failed remote jobs.
+- **Dedicated analysis capabilities guide** — README now includes a full
+  post-execution analysis section covering scientific interpretation goals,
+  supported analysis modes, example requests, visualization outputs, and
+  current analysis limitations.
 
 ## 🧬 Overview
 
@@ -59,6 +63,127 @@ Remote execution features:
 Phase 1 limitation: Analyzer operates on local-accessible files only. Remote results must be copied back before downstream analysis.
 
 See [`docs/remote_execution_architecture.md`](docs/remote_execution_architecture.md) for architecture details, [`docs/cluster_slurm_setup.md`](docs/cluster_slurm_setup.md) for setup, and [`docs/user_guide_execution_modes.md`](docs/user_guide_execution_modes.md) for usage.
+
+## 🔬 Analysis Capabilities
+
+AGOUTIC combines computational workflow execution with agent-guided biological
+interpretation. After a pipeline finishes, the platform helps users move from
+raw output folders to scientific insight, including isoform behavior,
+modification patterns, pathway shifts, and gene-level functional context.
+
+### Analysis Goals
+
+AGOUTIC is designed to help users:
+- Interpret isoform discovery and transcript structure outputs from long-read workflows
+- Summarize RNA and DNA modification signals from workflow artifacts
+- Review QC metrics across runs and identify quality or completeness issues
+- Inspect gene-level and transcript-level result tables with context
+- Run downstream differential expression and enrichment analysis
+- Compare outputs across samples, conditions, and workflows
+
+### Supported Analysis Types
+
+- **Quality Control (QC) analysis**
+  - Parse run summaries, count/stat tables, alignment summaries, and basecalling outputs
+  - Validate run completeness and surface troubleshooting context from logs and artifacts
+  - Generate QC summaries for quick review across workflow outputs
+
+- **Transcriptomic analysis**
+  - Explore gene- and transcript-level quantification outputs
+  - Support isoform-aware interpretation from long-read RNA/cDNA pipelines
+  - Review splice-aware and transcript-structure-relevant outputs
+
+- **Epitranscriptomic and epigenomic analysis**
+  - Summarize RNA modification outputs from direct RNA workflows
+  - Summarize DNA modification outputs from DNA workflows
+  - Parse and interpret `bedMethyl` outputs, including region- and gene-linked review where applicable
+
+- **Differential analysis**
+  - Run bulk and single-cell RNA-seq differential expression through edgePython
+  - Use the stateful DE flow: load → filter → normalize → design → fit → test → results
+  - Filter by FDR/logFC and report annotated top genes for interpretation
+
+- **Functional interpretation**
+  - Run GO enrichment (BP, MF, CC)
+  - Run Reactome and KEGG pathway enrichment
+  - Translate Ensembl IDs and normalize symbols for human and mouse datasets
+
+For deeper tool-level details, see [`analyzer/README.md`](analyzer/README.md),
+[`skills/Differential_Expression.md`](skills/Differential_Expression.md),
+[`skills/Enrichment_Analysis.md`](skills/Enrichment_Analysis.md), and
+[`SKILLS.md`](SKILLS.md).
+
+### Typical Analysis Workflow
+
+Pipeline execution
+  ↓
+Result discovery
+  ↓
+QC parsing and summary generation
+  ↓
+Expression / isoform / modification result extraction
+  ↓
+Optional differential expression analysis
+  ↓
+Functional enrichment
+  ↓
+Agent-guided visualization and biological interpretation
+
+### What Happens Next in Analysis
+
+Once parsing and summaries are complete, AGOUTIC can pivot into follow-up
+interpretation tasks such as cross-workflow comparison, condition-focused
+differential analysis, and targeted functional hypotheses (for example,
+pathway-level shifts or biologically coherent gene programs).
+
+### Analysis Inputs
+
+The analysis layer consumes:
+- Pipeline result folders (for example `workflow1/`, `workflow2/`)
+- CSV/TSV/BED/bedMethyl files
+- Counts and summary/statistics tables
+- Annotation and quantification outputs
+- User-selected files from workflow subdirectories
+
+### Analysis Outputs
+
+The analysis layer returns:
+- Parsed result tables
+- QC summaries and run-validation context
+- Annotated gene/transcript lists
+- Differential expression result tables
+- GO/pathway enrichment tables
+- Interactive plots and chart-ready summaries
+- Chat-readable scientific interpretation for downstream decisions
+
+### Example Analysis Requests
+
+- `Summarize the QC for workflow2`
+- `List the important files in workflow1/annot`
+- `Parse the bedMethyl output and summarize methylation patterns`
+- `Show the top expressed genes from this result file`
+- `Run differential expression between control and treatment`
+- `Annotate these Ensembl IDs`
+- `Run GO enrichment on the upregulated genes`
+- `Compare workflow1 and workflow2 outputs`
+
+### Visualization Support
+
+- Inline Plotly visualizations directly in chat
+- Interactive bar, scatter, heatmap, box, histogram, and pie plots
+- Automatic plotting from parsed tables when chartable data are detected
+- Plot generation from DE and enrichment outputs for rapid interpretation
+
+### Current Analysis Limitations
+
+- Analyzer currently requires local-accessible files
+- Remote-only results must be copied back before downstream analysis
+- Some analysis pathways are file-format dependent and assume expected output conventions
+- Cross-run comparison is strongest when workflows use consistent references and naming
+- Interpretation depth depends on pipeline completeness and annotation availability
+
+See [`docs/remote_execution_architecture.md`](docs/remote_execution_architecture.md)
+for remote execution constraints and staging/copy-back behavior.
 
 ## 🔒 Security & Multi-User Isolation
 

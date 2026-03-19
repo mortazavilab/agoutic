@@ -119,6 +119,16 @@
     during remote profile connection tests
   - Remote Profiles UI support for long-running connection-test requests
 
+### Documentation
+
+- Added a dedicated analysis narrative in `README.md` that explains what
+  happens after pipeline execution, including analysis goals, supported
+  analysis types, typical analysis flow, inputs/outputs, visualization support,
+  and analysis limitations.
+
+- Clarified analysis constraints across user docs: remote-only results must be
+  copied back locally before Analyzer-based downstream interpretation.
+
 ## [3.4.1] - 2026-03-17
 
 - **Per-user cross-project SLURM cache reuse** — added cache preflight planning
