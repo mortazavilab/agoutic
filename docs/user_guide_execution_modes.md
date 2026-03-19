@@ -98,6 +98,10 @@ When submitting to SLURM, you can configure these resource parameters:
 
 These are set as defaults per SSH profile and can be overridden per job.
 
+When profile-level defaults are present (for example account/partition on
+`hpc3`), AGOUTIC uses them directly in the remote submit approval summary and
+does not ask again unless a required field is still missing.
+
 **Tips:**
 - Request only what you need — smaller requests get scheduled faster
 - Check partition limits before requesting large resources

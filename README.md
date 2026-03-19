@@ -21,6 +21,14 @@
 - **Expanded Launchpad debug visibility** — `/jobs/{run_uuid}/debug` now
   surfaces discovered `slurm-*.out/.err` previews and focused Nextflow log
   context for failed remote jobs.
+- **Remote defaults-to-approval continuity** — when `get_slurm_defaults`
+  resolves values from saved SSH-profile defaults, Cortex now treats them as
+  valid submit-ready defaults and builds a proper approval gate instead of
+  emitting fallback "0 SLURM defaults" messaging.
+- **Launchpad context param safety net** — remote Launchpad calls now inject
+  missing context fields (`user_id`, plus `project_id` for
+  `get_slurm_defaults`) before execution to prevent missing-argument failures
+  from degraded model tags.
 - **Dedicated analysis capabilities guide** — README now includes a full
   post-execution analysis section covering scientific interpretation goals,
   supported analysis modes, example requests, visualization outputs, and

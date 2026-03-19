@@ -96,6 +96,22 @@
   Profiles page now keeps the test-connection request alive for slow clusters
   and shows a live elapsed-time indicator while the probe is running.
 
+- **Remote defaults-to-submit approval continuity** — remote execution now
+  treats `get_slurm_defaults(found=true, source=ssh_profile_defaults)` as a
+  valid defaults signal for submit intents, generating deterministic
+  submit-ready approval summaries/gates instead of falling through to generic
+  second-pass "0 SLURM defaults" failure copy.
+
+- **Launchpad remote-call context injection** — Cortex now auto-injects
+  required Launchpad context parameters (`user_id`, and `project_id` for
+  `get_slurm_defaults`) at execution time when model-emitted DATA_CALL tags
+  omit them.
+
+- **Provenance row-count correctness for dict-style success payloads** —
+  `TOOL_RESULT` row counts now treat `found=true`/`ok=true` dict responses as
+  successful one-row outcomes, preventing misleading `rows=0` audit signals
+  for defaults/profile lookups.
+
 ### Tests
 
 - Added/updated tests for:
@@ -118,6 +134,11 @@
   - long SSH connect/probe timeout defaults and surfaced broker failure text
     during remote profile connection tests
   - Remote Profiles UI support for long-running connection-test requests
+  - auto-injection of missing `user_id`/`project_id` context for
+    `get_slurm_defaults` Launchpad calls
+  - remote run intent path using SSH-profile-backed defaults to produce a
+    submit approval gate (not stage-only) and suppress misleading
+    "0 SLURM defaults" fallback messaging
 
 ### Documentation
 

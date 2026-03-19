@@ -1281,6 +1281,139 @@ class TestBrowsingToolBypass:
         assert extracted.get("ssh_profile_nickname") == "hpc3"
         assert extracted.get("remote_base_path") == "/share/crsp/lab/seyedam/share/agoutic/seyedam"
 
+    def test_get_slurm_defaults_injects_user_id_when_llm_omits_it(self, SL, seed, tmp_path):
+        """Launchpad defaults call should be repaired with user_id before MCP execution."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            assert tool_name == "get_slurm_defaults"
+            assert kwargs.get("user_id") == "u-plot"
+            assert kwargs.get("project_id") == "proj-plot"
+            return {"found": False, "source": "none"}
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "Checking saved defaults now.\n"
+                "[[DATA_CALL: service=launchpad, tool=get_slurm_defaults, project_id=<project_id>]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "check my slurm defaults", skill="remote_execution")
+        assert resp.status_code == 200
+        assert mock_mcp.call_tool.await_count == 1
+
+    def test_remote_run_uses_profile_defaults_and_creates_job_approval(self, SL, seed, tmp_path):
+        """Remote run intent should use SSH-profile defaults and create a job approval gate."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            if tool_name == "list_ssh_profiles":
+                return [
+                    {
+                        "id": "profile-123",
+                        "nickname": "hpc3",
+                        "ssh_username": "agoutic",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                        "default_slurm_gpu_account": "SEYEDAM_LAB",
+                        "default_slurm_gpu_partition": "gpu",
+                    }
+                ]
+            if tool_name == "get_slurm_defaults":
+                return {
+                    "found": True,
+                    "source": "ssh_profile_defaults",
+                    "account": "SEYEDAM_LAB",
+                    "partition": "standard",
+                    "selected_profile_defaults": {
+                        "ssh_profile_id": "profile-123",
+                        "nickname": "hpc3",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                    },
+                }
+            raise AssertionError(f"unexpected tool: {tool_name}")
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "I found 1 SSH profile and 0 SLURM defaults for your request.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
+            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch(
+                "cortex.app._list_user_ssh_profiles",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "profile-123",
+                            "nickname": "hpc3",
+                            "ssh_username": "agoutic",
+                            "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                            "default_slurm_account": "SEYEDAM_LAB",
+                            "default_slurm_partition": "standard",
+                            "default_slurm_gpu_account": "SEYEDAM_LAB",
+                            "default_slurm_gpu_partition": "gpu",
+                        }
+                    ]
+                ),
+            ),
+            patch(
+                "cortex.app.extract_job_parameters_from_conversation",
+                new=AsyncMock(
+                    return_value={
+                        "sample_name": "Jamshid",
+                        "input_directory": "/media/backup_disk/agoutic_root/testdata/CDNA/pod5",
+                        "mode": "CDNA",
+                        "reference_genome": ["mm39"],
+                        "ssh_profile_nickname": "hpc3",
+                        "execution_mode": "slurm",
+                    }
+                ),
+            ),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "Analyze the mouse CDNA sample called Jamshid at /media/backup_disk/agoutic_root/testdata/CDNA/pod5 on hpc3",
+            skill="welcome",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        assert payload.get("skill") == "remote_execution"
+        assert "I found the saved remote defaults needed to submit this run." in md
+        assert "0 SLURM defaults" not in md
+        assert "did not return the expected data" not in md
+
+        gate = data.get("gate_block") or {}
+        gate_payload = gate.get("payload") or {}
+        assert gate_payload.get("skill") == "remote_execution"
+        assert gate_payload.get("gate_action") == "job"
+        extracted = gate_payload.get("extracted_params") or {}
+        assert extracted.get("execution_mode") == "slurm"
+        assert extracted.get("gate_action") == "job"
+        assert extracted.get("slurm_account") == "SEYEDAM_LAB"
+        assert extracted.get("slurm_partition") == "standard"
+
 
 class TestDownloadWorkflow:
     def test_download_skill_skip_second_pass(self, SL, seed, tmp_path):

@@ -814,7 +814,7 @@ async def _build_remote_stage_approval_context(
         return None
 
     remote_request = _extract_remote_execution_request(user_message)
-    if not remote_request or not remote_request.get("stage_only"):
+    if not remote_request:
         return None
 
     launchpad_results = all_results.get("launchpad") or []
@@ -832,9 +832,14 @@ async def _build_remote_stage_approval_context(
     selected_defaults = defaults_data.get("selected_profile_defaults") or {}
     params = await extract_job_parameters_from_conversation(session, project_id) or {}
     params = dict(params)
-    params.setdefault("remote_action", "stage_only")
-    params.setdefault("gate_action", "remote_stage")
     params["execution_mode"] = "slurm"
+    if remote_request.get("stage_only"):
+        params.setdefault("remote_action", "stage_only")
+        params.setdefault("gate_action", "remote_stage")
+    else:
+        if (params.get("remote_action") or "").strip().lower() == "stage_only":
+            params.pop("remote_action", None)
+        params.setdefault("gate_action", "job")
     if selected_defaults.get("ssh_profile_id") and not params.get("ssh_profile_id"):
         params["ssh_profile_id"] = selected_defaults.get("ssh_profile_id")
     if selected_defaults.get("nickname") and not params.get("ssh_profile_nickname"):
@@ -843,9 +848,12 @@ async def _build_remote_stage_approval_context(
         params["remote_base_path"] = selected_defaults.get("remote_base_path")
 
     prepared = await _prepare_remote_execution_params(session, project_id, owner_id, params)
-    prepared["remote_action"] = "stage_only"
-    prepared["gate_action"] = "remote_stage"
     prepared["execution_mode"] = "slurm"
+    if remote_request.get("stage_only"):
+        prepared["remote_action"] = "stage_only"
+        prepared["gate_action"] = "remote_stage"
+    else:
+        prepared["gate_action"] = "job"
     prepared = await _build_slurm_cache_preflight(session, project_id, owner_id, prepared)
 
     sample_name = prepared.get("sample_name") or "sample"
@@ -859,9 +867,14 @@ async def _build_remote_stage_approval_context(
     account = prepared.get("slurm_account") or defaults_data.get("account") or selected_defaults.get("default_slurm_account") or "(unset)"
     partition = prepared.get("slurm_partition") or defaults_data.get("partition") or selected_defaults.get("default_slurm_partition") or "(unset)"
     remote_base_path = prepared.get("remote_base_path") or selected_defaults.get("remote_base_path") or "(unset)"
+    result_destination = prepared.get("result_destination") or "local"
+    cpus = int(prepared.get("slurm_cpus") or 4)
+    memory_gb = int(prepared.get("slurm_memory_gb") or 16)
+    walltime = prepared.get("slurm_walltime") or "04:00:00"
+    gpus = int(prepared.get("slurm_gpus") or 1)
 
-    return {
-        "summary": (
+    if remote_request.get("stage_only"):
+        summary = (
             "I found the saved remote defaults needed for staging.\n\n"
             f"📋 **Sample Name:** {sample_name}\n"
             f"📁 **Data Path:** {input_directory}\n"
@@ -874,7 +887,30 @@ async def _build_remote_stage_approval_context(
             f"📍 **Remote Base Path:** {remote_base_path}\n\n"
             f"I will stage the sample and reference assets on `{profile_name}`. This will not launch Dogme or Nextflow.\n\n"
             "[[APPROVAL_NEEDED]]"
-        ),
+        )
+    else:
+        summary = (
+            "I found the saved remote defaults needed to submit this run.\n\n"
+            f"📋 **Sample Name:** {sample_name}\n"
+            f"📁 **Data Path:** {input_directory}\n"
+            f"🧬 **Data Type:** {mode}\n"
+            f"🔬 **Reference Genome:** {reference_text}\n"
+            f"🖥️ **Execution Mode:** SLURM\n"
+            f"🔐 **SSH Profile:** {profile_name}\n"
+            f"🧾 **Account:** {account}\n"
+            f"🗂️ **Partition:** {partition}\n"
+            f"🧠 **CPUs:** {cpus}\n"
+            f"💾 **Memory (GB):** {memory_gb}\n"
+            f"⏱️ **Walltime:** {walltime}\n"
+            f"🎮 **GPUs:** {gpus}\n"
+            f"📦 **Result Destination:** {result_destination}\n"
+            f"📍 **Remote Base Path:** {remote_base_path}\n\n"
+            f"I am ready to submit Dogme on `{profile_name}` once you approve.\n\n"
+            "[[APPROVAL_NEEDED]]"
+        )
+
+    return {
+        "summary": summary,
         "params": prepared,
     }
 
@@ -1338,6 +1374,28 @@ def _hydrate_request_placeholders(value, *, user_id: str, project_id: str):
             for key, item in value.items()
         }
     return value
+
+
+def _inject_launchpad_context_params(
+    tool_name: str,
+    params: dict,
+    *,
+    user_id: str,
+    project_id: str,
+) -> dict:
+    """Best-effort context hydration for Launchpad tools that require identity scope."""
+    hydrated = dict(params or {})
+
+    # Remote profile/default/listing tools require user scope in Launchpad MCP.
+    if tool_name in {"list_ssh_profiles", "get_slurm_defaults", "list_remote_files", "test_ssh_connection"}:
+        if not hydrated.get("user_id"):
+            hydrated["user_id"] = user_id
+
+    # Defaults lookups are usually project-scoped in chat flows.
+    if tool_name == "get_slurm_defaults" and project_id and not hydrated.get("project_id"):
+        hydrated["project_id"] = project_id
+
+    return hydrated
 
 @app.post("/jobs/{run_uuid}/resubmit")
 async def resubmit_job(run_uuid: str, request: Request):
@@ -5713,6 +5771,22 @@ What would you like to do?
                     tool_name = call["tool"]
                     params = call["params"]
 
+                    if source_key == "launchpad":
+                        _patched = _inject_launchpad_context_params(
+                            tool_name,
+                            params,
+                            user_id=user.id,
+                            project_id=req.project_id,
+                        )
+                        if _patched != params:
+                            logger.info(
+                                "Injected missing Launchpad context params",
+                                tool=tool_name,
+                                original_params=params,
+                                patched_params=_patched,
+                            )
+                        params = _patched
+
                     # Check for user cancellation before each tool call
                     if _is_cancelled(req.request_id):
                         raise ChatCancelled("tools", f"Cancelled before running {tool_name} on {_source_label}.")
@@ -6102,11 +6176,14 @@ What would you like to do?
                 if "data" in _prov_r:
                     _data = _prov_r["data"]
                     if isinstance(_data, dict):
-                        _prov_entry["rows"] = (
+                        _rows = (
                             _data.get("total")
                             or _data.get("count")
                             or len(_data.get("experiments", _data.get("files", _data.get("entries", []))))
                         )
+                        if not _rows and (_data.get("found") is True or _data.get("ok") is True):
+                            _rows = 1
+                        _prov_entry["rows"] = _rows
                     elif isinstance(_data, list):
                         _prov_entry["rows"] = len(_data)
                 if "error" in _prov_r:
