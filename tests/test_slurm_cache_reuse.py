@@ -76,3 +76,16 @@ def test_compute_directory_signature_changes_with_file_update(tmp_path: Path):
     second = SlurmBackend._compute_directory_signature(ref_dir)
 
     assert first != second
+
+
+def test_compute_directory_signature_changes_when_file_added(tmp_path: Path):
+    ref_dir = tmp_path / "mm39"
+    ref_dir.mkdir()
+    fasta = ref_dir / "genome.fa"
+    fasta.write_text(">chr1\nACGT\n")
+
+    first = SlurmBackend._compute_directory_signature(ref_dir)
+    (ref_dir / "mm39GencM36_k63.idx").write_text("index")
+    second = SlurmBackend._compute_directory_signature(ref_dir)
+
+    assert first != second

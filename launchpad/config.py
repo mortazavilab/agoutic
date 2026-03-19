@@ -68,6 +68,8 @@ REFERENCE_GENOMES = {
     "mm39": {
         "fasta": AGOUTIC_DATA / "references" / "mm39" / "IGVFFI9282QLXO.fasta",
         "gtf": AGOUTIC_DATA / "references" / "mm39" / "IGVFFI4777RDZK.gtf",
+        "kallisto_index": AGOUTIC_DATA / "references" / "mm39" / "mm39GencM36_k63.idx",
+        "kallisto_t2g": AGOUTIC_DATA / "references" / "mm39" / "mm39GencM36_k63.t2g",
     },
     "default": "GRCh38",
 }

@@ -2829,6 +2829,14 @@ def _should_stage_local_sample(gate_payload: dict, job_params: dict) -> bool:
     skill = gate_payload.get("skill")
     if skill != "analyze_local_sample":
         return False
+    if gate_payload.get("gate_action") == "remote_stage" or job_params.get("gate_action") == "remote_stage":
+        return False
+    if (job_params.get("remote_action") or "").strip().lower() == "stage_only":
+        return False
+    if job_params.get("ssh_profile_id") or job_params.get("ssh_profile_nickname"):
+        return False
+    if (job_params.get("execution_mode") or "local").strip().lower() == "slurm":
+        return False
     if job_params.get("input_type") == "bam":
         return False
     input_dir = str(job_params.get("input_directory") or "").strip()
@@ -3114,7 +3122,17 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
         _username = owner_user.username if owner_user else None
         _project_slug = project_obj.slug if project_obj else None
+        gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
+        remote_action = (job_params.get("remote_action") or "").strip().lower()
+        remote_intent = (
+            gate_action == "remote_stage"
+            or remote_action == "stage_only"
+            or bool(job_params.get("ssh_profile_id") or job_params.get("ssh_profile_nickname"))
+        )
         execution_mode = (job_params.get("execution_mode") or "local").strip().lower()
+        if remote_intent and execution_mode != "slurm":
+            execution_mode = "slurm"
+            job_params["execution_mode"] = "slurm"
         if execution_mode not in ("local", "slurm"):
             logger.warning(
                 "Invalid execution_mode from job_params, defaulting to local",
@@ -3176,7 +3194,6 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         }
 
         workflow_block = None
-        gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
         remote_stage_only = execution_mode == "slurm" and (
             gate_action == "remote_stage" or job_params.get("remote_action") == "stage_only"
         )
@@ -3473,6 +3490,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                         "remote_reference_paths": stage_result.get("remote_reference_paths"),
                         "data_cache_status": stage_result.get("data_cache_status"),
                         "reference_cache_statuses": stage_result.get("reference_cache_statuses"),
+                        "reference_asset_evidence": stage_result.get("reference_asset_evidence"),
                         "stage_parts": stage_parts,
                     },
                     status="DONE",

@@ -768,6 +768,65 @@ class TestSubmitJobAfterApproval:
         sess.close()
 
     @pytest.mark.asyncio
+    async def test_remote_stage_only_skips_local_sample_staging_even_with_existing_local_path(self, session_factory, seed_data, tmp_path):
+        source_dir = tmp_path / "incoming" / "pod5"
+        source_dir.mkdir(parents=True)
+        (source_dir / "reads.pod5").write_text("pod5-data")
+
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "gate_action": "remote_stage",
+            "skill": "analyze_local_sample",
+            "extracted_params": {
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "input_directory": str(source_dir),
+                "reference_genome": ["mm39"],
+                "execution_mode": "slurm",
+                "ssh_profile_nickname": "hpc3",
+                "remote_action": "stage_only",
+                "gate_action": "remote_stage",
+                "remote_base_path": "/remote/u1/agoutic",
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "remote_data_path": "/remote/u1/agoutic/data/fp1",
+            "data_cache_status": "staged",
+            "reference_cache_statuses": {"mm39": "reused"},
+            "reference_asset_evidence": {
+                "mm39": {
+                    "requires_kallisto": True,
+                    "missing_required_assets": [],
+                    "all_required_present": True,
+                }
+            },
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.app.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.app.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.await_count == 1
+        assert mock_client.call_tool.call_args.args[0] == "stage_remote_sample"
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["input_directory"] == str(source_dir)
+
+        staged_dir = tmp_path / "users" / "bguser" / "data" / "jamshid"
+        assert not staged_dir.exists()
+
+        sess = session_factory()
+        assert sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all() == []
+        gates = sess.query(ProjectBlock).filter(ProjectBlock.type == "APPROVAL_GATE").all()
+        assert len(gates) == 1
+        sess.close()
+
+    @pytest.mark.asyncio
     async def test_polls_job_after_submission(self, session_factory, seed_data):
         """After successful submission, creates a poll task."""
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
@@ -849,6 +908,13 @@ class TestSubmitJobAfterApproval:
             "remote_data_path": "/remote/u1/agoutic/data/fp1",
             "data_cache_status": "reused",
             "reference_cache_statuses": {"mm39": "reused"},
+            "reference_asset_evidence": {
+                "mm39": {
+                    "requires_kallisto": True,
+                    "missing_required_assets": [],
+                    "all_required_present": True,
+                }
+            },
         })
 
         with _patch_session(session_factory), \
@@ -875,12 +941,63 @@ class TestSubmitJobAfterApproval:
         staging_payload = get_block_payload(staging_block)
         assert staging_block.status == "DONE"
         assert staging_payload["remote_data_path"] == "/remote/u1/agoutic/data/fp1"
+        assert staging_payload["reference_asset_evidence"]["mm39"]["all_required_present"] is True
         assert staging_payload["stage_parts"]["references"]["status"] == "COMPLETED"
         assert staging_payload["stage_parts"]["references"]["progress_percent"] == 100
         assert "already staged" in staging_payload["stage_parts"]["references"]["message"].lower()
         assert staging_payload["stage_parts"]["data"]["status"] == "COMPLETED"
         assert staging_payload["stage_parts"]["data"]["progress_percent"] == 100
         assert sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all() == []
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_stage_only_remote_request_forces_slurm_even_without_execution_mode(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "gate_action": "remote_stage",
+            "skill": "analyze_local_sample",
+            "extracted_params": {
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "input_directory": "/media/backup_disk/agoutic_root/testdata/CDNA/pod5",
+                "reference_genome": ["mm39"],
+                "ssh_profile_nickname": "hpc3",
+                "remote_action": "stage_only",
+                "gate_action": "remote_stage",
+                "remote_base_path": "/remote/u1/agoutic",
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "remote_data_path": "/remote/u1/agoutic/data/fp1",
+            "data_cache_status": "staged",
+            "reference_cache_statuses": {"mm39": "reused"},
+            "reference_asset_evidence": {
+                "mm39": {
+                    "requires_kallisto": True,
+                    "missing_required_assets": [],
+                    "all_required_present": True,
+                }
+            },
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.app.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.await_count == 1
+        assert mock_client.call_tool.call_args.args[0] == "stage_remote_sample"
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["ssh_profile_id"] == "profile-123"
+        assert "execution_mode" not in submitted
+
+        sess = session_factory()
+        assert sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all() == []
+        assert sess.query(ProjectBlock).filter(ProjectBlock.type == "STAGING_TASK").count() == 1
         sess.close()
 
 

@@ -12,8 +12,9 @@ from launchpad.config import REFERENCE_GENOMES
 
 
 class _FakeConn:
-    def __init__(self, existing_paths=None):
+    def __init__(self, existing_paths=None, dir_entries=None):
         self.existing_paths = set(existing_paths or [])
+        self.dir_entries = dir_entries or {}
         self.commands = []
 
     async def path_exists(self, path: str) -> bool:
@@ -21,6 +22,9 @@ class _FakeConn:
 
     async def mkdir_p(self, path: str) -> None:
         self.existing_paths.add(path)
+
+    async def list_dir(self, path: str):
+        return self.dir_entries.get(path, [])
 
     async def run(self, command: str, check: bool = False):
         self.commands.append(command)
@@ -37,10 +41,12 @@ class _FakeConn:
 
 
 class _FakeStatusConn(_FakeConn):
-    def __init__(self, sacct_output: str = "", squeue_output: str = ""):
+    def __init__(self, sacct_output: str = "", squeue_output: str = "", trace_output: str = "", slurm_out_output: str = ""):
         super().__init__()
         self.sacct_output = sacct_output
         self.squeue_output = squeue_output
+        self.trace_output = trace_output
+        self.slurm_out_output = slurm_out_output
 
     async def run(self, command: str, check: bool = False):
         self.commands.append(command)
@@ -48,6 +54,10 @@ class _FakeStatusConn(_FakeConn):
             return SimpleNamespace(stdout=self.sacct_output, stderr="", exit_status=0)
         if "squeue -j" in command:
             return SimpleNamespace(stdout=self.squeue_output, stderr="", exit_status=0)
+        if "find " in command and "_trace.txt" in command:
+            return SimpleNamespace(stdout=self.trace_output, stderr="", exit_status=0)
+        if "tail -n 500" in command and "slurm-" in command and ".out" in command:
+            return SimpleNamespace(stdout=self.slurm_out_output, stderr="", exit_status=0)
         return await super().run(command, check=check)
 
 
@@ -352,6 +362,120 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
 
 
 @pytest.mark.asyncio
+async def test_stage_remote_sample_dna_does_not_require_kallisto_sidecars(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeConn(
+        dir_entries={
+            "/remote/eli/agoutic/ref/mm39": [
+                {"name": Path(REFERENCE_GENOMES["mm39"]["fasta"]).name, "type": "file", "size": 1},
+                {"name": Path(REFERENCE_GENOMES["mm39"]["gtf"]).name, "type": "file", "size": 1},
+            ]
+        }
+    )
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        sample_name="sample",
+        mode="DNA",
+        input_directory="/tmp/input",
+        reference_genome=["mm39"],
+        ssh_profile_id="profile-1",
+        remote_base_path="/remote/eli/agoutic",
+    )
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _stage_inputs(*args, **kwargs):
+        return {
+            "remote_input": "/remote/eli/agoutic/data/fp1",
+            "data_cache_status": "reused",
+            "reference_cache_statuses": {"mm39": "reused"},
+            "remote_reference_paths": {"mm39": "/remote/eli/agoutic/ref/mm39"},
+        }
+
+    async def _validate_remote_paths(*args, **kwargs):
+        return {}
+
+    from launchpad.backends import slurm_backend as slurm_module
+
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+    monkeypatch.setattr(backend, "_stage_sample_inputs", _stage_inputs)
+    monkeypatch.setattr(slurm_module, "validate_remote_paths", _validate_remote_paths)
+    monkeypatch.setattr(slurm_module, "check_all_paths_ok", lambda *_: (True, []))
+
+    result = await backend.stage_remote_sample(params)
+
+    evidence = result["reference_asset_evidence"]["mm39"]
+    assert evidence["requires_kallisto"] is False
+    assert evidence["missing_required_assets"] == []
+    assert evidence["all_required_present"] is True
+    assert evidence["optional_assets"] == {
+        "kallisto_index": Path(REFERENCE_GENOMES["mm39"]["kallisto_index"]).name,
+        "kallisto_t2g": Path(REFERENCE_GENOMES["mm39"]["kallisto_t2g"]).name,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stage_remote_sample_cdna_requires_kallisto_sidecars(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeConn(
+        dir_entries={
+            "/remote/eli/agoutic/ref/mm39": [
+                {"name": Path(REFERENCE_GENOMES["mm39"]["fasta"]).name, "type": "file", "size": 1},
+                {"name": Path(REFERENCE_GENOMES["mm39"]["gtf"]).name, "type": "file", "size": 1},
+            ]
+        }
+    )
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        sample_name="sample",
+        mode="CDNA",
+        input_directory="/tmp/input",
+        reference_genome=["mm39"],
+        ssh_profile_id="profile-1",
+        remote_base_path="/remote/eli/agoutic",
+    )
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _stage_inputs(*args, **kwargs):
+        return {
+            "remote_input": "/remote/eli/agoutic/data/fp1",
+            "data_cache_status": "reused",
+            "reference_cache_statuses": {"mm39": "reused"},
+            "remote_reference_paths": {"mm39": "/remote/eli/agoutic/ref/mm39"},
+        }
+
+    async def _validate_remote_paths(*args, **kwargs):
+        return {}
+
+    from launchpad.backends import slurm_backend as slurm_module
+
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+    monkeypatch.setattr(backend, "_stage_sample_inputs", _stage_inputs)
+    monkeypatch.setattr(slurm_module, "validate_remote_paths", _validate_remote_paths)
+    monkeypatch.setattr(slurm_module, "check_all_paths_ok", lambda *_: (True, []))
+
+    result = await backend.stage_remote_sample(params)
+
+    evidence = result["reference_asset_evidence"]["mm39"]
+    assert evidence["requires_kallisto"] is True
+    assert evidence["missing_required_assets"] == ["kallisto_index", "kallisto_t2g"]
+    assert evidence["all_required_present"] is False
+
+
+@pytest.mark.asyncio
 async def test_check_status_includes_sacct_failure_reason(monkeypatch, profile):
     backend = SlurmBackend()
     conn = _FakeStatusConn(sacct_output="FAILED|127:0|NonZeroExitCode\n")
@@ -401,6 +525,63 @@ async def test_check_status_includes_sacct_failure_reason(monkeypatch, profile):
     assert "exit code 127:0" in status.message
     assert "non-zero exit code" in status.message.lower()
     assert updates[0]["error_message"] == status.message
+
+
+@pytest.mark.asyncio
+async def test_check_status_reports_remote_trace_progress(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeStatusConn(
+        sacct_output="RUNNING|0:0|\n",
+        trace_output=(
+            "task_id\thash\tnative_id\tname\tstatus\texit\n"
+            "1\tda/2fa490\t50043101\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
+            "2\t5/abc123\t50043106\tmainWorkflow:softwareVTask\tCOMPLETED\t0\n"
+        ),
+        slurm_out_output=(
+            "executor >  slurm (3)\n"
+            "[fe/e700c5] mainWorkflow:doradoTask (1) | 0 of 1\n"
+        ),
+    )
+
+    from launchpad import db as launchpad_db
+
+    async def _get_job_by_uuid(*args, **kwargs):
+        return SimpleNamespace(
+            run_uuid="run-6",
+            status="RUNNING",
+            progress_percent=0,
+            run_stage="running",
+            slurm_job_id="50043100",
+            transfer_state=None,
+            result_destination="local",
+            ssh_profile_id="profile-1",
+            user_id="user-1",
+            slurm_state=None,
+            remote_work_dir="/remote/eli/agoutic/proj-1/workflow7",
+        )
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _noop_update(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_db, "get_job_by_uuid", _get_job_by_uuid)
+    monkeypatch.setattr(backend, "_update_job_slurm_state", _noop_update)
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+
+    status = await backend.check_status("run-6")
+
+    assert status.status == "RUNNING"
+    assert status.progress_percent == 60
+    assert status.tasks["completed_count"] == 2
+    assert status.tasks["total"] == 3
+    assert status.tasks["running"] == ["mainWorkflow:doradoTask (1)"]
+    assert "2/3 completed" in status.message
 
 
 def test_controller_resources_prefer_cpu_defaults(profile):

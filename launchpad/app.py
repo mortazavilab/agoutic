@@ -576,8 +576,10 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         
-        # For terminal DB states, return directly without checking work dir
-        if job.status in (JobStatus.DELETED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+        # For local terminal DB states, return directly without checking work dir.
+        # SLURM jobs still need backend polling to surface live/terminal scheduler
+        # details plus remote trace-derived task progress.
+        if job.execution_mode != "slurm" and job.status in (JobStatus.DELETED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
             return {
                 "run_uuid": run_uuid,
                 "status": job.status,
@@ -592,7 +594,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             return {
                 "run_uuid": run_uuid,
                 "status": status_data.status,
-                "progress_percent": 100 if status_data.status == JobStatus.COMPLETED else job.progress_percent,
+                "progress_percent": status_data.progress_percent if status_data.progress_percent is not None else (100 if status_data.status == JobStatus.COMPLETED else job.progress_percent),
                 "message": status_data.message or job.error_message or f"Status: {job.status}",
                 "tasks": status_data.tasks or {},
                 "execution_mode": status_data.execution_mode,

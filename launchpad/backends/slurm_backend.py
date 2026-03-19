@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shlex
 import uuid
@@ -53,6 +54,11 @@ class SlurmBackend:
                 raise ValueError(f"Remote path validation failed: {'; '.join(path_errors)}")
 
             stage_result = await self._stage_sample_inputs(params, profile, conn, run_uuid=None)
+            reference_asset_evidence = await self._collect_reference_asset_evidence(
+                params,
+                conn,
+                stage_result["remote_reference_paths"],
+            )
             return {
                 "sample_name": params.sample_name,
                 "ssh_profile_id": profile.id,
@@ -62,6 +68,7 @@ class SlurmBackend:
                 "remote_reference_paths": stage_result["remote_reference_paths"],
                 "data_cache_status": stage_result["data_cache_status"],
                 "reference_cache_statuses": stage_result["reference_cache_statuses"],
+                "reference_asset_evidence": reference_asset_evidence,
             }
         finally:
             await conn.close()
@@ -246,6 +253,21 @@ class SlurmBackend:
                 elif agoutic_status == "CANCELLED" and reason:
                     message += f" — {reason}"
 
+                progress_percent = 100 if agoutic_status == "COMPLETED" else 0
+                tasks: dict | None = None
+                remote_work_dir = getattr(job, "remote_work_dir", None)
+                if remote_work_dir:
+                    progress_percent, tasks, task_message = await self._read_remote_task_status(
+                        conn=conn,
+                        remote_work=remote_work_dir,
+                        slurm_job_id=str(job.slurm_job_id),
+                        scheduler_status=agoutic_status,
+                    )
+                    if task_message and agoutic_status == "RUNNING":
+                        message = task_message
+                    elif task_message and agoutic_status == "FAILED":
+                        message = f"{message} — {task_message}"
+
                 # Update DB with latest state
                 await self._update_job_slurm_state(
                     run_uuid,
@@ -257,6 +279,8 @@ class SlurmBackend:
                 return JobStatus(
                     run_uuid=run_uuid,
                     status=agoutic_status,
+                    progress_percent=progress_percent,
+                    tasks=tasks,
                     execution_mode="slurm",
                     run_stage=job.run_stage,
                     slurm_job_id=job.slurm_job_id,
@@ -274,12 +298,131 @@ class SlurmBackend:
             return JobStatus(
                 run_uuid=run_uuid,
                 status=job.status,
+                progress_percent=getattr(job, "progress_percent", 0),
                 execution_mode="slurm",
                 run_stage=job.run_stage,
                 slurm_job_id=job.slurm_job_id,
                 slurm_state=job.slurm_state,
                 message=f"Failed to poll scheduler: {e}",
             )
+
+    async def _read_remote_task_status(
+        self,
+        *,
+        conn,
+        remote_work: str,
+        slurm_job_id: str,
+        scheduler_status: str,
+    ) -> tuple[int, dict | None, str | None]:
+        """Read remote trace/stdout files and derive task-level progress."""
+        quoted_remote_work = shlex.quote(remote_work)
+        trace_cmd = (
+            f"trace=$(find {quoted_remote_work} -maxdepth 1 -type f \\(" 
+            f"-name '*_trace.txt' -o -name 'trace.txt' \\) | sort | head -n 1); "
+            f"if [ -n \"$trace\" ]; then cat \"$trace\"; fi"
+        )
+        trace_result = await conn.run(f"{trace_cmd} 2>/dev/null || true")
+        trace_content = trace_result.stdout or ""
+
+        stdout_path = f"{remote_work}/slurm-{slurm_job_id}.out"
+        stdout_result = await conn.run(
+            f"tail -n 500 {shlex.quote(stdout_path)} 2>/dev/null || true"
+        )
+        stdout_content = stdout_result.stdout or ""
+
+        return self._parse_task_status_texts(
+            trace_content=trace_content,
+            stdout_content=stdout_content,
+            scheduler_status=scheduler_status,
+        )
+
+    @staticmethod
+    def _parse_task_status_texts(
+        *,
+        trace_content: str,
+        stdout_content: str,
+        scheduler_status: str,
+    ) -> tuple[int, dict | None, str | None]:
+        completed_tasks: list[str] = []
+        failed_tasks: list[str] = []
+        running_tasks: list[str] = []
+        submitted_count = 0
+
+        trace_lines = trace_content.splitlines() if trace_content else []
+        if len(trace_lines) > 1:
+            for line in trace_lines[1:]:
+                if not line.strip():
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 5:
+                    continue
+                task_name = parts[3].strip()
+                task_status = parts[4].strip()
+                if ":" not in task_name:
+                    continue
+                if task_status == "COMPLETED" and task_name not in completed_tasks:
+                    completed_tasks.append(task_name)
+                elif task_status in {"FAILED", "ABORTED"} and task_name not in failed_tasks:
+                    failed_tasks.append(task_name)
+
+        seen_hashes: set[str] = set()
+        for line in stdout_content.splitlines():
+            if "executor >" in line and "(" in line:
+                try:
+                    count_str = line.split("(", 1)[1].split(")", 1)[0]
+                    submitted_count = max(submitted_count, int(count_str))
+                except Exception:
+                    pass
+
+            if not line.startswith("[") or "]" not in line or ":" not in line.split("]", 1)[-1]:
+                continue
+            hash_part = line.split("]", 1)[0] + "]"
+            if "/" not in hash_part:
+                continue
+            rest = line.split("]", 1)[1].strip()
+            task_name = rest.split()[0] if rest else ""
+            if not task_name or task_name in completed_tasks or task_name in failed_tasks:
+                continue
+            match = re.search(r"(\(\d+\))", rest)
+            if match and match.group(1) not in task_name:
+                task_name = f"{task_name} {match.group(1)}"
+            if hash_part not in seen_hashes:
+                seen_hashes.add(hash_part)
+                if task_name not in running_tasks:
+                    running_tasks.append(task_name)
+
+        total = max(submitted_count, len(completed_tasks) + len(running_tasks) + len(failed_tasks))
+        if total <= 0 and not completed_tasks and not running_tasks and not failed_tasks:
+            if scheduler_status == "RUNNING":
+                return 10, None, "Pipeline starting..."
+            if scheduler_status == "COMPLETED":
+                return 100, None, None
+            return 0, None, None
+
+        tasks = {
+            "completed": completed_tasks,
+            "running": running_tasks[-5:] if len(running_tasks) > 5 else running_tasks,
+            "total": total,
+            "completed_count": len(completed_tasks),
+            "failed_count": len(failed_tasks),
+        }
+
+        if scheduler_status == "COMPLETED":
+            return 100, tasks, f"Pipeline: {len(completed_tasks)}/{max(total, len(completed_tasks))} completed"
+
+        progress = int((len(completed_tasks) / total) * 90) if total > 0 else 10
+        progress = max(progress, 10 if scheduler_status == "RUNNING" else progress)
+
+        msg_parts = []
+        if total > 0:
+            msg_parts.append(f"{len(completed_tasks)}/{total} completed")
+        if running_tasks:
+            msg_parts.append(f"{len(running_tasks)} running")
+        if failed_tasks:
+            msg_parts.append(f"{len(failed_tasks)} failed")
+
+        message = f"Pipeline: {', '.join(msg_parts)}" if msg_parts else None
+        return progress, tasks, message
 
     async def cancel(self, run_uuid: str) -> bool:
         """Cancel a SLURM job via scancel."""
@@ -793,6 +936,84 @@ class SlurmBackend:
             "remote_reference_paths": remote_reference_paths,
         }
 
+    async def _collect_reference_asset_evidence(
+        self,
+        params: SubmitParams,
+        conn,
+        remote_reference_paths: dict[str, str],
+    ) -> dict[str, dict[str, object]]:
+        """Collect remote file evidence for staged reference directories."""
+        evidence: dict[str, dict[str, object]] = {}
+        seen_refs: set[str] = set()
+
+        for ref_raw in params.reference_genome or []:
+            ref_id = self._normalize_reference_id(ref_raw)
+            if ref_id in seen_refs:
+                continue
+            seen_refs.add(ref_id)
+
+            ref_cfg = self._resolve_reference_config(ref_raw)
+            remote_ref_path = remote_reference_paths.get(ref_id)
+            requires_kallisto = (params.mode or "").strip().upper() in {"RNA", "CDNA"}
+
+            required_assets: dict[str, str] = {}
+            optional_assets: dict[str, str] = {}
+            for asset_name in ("fasta", "gtf"):
+                asset_path = ref_cfg.get(asset_name)
+                if asset_path:
+                    required_assets[asset_name] = Path(asset_path).name
+            for asset_name in ("kallisto_index", "kallisto_t2g"):
+                asset_path = ref_cfg.get(asset_name)
+                if not asset_path:
+                    continue
+                asset_filename = Path(asset_path).name
+                if requires_kallisto:
+                    required_assets[asset_name] = asset_filename
+                else:
+                    optional_assets[asset_name] = asset_filename
+
+            listed_files: list[str] = []
+            listing_error: str | None = None
+            if remote_ref_path:
+                try:
+                    entries = await conn.list_dir(remote_ref_path)
+                    listed_files = sorted(
+                        entry["name"]
+                        for entry in entries
+                        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+                    )
+                except Exception as exc:
+                    listing_error = str(exc).strip() or f"{type(exc).__name__}: {exc!r}"
+            else:
+                listing_error = "Remote reference path unavailable"
+
+            listed_file_set = set(listed_files)
+            present_assets = {
+                asset_name: str(PurePosixPath(remote_ref_path) / filename)
+                for asset_name, filename in {**required_assets, **optional_assets}.items()
+                if remote_ref_path and filename in listed_file_set
+            }
+            missing_required_assets = [
+                asset_name
+                for asset_name, filename in required_assets.items()
+                if filename not in listed_file_set
+            ]
+
+            evidence[ref_id] = {
+                "mode": (params.mode or "").strip().upper(),
+                "remote_path": remote_ref_path,
+                "requires_kallisto": requires_kallisto,
+                "required_assets": required_assets,
+                "optional_assets": optional_assets,
+                "present_assets": present_assets,
+                "missing_required_assets": missing_required_assets,
+                "all_required_present": not missing_required_assets and listing_error is None,
+                "listed_files": listed_files,
+                "listing_error": listing_error,
+            }
+
+        return evidence
+
     async def _reuse_pre_staged_input(self, run_uuid: str, params: SubmitParams) -> dict:
         """Use a previously staged remote data path without restaging local inputs."""
         from launchpad.db import update_job_fields
@@ -960,9 +1181,9 @@ class SlurmBackend:
         return cleaned.strip("-") or "sample"
 
     @staticmethod
-    def _resolve_reference_source_dir(reference_id: str) -> Path | None:
+    def _resolve_reference_config(reference_id: str) -> dict:
         if not reference_id:
-            return None
+            return {}
 
         requested = reference_id.strip()
         ref_cfg = REFERENCE_GENOMES.get(requested)
@@ -970,7 +1191,12 @@ class SlurmBackend:
             lower_map = {k.lower(): k for k in REFERENCE_GENOMES.keys()}
             mapped_key = lower_map.get(requested.lower())
             ref_cfg = REFERENCE_GENOMES.get(mapped_key) if mapped_key else None
-        if not isinstance(ref_cfg, dict):
+        return ref_cfg if isinstance(ref_cfg, dict) else {}
+
+    @staticmethod
+    def _resolve_reference_source_dir(reference_id: str) -> Path | None:
+        ref_cfg = SlurmBackend._resolve_reference_config(reference_id)
+        if not ref_cfg:
             return None
 
         fasta_path = ref_cfg.get("fasta")

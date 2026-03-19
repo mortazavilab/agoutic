@@ -125,6 +125,7 @@ class StageRemoteSampleResponse(BaseModel):
     remote_reference_paths: dict[str, str]
     data_cache_status: str
     reference_cache_statuses: dict[str, str]
+    reference_asset_evidence: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 class JobListResponse(BaseModel):
     """Response with list of jobs."""

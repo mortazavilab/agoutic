@@ -38,6 +38,17 @@ class TestGenerateConfig:
         assert "modifications = 'inosine_m6A_2OmeA,pseU_2OmeU,m5C_2OmeC,2OmeG'" in config
         assert "minCov = 3" in config
 
+    def test_mm39_config_uses_reference_folder_for_kallisto_sidecars(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-mm39",
+            mode="RNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+        )
+
+        assert f"kallistoIndex = '{REFERENCE_GENOMES['mm39']['kallisto_index']}'" in config
+        assert f"t2g = '{REFERENCE_GENOMES['mm39']['kallisto_t2g']}'" in config
+
     def test_explicit_modifications_override_mode_defaults(self):
         config = NextflowConfig.generate_config(
             sample_name="sample-c",

@@ -56,6 +56,17 @@
   `dogme.profile` file alongside `nextflow.config` so remote Dogme tasks can
   safely source `${launchDir}/dogme.profile`.
 
+- **Mode-aware remote reference asset verification** — stage-only remote
+  staging now reports per-reference remote asset evidence, verifies FASTA/GTF
+  for all modes, and only requires `kallistoIndex`/`t2g` sidecars for RNA and
+  cDNA samples instead of DNA runs.
+
+- **Stage-only approval routing correctness** — Cortex now preserves remote
+  stage intent through approval handling, forces SLURM mode when a request is
+  clearly targeting a remote profile such as `hpc3`, and prevents those
+  requests from falling into local sample staging or accidentally submitting a
+  Nextflow job.
+
 ### Tests
 
 - Added/updated tests for:
@@ -66,6 +77,9 @@
   - remote `kallistoIndex`/`t2g` override rendering for SLURM configs
   - CPU/default controller resource selection for remote Nextflow head jobs
   - remote `dogme.profile` creation during SLURM workflow staging
+  - mode-aware remote reference asset evidence for DNA vs RNA/cDNA staging
+  - remote stage-only approval routing when the request carries remote intent
+    but an incomplete or degraded execution-mode payload
 
 ## [3.4.1] - 2026-03-17
 
