@@ -54,10 +54,13 @@ class SlurmBackend:
                 raise ValueError(f"Remote path validation failed: {'; '.join(path_errors)}")
 
             stage_result = await self._stage_sample_inputs(params, profile, conn, run_uuid=None)
-            reference_asset_evidence = await self._collect_reference_asset_evidence(
-                params,
-                conn,
-                stage_result["remote_reference_paths"],
+            reference_statuses = dict(stage_result.get("reference_cache_statuses") or {})
+            reference_asset_evidence, reference_statuses = await self._ensure_reference_assets_present(
+                params=params,
+                profile=profile,
+                conn=conn,
+                remote_reference_paths=stage_result["remote_reference_paths"],
+                reference_statuses=reference_statuses,
             )
             return {
                 "sample_name": params.sample_name,
@@ -67,7 +70,7 @@ class SlurmBackend:
                 "remote_data_path": stage_result["remote_input"],
                 "remote_reference_paths": stage_result["remote_reference_paths"],
                 "data_cache_status": stage_result["data_cache_status"],
-                "reference_cache_statuses": stage_result["reference_cache_statuses"],
+                "reference_cache_statuses": reference_statuses,
                 "reference_asset_evidence": reference_asset_evidence,
             }
         finally:
@@ -134,6 +137,18 @@ class SlurmBackend:
                     error=str(cache_error),
                 )
                 cache_resolution = await self._fallback_stage_inputs(run_uuid, params, profile, conn)
+
+            reference_statuses = dict(cache_resolution.get("reference_cache_statuses") or {})
+            reference_asset_evidence, reference_statuses = await self._ensure_reference_assets_present(
+                params=params,
+                profile=profile,
+                conn=conn,
+                remote_reference_paths=cache_resolution.get("remote_reference_paths") or {},
+                reference_statuses=reference_statuses,
+                run_uuid=run_uuid,
+            )
+            cache_resolution["reference_cache_statuses"] = reference_statuses
+            cache_resolution["reference_asset_evidence"] = reference_asset_evidence
 
             # 6. Generate and submit sbatch script
             await self._update_job_stage(run_uuid, RunStage.SUBMITTING_JOB)
@@ -1013,6 +1028,90 @@ class SlurmBackend:
             }
 
         return evidence
+
+    async def _ensure_reference_assets_present(
+        self,
+        *,
+        params: SubmitParams,
+        profile: SSHProfileData,
+        conn,
+        remote_reference_paths: dict[str, str],
+        reference_statuses: dict[str, str] | None = None,
+        run_uuid: str | None = None,
+    ) -> tuple[dict[str, dict[str, object]], dict[str, str]]:
+        from launchpad.db import upsert_remote_reference_cache_entry
+
+        remote_reference_paths = dict(remote_reference_paths or {})
+        reference_statuses = dict(reference_statuses or {})
+        evidence = await self._collect_reference_asset_evidence(params, conn, remote_reference_paths)
+        missing_by_ref = {
+            ref_id: list((ref_evidence or {}).get("missing_required_assets") or [])
+            for ref_id, ref_evidence in evidence.items()
+            if (ref_evidence or {}).get("missing_required_assets")
+        }
+        if not missing_by_ref:
+            return evidence, reference_statuses
+
+        logger.warning(
+            "Remote reference verification found missing required assets; forcing refresh",
+            sample_name=params.sample_name,
+            missing_by_ref=missing_by_ref,
+        )
+
+        remote_roots = self._derive_remote_roots(params, profile)
+        for ref_id in missing_by_ref:
+            ref_source_dir = self._resolve_reference_source_dir(ref_id)
+            if not ref_source_dir:
+                raise RuntimeError(f"Reference source directory is unavailable for {ref_id}")
+
+            remote_ref_path = remote_reference_paths.get(ref_id) or str(PurePosixPath(remote_roots["ref_root"]) / ref_id)
+            remote_reference_paths[ref_id] = remote_ref_path
+
+            if run_uuid:
+                await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
+                await self._update_job_transfer_state(run_uuid, "uploading_inputs")
+
+            await conn.mkdir_p(remote_ref_path)
+            result = await self._transfer_manager.upload_inputs(
+                profile=profile,
+                local_path=str(ref_source_dir),
+                remote_path=remote_ref_path,
+            )
+            if not result["ok"]:
+                if run_uuid:
+                    await self._update_job_transfer_state(run_uuid, "transfer_failed")
+                raise RuntimeError(f"Reference cache repair failed for {ref_id}: {result['message']}")
+
+            source_signature = self._compute_directory_signature(ref_source_dir)
+            await upsert_remote_reference_cache_entry(
+                user_id=params.user_id or self._cache_user_key(params, profile),
+                ssh_profile_id=profile.id,
+                reference_id=ref_id,
+                source_signature=source_signature,
+                source_uri=str(ref_source_dir),
+                remote_path=remote_ref_path,
+                status="READY",
+                increment_use_count=True,
+            )
+            reference_statuses[ref_id] = "refreshed"
+
+        if run_uuid:
+            await self._update_job_transfer_state(run_uuid, "inputs_uploaded")
+
+        evidence = await self._collect_reference_asset_evidence(params, conn, remote_reference_paths)
+        remaining_missing = {
+            ref_id: list((ref_evidence or {}).get("missing_required_assets") or [])
+            for ref_id, ref_evidence in evidence.items()
+            if (ref_evidence or {}).get("missing_required_assets")
+        }
+        if remaining_missing:
+            details = "; ".join(
+                f"{ref_id}: {', '.join(missing_assets)}"
+                for ref_id, missing_assets in remaining_missing.items()
+            )
+            raise RuntimeError(f"Remote reference cache verification failed after refresh: {details}")
+
+        return evidence, reference_statuses
 
     async def _reuse_pre_staged_input(self, run_uuid: str, params: SubmitParams) -> dict:
         """Use a previously staged remote data path without restaging local inputs."""

@@ -16,7 +16,7 @@ from typing import Any
 
 from common.logging_config import get_logger
 from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
-from launchpad.config import SSH_AGENT_FORWARDING, SSH_KNOWN_HOSTS
+from launchpad.config import LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS, SSH_AGENT_FORWARDING, SSH_CONNECT_TIMEOUT_SECONDS, SSH_KNOWN_HOSTS
 
 logger = get_logger(__name__)
 
@@ -115,9 +115,19 @@ class SSHConnectionManager:
     async def test_connection(self, profile: SSHProfileData, local_password: str = "") -> dict[str, Any]:
         """Test SSH connectivity. Returns {ok: bool, message: str, detail: ...}."""
         try:
-            conn = await asyncio.wait_for(self.connect(profile, local_password), timeout=15.0)
-            result = await conn.run("echo AGOUTIC_SSH_OK && hostname && whoami")
+            conn = await asyncio.wait_for(self.connect(profile, local_password), timeout=float(SSH_CONNECT_TIMEOUT_SECONDS))
+            result = await conn.run(
+                "echo AGOUTIC_SSH_OK && hostname && whoami",
+                timeout_seconds=float(SSH_CONNECT_TIMEOUT_SECONDS),
+            )
             await conn.close()
+
+            exit_status = getattr(result, "exit_status", 0)
+            stderr_text = (getattr(result, "stderr", "") or "").strip()
+            if exit_status != 0:
+                if stderr_text:
+                    return {"ok": False, "message": f"Connection failed: {stderr_text}"}
+                return {"ok": False, "message": f"Connection failed with exit status {exit_status}"}
 
             lines = result.stdout.strip().split("\n") if result.stdout else []
             ok = len(lines) >= 1 and lines[0] == "AGOUTIC_SSH_OK"
@@ -128,7 +138,7 @@ class SSHConnectionManager:
                 "remote_user": lines[2] if len(lines) > 2 else None,
             }
         except asyncio.TimeoutError:
-            return {"ok": False, "message": "Connection timed out (15s)"}
+            return {"ok": False, "message": f"Connection timed out ({SSH_CONNECT_TIMEOUT_SECONDS}s)"}
         except Exception as e:
             return {"ok": False, "message": f"Connection failed: {e}"}
 
@@ -152,14 +162,17 @@ class SSHConnection:
         self._conn = conn
         self.profile = profile
 
-    async def run(self, command: str, check: bool = False) -> Any:
+    async def run(self, command: str, check: bool = False, timeout_seconds: float | None = None) -> Any:
         """Run a command on the remote host."""
-        result = await self._conn.run(command, check=check)
+        if timeout_seconds and timeout_seconds > 0:
+            result = await asyncio.wait_for(self._conn.run(command, check=check), timeout=timeout_seconds)
+        else:
+            result = await self._conn.run(command, check=check)
         return result
 
-    async def run_checked(self, command: str) -> str:
+    async def run_checked(self, command: str, timeout_seconds: float | None = None) -> str:
         """Run a command and raise on non-zero exit. Returns stdout."""
-        result = await self._conn.run(command, check=True)
+        result = await self.run(command, check=True, timeout_seconds=timeout_seconds)
         return result.stdout or ""
 
     async def path_exists(self, path: str) -> bool:
@@ -211,7 +224,7 @@ class LocalBrokerSSHConnection:
         self._session_manager = session_manager
         self._session = session
 
-    async def run(self, command: str, check: bool = False) -> SSHCommandResult:
+    async def run(self, command: str, check: bool = False, timeout_seconds: float | None = None) -> SSHCommandResult:
         response = await self._session_manager.invoke(
             self._session,
             {
@@ -224,6 +237,7 @@ class LocalBrokerSSHConnection:
                     "key_file_path": self.profile.key_file_path,
                 },
                 "command": command,
+                "timeout_seconds": timeout_seconds or LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
             },
         )
         result = SSHCommandResult(
@@ -235,8 +249,8 @@ class LocalBrokerSSHConnection:
             raise RuntimeError(result.stderr or f"SSH command failed with exit status {result.exit_status}")
         return result
 
-    async def run_checked(self, command: str) -> str:
-        result = await self.run(command, check=True)
+    async def run_checked(self, command: str, timeout_seconds: float | None = None) -> str:
+        result = await self.run(command, check=True, timeout_seconds=timeout_seconds)
         return result.stdout or ""
 
     async def path_exists(self, path: str) -> bool:

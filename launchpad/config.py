@@ -94,8 +94,11 @@ SLURM_ALLOWED_ACCOUNTS = [a for a in os.getenv("SLURM_ALLOWED_ACCOUNTS", "").spl
 SSH_KNOWN_HOSTS = os.getenv("SSH_KNOWN_HOSTS", "").strip() or None
 SSH_STRICT_HOST_KEY_CHECKING = os.getenv("SSH_STRICT_HOST_KEY_CHECKING", "true").strip().lower() not in {"0", "false", "no"}
 SSH_AGENT_FORWARDING = os.getenv("SSH_AGENT_FORWARDING", "false").strip().lower() in {"1", "true", "yes"}
+SSH_CONNECT_TIMEOUT_SECONDS = int(os.getenv("SSH_CONNECT_TIMEOUT_SECONDS", "600"))
+SSH_CONNECTION_ATTEMPTS = int(os.getenv("SSH_CONNECTION_ATTEMPTS", "1"))
 
 # Local auth broker sessions for per-user SSH access via `su`
 LOCAL_AUTH_SESSION_TTL_SECONDS = int(os.getenv("LOCAL_AUTH_SESSION_TTL_SECONDS", "3600"))
 LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS = int(os.getenv("LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS", "20"))
+LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS = int(os.getenv("LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS", "3600"))
 LOCAL_AUTH_SOCKET_DIR = Path(os.getenv("LOCAL_AUTH_SOCKET_DIR", AGOUTIC_DATA / "runtime" / "local_auth"))

@@ -23,6 +23,7 @@ from common.logging_config import get_logger
 from launchpad.config import (
     AGOUTIC_CODE,
     LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS,
+    LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
     LOCAL_AUTH_SESSION_TTL_SECONDS,
     LOCAL_AUTH_SOCKET_DIR,
 )
@@ -338,12 +339,26 @@ class LocalAuthSessionManager:
     async def invoke(self, session: LocalAuthSession, payload: dict[str, Any]) -> dict[str, Any]:
         request = dict(payload)
         request["auth_token"] = session.auth_token
-        reader, writer = await asyncio.open_connection(session.helper_host, session.helper_port)
-        writer.write((json.dumps(request) + "\n").encode())
-        await writer.drain()
-        raw = await reader.readline()
-        writer.close()
-        await writer.wait_closed()
+        timeout_seconds = float(request.get("timeout_seconds") or LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS)
+
+        async def _invoke_once() -> bytes:
+            reader, writer = await asyncio.open_connection(session.helper_host, session.helper_port)
+            try:
+                writer.write((json.dumps(request) + "\n").encode())
+                await writer.drain()
+                return await reader.readline()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        try:
+            raw = await asyncio.wait_for(_invoke_once(), timeout=max(timeout_seconds + 5.0, 5.0))
+        except asyncio.TimeoutError as exc:
+            helper_output = _read_helper_log_excerpt(session.log_file)
+            detail = f" Local auth broker log excerpt: {helper_output}" if helper_output else ""
+            raise TimeoutError(
+                f"Local auth broker request timed out after {int(timeout_seconds)}s.{detail}"
+            ) from exc
         if not raw:
             raise RuntimeError("Local auth broker closed the connection unexpectedly")
         response = json.loads(raw.decode())

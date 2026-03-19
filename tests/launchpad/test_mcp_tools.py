@@ -154,6 +154,7 @@ class TestSubmitDogmeJob:
                 json_data={"remote_data_path": "/remote/agoutic/data/fp1", "data_cache_status": "reused"}
             )
         )
+        monkeypatch.setenv("LAUNCHPAD_STAGE_TIMEOUT", "3600")
 
         with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
             tools = LaunchpadMCPTools("http://launchpad.local")
@@ -173,6 +174,9 @@ class TestSubmitDogmeJob:
         assert result["remote_data_path"] == "/remote/agoutic/data/fp1"
         url, kwargs = fake_client.post_calls[0]
         assert url == "http://launchpad.local/remote/stage"
+        assert isinstance(kwargs["timeout"], httpx.Timeout)
+        assert kwargs["timeout"].read == 3600.0
+        assert kwargs["timeout"].connect == 30.0
         assert kwargs["json"] == {
             "project_id": "proj-1",
             "user_id": "user-1",

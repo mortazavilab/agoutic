@@ -26,6 +26,7 @@ class LaunchpadMCPTools:
         self.server_url = (server_url or default_url).rstrip("/")
         self.timeout = 30.0
         self.submit_timeout = float(os.getenv("LAUNCHPAD_SUBMIT_TIMEOUT", "900"))
+        self.stage_timeout = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
         # Internal API secret for Launchpad authentication
         self._api_secret = os.getenv("INTERNAL_API_SECRET", "")
     
@@ -220,7 +221,7 @@ class LaunchpadMCPTools:
                     f"{self.server_url}/remote/stage",
                     json=payload,
                     headers=self._headers(),
-                    timeout=httpx.Timeout(self.submit_timeout, connect=30.0),
+                    timeout=httpx.Timeout(self.stage_timeout, connect=30.0),
                 )
                 response.raise_for_status()
                 return response.json()

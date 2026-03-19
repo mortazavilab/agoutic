@@ -67,6 +67,35 @@
   requests from falling into local sample staging or accidentally submitting a
   Nextflow job.
 
+- **Saved SSH-profile defaults now survive remote-stage approval** — when
+  Launchpad successfully returns stored SLURM defaults for a remote profile,
+  Cortex now carries those normalized values into the approval summary and the
+  actual approval gate instead of reverting to “0 Slurm defaults” or falling
+  back to `execution_mode=local`.
+
+- **Fail-closed remote reference refresh verification** — after remote staging,
+  Launchpad now re-checks required reference assets on the cluster, force-
+  refreshes missing files such as `kallistoIndex` and `t2g` sidecars when
+  needed, and aborts the stage if the repaired cache is still incomplete.
+
+- **Long-running remote stage timeout support** — stage-only remote staging now
+  uses an env-backed `LAUNCHPAD_STAGE_TIMEOUT` default of 3600 seconds in both
+  Cortex and Launchpad so large reference refreshes do not fail prematurely.
+
+- **Broker timeout and diagnostics coverage** — brokered `ssh` and `rsync`
+  operations now enforce explicit per-operation timeouts, log start/finish
+  markers with host/user/exit status, and surface timeout details back to the
+  caller instead of hanging indefinitely.
+
+- **Slow-HPC SSH connection test support** — remote profile connection tests
+  now use a 10-minute SSH connect/probe timeout, preserve noninteractive
+  public-key-only transport settings, and return concrete probe failure text
+  instead of generic “Unexpected response” errors.
+
+- **Elapsed-time feedback in Remote Profiles UI** — the Streamlit Remote
+  Profiles page now keeps the test-connection request alive for slow clusters
+  and shows a live elapsed-time indicator while the probe is running.
+
 ### Tests
 
 - Added/updated tests for:
@@ -80,6 +109,15 @@
   - mode-aware remote reference asset evidence for DNA vs RNA/cDNA staging
   - remote stage-only approval routing when the request carries remote intent
     but an incomplete or degraded execution-mode payload
+  - saved SSH-profile SLURM defaults flowing through remote-stage approval and
+    execution without prompting again
+  - fail-closed repair behavior when refreshed remote reference sidecars are
+    still missing after a forced cache refresh
+  - env-backed 3600-second remote stage timeout wiring in Launchpad MCP calls
+  - broker timeout propagation for brokered `ssh` and `rsync` operations
+  - long SSH connect/probe timeout defaults and surfaced broker failure text
+    during remote profile connection tests
+  - Remote Profiles UI support for long-running connection-test requests
 
 ## [3.4.1] - 2026-03-17
 

@@ -237,6 +237,7 @@ class TestDirectoryListing:
 
         class FakeSessionManager:
             async def invoke(self, session_obj, payload):
+                assert payload["timeout_seconds"] > 0
                 return {
                     "stdout": '[{"name":"ref","type":"dir","size":0}]',
                     "stderr": "",
@@ -248,6 +249,84 @@ class TestDirectoryListing:
         entries = await conn.list_dir("/remote/base")
 
         assert entries == [{"name": "ref", "type": "dir", "size": 0}]
+
+    @pytest.mark.asyncio
+    async def test_test_connection_passes_short_timeout_to_broker(self):
+        profile = SSHProfileData(
+            id="p1",
+            user_id="u1",
+            nickname="test",
+            ssh_host="example.org",
+            ssh_port=22,
+            ssh_username="alice",
+            auth_method="key_file",
+            key_file_path="~/.ssh/id_ed25519",
+            local_username="alice",
+            is_enabled=True,
+        )
+
+        observed = {}
+
+        class FakeConn:
+            async def run(self, command: str, check: bool = False, timeout_seconds=None):
+                observed["command"] = command
+                observed["timeout_seconds"] = timeout_seconds
+                return SimpleNamespace(stdout="AGOUTIC_SSH_OK\nhost\nalice\n", stderr="", exit_status=0)
+
+            async def close(self):
+                return None
+
+        manager = SSHConnectionManager()
+
+        async def fake_connect(profile_obj, local_password=""):
+            return FakeConn()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(manager, "connect", fake_connect)
+        try:
+            result = await manager.test_connection(profile)
+        finally:
+            monkeypatch.undo()
+
+        assert result["ok"] is True
+        assert observed["command"] == "echo AGOUTIC_SSH_OK && hostname && whoami"
+        assert observed["timeout_seconds"] == 600.0
+
+    @pytest.mark.asyncio
+    async def test_test_connection_surfaces_broker_failure_message(self):
+        profile = SSHProfileData(
+            id="p1",
+            user_id="u1",
+            nickname="test",
+            ssh_host="example.org",
+            ssh_port=22,
+            ssh_username="alice",
+            auth_method="key_file",
+            key_file_path="~/.ssh/id_ed25519",
+            local_username="alice",
+            is_enabled=True,
+        )
+
+        class FakeConn:
+            async def run(self, command: str, check: bool = False, timeout_seconds=None):
+                return SimpleNamespace(stdout="", stderr="Operation timed out after 15s", exit_status=124)
+
+            async def close(self):
+                return None
+
+        manager = SSHConnectionManager()
+
+        async def fake_connect(profile_obj, local_password=""):
+            return FakeConn()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(manager, "connect", fake_connect)
+        try:
+            result = await manager.test_connection(profile)
+        finally:
+            monkeypatch.undo()
+
+        assert result == {"ok": False, "message": "Connection failed: Operation timed out after 15s"}
 
     @pytest.mark.asyncio
     async def test_connect_uses_shared_broker_session_metadata(self, monkeypatch, tmp_path):

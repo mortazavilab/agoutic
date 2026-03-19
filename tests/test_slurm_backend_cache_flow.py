@@ -460,6 +460,7 @@ async def test_stage_remote_sample_cdna_requires_kallisto_sidecars(monkeypatch, 
         return {}
 
     from launchpad.backends import slurm_backend as slurm_module
+    from launchpad import db as launchpad_db
 
     monkeypatch.setattr(backend, "_load_profile", _load_profile)
     monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
@@ -467,12 +468,96 @@ async def test_stage_remote_sample_cdna_requires_kallisto_sidecars(monkeypatch, 
     monkeypatch.setattr(slurm_module, "validate_remote_paths", _validate_remote_paths)
     monkeypatch.setattr(slurm_module, "check_all_paths_ok", lambda *_: (True, []))
 
+    upload_calls = []
+
+    async def _upload_inputs(**kwargs):
+        upload_calls.append(kwargs)
+        conn.dir_entries["/remote/eli/agoutic/ref/mm39"] = [
+            {"name": Path(REFERENCE_GENOMES["mm39"]["fasta"]).name, "type": "file", "size": 1},
+            {"name": Path(REFERENCE_GENOMES["mm39"]["gtf"]).name, "type": "file", "size": 1},
+            {"name": Path(REFERENCE_GENOMES["mm39"]["kallisto_index"]).name, "type": "file", "size": 1},
+            {"name": Path(REFERENCE_GENOMES["mm39"]["kallisto_t2g"]).name, "type": "file", "size": 1},
+        ]
+        return {"ok": True, "message": "ok", "bytes_transferred": 42}
+
+    async def _upsert_ref(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(backend._transfer_manager, "upload_inputs", _upload_inputs)
+    monkeypatch.setattr(launchpad_db, "upsert_remote_reference_cache_entry", _upsert_ref)
+    monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda _: Path("/tmp/mm39"))
+    monkeypatch.setattr(backend, "_compute_directory_signature", lambda _: "sig-mm39")
+
     result = await backend.stage_remote_sample(params)
 
     evidence = result["reference_asset_evidence"]["mm39"]
     assert evidence["requires_kallisto"] is True
-    assert evidence["missing_required_assets"] == ["kallisto_index", "kallisto_t2g"]
-    assert evidence["all_required_present"] is False
+    assert evidence["missing_required_assets"] == []
+    assert evidence["all_required_present"] is True
+    assert result["reference_cache_statuses"]["mm39"] == "refreshed"
+    assert len(upload_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_stage_remote_sample_cdna_fails_when_reference_assets_still_missing_after_refresh(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeConn(
+        dir_entries={
+            "/remote/eli/agoutic/ref/mm39": [
+                {"name": Path(REFERENCE_GENOMES["mm39"]["fasta"]).name, "type": "file", "size": 1},
+                {"name": Path(REFERENCE_GENOMES["mm39"]["gtf"]).name, "type": "file", "size": 1},
+            ]
+        }
+    )
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        sample_name="sample",
+        mode="CDNA",
+        input_directory="/tmp/input",
+        reference_genome=["mm39"],
+        ssh_profile_id="profile-1",
+        remote_base_path="/remote/eli/agoutic",
+    )
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _stage_inputs(*args, **kwargs):
+        return {
+            "remote_input": "/remote/eli/agoutic/data/fp1",
+            "data_cache_status": "reused",
+            "reference_cache_statuses": {"mm39": "reused"},
+            "remote_reference_paths": {"mm39": "/remote/eli/agoutic/ref/mm39"},
+        }
+
+    async def _validate_remote_paths(*args, **kwargs):
+        return {}
+
+    from launchpad.backends import slurm_backend as slurm_module
+    from launchpad import db as launchpad_db
+
+    async def _upload_inputs(**kwargs):
+        return {"ok": True, "message": "ok", "bytes_transferred": 0}
+
+    async def _upsert_ref(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+    monkeypatch.setattr(backend, "_stage_sample_inputs", _stage_inputs)
+    monkeypatch.setattr(slurm_module, "validate_remote_paths", _validate_remote_paths)
+    monkeypatch.setattr(slurm_module, "check_all_paths_ok", lambda *_: (True, []))
+    monkeypatch.setattr(backend._transfer_manager, "upload_inputs", _upload_inputs)
+    monkeypatch.setattr(launchpad_db, "upsert_remote_reference_cache_entry", _upsert_ref)
+    monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda _: Path("/tmp/mm39"))
+    monkeypatch.setattr(backend, "_compute_directory_signature", lambda _: "sig-mm39")
+
+    with pytest.raises(RuntimeError, match="Remote reference cache verification failed after refresh"):
+        await backend.stage_remote_sample(params)
 
 
 @pytest.mark.asyncio

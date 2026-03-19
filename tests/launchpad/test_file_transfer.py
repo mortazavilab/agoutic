@@ -6,6 +6,7 @@ import pytest
 
 from launchpad.backends.file_transfer import FileTransferManager
 from launchpad.backends.ssh_manager import SSHProfileData
+from launchpad.config import LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS
 
 
 @pytest.fixture()
@@ -63,6 +64,7 @@ async def test_upload_prefers_active_broker_session(monkeypatch, tmp_path, key_f
     assert payload["op"] == "rsync_transfer"
     assert payload["source"] == f"{local_dir}/"
     assert payload["dest"] == "seyedam@hpc3.example.edu:/scratch/seyedam/agoutic/data/sample"
+    assert payload["timeout_seconds"] == LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -89,3 +91,18 @@ async def test_upload_requires_unlock_when_key_unreadable_and_no_session(monkeyp
         "message": "No active local auth session for this profile. Unlock the profile in Remote Profiles first.",
         "bytes_transferred": 0,
     }
+
+
+def test_rsync_ssh_command_uses_fail_fast_publickey_transport(key_file_profile):
+    manager = FileTransferManager()
+
+    command = manager._build_ssh_command(key_file_profile)
+
+    assert "BatchMode=yes" in command
+    assert "PreferredAuthentications=publickey" in command
+    assert "PasswordAuthentication=no" in command
+    assert "KbdInteractiveAuthentication=no" in command
+    assert "GSSAPIAuthentication=no" in command
+    assert "IdentitiesOnly=yes" in command
+    assert "ConnectTimeout=600" in command
+    assert "ConnectionAttempts=1" in command

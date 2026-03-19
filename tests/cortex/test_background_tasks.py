@@ -34,6 +34,7 @@ from cortex.app import (
     download_after_approval,
     submit_job_after_approval,
     _auto_execute_plan_steps,
+    _initial_stage_parts,
     poll_job_status,
     _auto_trigger_analysis,
     _build_auto_analysis_context,
@@ -44,6 +45,24 @@ from cortex.app import (
     _active_downloads,
 )
 from cortex.planner import _template_remote_stage_workflow
+
+
+def test_initial_stage_parts_describe_preflight_reference_actions_without_implying_active_transfer():
+    parts = _initial_stage_parts(
+        {
+            "reference_actions": [
+                {"reference_id": "mm39", "action": "refresh"},
+            ],
+            "data_action": {"action": "reuse"},
+        }
+    )
+
+    references = parts["references"]
+    assert references["status"] == "RUNNING"
+    assert references["message"] == "Checking and preparing reference assets on the remote profile..."
+    details = references.get("details") or []
+    assert details
+    assert details[0]["message"] == "Planned refresh for mm39 on the remote profile."
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1017,95 @@ class TestSubmitJobAfterApproval:
         sess = session_factory()
         assert sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all() == []
         assert sess.query(ProjectBlock).filter(ProjectBlock.type == "STAGING_TASK").count() == 1
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_remote_stage_only_request_with_profile_is_normalized_before_remote_prep(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "gate_action": "remote_stage",
+            "skill": "analyze_local_sample",
+            "extracted_params": {
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "input_directory": "/media/backup_disk/agoutic_root/testdata/CDNA/pod5",
+                "reference_genome": ["mm39"],
+                "ssh_profile_nickname": "hpc3",
+                "remote_action": "stage_only",
+                "gate_action": "remote_stage",
+            },
+        })
+
+        seen_execution_modes = []
+        real_prepare = __import__("cortex.app", fromlist=["_prepare_remote_execution_params"])._prepare_remote_execution_params
+
+        async def _wrapped_prepare(session, project_id, owner_id, params):
+            seen_execution_modes.append((params.get("execution_mode") or "local").strip().lower())
+            prepared = await real_prepare(session, project_id, owner_id, params)
+            seen_execution_modes.append((prepared.get("execution_mode") or "local").strip().lower())
+            return prepared
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "remote_data_path": "/remote/u1/agoutic/data/fp1",
+            "data_cache_status": "staged",
+            "reference_cache_statuses": {"mm39": "reused"},
+            "reference_asset_evidence": {"mm39": {"all_required_present": True}},
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.app._prepare_remote_execution_params", new=_wrapped_prepare), \
+             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[])), \
+             patch("cortex.app.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert seen_execution_modes[0] == "local"
+        assert seen_execution_modes[1] == "slurm"
+        assert mock_client.call_tool.call_args.args[0] == "stage_remote_sample"
+
+    @pytest.mark.asyncio
+    async def test_remote_stage_only_request_never_falls_through_to_submit_job(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "gate_action": "remote_stage",
+            "extracted_params": {
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "input_directory": "/data/pod5",
+                "reference_genome": ["mm39"],
+                "execution_mode": "local",
+                "remote_action": "stage_only",
+                "gate_action": "remote_stage",
+            },
+        })
+
+        async def _broken_prepare(session, project_id, owner_id, params):
+            broken = dict(params)
+            broken["execution_mode"] = "local"
+            return broken
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "should-not-submit",
+            "work_directory": "/work/should-not-submit",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.app._prepare_remote_execution_params", new=_broken_prepare), \
+             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.call_count == 0
+        sess = session_factory()
+        job_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
+        assert job_blocks
+        payload = get_block_payload(job_blocks[-1])
+        assert "SLURM execution requires an SSH profile" in payload.get("error", "")
         sess.close()
 
 

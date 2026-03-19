@@ -20,6 +20,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 SSH_KNOWN_HOSTS = os.getenv("SSH_KNOWN_HOSTS", "").strip() or None
 SSH_STRICT_HOST_KEY_CHECKING = os.getenv("SSH_STRICT_HOST_KEY_CHECKING", "true").strip().lower() not in {"0", "false", "no"}
+SSH_CONNECT_TIMEOUT_SECONDS = int(os.getenv("SSH_CONNECT_TIMEOUT_SECONDS", "600"))
+SSH_CONNECTION_ATTEMPTS = int(os.getenv("SSH_CONNECTION_ATTEMPTS", "1"))
 
 
 def _resolve_key_file_path(raw_path: str | None) -> str | None:
@@ -33,7 +35,14 @@ def _build_ssh_transport(profile: dict[str, Any]) -> list[str]:
     key_path = _resolve_key_file_path(profile.get("key_file_path"))
     if profile.get("auth_method") == "key_file" and key_path:
         parts.extend(["-i", key_path])
+        parts.extend(["-o", "IdentitiesOnly=yes"])
     parts.extend(["-o", "BatchMode=yes"])
+    parts.extend(["-o", "PreferredAuthentications=publickey"])
+    parts.extend(["-o", "PasswordAuthentication=no"])
+    parts.extend(["-o", "KbdInteractiveAuthentication=no"])
+    parts.extend(["-o", "GSSAPIAuthentication=no"])
+    parts.extend(["-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}"])
+    parts.extend(["-o", f"ConnectionAttempts={SSH_CONNECTION_ATTEMPTS}"])
     parts.extend(["-o", f"StrictHostKeyChecking={'yes' if SSH_STRICT_HOST_KEY_CHECKING else 'no'}"])
     if SSH_KNOWN_HOSTS:
         parts.extend(["-o", f"UserKnownHostsFile={str(Path(SSH_KNOWN_HOSTS).expanduser())}"])
@@ -60,13 +69,31 @@ def _parse_rsync_bytes(output: str) -> int:
     return 0
 
 
-async def _run_subprocess(command: list[str]) -> dict[str, Any]:
+async def _run_subprocess(command: list[str], timeout_seconds: float | None = None) -> dict[str, Any]:
     proc = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        if timeout_seconds and timeout_seconds > 0:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        else:
+            stdout, stderr = await proc.communicate()
+    except asyncio.TimeoutError:
+        proc.kill()
+        stdout, stderr = await proc.communicate()
+        timeout_label = int(timeout_seconds) if timeout_seconds else timeout_seconds
+        stderr_text = (stderr.decode() if stderr else "").strip()
+        timeout_msg = f"Operation timed out after {timeout_label}s"
+        if stderr_text:
+            timeout_msg = f"{timeout_msg}: {stderr_text}"
+        return {
+            "ok": False,
+            "stdout": stdout.decode(),
+            "stderr": timeout_msg,
+            "exit_status": 124,
+        }
     return {
         "ok": proc.returncode == 0,
         "stdout": stdout.decode(),
@@ -90,13 +117,29 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
     if op == "ssh_run":
         profile = request["profile"]
         remote_command = request["command"]
-        return await _run_subprocess(_build_ssh_command(profile, remote_command))
+        timeout_seconds = request.get("timeout_seconds")
+        logger.info(
+            "Local auth broker starting ssh_run host=%s user=%s timeout=%ss",
+            profile.get("ssh_host"),
+            profile.get("ssh_username"),
+            timeout_seconds,
+        )
+        result = await _run_subprocess(_build_ssh_command(profile, remote_command), timeout_seconds=timeout_seconds)
+        logger.info(
+            "Local auth broker finished ssh_run host=%s user=%s timeout=%ss exit_status=%s",
+            profile.get("ssh_host"),
+            profile.get("ssh_username"),
+            timeout_seconds,
+            result.get("exit_status"),
+        )
+        return result
 
     if op == "rsync_transfer":
         profile = request["profile"]
         source = request["source"]
         dest = request["dest"]
         exclude_patterns = request.get("exclude_patterns") or []
+        timeout_seconds = request.get("timeout_seconds")
 
         cmd = [
             "rsync", "-avz", "--partial", "--progress",
@@ -109,8 +152,26 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
             source += "/"
         cmd.extend([source, dest])
 
-        result = await _run_subprocess(cmd)
+        logger.info(
+            "Local auth broker starting rsync_transfer host=%s user=%s timeout=%ss source=%s dest=%s",
+            profile.get("ssh_host"),
+            profile.get("ssh_username"),
+            timeout_seconds,
+            source,
+            dest,
+        )
+        result = await _run_subprocess(cmd, timeout_seconds=timeout_seconds)
         result["bytes_transferred"] = _parse_rsync_bytes(result.get("stdout", ""))
+        logger.info(
+            "Local auth broker finished rsync_transfer host=%s user=%s timeout=%ss exit_status=%s bytes=%s source=%s dest=%s",
+            profile.get("ssh_host"),
+            profile.get("ssh_username"),
+            timeout_seconds,
+            result.get("exit_status"),
+            result.get("bytes_transferred"),
+            source,
+            dest,
+        )
         return result
 
     return {"ok": False, "error": f"Unsupported broker operation: {op}"}

@@ -10,7 +10,13 @@ from pathlib import Path
 
 from common.logging_config import get_logger
 from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
-from launchpad.config import SSH_KNOWN_HOSTS, SSH_STRICT_HOST_KEY_CHECKING
+from launchpad.config import (
+    LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
+    SSH_CONNECT_TIMEOUT_SECONDS,
+    SSH_CONNECTION_ATTEMPTS,
+    SSH_KNOWN_HOSTS,
+    SSH_STRICT_HOST_KEY_CHECKING,
+)
 from launchpad.backends.ssh_manager import SSHConnection, SSHProfileData, resolve_key_file_path
 
 logger = get_logger(__name__)
@@ -50,6 +56,7 @@ class FileTransferManager:
                 "source": source,
                 "dest": dest,
                 "exclude_patterns": exclude_patterns or [],
+                "timeout_seconds": LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
             },
         )
         if response.get("ok"):
@@ -206,6 +213,14 @@ class FileTransferManager:
         parts = ["ssh", "-p", str(profile.ssh_port)]
         if profile.auth_method == "key_file" and profile.key_file_path:
             parts.extend(["-i", resolve_key_file_path(profile)])
+            parts.extend(["-o", "IdentitiesOnly=yes"])
+        parts.extend(["-o", "BatchMode=yes"])
+        parts.extend(["-o", "PreferredAuthentications=publickey"])
+        parts.extend(["-o", "PasswordAuthentication=no"])
+        parts.extend(["-o", "KbdInteractiveAuthentication=no"])
+        parts.extend(["-o", "GSSAPIAuthentication=no"])
+        parts.extend(["-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}"])
+        parts.extend(["-o", f"ConnectionAttempts={SSH_CONNECTION_ATTEMPTS}"])
         parts.extend(["-o", f"StrictHostKeyChecking={'yes' if SSH_STRICT_HOST_KEY_CHECKING else 'no'}"])
         if SSH_KNOWN_HOSTS:
             parts.extend(["-o", f"UserKnownHostsFile={str(Path(SSH_KNOWN_HOSTS).expanduser())}"])

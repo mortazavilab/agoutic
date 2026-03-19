@@ -1169,6 +1169,118 @@ class TestBrowsingToolBypass:
         assert mock_mcp.call_tool.call_args.args[0] == "list_remote_files"
         assert mock_mcp.call_tool.call_args.kwargs["ssh_profile_id"] == "profile-123"
 
+    def test_remote_stage_uses_saved_profile_defaults_instead_of_asking_again(self, SL, seed, tmp_path):
+        """Stage-only remote requests should build approval text from saved SSH profile defaults."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            if tool_name == "list_ssh_profiles":
+                return [
+                    {
+                        "id": "profile-123",
+                        "nickname": "hpc3",
+                        "ssh_username": "agoutic",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                        "default_slurm_gpu_account": "SEYEDAM_LAB",
+                        "default_slurm_gpu_partition": "gpu",
+                    }
+                ]
+            if tool_name == "get_slurm_defaults":
+                return {
+                    "found": True,
+                    "source": "ssh_profile_defaults",
+                    "account": "SEYEDAM_LAB",
+                    "partition": "standard",
+                    "selected_profile_defaults": {
+                        "id": "profile-123",
+                        "ssh_profile_id": "profile-123",
+                        "nickname": "hpc3",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                        "default_slurm_gpu_account": "SEYEDAM_LAB",
+                        "default_slurm_gpu_partition": "gpu",
+                    },
+                }
+            raise AssertionError(f"unexpected tool: {tool_name}")
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "I found 1 SSH profile and 0 Slurm defaults. Please provide the specific Slurm defaults.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
+            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch(
+                "cortex.app._list_user_ssh_profiles",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "profile-123",
+                            "nickname": "hpc3",
+                            "ssh_username": "agoutic",
+                            "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                            "default_slurm_account": "SEYEDAM_LAB",
+                            "default_slurm_partition": "standard",
+                            "default_slurm_gpu_account": "SEYEDAM_LAB",
+                            "default_slurm_gpu_partition": "gpu",
+                        }
+                    ]
+                ),
+            ),
+            patch(
+                "cortex.app.extract_job_parameters_from_conversation",
+                new=AsyncMock(
+                    return_value={
+                        "sample_name": "Jamshid",
+                        "input_directory": "/media/backup_disk/agoutic_root/testdata/CDNA/pod5",
+                        "mode": "CDNA",
+                        "reference_genome": ["mm39"],
+                        "ssh_profile_nickname": "hpc3",
+                        "execution_mode": "slurm",
+                        "remote_action": "stage_only",
+                    }
+                ),
+            ),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "stage the mouse CDNA sample called Jamshid at /media/backup_disk/agoutic_root/testdata/CDNA/pod5 on hpc3",
+            skill="remote_execution",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        assert payload.get("skill") == "remote_execution"
+        assert "I found the saved remote defaults needed for staging." in md
+        assert "SEYEDAM_LAB" in md
+        assert "/share/crsp/lab/seyedam/share/agoutic/seyedam" in md
+        assert "This will not launch Dogme or Nextflow." in md
+        assert "0 Slurm defaults" not in md
+        assert "Please provide the specific Slurm defaults" not in md
+
+        gate = data.get("gate_block") or {}
+        gate_payload = gate.get("payload") or {}
+        assert gate_payload.get("skill") == "remote_execution"
+        assert gate_payload.get("gate_action") == "remote_stage"
+        extracted = gate_payload.get("extracted_params") or {}
+        assert extracted.get("execution_mode") == "slurm"
+        assert extracted.get("remote_action") == "stage_only"
+        assert extracted.get("gate_action") == "remote_stage"
+        assert extracted.get("ssh_profile_nickname") == "hpc3"
+        assert extracted.get("remote_base_path") == "/share/crsp/lab/seyedam/share/agoutic/seyedam"
+
 
 class TestDownloadWorkflow:
     def test_download_skill_skip_second_pass(self, SL, seed, tmp_path):

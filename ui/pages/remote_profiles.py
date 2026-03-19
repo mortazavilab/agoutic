@@ -8,6 +8,8 @@ import streamlit as st
 import pandas as pd
 import sys
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 
@@ -22,6 +24,8 @@ LAUNCHPAD_URL = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 # Internal API secret for service-to-service auth with Launchpad
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+REMOTE_PROFILE_TEST_TIMEOUT_SECONDS = int(os.getenv("REMOTE_PROFILE_TEST_TIMEOUT_SECONDS", "630"))
+REMOTE_PROFILE_TEST_MAX_WAIT_SECONDS = int(os.getenv("REMOTE_PROFILE_TEST_MAX_WAIT_SECONDS", "600"))
 
 st.set_page_config(page_title="Remote Profiles", page_icon="🔌", layout="wide")
 
@@ -109,6 +113,19 @@ def _response_error_text(resp) -> str:
         if isinstance(message, str) and message.strip():
             return message[:300]
     return resp.text[:300]
+
+
+def _run_request_with_elapsed(method: str, url: str, *, status_label: str, timeout: int, **kwargs):
+    status_box = st.empty()
+    started = time.time()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(make_authenticated_request, method, url, timeout=timeout, **kwargs)
+        while not future.done():
+            elapsed = int(time.time() - started)
+            status_box.info(f"{status_label} Elapsed: {elapsed}s / {REMOTE_PROFILE_TEST_MAX_WAIT_SECONDS}s")
+            time.sleep(1)
+        status_box.empty()
+        return future.result()
 
 
 # ── Create Profile ───────────────────────────────────────────────────
@@ -302,29 +319,29 @@ for idx, profile in enumerate(profiles):
                 if needs_password and not (local_auth_pwd or session_info.get("active")):
                     st.warning("Unlock the local auth session first, or enter the password for a one-off test")
                 else:
-                    with st.spinner("Testing connection…"):
-                        try:
-                            resp = make_authenticated_request(
-                                "POST",
-                                f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/test",
-                                params={"user_id": user_id},
-                                json={"local_password": local_auth_pwd},
-                                headers=_launchpad_headers(),
-                                timeout=30,
-                            )
-                            if resp.status_code == 200:
-                                result = resp.json()
-                                if result.get("success", result.get("ok", False)):
-                                    msg = result.get("message", "")
-                                    if result.get("session_started") and result.get("session_expires_at"):
-                                        msg = f"{msg} Session unlocked until {_fmt_datetime(result['session_expires_at'])}".strip()
-                                    st.success(f"✅ Connection successful! {msg}")
-                                else:
-                                    st.warning(f"⚠️ Test returned: {result.get('message', result)}")
+                    try:
+                        resp = _run_request_with_elapsed(
+                            "POST",
+                            f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/test",
+                            status_label="Testing connection…",
+                            params={"user_id": user_id},
+                            json={"local_password": local_auth_pwd},
+                            headers=_launchpad_headers(),
+                            timeout=REMOTE_PROFILE_TEST_TIMEOUT_SECONDS,
+                        )
+                        if resp.status_code == 200:
+                            result = resp.json()
+                            if result.get("success", result.get("ok", False)):
+                                msg = result.get("message", "")
+                                if result.get("session_started") and result.get("session_expires_at"):
+                                    msg = f"{msg} Session unlocked until {_fmt_datetime(result['session_expires_at'])}".strip()
+                                st.success(f"✅ Connection successful! {msg}")
                             else:
-                                st.error(f"Test failed ({resp.status_code}): {_response_error_text(resp)}")
-                        except Exception as e:
-                            st.error(f"Connection test error: {e}")
+                                st.warning(f"⚠️ Test returned: {result.get('message', result)}")
+                        else:
+                            st.error(f"Test failed ({resp.status_code}): {_response_error_text(resp)}")
+                    except Exception as e:
+                        st.error(f"Connection test error: {e}")
 
         # ── Delete ───────────────────────────────────────────────────
         with act_col3:

@@ -28,6 +28,7 @@ from cortex.middleware import AuthMiddleware
 # --- VERSION (single source of truth: VERSION file at repo root) ---
 _VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
 AGOUTIC_VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
+REMOTE_STAGE_MCP_TIMEOUT = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
 from cortex.auth import router as auth_router
 from cortex.admin import router as admin_router
 from cortex.dependencies import require_project_access, require_run_uuid_access
@@ -770,6 +771,114 @@ def _extract_remote_browse_request(user_message: str) -> dict | None:
     }
 
 
+def _extract_remote_execution_request(user_message: str) -> dict | None:
+    msg = (user_message or "").strip()
+    if not msg:
+        return None
+
+    has_remote_intent = bool(re.search(
+        r"\b(?:stage|staging|run|submit|launch|analy[sz]e|analyse|process)\b",
+        msg,
+        re.IGNORECASE,
+    ))
+    if not has_remote_intent:
+        return None
+
+    profile_pattern = re.compile(
+        r"\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)([a-zA-Z0-9_-]+)(?:\s+profile)?(?:[?.!,]|$)|(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile)\b",
+        re.IGNORECASE,
+    )
+    profile_match = profile_pattern.search(msg)
+    if not profile_match:
+        return None
+
+    nickname = profile_match.group(1) or profile_match.group(2)
+    if not nickname:
+        return None
+
+    return {
+        "ssh_profile_nickname": nickname,
+        "stage_only": bool(re.search(r"\bstage(?:\s+only)?\b", msg, re.IGNORECASE)),
+    }
+
+async def _build_remote_stage_approval_context(
+    session,
+    *,
+    project_id: str,
+    owner_id: str,
+    user_message: str,
+    active_skill: str,
+    all_results: dict,
+) -> dict | None:
+    if active_skill != "remote_execution":
+        return None
+
+    remote_request = _extract_remote_execution_request(user_message)
+    if not remote_request or not remote_request.get("stage_only"):
+        return None
+
+    launchpad_results = all_results.get("launchpad") or []
+    defaults_data = next(
+        (
+            result.get("data")
+            for result in launchpad_results
+            if result.get("tool") == "get_slurm_defaults" and isinstance(result.get("data"), dict)
+        ),
+        None,
+    )
+    if not defaults_data or not defaults_data.get("found"):
+        return None
+
+    selected_defaults = defaults_data.get("selected_profile_defaults") or {}
+    params = await extract_job_parameters_from_conversation(session, project_id) or {}
+    params = dict(params)
+    params.setdefault("remote_action", "stage_only")
+    params.setdefault("gate_action", "remote_stage")
+    params["execution_mode"] = "slurm"
+    if selected_defaults.get("ssh_profile_id") and not params.get("ssh_profile_id"):
+        params["ssh_profile_id"] = selected_defaults.get("ssh_profile_id")
+    if selected_defaults.get("nickname") and not params.get("ssh_profile_nickname"):
+        params["ssh_profile_nickname"] = selected_defaults.get("nickname")
+    if selected_defaults.get("remote_base_path") and not params.get("remote_base_path"):
+        params["remote_base_path"] = selected_defaults.get("remote_base_path")
+
+    prepared = await _prepare_remote_execution_params(session, project_id, owner_id, params)
+    prepared["remote_action"] = "stage_only"
+    prepared["gate_action"] = "remote_stage"
+    prepared["execution_mode"] = "slurm"
+    prepared = await _build_slurm_cache_preflight(session, project_id, owner_id, prepared)
+
+    sample_name = prepared.get("sample_name") or "sample"
+    mode = prepared.get("mode") or "DNA"
+    input_directory = prepared.get("input_directory") or ""
+    reference_genome = prepared.get("reference_genome") or ["mm39"]
+    if isinstance(reference_genome, str):
+        reference_genome = [reference_genome]
+    reference_text = ", ".join(reference_genome)
+    profile_name = prepared.get("ssh_profile_nickname") or selected_defaults.get("nickname") or remote_request.get("ssh_profile_nickname") or "remote profile"
+    account = prepared.get("slurm_account") or defaults_data.get("account") or selected_defaults.get("default_slurm_account") or "(unset)"
+    partition = prepared.get("slurm_partition") or defaults_data.get("partition") or selected_defaults.get("default_slurm_partition") or "(unset)"
+    remote_base_path = prepared.get("remote_base_path") or selected_defaults.get("remote_base_path") or "(unset)"
+
+    return {
+        "summary": (
+            "I found the saved remote defaults needed for staging.\n\n"
+            f"📋 **Sample Name:** {sample_name}\n"
+            f"📁 **Data Path:** {input_directory}\n"
+            f"🧬 **Data Type:** {mode}\n"
+            f"🔬 **Reference Genome:** {reference_text}\n"
+            f"🖥️ **Execution Mode:** SLURM staging only\n"
+            f"🔐 **SSH Profile:** {profile_name}\n"
+            f"🧾 **Account:** {account}\n"
+            f"🗂️ **Partition:** {partition}\n"
+            f"📍 **Remote Base Path:** {remote_base_path}\n\n"
+            f"I will stage the sample and reference assets on `{profile_name}`. This will not launch Dogme or Nextflow.\n\n"
+            "[[APPROVAL_NEEDED]]"
+        ),
+        "params": prepared,
+    }
+
+
 def _normalize_reference_id(reference_id: str | None) -> str:
     return (reference_id or "default").strip().lower()
 
@@ -898,6 +1007,16 @@ def _compute_reference_source_signature(reference_id: str) -> str | None:
     return hasher.hexdigest()
 
 
+def _has_remote_stage_intent(params: dict | None, gate_payload: dict | None = None) -> bool:
+    normalized = dict(params or {})
+    gate_payload = gate_payload or {}
+    gate_action = gate_payload.get("gate_action") or normalized.get("gate_action") or ""
+    remote_action = (normalized.get("remote_action") or "").strip().lower()
+    if gate_action == "remote_stage" or remote_action == "stage_only":
+        return True
+    return bool(normalized.get("ssh_profile_id") or normalized.get("ssh_profile_nickname"))
+
+
 async def _build_slurm_cache_preflight(
     session,
     project_id: str,
@@ -906,6 +1025,8 @@ async def _build_slurm_cache_preflight(
 ) -> dict:
     """Build planner/approval cache preflight metadata for SLURM staging reuse."""
     normalized = dict(params or {})
+    if _has_remote_stage_intent(normalized):
+        normalized["execution_mode"] = "slurm"
     if (normalized.get("execution_mode") or "local") != "slurm":
         return normalized
 
@@ -1077,6 +1198,8 @@ async def _prepare_remote_execution_params(
         return rendered
 
     normalized = dict(params or {})
+    if _has_remote_stage_intent(normalized):
+        normalized["execution_mode"] = "slurm"
     if (normalized.get("execution_mode") or "local") != "slurm":
         return normalized
 
@@ -2694,11 +2817,11 @@ def _initial_stage_parts(cache_preflight: dict | None) -> dict:
             })
         else:
             reference_needs_transfer = True
-            action_label = "refreshing" if action == "refresh" else "staging"
+            action_label = "planned refresh" if action == "refresh" else "planned stage"
             reference_details.append({
                 "reference_id": ref_id,
                 "status": "pending",
-                "message": f"{action_label.capitalize()} {ref_id} on the remote profile.",
+                "message": f"{action_label.capitalize()} for {ref_id} on the remote profile.",
             })
 
     if reference_actions and not reference_needs_transfer:
@@ -2712,7 +2835,7 @@ def _initial_stage_parts(cache_preflight: dict | None) -> dict:
         references = _make_stage_part(
             "RUNNING",
             40,
-            "Staging reference assets on the remote profile...",
+            "Checking and preparing reference assets on the remote profile...",
             reference_details,
         )
 
@@ -2829,11 +2952,7 @@ def _should_stage_local_sample(gate_payload: dict, job_params: dict) -> bool:
     skill = gate_payload.get("skill")
     if skill != "analyze_local_sample":
         return False
-    if gate_payload.get("gate_action") == "remote_stage" or job_params.get("gate_action") == "remote_stage":
-        return False
-    if (job_params.get("remote_action") or "").strip().lower() == "stage_only":
-        return False
-    if job_params.get("ssh_profile_id") or job_params.get("ssh_profile_nickname"):
+    if _has_remote_stage_intent(job_params, gate_payload):
         return False
     if (job_params.get("execution_mode") or "local").strip().lower() == "slurm":
         return False
@@ -3124,11 +3243,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         _project_slug = project_obj.slug if project_obj else None
         gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
         remote_action = (job_params.get("remote_action") or "").strip().lower()
-        remote_intent = (
-            gate_action == "remote_stage"
-            or remote_action == "stage_only"
-            or bool(job_params.get("ssh_profile_id") or job_params.get("ssh_profile_nickname"))
-        )
+        remote_intent = _has_remote_stage_intent(job_params, gate_payload)
         execution_mode = (job_params.get("execution_mode") or "local").strip().lower()
         if remote_intent and execution_mode != "slurm":
             execution_mode = "slurm"
@@ -3433,7 +3548,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
 
             try:
                 launchpad_url = get_service_url("launchpad")
-                client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=900.0)
+                client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=REMOTE_STAGE_MCP_TIMEOUT)
                 await client.connect()
                 try:
                     stage_result = await client.call_tool(
@@ -3515,6 +3630,11 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             )
             logger.info("Remote stage-only request completed", project_id=project_id, sample_name=job_data["sample_name"])
             return
+
+        if gate_action == "remote_stage" or remote_action == "stage_only":
+            raise RuntimeError(
+                "Refusing to submit a job for a remote stage-only request; the request must stop at remote staging."
+            )
         
         # Submit job to Launchpad via MCP (single call — Nextflow handles multi-genome)
         try:
@@ -4378,7 +4498,11 @@ What would you like to do?
 
         # 2a. Pre-LLM skill switch detection — catch obvious mismatches
         # before wasting time on an LLM call with the wrong skill.
-        auto_skill = _auto_detect_skill_switch(req.message, active_skill)
+        _remote_execution_request = _extract_remote_execution_request(req.message)
+        if _remote_execution_request:
+            auto_skill = "remote_execution"
+        else:
+            auto_skill = _auto_detect_skill_switch(req.message, active_skill)
         _pre_llm_skill = active_skill  # Track for debug
         if auto_skill and auto_skill in SKILLS_REGISTRY:
             logger.info("Auto-detected skill switch before LLM call",
@@ -6051,6 +6175,8 @@ What would you like to do?
                 except (json.JSONDecodeError, ValueError):
                     pass  # not clean JSON — leave all_results empty, fall through normally
 
+        remote_stage_approval_context = None
+
         if all_results:
             # Check if all results are errors (skip second pass if so)
             has_real_data = any(
@@ -6127,7 +6253,29 @@ What would you like to do?
             # used to build the approval gate, not to summarise for the user.
             _is_download = _has_download_chain or active_skill == "download_files"
 
-            if _is_browsing and has_real_data and formatted_data.strip():
+            remote_stage_approval_context = await _build_remote_stage_approval_context(
+                session,
+                project_id=req.project_id,
+                owner_id=user.id,
+                user_message=req.message,
+                active_skill=active_skill,
+                all_results=all_results,
+            )
+
+            if remote_stage_approval_context and has_real_data:
+                needs_approval = True
+                _display_data = "\n".join(formatted_data_parts)
+                if _prov_block:
+                    _display_data = _prov_block + "\n\n" + _display_data
+                clean_markdown = str(remote_stage_approval_context.get("summary") or "").rstrip()
+                if _display_data.strip():
+                    clean_markdown += (
+                        "\n\n<details><summary>📋 Raw Query Results (click to expand)</summary>\n\n"
+                        + _display_data
+                        + "\n\n</details>"
+                    )
+
+            elif _is_browsing and has_real_data and formatted_data.strip():
                 # Show the formatted file listing directly — no second pass.
                 # Use the raw results (without provenance prefix) and append
                 # provenance as a collapsed section at the end.
@@ -6858,9 +7006,18 @@ What would you like to do?
                 }
             else:
                 # Job gate: extract Dogme pipeline parameters
-                extracted_params = await extract_job_parameters_from_conversation(session, req.project_id)
+                if remote_stage_approval_context and isinstance(remote_stage_approval_context.get("params"), dict):
+                    extracted_params = dict(remote_stage_approval_context.get("params") or {})
+                else:
+                    extracted_params = await extract_job_parameters_from_conversation(session, req.project_id)
                 if isinstance(extracted_params, dict):
                     gate_action = extracted_params.get("gate_action") or gate_action
+                    if (
+                        gate_action == "remote_stage"
+                        or (extracted_params.get("remote_action") or "").strip().lower() == "stage_only"
+                    ):
+                        gate_action = "remote_stage"
+                        gate_skill = "remote_execution"
                 if (extracted_params.get("execution_mode") or "local") == "slurm":
                     gate_skill = "remote_execution"
             

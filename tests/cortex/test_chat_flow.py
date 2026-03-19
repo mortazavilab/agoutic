@@ -210,6 +210,23 @@ class TestApprovalGateCreation:
         md = resp.json()["agent_block"]["payload"]["markdown"]
         assert "[[APPROVAL_NEEDED]]" not in md
 
+    def test_stage_on_hpc3_routes_to_remote_stage_workflow(self, plain_client):
+        with patch("cortex.app.asyncio.create_task", MagicMock()):
+            resp = plain_client.post("/chat", json={
+                "project_id": "proj-flow",
+                "message": "stage the mouse CDNA sample called Jamshid at /media/backup_disk/agoutic_root/testdata/CDNA/pod5 on hpc3",
+                "skill": "welcome",
+            })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["plan_block"] is not None
+        assert data["gate_block"] is None
+        assert data["agent_block"]["payload"]["skill"] == "remote_execution"
+        plan_payload = data["plan_block"]["payload"]
+        assert plan_payload["workflow_type"] == "remote_sample_intake"
+        assert plan_payload["remote_action"] == "stage_only"
+
 
 # ---------------------------------------------------------------------------
 # Skill switch

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from launchpad.backends.local_auth_sessions import LocalAuthSession, LocalAuthSessionManager, _launch_helper_via_su
+from launchpad.backends.local_user_broker import _build_ssh_transport
 
 
 class DummyProcess:
@@ -59,6 +60,28 @@ def test_launch_helper_sets_readable_umask(monkeypatch, tmp_path):
     _launch_helper_via_su("alice", "secret", "127.0.0.1", "/tmp/session.port", "/tmp/session.pid", str(log_file), "token-123")
 
     assert "umask 022 && nohup" in captured["args"][3]
+
+
+def test_local_broker_transport_uses_fail_fast_publickey_options():
+    transport = _build_ssh_transport(
+        {
+            "ssh_host": "hpc3.example.edu",
+            "ssh_port": 22,
+            "ssh_username": "seyedam",
+            "auth_method": "key_file",
+            "key_file_path": "~/.ssh/id_ed25519",
+        }
+    )
+
+    assert "-o" in transport
+    assert "BatchMode=yes" in transport
+    assert "PreferredAuthentications=publickey" in transport
+    assert "PasswordAuthentication=no" in transport
+    assert "KbdInteractiveAuthentication=no" in transport
+    assert "GSSAPIAuthentication=no" in transport
+    assert "IdentitiesOnly=yes" in transport
+    assert "ConnectTimeout=600" in transport
+    assert "ConnectionAttempts=1" in transport
 
 
 @pytest.mark.asyncio
