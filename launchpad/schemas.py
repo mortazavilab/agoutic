@@ -249,3 +249,4 @@ class JobStatusExtendedResponse(JobStatusResponse):
     transfer_state: Optional[str] = None
     result_destination: Optional[str] = None
     ssh_profile_nickname: Optional[str] = None
+    work_directory: Optional[str] = None

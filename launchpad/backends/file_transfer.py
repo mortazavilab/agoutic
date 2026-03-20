@@ -30,6 +30,7 @@ class FileTransferManager:
         profile: SSHProfileData,
         source: str,
         dest: str,
+        include_patterns: list[str] | None,
         exclude_patterns: list[str] | None,
         direction: str,
     ) -> dict | None:
@@ -55,6 +56,7 @@ class FileTransferManager:
                 },
                 "source": source,
                 "dest": dest,
+                "include_patterns": include_patterns or [],
                 "exclude_patterns": exclude_patterns or [],
                 "timeout_seconds": LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
             },
@@ -76,6 +78,7 @@ class FileTransferManager:
         profile: SSHProfileData,
         local_path: str,
         remote_path: str,
+        include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
     ) -> dict:
         """Upload local input files to the remote host via rsync.
@@ -93,6 +96,7 @@ class FileTransferManager:
             profile=profile,
             source=local_path,
             dest=f"{profile.ssh_username}@{profile.ssh_host}:{remote_path}",
+            include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             direction="upload",
         )
@@ -102,6 +106,7 @@ class FileTransferManager:
         profile: SSHProfileData,
         remote_path: str,
         local_path: str,
+        include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
     ) -> dict:
         """Download remote output files to local via rsync.
@@ -115,6 +120,7 @@ class FileTransferManager:
             profile=profile,
             source=f"{profile.ssh_username}@{profile.ssh_host}:{remote_path}",
             dest=local_path,
+            include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             direction="download",
         )
@@ -124,6 +130,7 @@ class FileTransferManager:
         profile: SSHProfileData,
         source: str,
         dest: str,
+        include_patterns: list[str] | None,
         exclude_patterns: list[str] | None,
         direction: str,
     ) -> dict:
@@ -132,6 +139,10 @@ class FileTransferManager:
             "rsync", "-avz", "--partial", "--progress",
             "-e", self._build_ssh_command(profile),
         ]
+
+        if include_patterns:
+            for pat in include_patterns:
+                cmd.extend(["--include", pat])
 
         if exclude_patterns:
             for pat in exclude_patterns:
@@ -152,6 +163,7 @@ class FileTransferManager:
                 profile=profile,
                 source=source,
                 dest=dest,
+                include_patterns=include_patterns,
                 exclude_patterns=exclude_patterns,
                 direction=direction,
             )

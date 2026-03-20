@@ -234,6 +234,19 @@ class TestStatusAndReport:
         assert fake_client.get_calls[0][0] == "http://launchpad.local/jobs/run-1/status"
 
     @pytest.mark.asyncio
+    async def test_check_nextflow_status_uses_extended_status_timeout(self, monkeypatch):
+        fake_client = FakeAsyncClient(
+            get_responses=[FakeResponse(json_data={"run_uuid": "run-1", "status": "RUNNING"})]
+        )
+        monkeypatch.setenv("LAUNCHPAD_STATUS_TIMEOUT", "120")
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            await tools.check_nextflow_status("run-1")
+
+        assert fake_client.get_calls[0][1]["timeout"] == 120.0
+
+    @pytest.mark.asyncio
     async def test_check_nextflow_status_wraps_not_found(self):
         fake_client = FakeAsyncClient(get_responses=[FakeResponse(status_code=404)])
 

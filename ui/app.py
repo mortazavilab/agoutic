@@ -22,6 +22,7 @@ AGOUTIC_VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() el
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 LAUNCHPAD_URL = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+LIVE_JOB_STATUS_TIMEOUT_SECONDS = float(os.getenv("LIVE_JOB_STATUS_TIMEOUT_SECONDS", "60"))
 
 st.set_page_config(page_title=f"AGOUTIC v{AGOUTIC_VERSION}", layout="wide")
 
@@ -180,6 +181,13 @@ def _launchpad_headers() -> dict:
     if INTERNAL_API_SECRET:
         headers["X-Internal-Secret"] = INTERNAL_API_SECRET
     return headers
+
+
+def _job_status_updated_at(persisted_timestamp: str | None, live_poll_succeeded: bool, now: datetime.datetime | None = None) -> str | None:
+    if live_poll_succeeded:
+        current = now or datetime.datetime.now(datetime.timezone.utc)
+        return current.isoformat().replace("+00:00", "Z")
+    return persisted_timestamp or None
 
 
 def _load_user_ssh_profiles(user_id: str) -> list[dict]:
@@ -2117,15 +2125,17 @@ def render_block(block, expected_project_id: str = ""):
             # For RUNNING jobs, live-fetch status directly from Cortex
             # (bypasses stale block payload — always fresh from Launchpad)
             job_status = content.get("job_status", {})
+            live_status_poll_succeeded = False
             if run_uuid and block_status_str == "RUNNING":
                 try:
                     live_resp = make_authenticated_request(
                         "GET",
                         f"{API_URL}/jobs/{run_uuid}/status",
-                        timeout=5,
+                        timeout=LIVE_JOB_STATUS_TIMEOUT_SECONDS,
                     )
                     if live_resp.status_code == 200:
                         job_status = live_resp.json()
+                        live_status_poll_succeeded = True
                 except Exception:
                     pass  # Fall back to block payload
             
@@ -2325,7 +2335,10 @@ def render_block(block, expected_project_id: str = ""):
                     
                     # Job timing info
                     _job_created = block.get("created_at", "")
-                    _last_upd = content.get("last_updated", "")
+                    _last_upd = _job_status_updated_at(
+                        content.get("last_updated", ""),
+                        live_status_poll_succeeded,
+                    )
                     _timing_parts = []
                     if _job_created:
                         try:

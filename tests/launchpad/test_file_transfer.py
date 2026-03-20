@@ -64,7 +64,39 @@ async def test_upload_prefers_active_broker_session(monkeypatch, tmp_path, key_f
     assert payload["op"] == "rsync_transfer"
     assert payload["source"] == f"{local_dir}/"
     assert payload["dest"] == "seyedam@hpc3.example.edu:/scratch/seyedam/agoutic/data/sample"
+    assert payload["include_patterns"] == []
     assert payload["timeout_seconds"] == LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_download_passes_include_patterns_to_broker_session(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_dir = tmp_path / "workflow2"
+    fake_session = SimpleNamespace(session_id="sess-1")
+    invoke_calls = []
+
+    class FakeSessionManager:
+        async def get_active_session(self, profile):
+            return fake_session
+
+        async def invoke(self, session, payload):
+            invoke_calls.append((session, payload))
+            return {"ok": True, "bytes_transferred": 2048}
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+
+    result = await manager.download_outputs(
+        profile=key_file_profile,
+        remote_path="/scratch/seyedam/agoutic/project/workflow2",
+        local_path=str(local_dir),
+        include_patterns=["annot/***", "*.html"],
+        exclude_patterns=["*"],
+    )
+
+    assert result == {"ok": True, "message": "Download completed", "bytes_transferred": 2048}
+    _, payload = invoke_calls[0]
+    assert payload["include_patterns"] == ["annot/***", "*.html"]
+    assert payload["exclude_patterns"] == ["*"]
 
 
 @pytest.mark.asyncio

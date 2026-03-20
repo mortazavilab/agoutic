@@ -25,6 +25,7 @@ class LaunchpadMCPTools:
         default_url = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
         self.server_url = (server_url or default_url).rstrip("/")
         self.timeout = 30.0
+        self.status_timeout = float(os.getenv("LAUNCHPAD_STATUS_TIMEOUT", "120"))
         self.submit_timeout = float(os.getenv("LAUNCHPAD_SUBMIT_TIMEOUT", "900"))
         self.stage_timeout = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
         # Internal API secret for Launchpad authentication
@@ -292,7 +293,7 @@ class LaunchpadMCPTools:
                 response = await client.get(
                     f"{self.server_url}/jobs/{run_uuid}/status",
                     headers=self._headers(),
-                    timeout=self.timeout,
+                    timeout=self.status_timeout,
                 )
                 if response.status_code == 404:
                     raise RuntimeError(f"Job {run_uuid} not found")

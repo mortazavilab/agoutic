@@ -67,6 +67,7 @@ class JobStatus:
     transfer_state: str | None = None
     result_destination: str | None = None
     ssh_profile_nickname: str | None = None
+    work_directory: str | None = None
 
 
 @dataclass

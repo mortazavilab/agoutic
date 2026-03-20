@@ -214,6 +214,25 @@ class TestValidateAnalyzerParams:
         )
         assert result["work_dir"] == "/proj/dir"
 
+    def test_missing_context_work_dir_falls_back_to_run_uuid(self):
+        """If the contextual work_dir does not exist locally, keep run_uuid fallback."""
+        import json
+        blk = self._make_block(
+            "EXECUTION_JOB",
+            json.dumps({
+                "work_directory": "/remote/project/workflow1",
+                "run_uuid": "abc-123",
+            }),
+        )
+        result = _validate_analyzer_params(
+            tool="get_analysis_summary",
+            params={"work_dir": "/remote/project/workflow1"},
+            user_message="show summary",
+            history_blocks=[blk],
+        )
+        assert result["run_uuid"] == "abc-123"
+        assert "work_dir" not in result
+
     def test_list_workflows_strips_workflow_suffix(self):
         """'list workflows' command should strip /workflowN suffix."""
         import json

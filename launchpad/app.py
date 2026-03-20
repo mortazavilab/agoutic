@@ -75,6 +75,15 @@ app = FastAPI(
 # Add request logging middleware FIRST (outermost)
 app.add_middleware(RequestLoggingMiddleware)
 
+
+def _effective_job_work_directory(job) -> str | None:
+    result_destination = (getattr(job, "result_destination", "") or "").strip().lower()
+    local_work_dir = getattr(job, "nextflow_work_dir", None)
+    remote_work_dir = getattr(job, "remote_work_dir", None)
+    if result_destination in {"local", "both"} and local_work_dir:
+        return local_work_dir
+    return remote_work_dir or local_work_dir
+
 # Internal API secret validation middleware
 class InternalSecretMiddleware(BaseHTTPMiddleware):
     """
@@ -445,7 +454,7 @@ async def submit_job(req: SubmitJobRequest):
                 await session.refresh(job)
                 job.started_at = datetime.utcnow()
                 await session.commit()
-                work_directory = job.remote_work_dir or ""
+                work_directory = _effective_job_work_directory(job) or ""
                 response_status = job.status or JobStatus.PENDING
                 logger.info("Job submitted to SLURM backend", run_uuid=run_uuid,
                            sample_name=req.sample_name, remote_work=work_directory)
@@ -576,17 +585,35 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         
-        # For local terminal DB states, return directly without checking work dir.
-        # SLURM jobs still need backend polling to surface live/terminal scheduler
-        # details plus remote trace-derived task progress.
-        if job.execution_mode != "slurm" and job.status in (JobStatus.DELETED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
-            return {
+        terminal_statuses = (JobStatus.DELETED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        pending_local_result_sync = (
+            job.execution_mode == "slurm"
+            and job.status == JobStatus.COMPLETED
+            and (job.result_destination or "").strip().lower() in {"local", "both"}
+            and (job.transfer_state or "") != "outputs_downloaded"
+        )
+        if job.status in terminal_statuses and not pending_local_result_sync:
+            work_directory = _effective_job_work_directory(job)
+            base_payload = {
                 "run_uuid": run_uuid,
                 "status": job.status,
                 "progress_percent": 100 if job.status == JobStatus.COMPLETED else 0,
                 "message": job.error_message or f"Job {job.status.lower()}.",
                 "tasks": {},
+                "work_directory": work_directory,
             }
+            if job.execution_mode == "slurm":
+                base_payload.update(
+                    {
+                        "execution_mode": "slurm",
+                        "run_stage": job.run_stage,
+                        "slurm_job_id": job.slurm_job_id,
+                        "slurm_state": job.slurm_state,
+                        "transfer_state": job.transfer_state,
+                        "result_destination": job.result_destination,
+                    }
+                )
+            return base_payload
         
         if job.execution_mode == "slurm":
             backend = get_backend("slurm")
@@ -604,6 +631,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "transfer_state": status_data.transfer_state,
                 "result_destination": status_data.result_destination,
                 "ssh_profile_nickname": status_data.ssh_profile_nickname,
+                "work_directory": status_data.work_directory,
             }
 
         # Get detailed status including tasks from check_status

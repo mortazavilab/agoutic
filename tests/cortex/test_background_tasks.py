@@ -37,6 +37,8 @@ from cortex.app import (
     _initial_stage_parts,
     poll_job_status,
     _auto_trigger_analysis,
+    _completed_job_results_ready,
+    _resolved_job_work_directory,
     _build_auto_analysis_context,
     _build_static_analysis_summary,
     extract_job_parameters_from_conversation,
@@ -1498,6 +1500,73 @@ class TestPollJobStatus:
         call_args = mock_auto.call_args
         assert call_args[0][0] == "proj-bg"  # project_id
         assert call_args[0][1] == "auto-test"  # run_uuid
+
+    @pytest.mark.asyncio
+    async def test_waits_for_local_result_copy_before_auto_analysis(self, session_factory, seed_data):
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess, "proj-bg", "EXECUTION_JOB",
+            {
+                "run_uuid": "copyback-test",
+                "work_directory": "/work/copyback",
+                "sample_name": "sample-copy",
+                "mode": "DNA",
+                "model": "default",
+                "job_status": {"status": "PENDING"},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            {"status": "COMPLETED", "progress_percent": 95, "result_destination": "local", "transfer_state": "downloading_outputs", "work_directory": "/local/work/copyback"},
+            {"logs": []},
+            {"status": "COMPLETED", "progress_percent": 100, "result_destination": "local", "transfer_state": "outputs_downloaded", "work_directory": "/local/work/copyback"},
+            {"logs": []},
+        ])
+
+        mock_auto = AsyncMock()
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.app.asyncio") as mock_aio, \
+             patch("cortex.app._auto_trigger_analysis", mock_auto):
+            mock_aio.sleep = AsyncMock()
+            await poll_job_status("proj-bg", job_block.id, "copyback-test")
+
+        assert mock_auto.await_count == 1
+
+        sess = session_factory()
+        updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
+        payload = get_block_payload(updated)
+        assert updated.status == "DONE"
+        assert payload["job_status"]["transfer_state"] == "outputs_downloaded"
+        assert payload["work_directory"] == "/local/work/copyback"
+        sess.close()
+
+
+def test_completed_job_results_ready_requires_outputs_downloaded_for_local_destinations():
+    assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "local", "transfer_state": "outputs_downloaded"}) is True
+    assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "both", "transfer_state": "downloading_outputs"}) is False
+    assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "remote", "transfer_state": "none"}) is True
+
+
+def test_resolved_job_work_directory_prefers_status_data_over_existing_payload():
+    assert _resolved_job_work_directory(
+        "/remote/project/workflow1",
+        {"work_directory": "/local/project/workflow1"},
+    ) == "/local/project/workflow1"
+
+
+def test_resolved_job_work_directory_falls_back_to_existing_payload():
+    assert _resolved_job_work_directory(
+        "/local/project/workflow1",
+        {"status": "RUNNING"},
+    ) == "/local/project/workflow1"
 
     @pytest.mark.asyncio
     async def test_handles_poll_errors_gracefully(self, session_factory, seed_data):

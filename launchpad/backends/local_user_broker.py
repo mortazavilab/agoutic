@@ -138,6 +138,7 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
         profile = request["profile"]
         source = request["source"]
         dest = request["dest"]
+        include_patterns = request.get("include_patterns") or []
         exclude_patterns = request.get("exclude_patterns") or []
         timeout_seconds = request.get("timeout_seconds")
 
@@ -145,6 +146,8 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
             "rsync", "-avz", "--partial", "--progress",
             "-e", " ".join(_build_ssh_transport(profile)),
         ]
+        for pattern in include_patterns:
+            cmd.extend(["--include", pattern])
         for pattern in exclude_patterns:
             cmd.extend(["--exclude", pattern])
 

@@ -669,6 +669,50 @@ async def test_check_status_reports_remote_trace_progress(monkeypatch, profile):
     assert "2/3 completed" in status.message
 
 
+def test_parse_task_status_texts_excludes_numbered_tasks_already_completed_in_trace():
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content=(
+            "task_id\thash\tnative_id\tname\tstatus\texit\n"
+            "1\t71/22d996\t50052915\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
+            "2\td0/606400\t50052916\tmainWorkflow:softwareVTask\tCOMPLETED\t0\n"
+            "3\t46/b026bb\t50052917\tmainWorkflow:doradoTask (2)\tCOMPLETED\t0\n"
+            "4\t79/ee1ac3\t50052918\tmainWorkflow:doradoTask (1)\tCOMPLETED\t0\n"
+        ),
+        stdout_content=(
+            "executor >  slurm (5)\n"
+            "[71/22d996] mainWorkflow:doradoDownloadTask\n"
+            "[d0/606400] mainWorkflow:softwareVTask\n"
+            "[46/b026bb] mainWorkflow:doradoTask (2)\n"
+            "[79/ee1ac3] mainWorkflow:doradoTask (1)\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert progress == 72
+    assert tasks["completed_count"] == 4
+    assert tasks["running"] == []
+    assert message == "Pipeline: 4/5 completed"
+
+
+def test_parse_task_status_texts_uses_latest_stdout_event_per_hash():
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content="",
+        stdout_content=(
+            "executor >  local (2)\n"
+            "[aa/bbccdd] mainWorkflow:doradoTask (1)\n"
+            "[aa/bbccdd] mainWorkflow:doradoTask (1) ✔\n"
+            "[ee/ff0011] mainWorkflow:softwareVTask\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert progress == 10
+    assert tasks["completed_count"] == 0
+    assert tasks["total"] == 2
+    assert tasks["running"] == ["mainWorkflow:softwareVTask"]
+    assert message == "Pipeline: 0/2 completed, 1 running"
+
+
 def test_controller_resources_prefer_cpu_defaults(profile):
     backend = SlurmBackend()
     params = SubmitParams(

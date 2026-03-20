@@ -485,9 +485,10 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
     headers = {}
     if INTERNAL_API_SECRET:
         headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+    status_proxy_timeout = float(os.getenv("CORTEX_JOB_STATUS_PROXY_TIMEOUT_SECONDS", "60"))
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=status_proxy_timeout) as client:
             resp = await client.get(
                 f"{launchpad_rest}/jobs/{run_uuid}/status",
                 headers=headers,
@@ -3937,12 +3938,16 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                     # Create new payload dict to ensure SQLAlchemy detects the change
                     payload = get_block_payload(block)
                     payload["job_status"] = status_data
+                    resolved_work_directory = _resolved_job_work_directory(payload.get("work_directory"), status_data)
+                    if resolved_work_directory:
+                        payload["work_directory"] = resolved_work_directory
                     payload["logs"] = logs
                     payload["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
                 
                     # Update block status based on job status
                     job_status = status_data.get("status", "UNKNOWN")
-                    if job_status == "COMPLETED":
+                    completed_ready_for_analysis = _completed_job_results_ready(status_data)
+                    if job_status == "COMPLETED" and completed_ready_for_analysis:
                         block.status = "DONE"
                     elif job_status == "FAILED":
                         block.status = "FAILED"
@@ -3958,7 +3963,7 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                     logger.info("Job status updated", run_uuid=run_uuid, job_status=job_status, progress=status_data.get('progress_percent', 0))
                 
                     # Stop polling if job is done
-                    if job_status in ("COMPLETED", "FAILED"):
+                    if job_status == "FAILED" or (job_status == "COMPLETED" and completed_ready_for_analysis):
                         logger.info("Job finished", run_uuid=run_uuid, job_status=job_status)
 
                         workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
@@ -3986,6 +3991,25 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                 session.close()
     
     logger.info("Stopped polling job", run_uuid=run_uuid)
+
+
+def _completed_job_results_ready(status_data: dict | None) -> bool:
+    if not isinstance(status_data, dict):
+        return False
+    if status_data.get("status") != "COMPLETED":
+        return False
+    result_destination = (status_data.get("result_destination") or "").strip().lower()
+    if result_destination not in {"local", "both"}:
+        return True
+    return (status_data.get("transfer_state") or "") == "outputs_downloaded"
+
+
+def _resolved_job_work_directory(existing_work_directory: str | None, status_data: dict | None) -> str | None:
+    if isinstance(status_data, dict):
+        status_work_directory = (status_data.get("work_directory") or "").strip()
+        if status_work_directory:
+            return status_work_directory
+    return existing_work_directory or None
 
 
 async def _auto_trigger_analysis(

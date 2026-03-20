@@ -3,6 +3,7 @@ SLURM execution backend — SSH + sbatch for remote HPC execution.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -29,6 +30,19 @@ logger = get_logger(__name__)
 
 class SlurmBackend:
     """Remote execution via SSH + SLURM sbatch."""
+
+    _result_sync_tasks: dict[str, asyncio.Task] = {}
+    _RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "kallisto", "openChromatin", "stats")
+    _RESULT_SYNC_FILE_PATTERNS = ("*.config", "*.html", "*.txt", "*.csv", "*.tsv")
+
+    @staticmethod
+    def _effective_work_directory(job) -> str | None:
+        result_destination = (getattr(job, "result_destination", "") or "").strip().lower()
+        local_work_dir = getattr(job, "nextflow_work_dir", None)
+        remote_work_dir = getattr(job, "remote_work_dir", None)
+        if result_destination in {"local", "both"} and local_work_dir:
+            return local_work_dir
+        return remote_work_dir or local_work_dir
 
     def __init__(self):
         self._ssh_manager = SSHConnectionManager()
@@ -283,6 +297,19 @@ class SlurmBackend:
                     elif task_message and agoutic_status == "FAILED":
                         message = f"{message} — {task_message}"
 
+                if agoutic_status == "COMPLETED":
+                    agoutic_status, copyback_message = await self._ensure_local_results_ready(
+                        run_uuid=run_uuid,
+                        job=job,
+                        profile=profile,
+                    )
+                    if copyback_message:
+                        message = copyback_message
+                    if agoutic_status == "RUNNING":
+                        progress_percent = min(max(progress_percent, 95), 99)
+                    elif agoutic_status == "FAILED":
+                        progress_percent = 0
+
                 # Update DB with latest state
                 await self._update_job_slurm_state(
                     run_uuid,
@@ -304,6 +331,7 @@ class SlurmBackend:
                     result_destination=job.result_destination,
                     message=message,
                     ssh_profile_nickname=profile.nickname,
+                    work_directory=self._effective_work_directory(job),
                 )
             finally:
                 await conn.close()
@@ -319,6 +347,7 @@ class SlurmBackend:
                 slurm_job_id=job.slurm_job_id,
                 slurm_state=job.slurm_state,
                 message=f"Failed to poll scheduler: {e}",
+                work_directory=self._effective_work_directory(job),
             )
 
     async def _read_remote_task_status(
@@ -332,8 +361,8 @@ class SlurmBackend:
         """Read remote trace/stdout files and derive task-level progress."""
         quoted_remote_work = shlex.quote(remote_work)
         trace_cmd = (
-            f"trace=$(find {quoted_remote_work} -maxdepth 1 -type f \\(" 
-            f"-name '*_trace.txt' -o -name 'trace.txt' \\) | sort | head -n 1); "
+            f"trace=$(find {quoted_remote_work} -maxdepth 1 -type f \\("
+            f"-name '*_trace.txt' -o -name 'trace.txt' \\) -exec ls -1t {{}} + 2>/dev/null | head -n 1); "
             f"if [ -n \"$trace\" ]; then cat \"$trace\"; fi"
         )
         trace_result = await conn.run(f"{trace_cmd} 2>/dev/null || true")
@@ -380,7 +409,7 @@ class SlurmBackend:
                 elif task_status in {"FAILED", "ABORTED"} and task_name not in failed_tasks:
                     failed_tasks.append(task_name)
 
-        seen_hashes: set[str] = set()
+        task_events_by_hash: dict[str, tuple[str, bool]] = {}
         for line in stdout_content.splitlines():
             if "executor >" in line and "(" in line:
                 try:
@@ -396,15 +425,21 @@ class SlurmBackend:
                 continue
             rest = line.split("]", 1)[1].strip()
             task_name = rest.split()[0] if rest else ""
-            if not task_name or task_name in completed_tasks or task_name in failed_tasks:
-                continue
             match = re.search(r"(\(\d+\))", rest)
             if match and match.group(1) not in task_name:
                 task_name = f"{task_name} {match.group(1)}"
-            if hash_part not in seen_hashes:
-                seen_hashes.add(hash_part)
-                if task_name not in running_tasks:
-                    running_tasks.append(task_name)
+            if not task_name:
+                continue
+            is_terminal_stdout_event = "✔" in line or "FAILED" in line.upper()
+            task_events_by_hash[hash_part] = (task_name, is_terminal_stdout_event)
+
+        for task_name, is_terminal_stdout_event in task_events_by_hash.values():
+            if is_terminal_stdout_event:
+                continue
+            if task_name in completed_tasks or task_name in failed_tasks:
+                continue
+            if task_name not in running_tasks:
+                running_tasks.append(task_name)
 
         total = max(submitted_count, len(completed_tasks) + len(running_tasks) + len(failed_tasks))
         if total <= 0 and not completed_tasks and not running_tasks and not failed_tasks:
@@ -438,6 +473,112 @@ class SlurmBackend:
 
         message = f"Pipeline: {', '.join(msg_parts)}" if msg_parts else None
         return progress, tasks, message
+
+    @classmethod
+    def _build_result_sync_include_patterns(cls) -> list[str]:
+        return [*(f"{name}/***" for name in cls._RESULT_SYNC_DIRS), *cls._RESULT_SYNC_FILE_PATTERNS]
+
+    @staticmethod
+    def _needs_local_result_copy(job) -> bool:
+        destination = (getattr(job, "result_destination", "") or "").strip().lower()
+        return (
+            destination in {"local", "both"}
+            and bool(getattr(job, "remote_work_dir", None))
+            and bool(getattr(job, "nextflow_work_dir", None))
+        )
+
+    async def _ensure_local_results_ready(
+        self,
+        *,
+        run_uuid: str,
+        job,
+        profile: SSHProfileData,
+    ) -> tuple[str, str | None]:
+        from launchpad.db import get_job_by_uuid as get_job
+
+        current_job = await get_job(run_uuid) or job
+        if not self._needs_local_result_copy(current_job):
+            return "COMPLETED", None
+
+        transfer_state = (getattr(current_job, "transfer_state", "") or "").strip().lower()
+        if transfer_state == "outputs_downloaded":
+            return "COMPLETED", None
+        if transfer_state == "transfer_failed":
+            return "FAILED", "Remote job completed, but copying results back to the local workflow failed."
+
+        task = self._result_sync_tasks.get(run_uuid)
+        if task is None or task.done():
+            if task is not None:
+                try:
+                    task.result()
+                except Exception as exc:  # pragma: no cover - defensive task cleanup
+                    logger.warning("Background result sync task ended with error", run_uuid=run_uuid, error=str(exc))
+            self._result_sync_tasks[run_uuid] = asyncio.create_task(
+                self._copy_selected_results_to_local(run_uuid=run_uuid, job=current_job, profile=profile)
+            )
+        return "RUNNING", "Copying results back to the local workflow..."
+
+    async def _copy_selected_results_to_local(self, *, run_uuid: str, job, profile: SSHProfileData) -> None:
+        local_work_dir = getattr(job, "nextflow_work_dir", None)
+        remote_work_dir = getattr(job, "remote_work_dir", None)
+        try:
+            if not local_work_dir or not remote_work_dir:
+                raise RuntimeError("Missing local or remote workflow directory for result copy-back")
+
+            await self._update_job_transfer_state(run_uuid, "downloading_outputs")
+            artifacts = await self._discover_remote_result_artifacts(profile=profile, remote_work_dir=remote_work_dir)
+            transfer = await self._transfer_manager.download_outputs(
+                profile=profile,
+                remote_path=remote_work_dir,
+                local_path=local_work_dir,
+                include_patterns=self._build_result_sync_include_patterns(),
+                exclude_patterns=["*"],
+            )
+            self._verify_local_result_artifacts(local_work_dir=local_work_dir, artifacts=artifacts)
+            if not transfer.get("ok"):
+                logger.warning(
+                    "Selective result copy-back reported a transfer error but required artifacts are present locally",
+                    run_uuid=run_uuid,
+                    transfer_message=transfer.get("message"),
+                )
+            await self._update_job_transfer_state(run_uuid, "outputs_downloaded")
+        except Exception as exc:
+            await self._update_job_transfer_state(run_uuid, "transfer_failed")
+            logger.error("Selective result copy-back failed", run_uuid=run_uuid, error=str(exc))
+        finally:
+            self._result_sync_tasks.pop(run_uuid, None)
+
+    async def _discover_remote_result_artifacts(self, *, profile: SSHProfileData, remote_work_dir: str) -> dict[str, list[str]]:
+        conn = await self._ssh_manager.connect(profile)
+        try:
+            existing_dirs: list[str] = []
+            for dirname in self._RESULT_SYNC_DIRS:
+                if await conn.path_exists(str(PurePosixPath(remote_work_dir) / dirname)):
+                    existing_dirs.append(dirname)
+
+            file_predicate = " -o ".join(f"-name {shlex.quote(pattern)}" for pattern in self._RESULT_SYNC_FILE_PATTERNS)
+            file_cmd = (
+                f"find {shlex.quote(remote_work_dir)} -maxdepth 1 -type f \\( {file_predicate} \\) "
+                "-exec basename {} \\; | sort"
+            )
+            result = await conn.run(f"{file_cmd} 2>/dev/null || true")
+            existing_files = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+            return {"directories": existing_dirs, "files": existing_files}
+        finally:
+            await conn.close()
+
+    @staticmethod
+    def _verify_local_result_artifacts(*, local_work_dir: str, artifacts: dict[str, list[str]]) -> None:
+        local_root = Path(local_work_dir)
+        missing: list[str] = []
+        for dirname in artifacts.get("directories", []):
+            if not (local_root / dirname).exists():
+                missing.append(dirname)
+        for filename in artifacts.get("files", []):
+            if not (local_root / filename).exists():
+                missing.append(filename)
+        if missing:
+            raise RuntimeError(f"Local result copy-back is missing expected artifacts: {', '.join(sorted(missing))}")
 
     async def cancel(self, run_uuid: str) -> bool:
         """Cancel a SLURM job via scancel."""
@@ -604,10 +745,10 @@ class SlurmBackend:
         cache_resolution: dict,
     ) -> str:
         """Generate and write Nextflow config in the remote workflow directory."""
-        cpu_account = (params.slurm_account or profile.default_slurm_account or "default").strip()
-        cpu_partition = (params.slurm_partition or profile.default_slurm_partition or "standard").strip()
-        gpu_account = (profile.default_slurm_gpu_account or cpu_account).strip()
-        gpu_partition = (profile.default_slurm_gpu_partition or cpu_partition).strip()
+        cpu_account = (profile.default_slurm_account or params.slurm_account or "default").strip() or "default"
+        cpu_partition = (profile.default_slurm_partition or params.slurm_partition or "standard").strip() or "standard"
+        gpu_account = (profile.default_slurm_gpu_account or params.slurm_account or cpu_account).strip() or cpu_account
+        gpu_partition = (profile.default_slurm_gpu_partition or params.slurm_partition or cpu_partition).strip() or cpu_partition
 
         # Prefer staged remote reference cache paths so config does not point at local host paths.
         ref_overrides: dict[str, dict[str, str]] = {}

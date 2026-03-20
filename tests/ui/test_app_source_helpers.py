@@ -64,6 +64,30 @@ class TestCreateProjectServerSide:
         assert project_id == "uuid-fallback"
 
 
+class TestJobStatusUpdatedAt:
+    def test_prefers_live_poll_time_when_live_status_succeeds(self):
+        fn = _load_function("_job_status_updated_at")
+        now = dt.datetime(2026, 3, 19, 23, 0, 0, tzinfo=dt.timezone.utc)
+
+        value = fn("2026-03-19T22:50:00Z", True, now)
+
+        assert value == "2026-03-19T23:00:00Z"
+
+    def test_falls_back_to_persisted_timestamp_when_live_status_fails(self):
+        fn = _load_function("_job_status_updated_at")
+
+        value = fn("2026-03-19T22:50:00Z", False)
+
+        assert value == "2026-03-19T22:50:00Z"
+
+    def test_returns_none_when_no_timestamp_exists(self):
+        fn = _load_function("_job_status_updated_at")
+
+        value = fn(None, False)
+
+        assert value is None
+
+
 class TestResolveDfById:
     def test_returns_latest_matching_dataframe(self):
         fn = _load_function("_resolve_df_by_id")

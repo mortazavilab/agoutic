@@ -971,8 +971,7 @@ class NextflowExecutor:
                     content = f.read()
                     lines = content.split('\n')
                     
-                    # Track task hashes we've seen
-                    seen_hashes = set()
+                    task_events_by_hash = {}
                     
                     for line in lines:
                         # Look for executor count to get total submitted
@@ -1007,16 +1006,16 @@ class NextflowExecutor:
                             if not task_name:
                                 continue
                             
-                            # Check if completed (has ✔)
-                            is_completed = '✔' in line
-                            
-                            # Only add to running if not completed AND not already in completed_tasks
-                            if not is_completed and task_name not in completed_tasks:
-                                # Use hash to deduplicate
-                                if hash_part not in seen_hashes:
-                                    seen_hashes.add(hash_part)
-                                    if task_name not in running_tasks:
-                                        running_tasks.append(task_name)
+                            is_terminal_stdout_event = '✔' in line or 'FAILED' in line.upper()
+                            task_events_by_hash[hash_part] = (task_name, is_terminal_stdout_event)
+
+                    for task_name, is_terminal_stdout_event in task_events_by_hash.values():
+                        if is_terminal_stdout_event:
+                            continue
+                        if task_name in completed_tasks or task_name in failed_tasks:
+                            continue
+                        if task_name not in running_tasks:
+                            running_tasks.append(task_name)
                             
             except Exception as e:
                 pass

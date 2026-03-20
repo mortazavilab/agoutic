@@ -629,6 +629,7 @@ def _validate_analyzer_params(
         conversation_history, history_blocks=history_blocks
     )
     real_wd = ctx.get("work_dir", "")
+    ctx_run_uuid = ctx.get("run_uuid", "")
 
     # If multiple workflows, pick the matching one by filename/sample
     if not real_wd and ctx.get("workflows"):
@@ -647,6 +648,29 @@ def _validate_analyzer_params(
 
     llm_wd = params.get("work_dir", "")
     if real_wd:
+        _workflow_listing_request = bool(
+            tool == "list_job_files"
+            and re.search(
+                r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',
+                user_message,
+                re.IGNORECASE,
+            )
+        )
+        if (
+            ctx_run_uuid
+            and os.path.isabs(real_wd)
+            and not os.path.exists(real_wd)
+            and not _workflow_listing_request
+        ):
+            logger.warning(
+                "Context work_dir is missing locally; falling back to run_uuid for Analyzer resolution",
+                tool=tool,
+                work_dir=real_wd,
+                run_uuid=ctx_run_uuid,
+            )
+            params.pop("work_dir", None)
+            params["run_uuid"] = ctx_run_uuid
+            return params
         # "list workflows" needs the *project* dir, not a workflow dir.
         if tool == "list_job_files" and re.search(
             r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',

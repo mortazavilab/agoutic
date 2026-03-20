@@ -1,3 +1,48 @@
+## [3.4.3] - 2026-03-19
+
+### Fixes
+
+- **Broker-backed remote result copy-back** — completed remote workflows that
+  copy results back to a local workflow now use the same local authentication
+  broker path as brokered uploads when an active unlocked session exists,
+  including selective rsync include rules for result sync.
+
+- **Selective local result sync for remote workflows** — on remote completion,
+  Launchpad now copies back the local-analysis result set from the matching
+  remote workflow directory: `annot`, `bams`, `bedMethyl`, `kallisto`,
+  `openChromatin`, `stats`, plus top-level `.config`, `.html`, `.txt`,
+  `.csv`, and `.tsv` files when present.
+
+- **Fail-closed copy-back before local completion** — SLURM jobs with
+  `result_destination=local|both` no longer become locally complete just
+  because the remote scheduler says `COMPLETED`; Launchpad now keeps them in a
+  result-download phase until the selected outputs are present in the local
+  workflow folder, and marks the transfer failed if required copied artifacts
+  are still missing.
+
+- **Auto-analysis now waits for copied results** — Cortex no longer auto-
+  launches analysis for local/both remote runs until Launchpad reports
+  `transfer_state=outputs_downloaded`, preventing analysis from starting before
+  copied workflow outputs exist locally.
+
+- **Terminal SLURM status stability in the UI** — once a SLURM job is truly in
+  a terminal state, Launchpad now returns the terminal DB state directly rather
+  than reopening the job with a stale backend poll; jobs still pending local
+  copy-back continue polling until that transfer finishes.
+
+- **Accurate live-update timing in job cards** — the Streamlit job card now
+  reports “Updated Xs ago” based on the timestamp of the successful live status
+  fetch instead of stale persisted block metadata.
+
+### Tests
+
+- Added/updated tests for:
+  - broker-backed result downloads with selective rsync include patterns
+  - required result-sync include patterns for remote workflow copy-back
+  - status endpoint behavior for terminal SLURM rows vs. pending local copy-back
+  - delayed auto-analysis until `outputs_downloaded` is reached
+  - live-update timestamp selection for successful UI status polls
+
 ## [3.4.2] - 2026-03-18
 
 ### Fixes
