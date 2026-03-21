@@ -8,6 +8,8 @@ Usage:
 
 import streamlit as st
 from typing import Optional
+from components.cards import section_header
+from components.forms import grouped_section, review_panel
 
 
 def render_remote_paths_form(defaults: Optional[dict] = None) -> Optional[dict]:
@@ -23,8 +25,9 @@ def render_remote_paths_form(defaults: Optional[dict] = None) -> Optional[dict]:
     if defaults is None:
         defaults = {}
 
-    st.subheader("📂 Remote Path Configuration")
+    section_header("Remote Path Configuration", "Configure execution/storage paths on remote host", icon="📂")
 
+    grouped_section("Storage & Execution Paths")
     remote_input_path = st.text_input(
         "Remote Input Path",
         value=defaults.get("remote_input_path", ""),
@@ -48,6 +51,16 @@ def render_remote_paths_form(defaults: Optional[dict] = None) -> Optional[dict]:
         value=defaults.get("remote_log_path", ""),
         help="Directory on the remote host for log files",
         key="remote_log_path",
+    )
+
+    review_panel(
+        {
+            "Remote Input Path": remote_input_path,
+            "Remote Work Path": remote_work_path,
+            "Remote Output Path": remote_output_path,
+            "Remote Log Path": remote_log_path,
+        },
+        title="Path Summary",
     )
 
     if st.button("✅ Apply Remote Paths", key="remote_paths_submit"):

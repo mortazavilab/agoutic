@@ -17,6 +17,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import require_auth, make_authenticated_request
+from components.cards import section_header, empty_state, status_chip
 
 # Launchpad REST URL for SSH profile management
 LAUNCHPAD_URL = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
@@ -33,8 +34,7 @@ st.set_page_config(page_title="Remote Profiles", page_icon="🔌", layout="wide"
 user = require_auth(API_URL)
 user_id = user.get("id") or user.get("user_id", "")
 
-st.title("🔌 Remote Connection Profiles")
-st.caption("Manage SSH connection profiles for remote HPC/SLURM execution")
+section_header("Remote Connection Profiles", "Manage SSH profiles for remote HPC/SLURM execution", icon="🔌")
 st.caption("Remote base path may use placeholders like {ssh_username}, {project_slug}, {sample_name}, and {workflow_slug}.")
 
 
@@ -132,7 +132,7 @@ def _run_request_with_elapsed(method: str, url: str, *, status_label: str, timeo
 
 with st.expander("➕ Create Profile", expanded=False):
     with st.form("create_profile_form"):
-        st.subheader("New SSH Profile")
+        section_header("New SSH Profile", "Connection, authentication, and default execution settings", icon="➕")
 
         nickname = st.text_input("Nickname *", help="Friendly name for this connection")
         cp_col1, cp_col2 = st.columns(2)
@@ -228,7 +228,7 @@ st.divider()
 profiles = _load_profiles()
 
 if not profiles:
-    st.info("No SSH profiles yet. Create one above to get started.")
+    empty_state("No SSH profiles yet", "Create one above to get started.", icon="🔌")
     st.stop()
 
 # Display profiles as a table

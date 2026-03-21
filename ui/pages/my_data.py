@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import require_auth, make_authenticated_request
+from components.cards import section_header, stat_tile, empty_state, status_chip, metadata_row
 
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 
@@ -23,8 +24,7 @@ st.set_page_config(page_title="My Data", page_icon="🗄️", layout="wide")
 # Require authentication
 user = require_auth(API_URL)
 
-st.title("🗄️ My Data")
-st.caption("All files in your central data folder — shared across projects via symlinks.")
+section_header("My Data", "All files in your central data folder shared across projects via symlinks.", icon="🗄️")
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +58,11 @@ data = _fetch_user_files(include_untracked=include_untracked)
 files = data.get("files", [])
 
 if not files:
-    st.info("No files in your central data folder yet. Files will appear here when you download or upload data in any project.")
+    empty_state(
+        "No files in your central data folder yet",
+        "Files will appear here when you download or upload data in any project.",
+        icon="🗄️",
+    )
     st.stop()
 
 
@@ -73,7 +77,7 @@ with col_source:
     source_options = sorted({f["source"] for f in files})
     source_filter = st.multiselect("Source", source_options, default=source_options)
 with col_count:
-    st.metric("Total files", len(files))
+    stat_tile("Total files", len(files), icon="📦")
 
 # Apply filters
 filtered = files
@@ -95,7 +99,7 @@ if source_filter:
 # ---------------------------------------------------------------------------
 
 if not filtered:
-    st.warning("No files match your filters.")
+    empty_state("No files match your filters", "Try broadening search text or source filters.", icon="🔍")
     st.stop()
 
 table_data = []
@@ -133,7 +137,7 @@ st.dataframe(
 # ---------------------------------------------------------------------------
 
 st.divider()
-st.subheader("File Details & Actions")
+section_header("File Details & Actions", "Edit metadata, links, and file actions", icon="🧾")
 
 file_options = {}
 for f in filtered:
@@ -163,6 +167,7 @@ if selected_name:
         st.code(str(f.get("disk_path") or ""), language="text")
         st.caption(f"Folder: {str(Path(f.get('disk_path') or '').parent)}")
         if not is_tracked:
+            status_chip("warning", label="Untracked", icon="⚠️")
             st.info("This file exists on disk but is not in the AGOUTIC database catalog. Metadata/link/delete actions are disabled for this entry.")
         if f.get("source_url"):
             st.caption(f"URL: {f['source_url']}")

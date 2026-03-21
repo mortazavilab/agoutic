@@ -1,9 +1,9 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.2
+**Version:** 3.4.4
 **Status:** Active Prototype 
 
-## Latest Updates (2026-03-18)
+## Latest Updates (2026-03-21)
 
 - **Remote SLURM config-path correctness** — generated `nextflow.config` for
   remote submissions now prioritizes staged remote reference cache paths in

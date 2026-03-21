@@ -15,6 +15,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import require_auth, make_authenticated_request
+from components.cards import section_header, stat_tile, empty_state, status_chip
 
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 
@@ -23,7 +24,7 @@ st.set_page_config(page_title="Projects", page_icon="📁", layout="wide")
 # Require authentication
 user = require_auth(API_URL)
 
-st.title("📁 Projects Dashboard")
+section_header("Projects Dashboard", "Project state, activity, jobs, and storage at a glance", icon="📁")
 
 # ── Disk Usage Summary ───────────────────────────────────────────────
 try:
@@ -67,7 +68,7 @@ except Exception as e:
     st.stop()
 
 if not all_projects:
-    st.info("No projects yet. Create one from the main chat page.")
+    empty_state("No projects yet", "Create one from the main chat page to get started.", icon="📁")
     st.stop()
 
 # Filter controls
@@ -83,6 +84,30 @@ if search:
     filtered = [p for p in filtered if _s in (p.get("name") or "").lower()]
 if not show_archived:
     filtered = [p for p in filtered if not p.get("is_archived")]
+
+_visible_count = len(filtered)
+_active_count = sum(1 for p in filtered if not p.get("is_archived"))
+_archived_count = sum(1 for p in filtered if p.get("is_archived"))
+_job_total = sum(int(p.get("job_count") or 0) for p in filtered)
+
+section_header("Overview", "Filtered project footprint and status", icon="📌")
+ov1, ov2, ov3, ov4 = st.columns(4)
+with ov1:
+    stat_tile("Visible Projects", _visible_count, icon="📁")
+with ov2:
+    stat_tile("Active", _active_count, icon="✅")
+with ov3:
+    stat_tile("Archived", _archived_count, icon="🗄️")
+with ov4:
+    stat_tile("Jobs in View", _job_total, icon="🧪")
+
+sc1, sc2 = st.columns(2)
+with sc1:
+    status_chip("info", label=f"Search: {'On' if bool(search) else 'Off'}", icon="🔍")
+with sc2:
+    status_chip("warning" if show_archived else "success", label=f"Archived Visible: {'Yes' if show_archived else 'No'}", icon="🧭")
+
+st.divider()
 
 # Build enriched table — fetch per-project stats for disk, messages, files
 rows = []
@@ -221,7 +246,7 @@ if rows:
 st.divider()
 
 # ── Project Detail ───────────────────────────────────────────────────
-st.subheader("Project Details")
+section_header("Project Details", "Inspect project stats, jobs, files, and conversations", icon="🔎")
 
 # Choose which project to inspect
 proj_options = {p.get("name", p.get("id", "?")): p.get("id") for p in filtered}
@@ -314,7 +339,8 @@ with tab_jobs:
                 if job_uuids:
                     sel_uuid = st.selectbox("Analyze a job", job_uuids, key="job_sel")
                     if st.button("📊 View Results"):
-                        # Open results page with pre-filled UUID via query params
+                        # Persist selected UUID so Results pre-fills consistently.
+                        st.session_state["selected_job_run_uuid"] = sel_uuid
                         st.switch_page("pages/results.py")
 
                 # Cancel button for RUNNING jobs

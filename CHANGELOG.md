@@ -1,3 +1,33 @@
+## [3.4.4] - 2026-03-21
+
+### Improvements
+
+- **Streamlit UI redesign foundation** — introduced shared UI primitives and
+  theme infrastructure for consistent section headers, status chips, metadata
+  rows, empty states, review panels, and progress visuals across core surfaces.
+
+- **Chat block presentation and hierarchy refresh** — updated primary chat
+  block rendering for `AGENT_PLAN`, `APPROVAL_GATE`, `STAGING_TASK`,
+  `EXECUTION_JOB`, `AGENT_PLOT`, `DOWNLOAD_TASK`, and `WORKFLOW_PLAN` to
+  improve scannability while preserving payload contracts and existing behavior.
+
+- **Approval gate review clarity** — tightened approval grouping and review
+  hierarchy with clearer sectioning and summary presentation in pending forms.
+
+- **Results and Projects UX polish** — added a compact action tray and
+  run-overview metadata/status surface on Results, plus an at-a-glance
+  overview/status strip on Projects.
+
+- **Page-level consistency pass** — aligned key pages (`Projects`, `Results`,
+  `My Data`, `Remote Profiles`, `Admin`) and related form components with the
+  shared visual language and empty-state handling.
+
+### Fixes
+
+- **Projects → Results run selection handoff** — selecting a job in Projects
+  now persists the chosen `run_uuid` before navigating to Results so the
+  target run opens prefilled consistently.
+
 ## [3.4.3] - 2026-03-19
 
 ### Fixes

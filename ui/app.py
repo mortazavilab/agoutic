@@ -12,10 +12,15 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from auth import require_auth, logout_button, make_authenticated_request, get_session_cookie
+from theme import inject_global_css, get_plotly_template
+from components.cards import section_header, status_chip, metadata_row, stat_tile, info_callout
+from components.progress import stepper, segmented_progress, timeline, progress_stats
+from components.forms import review_panel, grouped_section
 
 # --- VERSION (single source of truth: VERSION file at repo root) ---
 _VERSION_FILE = _Path(__file__).resolve().parent.parent / "VERSION"
-AGOUTIC_VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
+_version_raw = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
+AGOUTIC_VERSION = _version_raw[1:] if _version_raw.lower().startswith("v") else _version_raw
 
 # --- CONFIG ---
 # Use environment variable or default to localhost
@@ -25,6 +30,8 @@ INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 LIVE_JOB_STATUS_TIMEOUT_SECONDS = float(os.getenv("LIVE_JOB_STATUS_TIMEOUT_SECONDS", "60"))
 
 st.set_page_config(page_title=f"AGOUTIC v{AGOUTIC_VERSION}", layout="wide")
+inject_global_css()
+PLOTLY_TEMPLATE = get_plotly_template()
 
 TASK_SECTION_ORDER = [
     ("pending", "📝 Pending"),
@@ -231,6 +238,52 @@ def _render_profile_path_template(template: str | None, context: dict[str, str])
         rendered = rendered.replace(f"<{key}>", value)
     return rendered
 
+
+def _is_help_intent(message: str) -> bool:
+    q = (message or "").strip().lower()
+    if not q:
+        return False
+    deterministic = {
+        "help",
+        "what can you do",
+        "show commands",
+        "how do i run a workflow",
+        "how do i use remote slurm",
+    }
+    return q in deterministic
+
+
+def _render_local_help_response() -> None:
+    section_header("Help", "Quick operational guide for AGOUTIC", icon="❓")
+    with st.container(border=True):
+        metadata_row({"Focus": "Workflow + Remote HPC", "Mode": "Deterministic Help"})
+        st.divider()
+        with st.expander("Getting Started", expanded=True):
+            st.markdown("1. Pick or create a project in the sidebar.")
+            st.markdown("2. Ask for a workflow run using natural language.")
+            st.markdown("3. Review approval parameters and approve to execute.")
+        with st.expander("Common Actions", expanded=False):
+            st.markdown("- run dna workflow for sample X from /path")
+            st.markdown("- stage sample to remote slurm profile hpc3")
+            st.markdown("- show job status and next steps")
+            st.markdown("- parse results for run UUID")
+        with st.expander("Execution Modes", expanded=False):
+            st.markdown("- Local: run on AGOUTIC host")
+            st.markdown("- SLURM: submit via remote profile and queue")
+        with st.expander("Status Guide", expanded=False):
+            st.markdown("- pending: waiting for action")
+            st.markdown("- running: task active")
+            st.markdown("- failed: inspect logs + retry")
+            st.markdown("- complete: outputs available in results")
+        with st.expander("Troubleshooting", expanded=False):
+            st.markdown("- Verify input path and sample name")
+            st.markdown("- Confirm reference genome and execution mode")
+            st.markdown("- For remote mode, verify SSH profile and SLURM fields")
+        with st.expander("Power User Tips", expanded=False):
+            st.markdown("- Use precise prompts including sample, mode, and destination")
+            st.markdown("- Review approval edits carefully before submission")
+            st.markdown("- Use Results page tabs for fast parse/preview")
+
 # Check if we're creating a new project (flag set by New Project button)
 if st.session_state.get("_create_new_project", False):
     # Create project via server-side endpoint (server generates UUID)
@@ -300,6 +353,21 @@ with st.sidebar:
     st.caption(f"👤 {user.get('display_name', user.get('email'))}")
     if user.get('role') == 'admin':
         st.caption("🔑 Admin")
+
+    with st.expander("❓ Help", expanded=False):
+        st.caption("Quick command suggestions")
+        if st.button("help", key="help_prompt_help", width="stretch"):
+            st.session_state["_help_prompt"] = "help"
+            st.rerun()
+        if st.button("what can you do", key="help_prompt_capabilities", width="stretch"):
+            st.session_state["_help_prompt"] = "what can you do"
+            st.rerun()
+        if st.button("how do I run a workflow", key="help_prompt_workflow", width="stretch"):
+            st.session_state["_help_prompt"] = "how do i run a workflow"
+            st.rerun()
+        if st.button("how do I use remote slurm", key="help_prompt_slurm", width="stretch"):
+            st.session_state["_help_prompt"] = "how do i use remote slurm"
+            st.rerun()
     
     logout_button(API_URL)
     
@@ -1152,7 +1220,7 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
                     if hasattr(trace, "fillcolor"):
                         trace.fillcolor = literal_color
 
-        fig.update_layout(template="plotly_white")
+        fig.update_layout(template=PLOTLY_TEMPLATE)
         return fig
 
     except Exception:
@@ -1214,7 +1282,7 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str):
                         title_parts.append(spec["title"])
             if combined.data:
                 combined.update_layout(
-                    template="plotly_white",
+                    template=PLOTLY_TEMPLATE,
                     title=" / ".join(title_parts) if title_parts else f"DF{df_id} — {chart_type}",
                 )
                 _safe_key = _re.sub(r"[^a-zA-Z0-9_]", "_", f"plot_{block_id}_{chart_idx}")
@@ -1249,15 +1317,35 @@ def render_block(block, expected_project_id: str = ""):
             break
 
     def show_metadata():
-        st.caption(f"📌 **Proj:** {b_project_display} | 🧠 **Model:** `{b_model}` | 🛠️ **Skill:** `{b_skill}`")
+        metadata_row({"Project": b_project_display, "Model": b_model, "Skill": b_skill})
+
+    def _block_timestamp() -> str:
+        raw_ts = block.get("created_at") or ""
+        if not raw_ts:
+            return ""
+        try:
+            dt = datetime.datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+            return dt.strftime("%b %d, %H:%M")
+        except Exception:
+            return ""
 
     if btype == "USER_MESSAGE":
         with st.chat_message("user"):
-            st.write(content.get("text", ""))
+            with st.container(border=True):
+                _ts = _block_timestamp()
+                _c1, _c2 = st.columns([3, 2])
+                with _c1:
+                    status_chip("pending", label="User", icon="👤")
+                with _c2:
+                    if _ts:
+                        st.caption(_ts)
+                st.write(content.get("text", ""))
 
     elif btype == "AGENT_PLAN":
         with st.chat_message("assistant", avatar="🤖"):
+            section_header("Agent Response", "Summary first, details on demand", icon="🤖")
             show_metadata()
+            st.divider()
             if "markdown" in content:
                 md = content["markdown"]
                 # Split out raw query results into a collapsible expander
@@ -1336,15 +1424,50 @@ def render_block(block, expected_project_id: str = ""):
             attempt_number = content.get("attempt_number", 1)
             rejection_history = content.get("rejection_history", [])
             
+            section_header("Approval Review", "Review and edit parameters before submission", icon="🚦")
+            _chip = "pending"
+            if status == "APPROVED":
+                _chip = "complete"
+            elif status == "REJECTED":
+                _chip = "failed"
+            status_chip(_chip, label=status.title(), icon="🧾")
+            metadata_row({"Attempt": f"{attempt_number}/3", "Mode": "Manual" if manual_mode else "AI Extracted", "Block": block_id[:8]})
+            st.divider()
+
             # Title based on mode
             if manual_mode:
-                st.write("### ⚠️ Manual Configuration Required")
-                st.warning(f"The AI couldn't understand your requirements after 3 attempts. Please verify these parameters manually.")
+                info_callout(
+                    "The AI could not confidently extract parameters after multiple attempts. Please verify manually.",
+                    kind="warning",
+                    icon="⚠️",
+                )
             else:
-                st.write(f"### ✅ Approval Required (Attempt {attempt_number}/3)")
+                st.caption(f"Approval required (attempt {attempt_number}/3)")
             
             st.write(content.get("label", "Approve this plan?"))
             st.caption(f"Block ID: `{block_id}`")
+
+            _summary = {}
+            _src_params = approved_params if isinstance(approved_params, dict) else extracted_params
+            if isinstance(_src_params, dict):
+                for _k in [
+                    "sample_name",
+                    "mode",
+                    "input_type",
+                    "input_directory",
+                    "execution_mode",
+                    "entry_point",
+                    "result_destination",
+                    "ssh_profile_nickname",
+                    "remote_base_path",
+                ]:
+                    _v = _src_params.get(_k)
+                    if _v not in (None, "", [], {}):
+                        _summary[_k.replace("_", " ").title()] = _v
+                _summary["Gate Action"] = extracted_params.get("gate_action") or content.get("gate_action", "job")
+            if _summary:
+                with st.expander("Plan Summary", expanded=True):
+                    review_panel(_summary, title="Ready-to-Run Parameters")
             
             # Show rejection history if exists
             if rejection_history:
@@ -1442,6 +1565,7 @@ def render_block(block, expected_project_id: str = ""):
                     }
 
                     with st.form(key=f"remote_stage_form_{block_id}"):
+                        grouped_section("Sample & Input")
                         sample_name = st.text_input(
                             "Sample Name",
                             value=extracted_params.get("sample_name", ""),
@@ -1481,6 +1605,7 @@ def render_block(block, expected_project_id: str = ""):
                         input_type = extracted_params.get("input_type", "pod5")
                         st.caption(f"Input type: `{input_type}`")
 
+                        grouped_section("Remote Target")
                         ssh_profile_id = extracted_params.get("ssh_profile_id") or ""
                         ssh_profile_nickname = extracted_params.get("ssh_profile_nickname", "") or ""
                         remote_base_path = extracted_params.get("remote_base_path", "") or ""
@@ -1615,6 +1740,7 @@ def render_block(block, expected_project_id: str = ""):
                     st.write("**📋 Extracted Parameters** (edit if needed):")
                     
                     with st.form(key=f"params_form_{block_id}"):
+                        grouped_section("Core Run Settings")
                         # Sample name
                         sample_name = st.text_input(
                             "Sample Name",
@@ -1697,6 +1823,7 @@ def render_block(block, expected_project_id: str = ""):
                             help="Maximum simultaneous dorado/GPU tasks within a pipeline run (default: 1)",
                         )
 
+                        grouped_section("Execution")
                         execution_mode_options = ["local", "slurm"]
                         current_execution_mode = extracted_params.get("execution_mode", "local")
                         execution_mode_index = execution_mode_options.index(current_execution_mode) if current_execution_mode in execution_mode_options else 0
@@ -1724,6 +1851,7 @@ def render_block(block, expected_project_id: str = ""):
                         result_destination_default = extracted_params.get("result_destination") or "local"
 
                         if execution_mode == "slurm":
+                            grouped_section("Remote Profile & SLURM")
                             st.caption("Remote execution uses one of your saved SSH profiles. You can refer to it by nickname, for example hpc3.")
                             _current_user_id = user.get("id") or user.get("user_id", "")
                             _saved_profiles = _load_user_ssh_profiles(_current_user_id)
@@ -2008,7 +2136,34 @@ def render_block(block, expected_project_id: str = ""):
 
     
     elif btype == "WORKFLOW_PLAN":
-        return
+        with st.chat_message("assistant", avatar="🗺️"):
+            section_header("Workflow Plan", "Structured execution outline", icon="🗺️")
+            show_metadata()
+            st.divider()
+
+            summary = content.get("summary") or content.get("title") or content.get("label")
+            if summary:
+                st.markdown(f"**{summary}**")
+
+            steps = content.get("steps")
+            if isinstance(steps, list) and steps:
+                for idx, step in enumerate(steps, start=1):
+                    if isinstance(step, dict):
+                        title = step.get("title") or step.get("name") or f"Step {idx}"
+                        detail = step.get("description") or step.get("details") or ""
+                        st.markdown(f"{idx}. **{title}**")
+                        if detail:
+                            st.caption(detail)
+                    else:
+                        st.markdown(f"{idx}. {step}")
+
+            markdown = content.get("markdown")
+            if markdown:
+                st.markdown(markdown)
+
+            if not summary and not markdown and not (isinstance(steps, list) and steps):
+                with st.expander("Plan Payload", expanded=False):
+                    st.json(content)
 
     elif btype == "STAGING_TASK":
         with st.chat_message("assistant", avatar="📤"):
@@ -2019,9 +2174,44 @@ def render_block(block, expected_project_id: str = ""):
             remote_profile = content.get("ssh_profile_nickname") or content.get("ssh_profile_id") or "remote profile"
             remote_data_path = content.get("remote_data_path", "")
             stage_parts = content.get("stage_parts") or {}
+            refs_part = stage_parts.get("references") or {}
+            data_part = stage_parts.get("data") or {}
+            refs_state = (refs_part.get("status") or "").upper()
+            data_state = (data_part.get("status") or "").upper()
 
-            st.write(f"### 📤 Remote Staging: {sample_name} ({mode})")
-            st.caption(f"Target profile: `{remote_profile}`")
+            _step_current = 0
+            _step_completed = []
+            _step_failed = []
+            if refs_state == "COMPLETED":
+                _step_completed.append(0)
+            if data_state == "COMPLETED":
+                _step_completed.append(1)
+
+            if refs_state == "FAILED":
+                _step_current = 0
+                _step_failed.append(0)
+            elif data_state == "FAILED":
+                _step_current = 1
+                _step_failed.append(1)
+            elif data_state == "RUNNING":
+                _step_current = 1
+            elif refs_state == "RUNNING":
+                _step_current = 0
+            elif block.get("status") == "DONE":
+                _step_current = 1
+                _step_completed = [0, 1]
+            elif block.get("status") == "FAILED":
+                _step_current = 1 if 0 in _step_completed else 0
+                if 0 in _step_completed and 1 not in _step_failed:
+                    _step_failed.append(1)
+                elif 0 not in _step_failed:
+                    _step_failed.append(0)
+            elif progress >= 50:
+                _step_current = 1
+
+            section_header(f"Remote Staging · {sample_name}", "Reference and data staging progress", icon="📤")
+            metadata_row({"Mode": mode, "Target": remote_profile, "Progress": f"{max(min(progress, 100), 0)}%"})
+            stepper(["References", "Sample Data"], current=_step_current, completed=_step_completed, failed=_step_failed)
 
             def _render_stage_part(label: str, part: dict):
                 state = (part.get("status") or "PENDING").upper()
@@ -2047,7 +2237,8 @@ def render_block(block, expected_project_id: str = ""):
                             st.caption(f"• {detail_message}")
 
             if block.get("status") == "RUNNING":
-                st.info(f"📤 {message}")
+                status_chip("running", label="Staging Running", icon="🔄")
+                st.caption(message)
                 st.progress(max(min(progress, 100), 0) / 100)
                 _render_stage_part("References", stage_parts.get("references") or {
                     "status": "RUNNING",
@@ -2060,7 +2251,8 @@ def render_block(block, expected_project_id: str = ""):
                     "message": "Waiting for reference staging to finish.",
                 })
             elif block.get("status") == "DONE":
-                st.success(f"✅ {message}")
+                status_chip("complete", label="Staging Complete", icon="✅")
+                st.caption(message)
                 _render_stage_part("References", stage_parts.get("references") or {
                     "status": "COMPLETED",
                     "progress_percent": 100,
@@ -2078,7 +2270,8 @@ def render_block(block, expected_project_id: str = ""):
                     with st.expander("Reference cache status", expanded=False):
                         st.json(ref_statuses)
             else:
-                st.error(f"❌ {content.get('error') or message}")
+                status_chip("failed", label="Staging Failed", icon="❌")
+                st.error(content.get("error") or message)
                 _render_stage_part("References", stage_parts.get("references") or {
                     "status": "FAILED",
                     "progress_percent": 0,
@@ -2106,19 +2299,20 @@ def render_block(block, expected_project_id: str = ""):
             has_identity = bool(run_uuid) or bool(content.get("sample_name"))
             block_status_str = block.get("status", "")
             
-            if has_identity:
-                st.write(f"### 🧬 Nextflow Job: {sample_name} ({mode})")
-            else:
-                st.write("### 🧬 Nextflow Job Submission")
+            section_header(
+                f"Nextflow Job · {sample_name if has_identity else 'Submission'}",
+                "Live execution monitoring and controls",
+                icon="🧬",
+            )
 
             # Show human-readable folder name (e.g. "workflow2") when available
             if run_uuid:
                 if work_directory:
                     import pathlib as _pathlib
                     _folder_name = _pathlib.PurePosixPath(work_directory).name
-                    st.caption(f"📁 `{_folder_name}` &nbsp;|&nbsp; Run UUID: `{run_uuid}`")
+                    metadata_row({"Mode": mode, "Workflow": _folder_name, "Run UUID": run_uuid})
                 else:
-                    st.caption(f"Run UUID: `{run_uuid}`")
+                    metadata_row({"Mode": mode, "Run UUID": run_uuid})
             elif block_status_str == "FAILED":
                 st.caption("Run UUID not assigned (submission failed before launch)")
             
@@ -2144,6 +2338,110 @@ def render_block(block, expected_project_id: str = ""):
                 progress = job_status.get("progress_percent", 0)
                 message = job_status.get("message", content.get("message", ""))
                 tasks = job_status.get("tasks", {})
+                run_stage = (job_status.get("run_stage") or "").strip().lower()
+                transfer_state = (job_status.get("transfer_state") or "").strip().lower()
+                result_destination = (job_status.get("result_destination") or "").strip().lower()
+                try:
+                    progress_pct = max(0, min(100, int(progress or 0)))
+                except (TypeError, ValueError):
+                    progress_pct = 0
+                _chip = "pending"
+                if status_str == "RUNNING":
+                    _chip = "running"
+                elif status_str == "COMPLETED":
+                    _chip = "complete"
+                elif status_str in ("FAILED", "CANCELLED"):
+                    _chip = "failed"
+                status_chip(_chip, label=status_str.title(), icon="⚙️")
+                is_running = status_str == "RUNNING"
+                is_failed = status_str in ("FAILED", "CANCELLED")
+                is_done = status_str in ("COMPLETED", "DELETED")
+
+                queue_state = "pending"
+                execute_state = "pending"
+                finalize_state = "pending"
+
+                if run_stage:
+                    pre_queue_stages = {
+                        "awaiting_details",
+                        "awaiting_approval",
+                        "validating_connection",
+                        "preparing_remote_dirs",
+                        "transferring_inputs",
+                        "submitting_job",
+                    }
+                    queue_stages = {"queued", "running", "collecting_outputs", "syncing_results", "completed", "failed", "cancelled"}
+                    run_stages = {"running", "collecting_outputs", "syncing_results", "completed", "failed", "cancelled"}
+
+                    if run_stage in queue_stages:
+                        queue_state = "complete"
+                    elif run_stage in pre_queue_stages:
+                        queue_state = "running"
+
+                    if run_stage in {"running", "collecting_outputs"}:
+                        execute_state = "running"
+                    elif run_stage in {"syncing_results", "completed"}:
+                        execute_state = "complete"
+                    elif run_stage in {"failed", "cancelled"}:
+                        execute_state = "failed"
+                    elif run_stage in run_stages:
+                        execute_state = "running"
+
+                    if run_stage in {"syncing_results"} or transfer_state in {"downloading_outputs"}:
+                        finalize_state = "running"
+                    elif run_stage in {"completed"} or transfer_state in {"outputs_downloaded"}:
+                        finalize_state = "complete"
+                    elif run_stage in {"failed", "cancelled"} or transfer_state in {"transfer_failed"}:
+                        finalize_state = "failed"
+
+                elif is_done:
+                    queue_state = "complete"
+                    execute_state = "complete"
+                    finalize_state = "complete"
+                elif is_failed:
+                    queue_state = "complete" if progress_pct >= 10 else "failed"
+                    execute_state = "failed"
+                    finalize_state = "failed"
+                elif is_running:
+                    queue_state = "complete" if progress_pct >= 10 else "running"
+                    execute_state = "running" if progress_pct < 95 else "complete"
+                    finalize_state = "running" if progress_pct >= 95 else "pending"
+
+                timeline([
+                    {"name": "Submit", "status": "complete"},
+                    {"name": "Queue / Provision", "status": queue_state},
+                    {"name": "Execute", "status": execute_state, "details": message or ""},
+                    {"name": "Finalize", "status": finalize_state},
+                ])
+
+                if run_stage:
+                    validation_state = "complete" if run_stage not in {"awaiting_details", "awaiting_approval"} else "active"
+                    staging_state = "complete" if run_stage not in {"validating_connection", "preparing_remote_dirs", "transferring_inputs"} else "active"
+                    run_state = "active" if run_stage in {"queued", "running", "collecting_outputs"} else ("complete" if run_stage in {"syncing_results", "completed"} else ("failed" if run_stage in {"failed", "cancelled"} else "pending"))
+                    if transfer_state in {"outputs_downloaded"}:
+                        sync_state = "complete"
+                    elif transfer_state in {"downloading_outputs"} or run_stage == "syncing_results":
+                        sync_state = "active"
+                    elif transfer_state in {"transfer_failed"}:
+                        sync_state = "failed"
+                    elif run_stage in {"completed"} and result_destination in {"remote", ""}:
+                        sync_state = "complete"
+                    elif run_stage in {"failed", "cancelled"}:
+                        sync_state = "failed"
+                    else:
+                        sync_state = "pending"
+                else:
+                    validation_state = "complete" if (progress_pct >= 10 or is_done or is_failed or is_running) else "pending"
+                    staging_state = "complete" if (progress_pct >= 30 or is_done) else ("failed" if is_failed and progress_pct < 30 else ("active" if is_running else "pending"))
+                    run_state = "complete" if is_done else ("failed" if is_failed else ("active" if is_running and progress_pct >= 30 else "pending"))
+                    sync_state = "complete" if is_done else ("failed" if is_failed and progress_pct >= 95 else ("active" if is_running and progress_pct >= 95 else "pending"))
+
+                segmented_progress([
+                    {"name": "Validation", "percentage": 15, "status": validation_state},
+                    {"name": "Staging", "percentage": 20, "status": staging_state},
+                    {"name": "Run", "percentage": 55, "status": run_state},
+                    {"name": "Sync", "percentage": 10, "status": sync_state},
+                ])
                 
                 # Status indicator
                 if status_str == "COMPLETED":
@@ -2186,7 +2484,12 @@ def render_block(block, expected_project_id: str = ""):
                                         st.text(f"✔ {base_name} ({len(instances)}/{max(instances_sorted)})")
                     
                 elif status_str == "FAILED":
-                    st.error(f"❌ {message}")
+                    info_callout(message or "Job failed during execution.", kind="error", icon="❌")
+                    with st.expander("Recommended Next Steps", expanded=True):
+                        st.markdown("1. Review Nextflow error lines below for first root cause.")
+                        st.markdown("2. Verify input path, genome, and execution mode parameters.")
+                        st.markdown("3. For remote mode, verify SSH profile and SLURM account/partition.")
+                        st.markdown("4. Resubmit after edits.")
                     
                     # Fetch detailed debug information
                     if run_uuid:
@@ -2331,7 +2634,7 @@ def render_block(block, expected_project_id: str = ""):
                         st.caption(f"Folder `{_pl.PurePosixPath(work_directory).name}` has been removed.")
 
                 elif status_str == "RUNNING":
-                    st.info(f"🔄 {message}")
+                    info_callout(message or "Job is running", kind="info", icon="🔄")
                     
                     # Job timing info
                     _job_created = block.get("created_at", "")
@@ -2371,14 +2674,11 @@ def render_block(block, expected_project_id: str = ""):
                         failed_count = tasks.get("failed_count", 0)
                         
                         # Summary metrics
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("✅ Completed", f"{completed_count}/{total}")
-                        with col2:
-                            st.metric("🏃 Running", len(running))
-                        with col3:
-                            if failed_count > 0:
-                                st.metric("❌ Failed", failed_count)
+                        progress_stats({
+                            "Completed": f"{completed_count}/{total}",
+                            "Running": len(running),
+                            "Failed": failed_count,
+                        })
                         
                         # Show running tasks in Nextflow style
                         if running:
@@ -2463,7 +2763,9 @@ def render_block(block, expected_project_id: str = ""):
     
     elif btype == "AGENT_PLOT":
         with st.chat_message("assistant", avatar="📊"):
+            section_header("Visualization", "Interactive plot generated from analyzed data", icon="📊")
             show_metadata()
+            st.divider()
             # Render interactive Plotly charts
             # Pass all currently loaded blocks so the renderer can look up DFs by ID
             all_blocks = st.session_state.get("blocks", [])
@@ -2478,6 +2780,21 @@ def render_block(block, expected_project_id: str = ""):
             total_bytes = content.get("bytes_downloaded", 0)
             expected_total_bytes = content.get("expected_total_bytes", 0)
             source = content.get("source", "url")
+
+            _chip = "pending"
+            if dl_status == "RUNNING":
+                _chip = "running"
+            elif dl_status == "DONE":
+                _chip = "complete"
+            elif dl_status in ("FAILED", "CANCELLED"):
+                _chip = "failed"
+            section_header("Download Task", "Track transfer progress and outcomes", icon="⬇️")
+            status_chip(_chip, label=dl_status.title(), icon="📦")
+            metadata_row({
+                "Source": source,
+                "Files": f"{downloaded}/{total}",
+                "Downloaded": f"{round(total_bytes / (1024 * 1024), 1)} MB" if total_bytes else "0 MB",
+            })
 
             if dl_status == "RUNNING":
                 cur = content.get("current_file", "")
@@ -2833,9 +3150,16 @@ if _active_chat is not None:
             st.rerun()
 
 # 3. Chat Input
-if prompt := st.chat_input("Ask Agoutic to do something..."):
+_queued_help_prompt = st.session_state.pop("_help_prompt", None)
+prompt = _queued_help_prompt or st.chat_input("Ask Agoutic to do something...")
+if prompt:
     with st.chat_message("user"):
         st.write(prompt)
+
+    if _is_help_intent(prompt):
+        with st.chat_message("assistant"):
+            _render_local_help_response()
+        st.stop()
 
     # --- Start threaded request and store in session state ---
     request_id = str(uuid.uuid4())

@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import require_auth, make_authenticated_request
+from components.cards import section_header, stat_tile, empty_state, status_chip, metadata_row
 
 # Cortex API URL (the only server the UI talks to)
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
@@ -23,11 +24,28 @@ st.set_page_config(page_title="Job Results", page_icon="📊", layout="wide")
 # Require authentication
 user = require_auth(API_URL)
 
-st.title("📊 Job Results Analysis")
-st.markdown("Analyze completed Dogme job results")
+section_header("Job Results Analysis", "Analyze completed Dogme workflow outputs", icon="📊")
+
+
+def _render_results_action_tray(current_run_uuid: str | None) -> None:
+    """Render a compact action row for common results-page workflows."""
+    col_refresh, col_clear, col_chat = st.columns(3)
+    with col_refresh:
+        if st.button("🔄 Refresh", key="results_action_refresh", width="stretch"):
+            st.rerun()
+    with col_clear:
+        if st.button("🧹 Clear Selection", key="results_action_clear", width="stretch"):
+            st.session_state.pop("selected_job_run_uuid", None)
+            st.session_state.pop("job_pick", None)
+            st.rerun()
+    with col_chat:
+        if st.button("💬 Open Chat", key="results_action_chat", width="stretch"):
+            if current_run_uuid:
+                st.session_state["selected_job_run_uuid"] = current_run_uuid
+            st.switch_page("app.py")
 
 # Main interface
-st.header("Select Job")
+section_header("Select Job", "Pick a job from the active project or enter a UUID", icon="🧪")
 
 # Auto-list jobs from the user's active project (if available)
 run_uuid = None
@@ -70,6 +88,8 @@ manual_uuid = st.text_input(
 if manual_uuid:
     run_uuid = manual_uuid
 
+_render_results_action_tray(run_uuid)
+
 if run_uuid:
     try:
         # ── Job Summary ──────────────────────────────────────────────
@@ -87,17 +107,25 @@ if run_uuid:
                 st.error(f"Analysis error: {summary.get('error', 'Unknown')} — {summary.get('detail', '')}")
                 st.stop()
             
-            # Job metrics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Sample", summary.get("sample_name", "N/A"))
-            with col2:
-                st.metric("Workflow", summary.get("mode", "N/A"))
-            with col3:
-                st.metric("Status", summary.get("status", "N/A"))
-            with col4:
-                total_files = summary.get("key_results", {}).get("total_files", 0)
-                st.metric("Total Files", total_files)
+            section_header("Run Overview", "Core metadata and result availability", icon="🧬")
+            _status = str(summary.get("status", "N/A") or "N/A")
+            _status_key = _status.lower()
+            if _status_key in {"completed", "done", "success"}:
+                _status_key = "success"
+            elif _status_key in {"failed", "error", "cancelled", "canceled"}:
+                _status_key = "error"
+            elif _status_key in {"running", "in_progress", "queued", "pending"}:
+                _status_key = "warning"
+            status_chip(_status_key, label=f"Run Status: {_status}", icon="🧭")
+            metadata_row(
+                {
+                    "Sample": summary.get("sample_name", "N/A"),
+                    "Workflow": summary.get("mode", "N/A"),
+                    "Run UUID": run_uuid,
+                }
+            )
+            total_files = summary.get("key_results", {}).get("total_files", 0)
+            stat_tile("Total Files", total_files, icon="📁")
             
             st.divider()
 
@@ -335,7 +363,7 @@ if run_uuid:
         st.error(f"Cannot connect to AGOUTIC API at {API_URL}. Make sure the servers are running.\n\nError: {e}")
 
 else:
-    st.info("👆 Select a job above or enter a UUID to view results")
+    empty_state("Select a job to begin", "Choose a recent job above or paste a run UUID.", icon="👆")
 
 # Footer
 st.divider()

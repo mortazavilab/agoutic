@@ -8,6 +8,8 @@ Usage:
 
 import streamlit as st
 from typing import Optional
+from components.cards import section_header
+from components.forms import grouped_section, review_panel, validation_messages
 
 
 def render_slurm_form(defaults: Optional[dict] = None) -> Optional[dict]:
@@ -23,8 +25,9 @@ def render_slurm_form(defaults: Optional[dict] = None) -> Optional[dict]:
     if defaults is None:
         defaults = {}
 
-    st.subheader("⚙️ SLURM Resource Configuration")
+    section_header("SLURM Resource Configuration", "Configure account, resources, and runtime", icon="⚙️")
 
+    grouped_section("Account & Queue")
     account = st.text_input(
         "Account *",
         value=defaults.get("account", ""),
@@ -38,6 +41,7 @@ def render_slurm_form(defaults: Optional[dict] = None) -> Optional[dict]:
         key="slurm_partition",
     )
 
+    grouped_section("Compute Resources")
     col1, col2 = st.columns(2)
     with col1:
         cpus = st.number_input(
@@ -62,24 +66,38 @@ def render_slurm_form(defaults: Optional[dict] = None) -> Optional[dict]:
         key="slurm_walltime",
     )
 
-    col3, col4 = st.columns(2)
-    with col3:
-        gpus = st.number_input(
-            "GPUs",
-            min_value=0,
-            max_value=8,
-            value=defaults.get("gpus", 0),
-            key="slurm_gpus",
-        )
-    with col4:
-        gpu_type = ""
-        if gpus > 0:
-            gpu_type = st.text_input(
-                "GPU Type",
-                value=defaults.get("gpu_type", ""),
-                help="e.g. A100, V100",
-                key="slurm_gpu_type",
+    with st.expander("Advanced GPU Options", expanded=False):
+        col3, col4 = st.columns(2)
+        with col3:
+            gpus = st.number_input(
+                "GPUs",
+                min_value=0,
+                max_value=8,
+                value=defaults.get("gpus", 0),
+                key="slurm_gpus",
             )
+        with col4:
+            gpu_type = ""
+            if gpus > 0:
+                gpu_type = st.text_input(
+                    "GPU Type",
+                    value=defaults.get("gpu_type", ""),
+                    help="e.g. A100, V100",
+                    key="slurm_gpu_type",
+                )
+
+    review_panel(
+        {
+            "Account": account,
+            "Partition": partition,
+            "CPUs": cpus,
+            "Memory (GB)": memory_gb,
+            "Walltime": walltime,
+            "GPUs": gpus,
+            "GPU Type": gpu_type if gpus > 0 else "",
+        },
+        title="Submission Summary",
+    )
 
     if st.button("✅ Apply SLURM Config", key="slurm_submit"):
         # Validation
@@ -92,8 +110,7 @@ def render_slurm_form(defaults: Optional[dict] = None) -> Optional[dict]:
             errors.append("Wall time must be in HH:MM:SS format.")
 
         if errors:
-            for err in errors:
-                st.error(err)
+            validation_messages(errors=errors)
             return None
 
         result = {
