@@ -1255,7 +1255,7 @@ class TestBrowsingToolBypass:
                 ),
             ),
             patch(
-                "cortex.app.extract_job_parameters_from_conversation",
+                "cortex.job_parameters.extract_job_parameters_from_conversation",
                 new=AsyncMock(
                     return_value={
                         "sample_name": "Jamshid",
@@ -1393,7 +1393,7 @@ class TestBrowsingToolBypass:
                 ),
             ),
             patch(
-                "cortex.app.extract_job_parameters_from_conversation",
+                "cortex.job_parameters.extract_job_parameters_from_conversation",
                 new=AsyncMock(
                     return_value={
                         "sample_name": "Jamshid",

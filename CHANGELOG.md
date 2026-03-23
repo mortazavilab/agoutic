@@ -42,11 +42,21 @@
   dispatches directly to `cortex.workflow_submission.submit_job_after_approval`
   at call sites.
 
-- **Explicit remaining deferred app-owned submit dependencies** —
-  `cortex/workflow_submission.py` intentionally resolves
-  `extract_job_parameters_from_conversation` and `poll_job_status` through
-  deferred `cortex.app` lookup in this pass to preserve behavior while those
-  symbols remain app-owned.
+- **Final workflow-submission app bridge removed** —
+  `cortex/workflow_submission.py` no longer resolves runtime behavior through
+  `cortex.app`; deferred `app_module` lookup was removed and submit flow now
+  imports owned symbols directly.
+
+- **Owned extraction boundary created** —
+  moved `extract_job_parameters_from_conversation` to
+  `cortex/job_parameters.py` and rewired app/workflow/test boundaries to the
+  new owner module.
+
+- **Owned polling boundary created** —
+  moved `poll_job_status`, `_completed_job_results_ready`,
+  `_resolved_job_work_directory`, and `_auto_trigger_analysis` to
+  `cortex/job_polling.py`, eliminating the last workflow-submission dependency
+  on app-owned runtime symbols.
 
 - **MCP submission parity for script-mode payloads** — Launchpad MCP wrappers
   now pass script-mode fields through `submit_dogme_job` when explicitly
@@ -63,6 +73,9 @@
   - submit-handler extraction boundary stability via focused
     background-task/approval tests plus broader Cortex endpoint/chat and
     Launchpad status/submit suites
+  - final workflow-submission bridge removal stability via compile validation,
+    focused submit/approval/extract suites, broader chat-data-call boundaries,
+    and polling-focused subsets on the new ownership modules
 
 ## [3.4.5] - 2026-03-23
 

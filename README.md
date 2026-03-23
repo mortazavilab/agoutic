@@ -31,11 +31,17 @@
   `cortex.workflow_submission.submit_job_after_approval`, and
   `cortex.app.submit_job_after_approval` is no longer maintained as an export
   surface.
-- **Explicit remaining deferred app-owned dependencies** —
-  `cortex/workflow_submission.py` still resolves
-  `extract_job_parameters_from_conversation` and `poll_job_status` through a
-  deferred `cortex.app` lookup in this pass while those symbols remain
-  app-owned.
+- **Final submit bridge removed** —
+  `cortex/workflow_submission.py` no longer depends on `cortex.app` for runtime
+  behavior; deferred `app_module` lookup has been eliminated.
+- **Owned extraction module introduced** —
+  `extract_job_parameters_from_conversation` now lives in
+  `cortex/job_parameters.py` and app/workflow call sites import from this owned
+  boundary.
+- **Owned polling module introduced** —
+  `poll_job_status`, `_completed_job_results_ready`,
+  `_resolved_job_work_directory`, and `_auto_trigger_analysis` now live in
+  `cortex/job_polling.py` for clean ownership without app back-links.
 - **Approval-context extractor injection** — remote approval-context building
   now receives parameter extraction from the app call site, preserving behavior
   while keeping module boundaries one-directional.
@@ -75,6 +81,9 @@
 - **Post-extraction validation sweep completed** — focused submit/approval
   tests plus broader Cortex endpoint/chat suites and Launchpad status/submit
   suites passed after the submission-handler module move.
+- **Bridge-removal validation sweep completed** — compile checks plus focused
+  submit/approval/extract tests and broader chat-data-call boundary suites
+  passed after moving extraction/polling ownership out of `cortex/app.py`.
 
 ## 🧬 Overview
 

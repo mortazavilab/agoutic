@@ -34,16 +34,18 @@ from cortex.app import (
     download_after_approval,
     _auto_execute_plan_steps,
     _initial_stage_parts,
+    _build_auto_analysis_context,
+    _build_static_analysis_summary,
+    get_block_payload,
+    _create_block_internal,
+    _active_downloads,
+)
+from cortex.job_parameters import extract_job_parameters_from_conversation
+from cortex.job_polling import (
     poll_job_status,
     _auto_trigger_analysis,
     _completed_job_results_ready,
     _resolved_job_work_directory,
-    _build_auto_analysis_context,
-    _build_static_analysis_summary,
-    extract_job_parameters_from_conversation,
-    get_block_payload,
-    _create_block_internal,
-    _active_downloads,
 )
 from cortex.workflow_submission import submit_job_after_approval
 from cortex.planner import _template_remote_stage_workflow
@@ -198,7 +200,7 @@ class TestHandleRejection:
         with _patch_session(session_factory), \
              patch("cortex.app.AgentEngine", return_value=mock_engine), \
              patch("cortex.app.run_in_threadpool", _mock_run_in_threadpool), \
-             patch("cortex.app.extract_job_parameters_from_conversation",
+             patch("cortex.job_parameters.extract_job_parameters_from_conversation",
                    new_callable=AsyncMock, return_value={"sample_name": "test"}):
             await handle_rejection("proj-bg", gate.id)
 
@@ -221,7 +223,7 @@ class TestHandleRejection:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.extract_job_parameters_from_conversation",
+             patch("cortex.job_parameters.extract_job_parameters_from_conversation",
                    new_callable=AsyncMock, return_value={"sample_name": "s1", "mode": "DNA"}):
             await handle_rejection("proj-bg", gate.id)
 
@@ -265,7 +267,7 @@ class TestHandleRejection:
         with _patch_session(session_factory), \
              patch("cortex.app.AgentEngine", return_value=mock_engine), \
              patch("cortex.app.run_in_threadpool", _mock_run_in_threadpool), \
-             patch("cortex.app.extract_job_parameters_from_conversation",
+             patch("cortex.job_parameters.extract_job_parameters_from_conversation",
                    new_callable=AsyncMock, return_value={"sample_name": "test"}):
             await handle_rejection("proj-bg", gate.id)
 
@@ -594,7 +596,7 @@ class TestSubmitJobAfterApproval:
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {})
 
         with _patch_session(session_factory), \
-             patch("cortex.app.extract_job_parameters_from_conversation",
+             patch("cortex.job_parameters.extract_job_parameters_from_conversation",
                    new_callable=AsyncMock, return_value=None):
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -1205,7 +1207,7 @@ async def test_auto_execute_plan_steps_creates_gate_for_waiting_remote_stage_pla
          patch("cortex.app.AgentEngine") as mock_engine_cls, \
          patch("cortex.plan_executor.execute_plan", new=AsyncMock(return_value=None)), \
          patch(
-             "cortex.app.extract_job_parameters_from_conversation",
+             "cortex.job_parameters.extract_job_parameters_from_conversation",
              new=AsyncMock(return_value={
                  "sample_name": "Jamshid",
                  "execution_mode": "slurm",
@@ -1260,7 +1262,7 @@ async def test_auto_execute_plan_steps_executes_remote_stage_plan_to_approval(se
              new=AsyncMock(return_value={"success": True, "file_count": 1, "files": [{"name": "read_001.pod5"}]}),
          ), \
          patch(
-             "cortex.app.extract_job_parameters_from_conversation",
+             "cortex.job_parameters.extract_job_parameters_from_conversation",
              new=AsyncMock(return_value={
                  "sample_name": "Jamshid",
                  "execution_mode": "slurm",
@@ -1341,7 +1343,7 @@ async def test_auto_execute_plan_steps_blocks_when_remote_profile_locked(session
          patch("cortex.app.AgentEngine") as mock_engine_cls, \
          patch("cortex.plan_executor.execute_plan", new=AsyncMock(return_value=None)), \
          patch(
-             "cortex.app.extract_job_parameters_from_conversation",
+             "cortex.job_parameters.extract_job_parameters_from_conversation",
              new=AsyncMock(return_value={
                  "sample_name": "Jamshid",
                  "execution_mode": "slurm",
@@ -1414,10 +1416,10 @@ class TestPollJobStatus:
         ])
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.asyncio") as mock_aio, \
-             patch("cortex.app._auto_trigger_analysis", new_callable=AsyncMock):
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+               patch("cortex.job_polling.asyncio") as mock_aio, \
+             patch("cortex.job_polling._auto_trigger_analysis", new_callable=AsyncMock):
             # Override sleep to not actually wait
             mock_aio.sleep = AsyncMock()
             await poll_job_status("proj-bg", job_block.id, "poll-test")
@@ -1453,9 +1455,9 @@ class TestPollJobStatus:
         ])
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+               patch("cortex.job_polling.asyncio") as mock_aio:
             mock_aio.sleep = AsyncMock()
             await poll_job_status("proj-bg", job_block.id, "fail-test")
 
@@ -1494,10 +1496,10 @@ class TestPollJobStatus:
         mock_auto = AsyncMock()
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.asyncio") as mock_aio, \
-             patch("cortex.app._auto_trigger_analysis", mock_auto):
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+               patch("cortex.job_polling.asyncio") as mock_aio, \
+             patch("cortex.job_polling._auto_trigger_analysis", mock_auto):
             mock_aio.sleep = AsyncMock()
             await poll_job_status("proj-bg", job_block.id, "auto-test")
 
@@ -1536,10 +1538,10 @@ class TestPollJobStatus:
         mock_auto = AsyncMock()
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.asyncio") as mock_aio, \
-             patch("cortex.app._auto_trigger_analysis", mock_auto):
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+               patch("cortex.job_polling.asyncio") as mock_aio, \
+             patch("cortex.job_polling._auto_trigger_analysis", mock_auto):
             mock_aio.sleep = AsyncMock()
             await poll_job_status("proj-bg", job_block.id, "copyback-test")
 
@@ -1626,9 +1628,9 @@ def test_resolved_job_work_directory_falls_back_to_existing_payload():
         ])
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+               patch("cortex.job_polling.asyncio") as mock_aio:
             mock_aio.sleep = AsyncMock()
             # This should not raise - errors are caught
             await poll_job_status("proj-bg", job_block.id, "err-test")
@@ -1670,8 +1672,8 @@ class TestAutoTriggerAnalysis:
         ))
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://analyzer:8002"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
              patch("cortex.app.AgentEngine", return_value=mock_engine), \
              patch("cortex.app.run_in_threadpool", _mock_run_in_threadpool), \
              patch("cortex.app.save_conversation_message", new_callable=AsyncMock):
@@ -1710,8 +1712,8 @@ class TestAutoTriggerAnalysis:
         mock_engine.think = MagicMock(side_effect=RuntimeError("LLM down"))
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://analyzer:8002"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
              patch("cortex.app.AgentEngine", return_value=mock_engine), \
              patch("cortex.app.run_in_threadpool", _mock_run_in_threadpool), \
              patch("cortex.app.save_conversation_message", new_callable=AsyncMock):
@@ -1746,8 +1748,8 @@ class TestAutoTriggerAnalysis:
         mock_engine.think = MagicMock(side_effect=RuntimeError("No data"))
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://analyzer:8002"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
              patch("cortex.app.AgentEngine", return_value=mock_engine), \
              patch("cortex.app.run_in_threadpool", _mock_run_in_threadpool), \
              patch("cortex.app.save_conversation_message", new_callable=AsyncMock):
@@ -1781,8 +1783,8 @@ class TestAutoTriggerAnalysis:
             mock_engine.think = MagicMock(side_effect=RuntimeError("skip"))
 
             with _patch_session(session_factory), \
-                 patch("cortex.app.get_service_url", return_value="http://analyzer:8002"), \
-                 patch("cortex.app.MCPHttpClient", return_value=mock_mcp), \
+                 patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+                 patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
                  patch("cortex.app.AgentEngine", return_value=mock_engine), \
                  patch("cortex.app.run_in_threadpool", _mock_run_in_threadpool), \
                  patch("cortex.app.save_conversation_message", new_callable=AsyncMock):
@@ -1828,7 +1830,7 @@ class TestAutoTriggerAnalysis:
         sess.close()
 
         with _patch_session(session_factory), \
-             patch("cortex.app.MCPHttpClient") as mock_mcp, \
+             patch("cortex.job_polling.MCPHttpClient") as mock_mcp, \
              patch("cortex.app.AgentEngine") as mock_engine, \
              patch("cortex.app.save_conversation_message", new_callable=AsyncMock):
             await _auto_trigger_analysis(

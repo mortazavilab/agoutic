@@ -17,7 +17,7 @@ from sqlalchemy.pool import StaticPool
 
 from common.database import Base
 from cortex.models import User, Project, ProjectAccess, ProjectBlock
-from cortex.app import extract_job_parameters_from_conversation
+from cortex.job_parameters import extract_job_parameters_from_conversation
 from launchpad.models import RemoteStagedSample
 
 
@@ -94,7 +94,7 @@ class TestModeDetection:
     @pytest.mark.asyncio
     async def test_default_dna(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "I want to run a pipeline"})
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await self._extract()
         assert result is not None
         assert result["mode"] == "DNA"
@@ -102,14 +102,14 @@ class TestModeDetection:
     @pytest.mark.asyncio
     async def test_rna_mode(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "analyze RNA data please"})
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await self._extract()
         assert result["mode"] == "RNA"
 
     @pytest.mark.asyncio
     async def test_cdna_mode(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "I have cDNA samples"})
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await self._extract()
         assert result["mode"] == "CDNA"
 
@@ -124,7 +124,7 @@ class TestGenomeDetection:
     async def test_human_genome(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "I have human DNA data"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert "GRCh38" in result["reference_genome"]
@@ -133,7 +133,7 @@ class TestGenomeDetection:
     async def test_mouse_genome(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "analyze mouse DNA data"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert "mm39" in result["reference_genome"]
@@ -142,7 +142,7 @@ class TestGenomeDetection:
     async def test_default_genome_is_mouse(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "run my pipeline"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["reference_genome"] == ["mm39"]
@@ -151,7 +151,7 @@ class TestGenomeDetection:
     async def test_both_genomes(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "analyze both human and mouse data"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert set(result["reference_genome"]) == {"GRCh38", "mm39"}
@@ -167,7 +167,7 @@ class TestEntryPoint:
     async def test_basecall_only(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "only basecall the data"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["entry_point"] == "basecall"
@@ -177,7 +177,7 @@ class TestEntryPoint:
     async def test_modkit_entry(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "call modifications on my data"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["entry_point"] == "modkit"
@@ -187,7 +187,7 @@ class TestEntryPoint:
     async def test_reports_entry(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "just generate report for me"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["entry_point"] == "reports"
@@ -203,7 +203,7 @@ class TestSampleName:
     async def test_explicit_sample_name(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "sample name is Jamshid"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["sample_name"] == "Jamshid"
@@ -212,7 +212,7 @@ class TestSampleName:
     async def test_named_pattern(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "analyze named Ali1"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["sample_name"] == "Ali1"
@@ -224,7 +224,7 @@ class TestSampleName:
         _add_block(self.sf, "AGENT_PLAN", {"markdown": "What is the sample name?"})
         _add_block(self.sf, "USER_MESSAGE", {"text": "c2c12r1"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["sample_name"] == "c2c12r1"
@@ -240,7 +240,7 @@ class TestAdvancedParams:
     async def test_threshold(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "call modifications with threshold of 0.85"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["modkit_filter_threshold"] == 0.85
@@ -249,7 +249,7 @@ class TestAdvancedParams:
     async def test_min_cov(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "set minimum coverage of 10 and run DNA"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["min_cov"] == 10
@@ -258,7 +258,7 @@ class TestAdvancedParams:
     async def test_accuracy(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "run with accuracy hac for DNA"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["accuracy"] == "hac"
@@ -267,7 +267,7 @@ class TestAdvancedParams:
     async def test_gpu_tasks(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "max gpu tasks 2 and run DNA"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["max_gpu_tasks"] == 2
@@ -288,7 +288,7 @@ class TestSubmissionCycleScope:
         _add_block(self.sf, "EXECUTION_JOB", {"run_uuid": "abc"}, seq=2)
         _add_block(self.sf, "USER_MESSAGE", {"text": "sample name is NewSample"}, seq=3)
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["sample_name"] == "NewSample"
@@ -296,7 +296,7 @@ class TestSubmissionCycleScope:
     @pytest.mark.asyncio
     async def test_no_blocks_returns_none(self):
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result is None
@@ -306,7 +306,7 @@ class TestSubmissionCycleScope:
         """Only AGENT_PLAN blocks but no USER_MESSAGE → returns None."""
         _add_block(self.sf, "AGENT_PLAN", {"markdown": "Let me help you"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         # conversation is built with both types, but if no USER_MESSAGE was appended
@@ -325,7 +325,7 @@ class TestInputType:
     async def test_fastq_detection(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "I have .fastq files to analyze"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["input_type"] == "fastq"
@@ -334,7 +334,7 @@ class TestInputType:
     async def test_bam_remap(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "I have unmapped bam files"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["input_type"] == "bam"
@@ -351,7 +351,7 @@ class TestRemoteExecutionDetection:
     async def test_detects_slurm_execution_mode(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 using slurm"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["execution_mode"] == "slurm"
@@ -360,7 +360,7 @@ class TestRemoteExecutionDetection:
     async def test_detects_hpc3_profile_nickname(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 on hpc3"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["execution_mode"] == "slurm"
@@ -370,7 +370,7 @@ class TestRemoteExecutionDetection:
     async def test_detects_arbitrary_profile_nickname(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 on mycluster"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["execution_mode"] == "slurm"
@@ -380,7 +380,7 @@ class TestRemoteExecutionDetection:
     async def test_applies_profile_defaults_for_slurm_paths_and_accounts(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 on hpc3"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp), \
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
              patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
              patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
                  "id": "profile-123",
@@ -426,7 +426,7 @@ class TestRemoteExecutionDetection:
         _add_block(self.sf, "USER_MESSAGE", {"text": "Analyze sample name is NewSample with mouse DNA data"}, seq=2)
 
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
 
@@ -440,7 +440,7 @@ class TestRemoteExecutionDetection:
     async def test_detects_stage_only_remote_action(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Stage the mouse cDNA sample called Jamshid at /data/pod5 on hpc3"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["execution_mode"] == "slurm"
@@ -451,7 +451,7 @@ class TestRemoteExecutionDetection:
     async def test_detects_stage_only_remote_action_for_arbitrary_profile_nickname(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Stage the mouse cDNA sample called Jamshid at /data/pod5 on mycluster"})
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["execution_mode"] == "slurm"
@@ -481,7 +481,7 @@ class TestRemoteExecutionDetection:
         )
         sess.add(staged)
         sess.commit()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp), \
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
              patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
              patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
                  "id": "profile-123",
@@ -510,7 +510,7 @@ class TestRemoteExecutionDetection:
         )
 
         sess = self.sf()
-        with patch("cortex.app.AGOUTIC_DATA", self.tmp), \
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
              patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
              patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
                  "id": "profile-123",

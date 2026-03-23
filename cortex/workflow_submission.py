@@ -34,6 +34,8 @@ from cortex.remote_orchestration import (
     _stage_part_progress,
     _update_project_block_payload,
 )
+import cortex.job_parameters as job_parameters
+import cortex.job_polling as job_polling
 
 REMOTE_STAGE_MCP_TIMEOUT = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
 
@@ -45,12 +47,6 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
     Background task to submit a job to Launchpad after approval.
     Uses edited_params if available, otherwise falls back to extracted_params.
     """
-    # Deferred app import remains only for app-owned functions not moved yet.
-    import cortex.app as app_module
-
-    extract_job_parameters_from_conversation = app_module.extract_job_parameters_from_conversation
-    poll_job_status = app_module.poll_job_status
-
     session = SessionLocal()
 
     stage_task_block = None
@@ -71,7 +67,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
 
         if not job_params:
             # Fallback: extract from conversation
-            job_params = await extract_job_parameters_from_conversation(session, project_id)
+            job_params = await job_parameters.extract_job_parameters_from_conversation(session, project_id)
 
         if not job_params:
             # Failed to extract parameters, create error block
@@ -605,7 +601,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             logger.info("Job submitted", run_uuid=run_uuid, project_id=project_id)
 
             # Start polling job status in background
-            asyncio.create_task(poll_job_status(project_id, job_block.id, run_uuid))
+            asyncio.create_task(job_polling.poll_job_status(project_id, job_block.id, run_uuid))
         else:
             # MCP call succeeded but no run_uuid in response
             # Show the actual result for debugging

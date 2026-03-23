@@ -128,6 +128,8 @@ from cortex.remote_orchestration import (
     _copy_local_sample_tree,
     _create_existing_stage_gate,
 )
+import cortex.job_parameters as job_parameters
+import cortex.job_polling as job_polling
 import cortex.workflow_submission as workflow_submission
 
 # --- LOGGING ---
@@ -209,7 +211,7 @@ async def startup_event():
                     # Trigger auto-analysis that was missed when polling died
                     if _inner == "COMPLETED":
                         asyncio.create_task(
-                            _auto_trigger_analysis(
+                            job_polling._auto_trigger_analysis(
                                 _blk.project_id, _run_uuid,
                                 _pl, _blk.owner_id,
                             )
@@ -218,7 +220,7 @@ async def startup_event():
                                      run_uuid=_run_uuid)
                 else:
                     asyncio.create_task(
-                        poll_job_status(_blk.project_id, _blk.id, _run_uuid)
+                        job_polling.poll_job_status(_blk.project_id, _blk.id, _run_uuid)
                     )
                     logger.info("Startup recovery: resumed polling for orphaned job",
                                  run_uuid=_run_uuid, block_id=_blk.id)
@@ -911,406 +913,6 @@ async def clear_project_blocks(project_id: str, request: Request):
         session.close()
 
 
-async def extract_job_parameters_from_conversation(session, project_id: str) -> dict:
-    """
-    Extract job parameters from conversation history using heuristics.
-    
-    Scopes to the **most recent submission cycle** — only blocks after the
-    last EXECUTION_JOB or APPROVAL_GATE (approved).  This prevents stale
-    parameters from earlier jobs (e.g. a previous sample name) bleeding
-    into a new submission.
-    
-    Analyzes USER_MESSAGE and AGENT_PLAN blocks to determine:
-    - sample_name
-    - mode (DNA/RNA/CDNA)
-    - input_directory (path to pod5 files)
-    - reference_genome (GRCh38, mm39, etc.)
-    - modifications (optional)
-    """
-    # Fetch all blocks for this project
-    query = select(ProjectBlock)\
-        .where(ProjectBlock.project_id == project_id)\
-        .order_by(ProjectBlock.seq.asc())
-    
-    result = session.execute(query)
-    blocks = result.scalars().all()
-    
-    # --- Scope to the most recent submission cycle ---
-    # Find the last EXECUTION_JOB or approved APPROVAL_GATE block.
-    # Only consider blocks AFTER that point for parameter extraction.
-    last_boundary_idx = -1
-    for i, block in enumerate(blocks):
-        if block.type == "EXECUTION_JOB":
-            last_boundary_idx = i
-        elif block.type == "APPROVAL_GATE" and block.status == "APPROVED":
-            last_boundary_idx = i
-    
-    recent_blocks = blocks[last_boundary_idx + 1:] if last_boundary_idx >= 0 else blocks
-
-    slurm_reuse_seed = {}
-    if last_boundary_idx >= 0:
-        for block in reversed(blocks[: last_boundary_idx + 1]):
-            seed_params = {}
-            if block.type == "APPROVAL_GATE" and block.status == "APPROVED":
-                payload = get_block_payload(block)
-                seed_params = payload.get("edited_params") or payload.get("extracted_params") or {}
-            elif block.type == "EXECUTION_JOB":
-                seed_params = get_block_payload(block)
-
-            if (seed_params.get("execution_mode") or "local") != "slurm":
-                continue
-
-            slurm_reuse_seed = {
-                "execution_mode": "slurm",
-                "ssh_profile_id": seed_params.get("ssh_profile_id"),
-                "ssh_profile_nickname": seed_params.get("ssh_profile_nickname"),
-                "slurm_account": seed_params.get("slurm_account"),
-                "slurm_partition": seed_params.get("slurm_partition"),
-                "slurm_gpu_account": seed_params.get("slurm_gpu_account"),
-                "slurm_gpu_partition": seed_params.get("slurm_gpu_partition"),
-                "slurm_cpus": seed_params.get("slurm_cpus"),
-                "slurm_memory_gb": seed_params.get("slurm_memory_gb"),
-                "slurm_walltime": seed_params.get("slurm_walltime"),
-                "slurm_gpus": seed_params.get("slurm_gpus"),
-                "slurm_gpu_type": seed_params.get("slurm_gpu_type"),
-                "remote_base_path": seed_params.get("remote_base_path"),
-                "result_destination": seed_params.get("result_destination"),
-                "max_gpu_tasks": seed_params.get("max_gpu_tasks"),
-            }
-            break
-    
-    # Build conversation context from recent blocks only
-    conversation = []
-    user_messages = []
-    for block in recent_blocks:
-        if block.type == "USER_MESSAGE":
-            text = get_block_payload(block).get('text', '')
-            conversation.append(f"User: {text}")
-            user_messages.append(text)
-        elif block.type == "AGENT_PLAN":
-            conversation.append(f"Agent: {get_block_payload(block).get('markdown', '')}")
-    
-    if not conversation:
-        return None
-    
-    conversation_text = "\n".join(conversation)
-    all_user_text_original = " ".join(user_messages)  # Keep original case for path extraction
-    all_user_text = all_user_text_original.lower()  # Lowercase for keyword matching
-    
-    # First, use simple heuristics for quick detection
-    params = {
-        "sample_name": None,
-        "mode": None,
-        "input_directory": None,
-        "input_directory_explicit": False,
-        "input_type": "pod5",  # Default to pod5
-        "entry_point": None,  # Dogme entry point
-        "reference_genome": [],  # Now a list for multi-genome support
-        "modifications": None,
-        # Advanced parameters (optional)
-        "modkit_filter_threshold": None,  # Will use default 0.9 if not specified
-        "min_cov": None,  # Will default based on mode if not specified
-        "per_mod": None,  # Will use default 5 if not specified
-        "accuracy": None,  # Will use default "sup" if not specified
-        "max_gpu_tasks": slurm_reuse_seed.get("max_gpu_tasks"),  # Will use default 1 if not specified
-        "execution_mode": slurm_reuse_seed.get("execution_mode") or "local",
-        "ssh_profile_id": slurm_reuse_seed.get("ssh_profile_id"),
-        "ssh_profile_nickname": slurm_reuse_seed.get("ssh_profile_nickname"),
-        "slurm_account": slurm_reuse_seed.get("slurm_account"),
-        "slurm_partition": slurm_reuse_seed.get("slurm_partition"),
-        "slurm_gpu_account": slurm_reuse_seed.get("slurm_gpu_account"),
-        "slurm_gpu_partition": slurm_reuse_seed.get("slurm_gpu_partition"),
-        "slurm_cpus": slurm_reuse_seed.get("slurm_cpus"),
-        "slurm_memory_gb": slurm_reuse_seed.get("slurm_memory_gb"),
-        "slurm_walltime": slurm_reuse_seed.get("slurm_walltime"),
-        "slurm_gpus": slurm_reuse_seed.get("slurm_gpus"),
-        "slurm_gpu_type": slurm_reuse_seed.get("slurm_gpu_type"),
-        "remote_base_path": slurm_reuse_seed.get("remote_base_path"),
-        "staged_remote_input_path": None,
-        "remote_staged_sample": None,
-        "result_destination": slurm_reuse_seed.get("result_destination"),
-        "remote_action": "job",
-        "gate_action": "job",
-    }
-
-    if re.search(r"\b(slurm|sbatch|cluster|remote(?:ly|\s+execution)?)\b", all_user_text):
-        params["execution_mode"] = "slurm"
-
-    profile_target_match = re.search(
-        r"\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)([a-zA-Z0-9_-]+)(?:\s+profile)?(?:[?.!,]|$)|(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile)\b",
-        all_user_text_original,
-        re.IGNORECASE,
-    )
-    if profile_target_match:
-        params["execution_mode"] = "slurm"
-        params["ssh_profile_nickname"] = profile_target_match.group(1) or profile_target_match.group(2)
-
-    if re.search(r"\bstage(?:\s+only)?\b", all_user_text) and (
-        re.search(r"\b(slurm|cluster|remote)\b", all_user_text) or profile_target_match
-    ):
-        params["execution_mode"] = "slurm"
-        params["remote_action"] = "stage_only"
-        params["gate_action"] = "remote_stage"
-
-    profile_match = re.search(
-        r"\b(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile\b",
-        all_user_text_original,
-        re.IGNORECASE,
-    )
-    if profile_match:
-        params["execution_mode"] = "slurm"
-        params["ssh_profile_nickname"] = profile_match.group(1)
-
-    account_match = re.search(r"\baccount\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
-    if account_match:
-        params["slurm_account"] = account_match.group(1)
-
-    gpu_account_match = re.search(r"\bgpu\s+account\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
-    if gpu_account_match:
-        params["slurm_gpu_account"] = gpu_account_match.group(1)
-
-    _invalid_partition_tokens = {
-        "and", "or", "cpu", "gpu", "account", "partition", "queue",
-        "override", "default", "defaults", "for", "on", "in", "with",
-    }
-    partition_match = re.search(r"(?<!/)\b(?:partition|queue)\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
-    if partition_match:
-        _cand_partition = partition_match.group(1)
-        if _cand_partition.lower() not in _invalid_partition_tokens:
-            params["slurm_partition"] = _cand_partition
-
-    gpu_partition_match = re.search(r"\bgpu\s+(?:partition|queue)\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
-    if gpu_partition_match:
-        _cand_gpu_partition = gpu_partition_match.group(1)
-        if _cand_gpu_partition.lower() not in _invalid_partition_tokens:
-            params["slurm_gpu_partition"] = _cand_gpu_partition
-
-    cpus_match = re.search(r"\b(\d+)\s*(?:cpus?|cores?)\b", all_user_text, re.IGNORECASE)
-    if cpus_match:
-        params["slurm_cpus"] = int(cpus_match.group(1))
-
-    memory_match = re.search(r"\b(\d+)\s*(?:gb|gib)\b", all_user_text, re.IGNORECASE)
-    if memory_match:
-        params["slurm_memory_gb"] = int(memory_match.group(1))
-
-    walltime_match = re.search(r"\b(\d{1,2}:\d{2}:\d{2}|\d+-\d{2}:\d{2}:\d{2})\b", all_user_text)
-    if walltime_match:
-        params["slurm_walltime"] = walltime_match.group(1)
-
-    gpus_match = re.search(r"\b(\d+)\s*gpus?\b", all_user_text, re.IGNORECASE)
-    if gpus_match:
-        params["slurm_gpus"] = int(gpus_match.group(1))
-    
-    # Detect Dogme entry point from conversation
-    if "only basecall" in all_user_text or "just basecalling" in all_user_text or "basecall only" in all_user_text:
-        params["entry_point"] = "basecall"
-        params["input_type"] = "pod5"
-    elif "call modifications" in all_user_text or "run modkit" in all_user_text or "extract modifications" in all_user_text:
-        params["entry_point"] = "modkit"
-        params["input_type"] = "bam"  # modkit needs mapped BAM
-    elif "generate report" in all_user_text or "create summary" in all_user_text or "reports only" in all_user_text:
-        params["entry_point"] = "reports"
-    elif "annotate" in all_user_text and ("transcripts" in all_user_text or "rna" in all_user_text):
-        params["entry_point"] = "annotateRNA"
-        params["input_type"] = "bam"  # annotateRNA needs mapped BAM
-    elif "unmapped bam" in all_user_text or "remap" in all_user_text:
-        params["entry_point"] = "remap"
-        params["input_type"] = "bam"
-    elif "downloaded bam" in all_user_text or "from bam" in all_user_text or ("bam" in all_user_text and "from data" in all_user_text):
-        # User wants to run Dogme from downloaded BAM files in project data/
-        params["entry_point"] = "remap"
-        params["input_type"] = "bam"
-    elif ".bam" in all_user_text_original:
-        # Detect if BAM is mapped or unmapped based on context
-        if "mapped" in all_user_text and "unmapped" not in all_user_text:
-            params["input_type"] = "bam"
-            # Will need to determine entry point based on other keywords
-        else:
-            params["entry_point"] = "remap"
-            params["input_type"] = "bam"
-    elif ".fastq" in all_user_text_original or ".fq" in all_user_text_original or "fastq" in all_user_text:
-        params["input_type"] = "fastq"
-    
-    # Detect genome from keywords - support multiple genomes
-    genome_keywords = ["human", "mouse", "hg38", "mm39", "mm10", "grch38"]
-    found_genomes = set()
-    
-    # Find all genome mentions
-    for keyword in genome_keywords:
-        if keyword in all_user_text:
-            canonical = GENOME_ALIASES.get(keyword, keyword)
-            found_genomes.add(canonical)
-    
-    # Check for "both X and Y" pattern
-    multi_genome_pattern = r'both\s+(\w+)\s+and\s+(\w+)'
-    multi_match = re.search(multi_genome_pattern, all_user_text)
-    if multi_match:
-        g1 = GENOME_ALIASES.get(multi_match.group(1), multi_match.group(1))
-        g2 = GENOME_ALIASES.get(multi_match.group(2), multi_match.group(2))
-        found_genomes.add(g1)
-        found_genomes.add(g2)
-    
-    # Convert to list, default to mouse if none found
-    # For modkit/annotateRNA, do NOT auto-default genome — the user must specify
-    # the genome the BAM was actually mapped to.
-    if found_genomes:
-        params["reference_genome"] = list(found_genomes)
-    elif params["entry_point"] in ("modkit", "annotateRNA"):
-        params["reference_genome"] = []  # Force the intake skill to ask
-    else:
-        params["reference_genome"] = ["mm39"]
-    
-    # Detect mode from keywords
-    if "rna" in all_user_text and "cdna" not in all_user_text:
-        params["mode"] = "RNA"
-    elif "cdna" in all_user_text:
-        params["mode"] = "CDNA"
-    elif "dna" in all_user_text or "genomic" in all_user_text or "fiber" in all_user_text:
-        params["mode"] = "DNA"
-    else:
-        params["mode"] = "DNA"  # Default to DNA
-    
-    # Look for paths in user messages (use ORIGINAL case to preserve path)
-    # First try: relative paths with known sequencing extensions (data/ENCFF921XAH.bam)
-    _rel_path_pattern = r'\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq|fq|fast5))\b'
-    _rel_paths = re.findall(_rel_path_pattern, all_user_text_original)
-    # Second try: absolute paths
-    # Avoid false positives like "account/partition" by requiring a sensible prefix.
-    _abs_path_pattern = r'(?:(?<=^)|(?<=[\s"\'(]))(/[^\s,]+(?:/[^\s,]+)*)'
-    _abs_paths = re.findall(_abs_path_pattern, all_user_text_original)
-    
-    if _rel_paths:
-        cleaned_path = _rel_paths[0].rstrip('.,;:!?')
-        params["input_directory_explicit"] = True
-        # Resolve relative path against project directory
-        _proj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
-        _owner_id = None
-        # Find the project owner from blocks
-        for block in blocks:
-            if block.owner_id:
-                _owner_id = block.owner_id
-                break
-        if _owner_id:
-            _owner_user = session.execute(select(User).where(User.id == _owner_id)).scalar_one_or_none()
-            _uname = getattr(_owner_user, 'username', None) if _owner_user else None
-            _slug = _proj.slug if _proj else None
-            if _uname and _slug:
-                _project_dir = AGOUTIC_DATA / "users" / _uname / _slug
-            else:
-                _project_dir = AGOUTIC_DATA / "users" / _owner_id / project_id
-            params["input_directory"] = str(_project_dir / cleaned_path)
-        else:
-            params["input_directory"] = cleaned_path
-    elif _abs_paths:
-        cleaned_path = _abs_paths[0].rstrip('.,;:!?')
-        params["input_directory"] = cleaned_path
-        params["input_directory_explicit"] = True
-    else:
-        params["input_directory"] = "/data/samples/test"
-    
-    # Extract sample name from context
-    # Search user messages in REVERSE order (most recent first) so a new
-    # submission request wins over older ones in the same cycle.
-    explicit_patterns = [
-        r'([a-zA-Z0-9_-]+)\s+is\s+(?:the\s+)?sample\s+name',  # "Jamshid is sample name"
-        r'sample\s+name\s+is\s+([a-zA-Z0-9_-]+)',  # "sample name is Jamshid"
-        r'named\s+([a-zA-Z0-9_-]+)',  # "named Ali1"
-        r'called\s+([a-zA-Z0-9_-]+)',  # "called Ali1"
-        r'(?:the\s+)?sample\s+([a-zA-Z0-9_-]+)',  # "the sample c2c12r1" / "sample c2c12r1"
-        r'analyze\s+(?:the\s+)?(?:sample\s+)?([a-zA-Z0-9_-]+)\s+using',  # "analyze c2c12r1 using"
-        r'analyze\s+(?:the\s+)?(?:sample\s+)?([a-zA-Z0-9_-]+)\s+on',  # "analyze Jamshid on hpc3"
-    ]
-    _skip_words = {'is', 'the', 'a', 'an', 'this', 'that', 'it', 'at', 'in', 'on',
-                   'mm39', 'grch38', 'hg38', 'mm10', 'name', 'type', 'data', 'file',
-                   'using', 'with', 'from', 'for', 'my', 'new', 'rna', 'dna', 'cdna'}
-    for msg in reversed(user_messages):
-        for pattern in explicit_patterns:
-            match = re.search(pattern, msg, re.IGNORECASE)
-            if match:
-                candidate = match.group(1)
-                if candidate.lower() not in _skip_words:
-                    params["sample_name"] = candidate
-                    break
-        if params["sample_name"]:
-            break
-    
-    # If not found via explicit pattern, check standalone answers (but filter more carefully)
-    if not params["sample_name"]:
-        for msg in reversed(user_messages):
-            msg_lower = msg.lower().strip()
-            # Check if this is a short, standalone response (likely an answer to a question)
-            if len(msg.split()) <= 5 and len(msg) < 50:
-                # Extract just the name part if it says "X is sample name"
-                name_match = re.search(r'^([a-zA-Z0-9_-]+)(?:\s+is\s+sample\s+name)?$', msg, re.IGNORECASE)
-                if name_match:
-                    potential_name = name_match.group(1)
-                    # Not a path, not a common word, not a genome name
-                    if (potential_name.lower() not in ['dna', 'rna', 'cdna', 'mm39', 'grch38', 'hg38', 'mm10', 'human', 'mouse', 'yes', 'no', 'sup', 'hac', 'fast']
-                        and '/' not in potential_name):
-                        params["sample_name"] = potential_name
-                        break
-    
-    if not params["sample_name"]:
-        # Use genome type + project timestamp as default
-        genome_type = "mouse" if "mm39" in params["reference_genome"] else "human"
-        params["sample_name"] = f"{genome_type}_sample_{project_id.split('_')[-1]}"
-    
-    # Extract advanced parameters if mentioned
-    # modkit_filter_threshold (handle "threshold of 0.85" or "threshold: 0.85")
-    threshold_pattern = r'(?:modkit\s+)?(?:threshold|filter)(?:[:\s]+of\s+|[:\s]+)([0-9.]+)'
-    threshold_match = re.search(threshold_pattern, all_user_text)
-    if threshold_match:
-        try:
-            params["modkit_filter_threshold"] = float(threshold_match.group(1))
-        except ValueError:
-            pass
-    
-    # min_cov (handle "coverage of 10" or "min cov: 10")
-    mincov_pattern = r'(?:min[_\s]*cov|minimum[_\s]*coverage)(?:[:\s]+of\s+|[:\s]+)(\d+)'
-    mincov_match = re.search(mincov_pattern, all_user_text)
-    if mincov_match:
-        params["min_cov"] = int(mincov_match.group(1))
-    
-    # per_mod (handle "per mod of 8" or "per_mod: 8")
-    permod_pattern = r'(?:per[_\s]*mod|percentage)(?:[:\s]+of\s+|[:\s]+)(\d+)'
-    permod_match = re.search(permod_pattern, all_user_text)
-    if permod_match:
-        params["per_mod"] = int(permod_match.group(1))
-    
-    # accuracy (sup, hac, fast)
-    if "accuracy" in all_user_text:
-        if "hac" in all_user_text:
-            params["accuracy"] = "hac"
-        elif "fast" in all_user_text:
-            params["accuracy"] = "fast"
-        elif "sup" in all_user_text:
-            params["accuracy"] = "sup"
-    
-    # max_gpu_tasks (handle "max gpu tasks 2", "limit dorado to 3", "run 2 gpu tasks at a time")
-    gpu_task_patterns = [
-        r'max[_\s]*gpu[_\s]*tasks?[:\s]+(?:of\s+)?(\d+)',
-        r'limit\s+(?:dorado|gpu)\s+(?:tasks?\s+)?to\s+(\d+)',
-        r'(\d+)\s+(?:concurrent|simultaneous|parallel)\s+(?:dorado|gpu)\s+tasks?',
-        r'(?:run|allow)\s+(\d+)\s+(?:dorado|gpu)\s+tasks?',
-    ]
-    for gp in gpu_task_patterns:
-        gpu_match = re.search(gp, all_user_text)
-        if gpu_match:
-            params["max_gpu_tasks"] = int(gpu_match.group(1))
-            break
-    
-    owner_id = None
-    project = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
-    if project:
-        owner_id = project.owner_id
-
-    if owner_id:
-        params = await _prepare_remote_execution_params(session, project_id, owner_id, params)
-
-    logger.info("Extracted parameters", method="heuristics", params=params)
-    return params
-
-
 async def handle_rejection(project_id: str, gate_block_id: str):
     """
     Background task to handle rejection of an approval gate.
@@ -1353,7 +955,7 @@ async def handle_rejection(project_id: str, gate_block_id: str):
             logger.warning("Max attempts reached, creating manual parameter form", project_id=project_id)
             
             # Extract parameters for manual form
-            params = await extract_job_parameters_from_conversation(session, project_id)
+            params = await job_parameters.extract_job_parameters_from_conversation(session, project_id)
             
             # Create a manual parameter form block
             _create_block_internal(
@@ -1468,7 +1070,7 @@ Please use the parameter editing form below to make corrections.""",
             # Only create approval gate if the agent explicitly requested it
             if needs_approval:
                 # Extract parameters for new approval gate
-                params = await extract_job_parameters_from_conversation(session, project_id)
+                params = await job_parameters.extract_job_parameters_from_conversation(session, project_id)
                 
                 # Create new APPROVAL_GATE
                 _create_block_internal(
@@ -1746,7 +1348,7 @@ async def _ensure_workflow_plan_approval_gate(
     if existing_gate is not None:
         return existing_gate
 
-    extracted_params = await extract_job_parameters_from_conversation(session, workflow_block.project_id)
+    extracted_params = await job_parameters.extract_job_parameters_from_conversation(session, workflow_block.project_id)
     gate_action = "job"
     gate_skill = payload.get("skill") or "welcome"
     if isinstance(extracted_params, dict):
@@ -1803,7 +1405,7 @@ async def _handle_workflow_plan_remote_profile_auth(
     if not current_step or current_step.get("kind") != "CHECK_REMOTE_PROFILE_AUTH":
         return None
 
-    job_params = await extract_job_parameters_from_conversation(session, workflow_block.project_id)
+    job_params = await job_parameters.extract_job_parameters_from_conversation(session, workflow_block.project_id)
     if (job_params.get("execution_mode") or "local") != "slurm":
         current_step["status"] = "COMPLETED"
         current_step["auth_status"] = "not_required"
@@ -1902,357 +1504,6 @@ def _mark_workflow_plan_approval_complete(session, workflow_block: ProjectBlock,
         payload["status"] = "RUNNING"
         _persist_workflow_plan(session, workflow_block, payload)
         return
-
-
-async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
-    """
-    Background task to poll Launchpad for job status via MCP and update the EXECUTION_JOB block.
-    Continues until job is completed or failed.
-    """
-    
-    # Adaptive polling: fast at first (3 s) then slow down to 30 s.
-    # Total coverage: ~10 h, which is enough for the longest pipelines.
-    _POLL_SCHEDULE = [
-        (120,   3),    # first 6 min  → every 3 s  (120 polls)
-        (120,  10),    # next 20 min  → every 10 s
-        (120,  30),    # next 60 min  → every 30 s
-        (960,  30),    # next ~8 h    → every 30 s  (960 polls)
-    ]
-    _job_done = False
-    
-    for _batch_polls, _interval in _POLL_SCHEDULE:
-        if _job_done:
-            break
-        for _ in range(_batch_polls):
-            if _job_done:
-                break
-            await asyncio.sleep(_interval)
-        
-            session = SessionLocal()
-            try:
-                # Get current status from Launchpad via MCP
-                launchpad_url = get_service_url("launchpad")
-                client = MCPHttpClient(name="launchpad", base_url=launchpad_url)
-                await client.connect()
-                try:
-                    status_data = await client.call_tool("check_nextflow_status", run_uuid=run_uuid)
-                    logs_data = await client.call_tool("get_job_logs", run_uuid=run_uuid, limit=50)
-                finally:
-                    await client.disconnect()
-            
-                if not isinstance(status_data, dict):
-                    logger.warning("Failed to get status", run_uuid=run_uuid)
-                    continue
-            
-                logs = logs_data.get("logs", []) if isinstance(logs_data, dict) else []
-            
-                # Update the block with new data
-                block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
-                if block:
-                    # Create new payload dict to ensure SQLAlchemy detects the change
-                    payload = get_block_payload(block)
-                    payload["job_status"] = status_data
-                    resolved_work_directory = _resolved_job_work_directory(payload.get("work_directory"), status_data)
-                    if resolved_work_directory:
-                        payload["work_directory"] = resolved_work_directory
-                    payload["logs"] = logs
-                    payload["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
-                
-                    # Update block status based on job status
-                    job_status = status_data.get("status", "UNKNOWN")
-                    completed_ready_for_analysis = _completed_job_results_ready(status_data)
-                    if job_status == "COMPLETED" and completed_ready_for_analysis:
-                        block.status = "DONE"
-                    elif job_status == "FAILED":
-                        block.status = "FAILED"
-                    else:
-                        block.status = "RUNNING"
-                
-                    # Reassign payload_json to trigger SQLAlchemy update
-                    block.payload_json = json.dumps(payload)
-                    session.commit()
-                    session.refresh(block)
-                    sync_project_tasks(session, project_id)
-                
-                    logger.info("Job status updated", run_uuid=run_uuid, job_status=job_status, progress=status_data.get('progress_percent', 0))
-                
-                    # Stop polling if job is done
-                    if job_status == "FAILED" or (job_status == "COMPLETED" and completed_ready_for_analysis):
-                        logger.info("Job finished", run_uuid=run_uuid, job_status=job_status)
-
-                        workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
-                        if workflow_block is not None:
-                            _set_workflow_step_status(
-                                session,
-                                workflow_block,
-                                "run_dogme",
-                                "COMPLETED" if job_status == "COMPLETED" else "FAILED",
-                                extra={"run_uuid": run_uuid, "block_id": block_id},
-                            )
-                    
-                        # On completion, auto-trigger analysis
-                        if job_status == "COMPLETED":
-                            await _auto_trigger_analysis(
-                                project_id, run_uuid, payload, block.owner_id
-                            )
-                    
-                        _job_done = True
-                        break
-        
-            except Exception as e:
-                logger.warning("Error polling job", run_uuid=run_uuid, error=str(e))
-            finally:
-                session.close()
-    
-    logger.info("Stopped polling job", run_uuid=run_uuid)
-
-
-def _completed_job_results_ready(status_data: dict | None) -> bool:
-    if not isinstance(status_data, dict):
-        return False
-    if status_data.get("status") != "COMPLETED":
-        return False
-    result_destination = (status_data.get("result_destination") or "").strip().lower()
-    if result_destination not in {"local", "both"}:
-        return True
-    return (status_data.get("transfer_state") or "") == "outputs_downloaded"
-
-
-def _resolved_job_work_directory(existing_work_directory: str | None, status_data: dict | None) -> str | None:
-    if isinstance(status_data, dict):
-        status_work_directory = (status_data.get("work_directory") or "").strip()
-        if status_work_directory:
-            return status_work_directory
-    return existing_work_directory or None
-
-
-async def _auto_trigger_analysis(
-    project_id: str, run_uuid: str, job_payload: dict, owner_id: str | None
-):
-    """
-    Automatically analyse a just-completed Dogme job.
-
-    1. Fetches the analysis summary (file listing) from Analyzer.
-    2. Parses key CSV result files (final_stats, qc_summary) via Analyzer MCP.
-    3. Passes everything to the LLM for an intelligent first interpretation.
-    4. Saves the LLM response as an AGENT_PLAN block with token tracking.
-
-    Falls back to a static template if the LLM call fails.
-    """
-    sample_name = job_payload.get("sample_name", "Unknown")
-    mode = job_payload.get("mode", "DNA")
-    model_key = job_payload.get("model", "default")
-    work_directory = job_payload.get("work_directory", "")
-
-    logger.info("Auto-triggering analysis", run_uuid=run_uuid,
-                sample_name=sample_name, mode=mode, model=model_key)
-
-    session = SessionLocal()
-    try:
-        workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
-        if workflow_block is not None:
-            workflow_payload = get_block_payload(workflow_block)
-            if workflow_payload.get("next_step") != "analyze_results":
-                logger.info("Skipping auto-analysis because analysis is not the next todo", run_uuid=run_uuid)
-                return
-            _set_workflow_step_status(
-                session,
-                workflow_block,
-                "analyze_results",
-                "RUNNING",
-                extra={"run_uuid": run_uuid},
-            )
-
-        # 1. Create a system message announcing the transition
-        _create_block_internal(
-            session,
-            project_id,
-            "USER_MESSAGE",
-            {"text": f"Job \"{sample_name}\" completed. Analyze the results."},
-            owner_id=owner_id,
-        )
-
-        # Also save to conversation history so the LLM sees it
-        if owner_id:
-            await save_conversation_message(
-                session, project_id, owner_id, "user",
-                f"Job \"{sample_name}\" completed. Analyze the results."
-            )
-
-        # 2. Fetch analysis summary + key CSV data from Analyzer
-        summary_data = {}  # structured summary from get_analysis_summary
-        parsed_csvs = {}   # filename → parsed rows from key CSVs
-        try:
-            analyzer_url = get_service_url("analyzer")
-            client = MCPHttpClient(name="analyzer", base_url=analyzer_url)
-            await client.connect()
-            try:
-                summary_data = await client.call_tool(
-                    "get_analysis_summary", run_uuid=run_uuid,
-                    work_dir=work_directory or None,
-                )
-                if not isinstance(summary_data, dict):
-                    summary_data = {}
-
-                # Parse key CSV files for the LLM
-                # Prioritise small, high-value files: final_stats, qc_summary
-                csv_files = (
-                    summary_data
-                    .get("file_summary", {})
-                    .get("csv_files", [])
-                )
-                _KEY_PATTERNS = ("final_stats", "qc_summary")
-                for finfo in csv_files:
-                    fname = finfo.get("name", "")
-                    fsize = finfo.get("size", 0)
-                    if fsize > 500_000:  # skip files > 500 KB
-                        continue
-                    if any(pat in fname.lower() for pat in _KEY_PATTERNS):
-                        try:
-                            _csv_params: dict = {
-                                "file_path": fname,
-                                "max_rows": 50,
-                            }
-                            if work_directory:
-                                _csv_params["work_dir"] = work_directory
-                            else:
-                                _csv_params["run_uuid"] = run_uuid
-                            parse_result = await client.call_tool(
-                                "parse_csv_file",
-                                **_csv_params,
-                            )
-                            if isinstance(parse_result, dict) and parse_result.get("data"):
-                                parsed_csvs[fname] = parse_result
-                        except Exception as csv_err:
-                            logger.debug("Failed to parse CSV for auto-analysis",
-                                         filename=fname, error=str(csv_err))
-            finally:
-                await client.disconnect()
-        except Exception as e:
-            logger.warning("Failed to fetch analysis summary", run_uuid=run_uuid, error=str(e))
-
-        # 3. Map mode → Dogme analysis skill
-        mode_skill_map = {
-            "DNA": "run_dogme_dna",
-            "RNA": "run_dogme_rna",
-            "CDNA": "run_dogme_cdna",
-        }
-        analysis_skill = mode_skill_map.get(mode.upper(), "analyze_job_results")
-
-        # 4. Build data context string for the LLM
-        data_context = _build_auto_analysis_context(
-            sample_name, mode, run_uuid, summary_data, parsed_csvs
-        )
-
-        # 5. Call the LLM for an intelligent interpretation
-        llm_md = ""
-        llm_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        engine = None
-        try:
-            engine = AgentEngine(model_key=model_key)
-            user_prompt = (
-                f"A Dogme {mode} job for sample \"{sample_name}\" just completed.\n"
-                f"Work directory: {work_directory}\n\n"
-                f"Here is the analysis summary and key result data:\n\n"
-                f"{data_context}\n\n"
-                f"Provide a concise interpretation of these results. "
-                f"Highlight key metrics, any QC concerns, and suggest "
-                f"next steps the user could explore."
-            )
-            llm_md, llm_usage = await run_in_threadpool(
-                engine.think,
-                user_prompt,
-                analysis_skill,
-                None,  # no conversation history needed — data is self-contained
-            )
-            # Strip any tags the LLM might emit (it shouldn't, but be safe)
-            llm_md = re.sub(r'\[\[DATA_CALL:.*?\]\]', '', llm_md)
-            llm_md = re.sub(r'\[\[SKILL_SWITCH_TO:.*?\]\]', '', llm_md)
-            llm_md = re.sub(r'\[\[APPROVAL_NEEDED\]\]', '', llm_md)
-            llm_md = llm_md.strip()
-            logger.info("Auto-analysis LLM call succeeded",
-                        run_uuid=run_uuid, tokens=llm_usage.get("total_tokens", 0))
-        except Exception as llm_err:
-            logger.warning("Auto-analysis LLM call failed, using static template",
-                           run_uuid=run_uuid, error=str(llm_err))
-            llm_md = ""  # fall through to static template below
-
-        # 6. Build the final markdown
-        if llm_md:
-            # LLM succeeded — prepend a header and append exploration hints
-            _wf_name = work_directory.rstrip('/').rsplit('/', 1)[-1] if work_directory else ''
-            final_md = (
-                f"### 📊 Analysis: {sample_name}\n"
-                f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
-                f"**Mode:** {mode} &nbsp;|&nbsp; "
-                f"**Status:** COMPLETED\n\n"
-                f"{llm_md}\n\n"
-                f"💡 *You can ask me to dive deeper — for example:*\n"
-                f"- \"Show me the modification summary\"\n"
-                f"- \"Parse the CSV results\"\n"
-                f"- \"Give me a QC report\"\n"
-            )
-            _model_name = engine.model_name if engine else "system"
-        else:
-            # Fallback: static template (same as before)
-            final_md = _build_static_analysis_summary(
-                sample_name, mode, run_uuid, summary_data,
-                work_directory=work_directory,
-            )
-            _model_name = "system"
-            llm_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-
-        # 7. Create AGENT_PLAN block with the analysis
-        _token_payload = {
-            **llm_usage,
-            "model": _model_name,
-        }
-        _create_block_internal(
-            session,
-            project_id,
-            "AGENT_PLAN",
-            {
-                "markdown": final_md,
-                "skill": analysis_skill,
-                "model": _model_name,
-                "tokens": _token_payload,
-            },
-            status="DONE",
-            owner_id=owner_id,
-        )
-
-        # Save assistant response to conversation history with token tracking
-        if owner_id:
-            await save_conversation_message(
-                session, project_id, owner_id, "assistant", final_md,
-                token_data=_token_payload, model_name=_model_name
-            )
-
-        logger.info("Auto-analysis block created", run_uuid=run_uuid,
-                    skill=analysis_skill, model=_model_name,
-                    tokens=llm_usage.get("total_tokens", 0))
-
-        if workflow_block is not None:
-            _set_workflow_step_status(
-                session,
-                workflow_block,
-                "analyze_results",
-                "COMPLETED",
-                extra={"run_uuid": run_uuid},
-            )
-
-    except Exception as e:
-        logger.error("Auto-trigger analysis failed", run_uuid=run_uuid, error=str(e))
-        if 'workflow_block' in locals() and workflow_block is not None:
-            _set_workflow_step_status(
-                session,
-                workflow_block,
-                "analyze_results",
-                "FAILED",
-                extra={"run_uuid": run_uuid, "error": str(e)},
-            )
-    finally:
-        session.close()
 
 
 # --- CHAT PROGRESS STATUS ---
@@ -4375,7 +3626,7 @@ What would you like to do?
                 user_message=req.message,
                 active_skill=active_skill,
                 all_results=all_results,
-                extract_params=extract_job_parameters_from_conversation,
+                extract_params=job_parameters.extract_job_parameters_from_conversation,
             )
 
             if remote_stage_approval_context and has_real_data:
@@ -5125,7 +4376,7 @@ What would you like to do?
                 if remote_stage_approval_context and isinstance(remote_stage_approval_context.get("params"), dict):
                     extracted_params = dict(remote_stage_approval_context.get("params") or {})
                 else:
-                    extracted_params = await extract_job_parameters_from_conversation(session, req.project_id)
+                    extracted_params = await job_parameters.extract_job_parameters_from_conversation(session, req.project_id)
                 if isinstance(extracted_params, dict):
                     gate_action = extracted_params.get("gate_action") or gate_action
                     if (
