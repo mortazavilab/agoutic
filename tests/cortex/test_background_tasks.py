@@ -32,7 +32,6 @@ from cortex.models import (
 from cortex.app import (
     handle_rejection,
     download_after_approval,
-    submit_job_after_approval,
     _auto_execute_plan_steps,
     _initial_stage_parts,
     poll_job_status,
@@ -46,6 +45,7 @@ from cortex.app import (
     _create_block_internal,
     _active_downloads,
 )
+from cortex.workflow_submission import submit_job_after_approval
 from cortex.planner import _template_remote_stage_workflow
 
 
@@ -121,6 +121,7 @@ import contextlib
 def _patch_session(session_factory):
     """Context manager that redirects SessionLocal to our in-memory DB."""
     with patch("cortex.app.SessionLocal", session_factory), \
+         patch("cortex.workflow_submission.SessionLocal", session_factory), \
          patch("cortex.db.SessionLocal", session_factory), \
          patch("cortex.dependencies.SessionLocal", session_factory), \
          patch("cortex.middleware.SessionLocal", session_factory), \
@@ -406,7 +407,7 @@ class TestDownloadAfterApproval:
 
         with _patch_session(session_factory), \
              patch("cortex.app.asyncio") as mock_aio, \
-             patch("cortex.app.AGOUTIC_DATA", str(tmp_path)):
+               patch("cortex.app.AGOUTIC_DATA", str(tmp_path)):
             mock_aio.create_task = MagicMock()
             await download_after_approval("proj-bg", gate.id)
 
@@ -526,9 +527,9 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -568,9 +569,9 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -620,8 +621,8 @@ class TestSubmitJobAfterApproval:
         mock_client.call_tool = AsyncMock(return_value={"error": "queue full"})
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client):
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client):
             await submit_job_after_approval("proj-bg", gate.id)
 
         sess = session_factory()
@@ -647,8 +648,8 @@ class TestSubmitJobAfterApproval:
         mock_client.connect = AsyncMock(side_effect=ConnectionError("No launchpad"))
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client):
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client):
             await submit_job_after_approval("proj-bg", gate.id)
 
         sess = session_factory()
@@ -682,10 +683,11 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.AGOUTIC_DATA", str(tmp_path)), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+               patch("cortex.workflow_submission.AGOUTIC_DATA", str(tmp_path)), \
+               patch("cortex.remote_orchestration.AGOUTIC_DATA", str(tmp_path)), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -719,10 +721,11 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.AGOUTIC_DATA", tmp_path), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+               patch("cortex.workflow_submission.AGOUTIC_DATA", tmp_path), \
+               patch("cortex.remote_orchestration.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -770,9 +773,10 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.AGOUTIC_DATA", tmp_path):
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+               patch("cortex.workflow_submission.AGOUTIC_DATA", tmp_path), \
+               patch("cortex.remote_orchestration.AGOUTIC_DATA", tmp_path):
             await submit_job_after_approval("proj-bg", gate.id)
 
         assert mock_client.call_tool.call_count == 0
@@ -825,11 +829,12 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-             patch("cortex.app.AGOUTIC_DATA", tmp_path), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+               patch("cortex.workflow_submission.AGOUTIC_DATA", tmp_path), \
+               patch("cortex.remote_orchestration.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -863,9 +868,9 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -891,10 +896,10 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -939,10 +944,10 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -1003,10 +1008,10 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -1038,7 +1043,7 @@ class TestSubmitJobAfterApproval:
         })
 
         seen_execution_modes = []
-        real_prepare = __import__("cortex.app", fromlist=["_prepare_remote_execution_params"])._prepare_remote_execution_params
+        real_prepare = __import__("cortex.workflow_submission", fromlist=["_prepare_remote_execution_params"])._prepare_remote_execution_params
 
         async def _wrapped_prepare(session, project_id, owner_id, params):
             seen_execution_modes.append((params.get("execution_mode") or "local").strip().lower())
@@ -1055,12 +1060,12 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app._prepare_remote_execution_params", new=_wrapped_prepare), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-             patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[])), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission._prepare_remote_execution_params", new=_wrapped_prepare), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[])), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -1095,10 +1100,10 @@ class TestSubmitJobAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app._prepare_remote_execution_params", new=_broken_prepare), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission._prepare_remote_execution_params", new=_broken_prepare), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -1138,10 +1143,10 @@ class TestSubmitJobAfterApproval:
         mock_client.call_tool = AsyncMock(side_effect=RuntimeError("Failed to stage remote sample: HTTP 400 from http://localhost:8003/remote/stage - {\"detail\":\"Local source path does not exist on the Launchpad server: /data/pod5\"}"))
 
         with _patch_session(session_factory), \
-             patch("cortex.app.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.app.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
@@ -1347,7 +1352,7 @@ async def test_auto_execute_plan_steps_blocks_when_remote_profile_locked(session
              }),
          ), \
          patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-         patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+         patch("cortex.workflow_submission._list_user_ssh_profiles", new=AsyncMock(return_value=[{
              "id": "profile-123",
              "nickname": "hpc3",
              "ssh_host": "hpc3.example.edu",

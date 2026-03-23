@@ -31,6 +31,23 @@
   script-mode fields and enforces local execution for script runs while keeping
   existing Dogme/remote staging paths unchanged.
 
+- **Cortex submission boundary extraction** — moved
+  `submit_job_after_approval` from `cortex/app.py` into
+  `cortex/workflow_submission.py` while keeping
+  `extract_job_parameters_from_conversation`, `poll_job_status`, and
+  `_auto_trigger_analysis` in `cortex/app.py`.
+
+- **Removed temporary submit compatibility export surface** —
+  `cortex.app.submit_job_after_approval` is no longer re-exported; app now
+  dispatches directly to `cortex.workflow_submission.submit_job_after_approval`
+  at call sites.
+
+- **Explicit remaining deferred app-owned submit dependencies** —
+  `cortex/workflow_submission.py` intentionally resolves
+  `extract_job_parameters_from_conversation` and `poll_job_status` through
+  deferred `cortex.app` lookup in this pass to preserve behavior while those
+  symbols remain app-owned.
+
 - **MCP submission parity for script-mode payloads** — Launchpad MCP wrappers
   now pass script-mode fields through `submit_dogme_job` when explicitly
   provided, with backward-compatible defaults for existing callers.
@@ -43,6 +60,9 @@
   - allowlist/path/args validation helpers
   - Launchpad script submit success and failure paths
   - MCP passthrough compatibility for script-mode fields
+  - submit-handler extraction boundary stability via focused
+    background-task/approval tests plus broader Cortex endpoint/chat and
+    Launchpad status/submit suites
 
 ## [3.4.5] - 2026-03-23
 

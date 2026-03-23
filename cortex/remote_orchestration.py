@@ -1,18 +1,22 @@
 import datetime
 import hashlib
+import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import httpx
+from fastapi.concurrency import run_in_threadpool
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from common.logging_config import get_logger
 from cortex.config import AGOUTIC_DATA, SERVICE_REGISTRY
-from cortex.db_helpers import _resolve_project_dir
-from cortex.models import Project, User
+from cortex.db_helpers import _create_block_internal, _resolve_project_dir
+from cortex.llm_validators import get_block_payload
+from cortex.models import Project, ProjectBlock, User
 from cortex.routes.projects import _slugify
 from cortex.remote_stage_status import (
     _make_stage_part,
@@ -22,8 +26,13 @@ from cortex.remote_stage_status import (
     _final_stage_parts,
     _failed_stage_parts,
 )
+from cortex.task_service import sync_project_tasks
 
 logger = get_logger(__name__)
+
+_WORKFLOW_PLAN_TYPE = "WORKFLOW_PLAN"
+_LOCAL_SAMPLE_WORKFLOW = "local_sample_intake"
+_REMOTE_SAMPLE_WORKFLOW = "remote_sample_intake"
 
 
 def _launchpad_internal_headers() -> dict[str, str]:
@@ -837,5 +846,392 @@ def _inject_launchpad_context_params(
         hydrated["project_id"] = project_id
 
     return hydrated
+
+
+def _workflow_step_index(payload: dict, step_id: str) -> int | None:
+    for idx, step in enumerate(payload.get("steps", [])):
+        if step.get("id") == step_id:
+            return idx
+    return None
+
+
+def _workflow_next_step(payload: dict) -> str | None:
+    for step in payload.get("steps", []):
+        if step.get("status") not in {"COMPLETED", "CANCELLED"}:
+            return step.get("id")
+    return None
+
+
+def _workflow_status(payload: dict) -> str:
+    steps = payload.get("steps", [])
+    if any(step.get("status") == "FAILED" for step in steps):
+        return "FAILED"
+    if any(step.get("status") == "FOLLOW_UP" for step in steps):
+        return "FOLLOW_UP"
+    if all(step.get("status") == "COMPLETED" for step in steps if step.get("id")) and steps:
+        return "COMPLETED"
+    if any(step.get("status") == "RUNNING" for step in steps):
+        return "RUNNING"
+    return "PENDING"
+
+
+def _persist_workflow_plan(session, workflow_block: ProjectBlock, payload: dict, *, status: str | None = None) -> None:
+    payload["next_step"] = _workflow_next_step(payload)
+    payload["status"] = _workflow_status(payload)
+    workflow_block.payload_json = json.dumps(payload)
+    workflow_block.status = status or payload["status"]
+    session.commit()
+    session.refresh(workflow_block)
+    sync_project_tasks(session, workflow_block.project_id)
+
+
+def _set_workflow_step_status(
+    session,
+    workflow_block: ProjectBlock,
+    step_id: str,
+    status: str,
+    *,
+    extra: dict | None = None,
+) -> dict:
+    payload = get_block_payload(workflow_block)
+    idx = _workflow_step_index(payload, step_id)
+    if idx is None:
+        return payload
+    step = dict(payload["steps"][idx])
+    step["status"] = status
+    if extra:
+        step.update(extra)
+    if status == "COMPLETED":
+        step.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+    payload["steps"][idx] = step
+    _persist_workflow_plan(session, workflow_block, payload)
+    return payload
+
+
+def _resolve_workflow_step_id(payload: dict, *identifiers: str, kinds: tuple[str, ...] = ()) -> str | None:
+    steps = payload.get("steps", [])
+    for identifier in identifiers:
+        if not identifier:
+            continue
+        for step in steps:
+            if step.get("id") == identifier:
+                return identifier
+    if kinds:
+        for step in steps:
+            if step.get("kind") in kinds:
+                return step.get("id")
+    return None
+
+
+def _update_project_block_payload(session, block_id: str, updates: dict, *, status: str | None = None) -> ProjectBlock | None:
+    block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
+    if not block:
+        return None
+    payload = get_block_payload(block)
+    payload.update(updates)
+    block.payload_json = json.dumps(payload)
+    if status is not None:
+        block.status = status
+    session.commit()
+    session.refresh(block)
+    sync_project_tasks(session, block.project_id)
+    return block
+
+
+def _apply_slurm_cache_preflight_to_workflow(
+    session,
+    workflow_block: ProjectBlock | None,
+    cache_preflight: dict | None,
+) -> None:
+    if workflow_block is None or not cache_preflight:
+        return
+
+    payload = get_block_payload(workflow_block)
+    steps = payload.get("steps", [])
+    if not steps:
+        return
+
+    reference_actions = cache_preflight.get("reference_actions") or []
+    data_action = cache_preflight.get("data_action") or {}
+    preflight_status = cache_preflight.get("status") or "ready"
+
+    for idx, step in enumerate(steps):
+        kind = step.get("kind")
+        if kind == "FIND_REFERENCE_CACHE":
+            updated = dict(step)
+            updated["status"] = "COMPLETED"
+            updated["cache_preflight_status"] = preflight_status
+            updated["reference_actions"] = reference_actions
+            updated["cache_root"] = (cache_preflight.get("cache_roots") or {}).get("reference_root")
+            updated.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+            steps[idx] = updated
+        elif kind == "FIND_DATA_CACHE":
+            updated = dict(step)
+            updated["status"] = "COMPLETED"
+            updated["cache_preflight_status"] = preflight_status
+            updated["data_action"] = data_action
+            updated["cache_root"] = (cache_preflight.get("cache_roots") or {}).get("data_root")
+            updated.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+            steps[idx] = updated
+        elif kind in {"check_remote_stage", "CHECK_REMOTE_STAGE"}:
+            updated = dict(step)
+            updated["status"] = "COMPLETED"
+            updated["cache_preflight_status"] = preflight_status
+            updated["reference_actions"] = reference_actions
+            updated["data_action"] = data_action
+            updated["cache_root"] = (cache_preflight.get("cache_roots") or {}).get("data_root")
+            updated.setdefault("completed_at", datetime.datetime.utcnow().isoformat() + "Z")
+            steps[idx] = updated
+
+    payload["steps"] = steps
+    _persist_workflow_plan(session, workflow_block, payload)
+
+
+def _find_workflow_plan(session, project_id: str, workflow_block_id: str | None = None, run_uuid: str | None = None) -> ProjectBlock | None:
+    query = select(ProjectBlock).where(
+        ProjectBlock.project_id == project_id,
+        ProjectBlock.type == _WORKFLOW_PLAN_TYPE,
+    ).order_by(ProjectBlock.seq.desc())
+    for block in session.execute(query).scalars().all():
+        if workflow_block_id and block.id == workflow_block_id:
+            return block
+        payload = get_block_payload(block)
+        if run_uuid and payload.get("run_uuid") == run_uuid:
+            return block
+        if not workflow_block_id and not run_uuid and payload.get("workflow_type") == _LOCAL_SAMPLE_WORKFLOW:
+            return block
+    return None
+
+
+def _local_sample_dest_dir(*, username: str | None, owner_id: str, sample_name: str) -> Path:
+    user_key = username or owner_id
+    sample_slug = _slugify(sample_name or "sample")
+    return Path(AGOUTIC_DATA) / "users" / user_key / "data" / sample_slug
+
+
+def _should_stage_local_sample(gate_payload: dict, job_params: dict) -> bool:
+    skill = gate_payload.get("skill")
+    if skill != "analyze_local_sample":
+        return False
+    if _has_remote_stage_intent(job_params, gate_payload):
+        return False
+    if (job_params.get("execution_mode") or "local").strip().lower() == "slurm":
+        return False
+    if job_params.get("input_type") == "bam":
+        return False
+    input_dir = str(job_params.get("input_directory") or "").strip()
+    if job_params.get("gate_action") == "local_sample_existing":
+        return True
+    return input_dir.startswith("/") and Path(input_dir).exists()
+
+
+def _build_local_sample_workflow_payload(job_data: dict, *, gate_block_id: str) -> dict:
+    sample_name = job_data["sample_name"]
+    source_path = str(job_data["input_directory"])
+    staged_path = str(job_data["staged_input_directory"])
+    return {
+        "workflow_type": _LOCAL_SAMPLE_WORKFLOW,
+        "title": f"Process local sample {sample_name}",
+        "sample_name": sample_name,
+        "mode": job_data.get("mode"),
+        "source_path": source_path,
+        "staged_input_directory": staged_path,
+        "gate_block_id": gate_block_id,
+        "run_uuid": None,
+        "steps": [
+            {
+                "id": "stage_input",
+                "kind": "copy_sample",
+                "title": f"Stage {sample_name} into user data",
+                "status": "PENDING",
+                "source_path": source_path,
+                "staged_input_directory": staged_path,
+                "order_index": 0,
+            },
+            {
+                "id": "run_dogme",
+                "kind": "run",
+                "title": f"Run Dogme for {sample_name}",
+                "status": "PENDING",
+                "order_index": 1,
+            },
+            {
+                "id": "analyze_results",
+                "kind": "analysis",
+                "title": f"Analyze results for {sample_name}",
+                "status": "PENDING",
+                "order_index": 2,
+            },
+        ],
+    }
+
+
+def _build_remote_sample_workflow_payload(job_data: dict, *, gate_block_id: str, stage_only: bool) -> dict:
+    sample_name = job_data["sample_name"]
+    source_path = str(job_data.get("input_directory") or "")
+    staged_path = str(job_data.get("staged_remote_input_path") or "")
+    steps = [
+        {
+            "id": "check_remote_stage",
+            "kind": "check_remote_stage",
+            "title": f"Check remote staged data for {sample_name}",
+            "status": "PENDING",
+            "order_index": 0,
+        },
+        {
+            "id": "stage_input",
+            "kind": "remote_stage",
+            "title": f"Stage or reuse remote input for {sample_name}",
+            "status": "PENDING",
+            "source_path": source_path,
+            "staged_input_directory": staged_path,
+            "order_index": 1,
+        },
+    ]
+    if stage_only:
+        steps.append(
+            {
+                "id": "complete_stage_only",
+                "kind": "complete_stage_only",
+                "title": f"Finish remote staging for {sample_name}",
+                "status": "PENDING",
+                "order_index": 2,
+            }
+        )
+    else:
+        steps.extend(
+            [
+                {
+                    "id": "run_dogme",
+                    "kind": "run",
+                    "title": f"Run Dogme for {sample_name}",
+                    "status": "PENDING",
+                    "order_index": 2,
+                },
+                {
+                    "id": "analyze_results",
+                    "kind": "analysis",
+                    "title": f"Analyze results for {sample_name}",
+                    "status": "PENDING",
+                    "order_index": 3,
+                },
+            ]
+        )
+
+    return {
+        "workflow_type": _REMOTE_SAMPLE_WORKFLOW,
+        "title": f"{'Stage' if stage_only else 'Run remote analysis for'} {sample_name}",
+        "sample_name": sample_name,
+        "mode": job_data.get("mode"),
+        "source_path": source_path,
+        "staged_input_directory": staged_path,
+        "remote_base_path": job_data.get("remote_base_path"),
+        "ssh_profile_id": job_data.get("ssh_profile_id"),
+        "gate_block_id": gate_block_id,
+        "run_uuid": None,
+        "remote_action": "stage_only" if stage_only else "job",
+        "steps": steps,
+    }
+
+
+def _ensure_remote_sample_workflow(
+    session,
+    project_id: str,
+    owner_id: str,
+    gate_block_id: str,
+    job_data: dict,
+    *,
+    workflow_block_id: str | None = None,
+    stage_only: bool,
+) -> ProjectBlock:
+    workflow_block = _find_workflow_plan(session, project_id, workflow_block_id=workflow_block_id)
+    if workflow_block is not None:
+        payload = get_block_payload(workflow_block)
+        payload["sample_name"] = job_data["sample_name"]
+        payload["mode"] = job_data.get("mode")
+        payload["source_path"] = str(job_data.get("input_directory") or "")
+        payload["staged_input_directory"] = str(job_data.get("staged_remote_input_path") or "")
+        payload["remote_base_path"] = job_data.get("remote_base_path")
+        payload["ssh_profile_id"] = job_data.get("ssh_profile_id")
+        payload["remote_action"] = "stage_only" if stage_only else "job"
+        _persist_workflow_plan(session, workflow_block, payload)
+        return workflow_block
+
+    workflow_block = _create_block_internal(
+        session,
+        project_id,
+        _WORKFLOW_PLAN_TYPE,
+        _build_remote_sample_workflow_payload(job_data, gate_block_id=gate_block_id, stage_only=stage_only),
+        status="PENDING",
+        owner_id=owner_id,
+    )
+    sync_project_tasks(session, project_id)
+    return workflow_block
+
+
+def _ensure_local_sample_workflow(session, project_id: str, owner_id: str, gate_block_id: str, job_data: dict, workflow_block_id: str | None = None) -> ProjectBlock:
+    workflow_block = _find_workflow_plan(session, project_id, workflow_block_id=workflow_block_id)
+    if workflow_block is not None:
+        payload = get_block_payload(workflow_block)
+        payload["sample_name"] = job_data["sample_name"]
+        payload["mode"] = job_data.get("mode")
+        payload["source_path"] = str(job_data["input_directory"])
+        payload["staged_input_directory"] = str(job_data["staged_input_directory"])
+        _persist_workflow_plan(session, workflow_block, payload)
+        return workflow_block
+
+    workflow_block = _create_block_internal(
+        session,
+        project_id,
+        _WORKFLOW_PLAN_TYPE,
+        _build_local_sample_workflow_payload(job_data, gate_block_id=gate_block_id),
+        status="PENDING",
+        owner_id=owner_id,
+    )
+    sync_project_tasks(session, project_id)
+    return workflow_block
+
+
+async def _copy_local_sample_tree(source_dir: Path, staged_dir: Path, *, replace_existing: bool) -> None:
+    def _copy():
+        staged_dir.parent.mkdir(parents=True, exist_ok=True)
+        if replace_existing and staged_dir.exists():
+            shutil.rmtree(staged_dir)
+        if not staged_dir.exists():
+            shutil.copytree(source_dir, staged_dir)
+
+    await run_in_threadpool(_copy)
+
+
+def _create_existing_stage_gate(session, project_id: str, owner_id: str, gate_payload: dict, job_params: dict, workflow_block: ProjectBlock, staged_dir: Path) -> ProjectBlock:
+    payload = {
+        "label": (
+            f"A staged sample folder already exists at `{staged_dir}`. "
+            "Approve to reuse the existing staged copy, or choose replace to recopy from the source path."
+        ),
+        "extracted_params": {
+            **job_params,
+            "gate_action": "local_sample_existing",
+            "workflow_block_id": workflow_block.id,
+            "staged_input_directory": str(staged_dir),
+        },
+        "gate_action": "local_sample_existing",
+        "attempt_number": 1,
+        "rejection_history": [],
+        "skill": gate_payload.get("skill"),
+        "model": gate_payload.get("model", "default"),
+    }
+    gate_block = _create_block_internal(
+        session,
+        project_id,
+        "APPROVAL_GATE",
+        payload,
+        status="PENDING",
+        owner_id=owner_id,
+    )
+    gate_block.parent_id = workflow_block.id
+    session.commit()
+    session.refresh(gate_block)
+    return gate_block
 
 

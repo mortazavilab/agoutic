@@ -22,6 +22,20 @@
 - **Remote orchestration bridge removal** — removed the temporary
   compatibility shim used during helper extraction and eliminated reverse
   import coupling from remote orchestration back into Cortex app logic.
+- **Submission-handler extraction** — moved
+  `submit_job_after_approval` from `cortex/app.py` to
+  `cortex/workflow_submission.py` to keep app-level route/orchestration glue
+  thinner while preserving runtime behavior.
+- **Submit boundary ownership now direct** —
+  `cortex/app.py` dispatches directly to
+  `cortex.workflow_submission.submit_job_after_approval`, and
+  `cortex.app.submit_job_after_approval` is no longer maintained as an export
+  surface.
+- **Explicit remaining deferred app-owned dependencies** —
+  `cortex/workflow_submission.py` still resolves
+  `extract_job_parameters_from_conversation` and `poll_job_status` through a
+  deferred `cortex.app` lookup in this pass while those symbols remain
+  app-owned.
 - **Approval-context extractor injection** — remote approval-context building
   now receives parameter extraction from the app call site, preserving behavior
   while keeping module boundaries one-directional.
@@ -58,6 +72,9 @@
   post-execution analysis section covering scientific interpretation goals,
   supported analysis modes, example requests, visualization outputs, and
   current analysis limitations.
+- **Post-extraction validation sweep completed** — focused submit/approval
+  tests plus broader Cortex endpoint/chat suites and Launchpad status/submit
+  suites passed after the submission-handler module move.
 
 ## 🧬 Overview
 
