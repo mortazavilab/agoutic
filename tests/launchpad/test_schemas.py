@@ -136,6 +136,44 @@ class TestSubmitJobRequest:
         )
         assert req.staged_remote_input_path == "/remote/agoutic/data/abc123"
 
+    def test_script_run_requires_explicit_script_selector(self):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="script-job",
+                mode="DNA",
+                input_directory="/tmp",
+                run_type="script",
+            )
+
+    def test_script_run_rejects_slurm_execution_mode(self):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="script-job",
+                mode="DNA",
+                input_directory="/tmp",
+                run_type="script",
+                script_id="reconcileBams",
+                execution_mode="slurm",
+                user_id="user-1",
+                ssh_profile_id="profile-1",
+            )
+
+    def test_script_run_accepts_script_id_or_script_path(self):
+        req = SubmitJobRequest(
+            project_id="p",
+            sample_name="script-job",
+            mode="DNA",
+            input_directory="/tmp",
+            run_type="script",
+            script_id="reconcileBams",
+            script_args=["--dry-run"],
+        )
+        assert req.run_type == "script"
+        assert req.script_id == "reconcileBams"
+        assert req.script_args == ["--dry-run"]
+
 
 class TestStageRemoteSampleRequest:
     def test_normalizes_reference_genome_to_list(self):

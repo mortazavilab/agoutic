@@ -1,3 +1,49 @@
+## [3.4.6] - 2026-03-23
+
+### Improvements
+
+- **RUN_SCRIPT workflow step support** — added `RUN_SCRIPT` as a supported
+  plan step kind so workflow plans can represent standalone Python utility
+  execution without forcing full Nextflow workflow submission.
+
+- **Launchpad `/jobs/submit` script mode (local-only)** — extended job
+  submission to support `run_type="script"` with structured script metadata
+  (`script_id`, `script_path`, `script_args`, `script_working_directory`) while
+  preserving existing Dogme submission behavior by default.
+
+- **Explicit allowlist-based script resolution (deny by default)** — script
+  execution now requires an explicit allowlisted selector:
+  - `script_id` mapped in `LAUNCHPAD_SCRIPT_ALLOWLIST_IDS`, or
+  - explicit absolute `script_path` under `LAUNCHPAD_SCRIPT_ALLOWLIST_ROOTS`.
+
+- **No repository auto-discovery for runnable scripts** — Launchpad does not
+  infer runnable scripts from repository contents; execution is only allowed
+  when an explicit allowlisted selector is provided.
+
+- **Structured local script monitoring and status** — script-mode runs now
+  record execution/log metadata, surface status through existing status/log
+  endpoints, and report clear success/failure outcomes for downstream plan
+  dependencies.
+
+### Fixes
+
+- **Cortex submission glue for script mode** — approval submission now forwards
+  script-mode fields and enforces local execution for script runs while keeping
+  existing Dogme/remote staging paths unchanged.
+
+- **MCP submission parity for script-mode payloads** — Launchpad MCP wrappers
+  now pass script-mode fields through `submit_dogme_job` when explicitly
+  provided, with backward-compatible defaults for existing callers.
+
+### Tests
+
+- Added focused regression tests for:
+  - `RUN_SCRIPT` step dispatch and approval-gated special handling
+  - script-mode schema validation constraints
+  - allowlist/path/args validation helpers
+  - Launchpad script submit success and failure paths
+  - MCP passthrough compatibility for script-mode fields
+
 ## [3.4.5] - 2026-03-23
 
 ### Fixes

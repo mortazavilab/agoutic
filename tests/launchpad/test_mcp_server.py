@@ -60,6 +60,7 @@ async def test_submit_dogme_job_forwards_cache_fields(monkeypatch):
 
     submit_mock.assert_awaited_once_with(
         project_id="proj-1",
+        run_type="dogme",
         user_id="user-1",
         username=None,
         project_slug=None,
@@ -89,6 +90,10 @@ async def test_submit_dogme_job_forwards_cache_fields(monkeypatch):
         staged_remote_input_path=None,
         cache_preflight=cache_preflight,
         result_destination="local",
+        script_id=None,
+        script_path=None,
+        script_args=None,
+        script_working_directory=None,
     )
 
 

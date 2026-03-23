@@ -65,6 +65,7 @@ _APPROVAL_STEP_KINDS = frozenset({
     "DOWNLOAD_DATA",
     "RUN_DE_ANALYSIS",
     "RUN_DE_PIPELINE",
+    "RUN_SCRIPT",
     "REQUEST_APPROVAL",
 })
 
@@ -97,6 +98,7 @@ STEP_TOOL_DEFAULTS: dict[str, list[dict] | None] = {
     "PARSE_OUTPUT_FILE": [{"source_key": "analyzer", "tool": "parse_csv_file"}],
     "SUMMARIZE_QC": [{"source_key": "analyzer", "tool": "get_analysis_summary"}],
     "RUN_DE_ANALYSIS": None,        # multi-call edgepython pipeline
+    "RUN_SCRIPT": None,             # standalone allowlisted script execution (special handling)
     "COMPARE_SAMPLES": None,        # multi-call analyzer + LLM synthesis
     "GENERATE_PLOT": None,          # uses PLOT tag system
     "WRITE_SUMMARY": None,          # uses LLM analyze_results
@@ -245,7 +247,7 @@ async def execute_step(
 
     if kind in ("SUBMIT_WORKFLOW", "DOWNLOAD_DATA", "RUN_DE_ANALYSIS",
                 "COMPARE_SAMPLES", "GENERATE_PLOT", "WRITE_SUMMARY",
-                "RUN_DE_PIPELINE", "INTERPRET_RESULTS", "RECOMMEND_NEXT"):
+                "RUN_DE_PIPELINE", "RUN_SCRIPT", "INTERPRET_RESULTS", "RECOMMEND_NEXT"):
         # These kinds need special orchestration — mark as needing attention
         # and return a marker so the caller can handle them
         step["status"] = "WAITING_APPROVAL" if step.get("requires_approval") else "PENDING"

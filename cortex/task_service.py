@@ -167,7 +167,7 @@ def _workflow_action_for_step(step: dict) -> tuple[str | None, str | None]:
     if kind in ("complete_stage_only", "COMPLETE_STAGE_ONLY"):
         return _action_for_status(status, pending_label="Finishing", completed_label="Staged"), None
     if kind in ("DOWNLOAD_DATA", "SUBMIT_WORKFLOW", "MONITOR_WORKFLOW",
-                "RUN_DE_ANALYSIS", "COMPARE_SAMPLES", "RUN_DE_PIPELINE"):
+            "RUN_DE_ANALYSIS", "COMPARE_SAMPLES", "RUN_DE_PIPELINE", "RUN_SCRIPT"):
         _step_target = _build_target("block", block_id=step["block_id"], run_uuid=step.get("run_uuid")) if step.get("block_id") else None
         return _action_for_status(status, pending_label="Running", completed_label="View results"), _step_target
     # --- Legacy step kinds ---

@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 from enum import Enum
 
@@ -102,3 +103,30 @@ LOCAL_AUTH_SESSION_TTL_SECONDS = int(os.getenv("LOCAL_AUTH_SESSION_TTL_SECONDS",
 LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS = int(os.getenv("LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS", "20"))
 LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS = int(os.getenv("LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS", "3600"))
 LOCAL_AUTH_SOCKET_DIR = Path(os.getenv("LOCAL_AUTH_SOCKET_DIR", AGOUTIC_DATA / "runtime" / "local_auth"))
+
+
+# --- LOCAL SCRIPT EXECUTION SAFETY ---
+# Deny-by-default allowlist for standalone script execution.
+# Only explicit script_id entries from SCRIPT_ALLOWLIST_IDS and explicit script_path
+# under SCRIPT_ALLOWLIST_ROOTS are runnable.
+_script_roots_raw = [
+    item.strip()
+    for item in os.getenv("LAUNCHPAD_SCRIPT_ALLOWLIST_ROOTS", "").split(os.pathsep)
+    if item.strip()
+]
+SCRIPT_ALLOWLIST_ROOTS = [Path(item).expanduser().resolve() for item in _script_roots_raw]
+
+_script_ids_raw = os.getenv("LAUNCHPAD_SCRIPT_ALLOWLIST_IDS", "{}")
+try:
+    _script_id_map = json.loads(_script_ids_raw)
+except json.JSONDecodeError:
+    _script_id_map = {}
+
+if not isinstance(_script_id_map, dict):
+    _script_id_map = {}
+
+SCRIPT_ALLOWLIST_IDS = {
+    str(key): Path(str(value)).expanduser().resolve()
+    for key, value in _script_id_map.items()
+    if str(key).strip() and str(value).strip()
+}

@@ -7,6 +7,7 @@ from datetime import datetime
 
 class SubmitJobRequest(BaseModel):
     """Request to submit a Dogme job."""
+    run_type: Literal["dogme", "script"] = "dogme"
     project_id: str = Field(..., min_length=1)
     user_id: Optional[str] = None  # Owner user ID (passed by Cortex)
     username: Optional[str] = None  # Human-readable username (for directory naming)
@@ -44,6 +45,12 @@ class SubmitJobRequest(BaseModel):
     per_mod: Optional[int] = 5  # Percentage threshold for modifications
     accuracy: Optional[str] = "sup"  # Basecalling accuracy (sup/hac/fast)
     max_gpu_tasks: Optional[int] = 1  # Max concurrent GPU tasks (dorado/openChromatin) per pipeline run
+
+    # Standalone script execution (local only)
+    script_id: Optional[str] = None
+    script_path: Optional[str] = None
+    script_args: list[str] = Field(default_factory=list)
+    script_working_directory: Optional[str] = None
     
     @field_validator("reference_genome")
     @classmethod
@@ -55,6 +62,13 @@ class SubmitJobRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_remote_execution(self):
+        if self.run_type == "script":
+            if self.execution_mode != "local":
+                raise ValueError("run_type 'script' currently supports execution_mode 'local' only")
+            if not (self.script_id or self.script_path):
+                raise ValueError("run_type 'script' requires explicit script_id or script_path")
+            return self
+
         if self.execution_mode == "slurm":
             if not self.user_id:
                 raise ValueError("user_id is required when execution_mode is 'slurm'")

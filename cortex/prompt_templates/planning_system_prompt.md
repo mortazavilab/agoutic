@@ -37,6 +37,7 @@ Each step object must have:
 - SUMMARIZE_QC — get QC metrics summary
 - RUN_DE_ANALYSIS — run differential expression (requires approval)
 - RUN_DE_PIPELINE — full DE pipeline: load, normalize, test, plot (requires approval)
+- RUN_SCRIPT — run an allowlisted standalone Python script (requires approval)
 - COMPARE_SAMPLES — compare metrics between samples
 - GENERATE_PLOT — create a visualization (bar/scatter/histogram/pie/heatmap/box)
 - GENERATE_DE_PLOT — create DE-specific plot (volcano/MD/heatmap)

@@ -49,6 +49,13 @@ class SubmitParams:
     reference_cache_path: str | None = None
     data_cache_path: str | None = None
 
+    # Standalone script execution (local only)
+    run_type: str = "dogme"  # "dogme" or "script"
+    script_id: str | None = None
+    script_path: str | None = None
+    script_args: list[str] = field(default_factory=list)
+    script_working_directory: str | None = None
+
 
 @dataclass
 class JobStatus:

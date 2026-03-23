@@ -2322,9 +2322,17 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             )
             logger.error("Failed to extract parameters", project_id=project_id)
             return
+
+        run_type = (job_params.get("run_type") or "dogme").strip().lower()
+        if run_type not in {"dogme", "script"}:
+            run_type = "dogme"
         
-        # Normalize reference_genome to list for Launchpad (Nextflow handles multi-genome in parallel)
-        job_params = await _prepare_remote_execution_params(session, project_id, owner_id, job_params)
+        # Normalize remote execution parameters for Dogme jobs only.
+        if run_type != "script":
+            job_params = await _prepare_remote_execution_params(session, project_id, owner_id, job_params)
+        else:
+            job_params = dict(job_params)
+            job_params["execution_mode"] = "local"
         if gate_payload.get("edited_params"):
             gate_payload["edited_params"] = job_params
         else:
@@ -2344,11 +2352,14 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         _project_slug = project_obj.slug if project_obj else None
         gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
         remote_action = (job_params.get("remote_action") or "").strip().lower()
-        remote_intent = _has_remote_stage_intent(job_params, gate_payload)
+        remote_intent = run_type != "script" and _has_remote_stage_intent(job_params, gate_payload)
         execution_mode = (job_params.get("execution_mode") or "local").strip().lower()
         if remote_intent and execution_mode != "slurm":
             execution_mode = "slurm"
             job_params["execution_mode"] = "slurm"
+        if run_type == "script":
+            execution_mode = "local"
+            job_params["execution_mode"] = "local"
         if execution_mode not in ("local", "slurm"):
             logger.warning(
                 "Invalid execution_mode from job_params, defaulting to local",
@@ -2384,6 +2395,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "sample_name": job_params.get("sample_name", f"sample_{project_id.split('_')[-1]}"),
             "mode": job_params.get("mode", "DNA"),
             "input_directory": job_params.get("input_directory", "/data/samples/test"),
+            "run_type": run_type,
             "reference_genome": ref_genome,  # List — Nextflow parallelizes across genomes
             "modifications": job_params.get("modifications"),
             "input_type": job_params.get("input_type", "pod5"),
@@ -2407,10 +2419,14 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "staged_remote_input_path": job_params.get("staged_remote_input_path"),
             "cache_preflight": job_params.get("cache_preflight"),
             "result_destination": job_params.get("result_destination"),
+            "script_id": job_params.get("script_id"),
+            "script_path": job_params.get("script_path"),
+            "script_args": job_params.get("script_args") if isinstance(job_params.get("script_args"), list) else None,
+            "script_working_directory": job_params.get("script_working_directory"),
         }
 
         workflow_block = None
-        remote_stage_only = execution_mode == "slurm" and (
+        remote_stage_only = run_type != "script" and execution_mode == "slurm" and (
             gate_action == "remote_stage" or job_params.get("remote_action") == "stage_only"
         )
         workflow_block_id = job_params.get("workflow_block_id")
@@ -2420,7 +2436,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         if workflow_block is None and job_params.get("run_uuid"):
             workflow_block = _find_workflow_plan(session, project_id, run_uuid=job_params.get("run_uuid"))
 
-        if execution_mode == "slurm":
+        if run_type != "script" and execution_mode == "slurm":
             workflow_block = _ensure_remote_sample_workflow(
                 session,
                 project_id,
@@ -2433,7 +2449,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
 
         _apply_slurm_cache_preflight_to_workflow(session, workflow_block, job_data.get("cache_preflight"))
 
-        if _should_stage_local_sample(gate_payload, job_params):
+        if run_type != "script" and _should_stage_local_sample(gate_payload, job_params):
             staged_dir = _local_sample_dest_dir(
                 username=_username,
                 owner_id=owner_id,

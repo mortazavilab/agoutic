@@ -49,6 +49,7 @@ async def submit_dogme_job(
     sample_name: str,
     mode: str,
     input_directory: str,
+    run_type: str = "dogme",
     reference_genome: str | list[str] = "mm39",
     project_id: str | None = None,
     user_id: str | None = None,
@@ -76,12 +77,17 @@ async def submit_dogme_job(
     staged_remote_input_path: str | None = None,
     cache_preflight: dict | None = None,
     result_destination: str | None = None,
+    script_id: str | None = None,
+    script_path: str | None = None,
+    script_args: list[str] | None = None,
+    script_working_directory: str | None = None,
 ) -> str:
     """Submit a DOGME job for processing. Input can be pod5, bam, or fastq files. Supports multiple reference genomes in parallel."""
     import uuid as _uuid
     _project_id = project_id or f"mcp_{_uuid.uuid4().hex[:12]}"
     result = await tools.submit_dogme_job(
         project_id=_project_id,
+        run_type=run_type,
         user_id=user_id,
         username=username,
         project_slug=project_slug,
@@ -111,6 +117,10 @@ async def submit_dogme_job(
         staged_remote_input_path=staged_remote_input_path,
         cache_preflight=cache_preflight,
         result_destination=result_destination,
+        script_id=script_id,
+        script_path=script_path,
+        script_args=script_args,
+        script_working_directory=script_working_directory,
     )
     return json.dumps(result, indent=2)
 

@@ -44,6 +44,7 @@ class LaunchpadMCPTools:
         sample_name: str,
         mode: str,
         input_directory: str,
+        run_type: str = "dogme",
         reference_genome: str | list[str] = "GRCh38",
         modifications: Optional[str] = None,
         input_type: Optional[str] = None,
@@ -70,6 +71,10 @@ class LaunchpadMCPTools:
         staged_remote_input_path: Optional[str] = None,
         cache_preflight: Optional[dict] = None,
         result_destination: Optional[str] = None,
+        script_id: Optional[str] = None,
+        script_path: Optional[str] = None,
+        script_args: Optional[list[str]] = None,
+        script_working_directory: Optional[str] = None,
     ) -> dict:
         """
         Submit a Dogme/Nextflow analysis job to Launchpad.
@@ -107,6 +112,7 @@ class LaunchpadMCPTools:
             "sample_name": sample_name,
             "mode": mode,
             "input_directory": input_directory,
+            "run_type": run_type,
             "reference_genome": reference_genome,
             "execution_mode": execution_mode,
         }
@@ -159,6 +165,14 @@ class LaunchpadMCPTools:
             payload["cache_preflight"] = cache_preflight
         if result_destination is not None:
             payload["result_destination"] = result_destination
+        if script_id is not None:
+            payload["script_id"] = script_id
+        if script_path is not None:
+            payload["script_path"] = script_path
+        if script_args is not None:
+            payload["script_args"] = script_args
+        if script_working_directory is not None:
+            payload["script_working_directory"] = script_working_directory
         
         try:
             async with httpx.AsyncClient() as client:
@@ -625,6 +639,7 @@ TOOL_REGISTRY = {
                 "sample_name": {"type": "string", "description": "Sample name/ID"},
                 "mode": {"type": "string", "enum": ["DNA", "RNA", "CDNA"], "description": "Analysis mode"},
                 "input_directory": {"type": "string", "description": "Path to input data (pod5, bam, or fastq files)"},
+                "run_type": {"type": "string", "enum": ["dogme", "script"], "description": "Execution payload type (default: dogme)"},
                 "reference_genome": {
                     "oneOf": [
                         {"type": "string"},
@@ -648,6 +663,10 @@ TOOL_REGISTRY = {
                 "staged_remote_input_path": {"type": "string", "description": "Previously staged remote data path to reuse instead of restaging local input"},
                 "cache_preflight": {"type": "object", "description": "Planner/approval cache preflight metadata"},
                 "result_destination": {"type": "string", "enum": ["local", "remote", "both"], "description": "Where final outputs should be kept"},
+                "script_id": {"type": "string", "description": "Explicit allowlisted script identifier"},
+                "script_path": {"type": "string", "description": "Explicit script path under allowlisted roots"},
+                "script_args": {"type": "array", "items": {"type": "string"}, "description": "Explicit script arguments"},
+                "script_working_directory": {"type": "string", "description": "Explicit script working directory under allowlisted roots"},
             },
             "required": ["sample_name", "mode", "input_directory"],
         }

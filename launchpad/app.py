@@ -3,7 +3,9 @@ Launchpad: FastAPI application for Dogme/Nextflow job execution.
 Receives job submissions from Cortex and manages pipeline execution.
 """
 import asyncio
+import json
 import os
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +22,7 @@ from common.logging_config import setup_logging, get_logger
 from common.logging_middleware import RequestLoggingMiddleware
 from launchpad.config import (
     AGOUTIC_DATA,
+    LAUNCHPAD_LOGS_DIR,
     JobStatus,
     MAX_CONCURRENT_JOBS,
     DEFAULT_MAX_GPU_TASKS,
@@ -60,6 +63,11 @@ from launchpad.schemas import (
 from launchpad.backends import get_backend, SubmitParams
 from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
 from launchpad.backends.ssh_manager import SSHProfileData
+from launchpad.script_execution import (
+    normalize_script_args,
+    resolve_allowlisted_script,
+    validate_script_working_directory,
+)
 
 # --- LOGGING ---
 setup_logging("launchpad-rest")
@@ -136,6 +144,7 @@ app.add_middleware(
 # --- GLOBALS ---
 executor = NextflowExecutor()
 job_monitors: dict = {}  # Maps run_uuid -> monitoring task
+script_processes: dict[str, asyncio.subprocess.Process] = {}
 
 
 def _describe_exception(exc: Exception) -> str:
@@ -144,6 +153,89 @@ def _describe_exception(exc: Exception) -> str:
     if msg:
         return msg
     return f"{type(exc).__name__}: {exc!r}"
+
+
+def _read_log_tail(path: str, *, max_chars: int = 4000) -> str:
+    """Read a safe tail snippet from a log file for status/error surfacing."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except Exception:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+async def _monitor_script_job(
+    run_uuid: str,
+    process: asyncio.subprocess.Process,
+    stdout_log_path: str,
+    stderr_log_path: str,
+) -> None:
+    """Monitor a standalone local script process and sync final status to DB."""
+    session = SessionLocal()
+    try:
+        return_code = await process.wait()
+        stdout_tail = _read_log_tail(stdout_log_path)
+        stderr_tail = _read_log_tail(stderr_log_path)
+
+        final_status = JobStatus.COMPLETED if return_code == 0 else JobStatus.FAILED
+        progress = 100 if return_code == 0 else 0
+        error_message = None if return_code == 0 else (stderr_tail.strip() or f"Script exited with code {return_code}")
+
+        await update_job_status(
+            session,
+            run_uuid,
+            final_status,
+            progress=progress,
+            error_message=error_message,
+        )
+
+        job = await get_job(session, run_uuid)
+        if job:
+            job.completed_at = datetime.utcnow()
+            job.run_stage = "SCRIPT_COMPLETED" if return_code == 0 else "SCRIPT_FAILED"
+            job.report_json = json.dumps(
+                {
+                    "run_type": "script",
+                    "return_code": return_code,
+                    "stdout_log": stdout_log_path,
+                    "stderr_log": stderr_log_path,
+                }
+            )
+            await session.commit()
+
+        await add_log_entry(
+            session,
+            run_uuid,
+            "INFO" if return_code == 0 else "ERROR",
+            f"Standalone script finished with exit code {return_code}",
+            source="script-monitor",
+        )
+
+        if stdout_tail.strip():
+            await add_log_entry(
+                session,
+                run_uuid,
+                "INFO",
+                f"stdout (tail):\n{stdout_tail}",
+                source="script-stdout",
+            )
+
+        if stderr_tail.strip():
+            await add_log_entry(
+                session,
+                run_uuid,
+                "ERROR" if return_code != 0 else "INFO",
+                f"stderr (tail):\n{stderr_tail}",
+                source="script-stderr",
+            )
+    except Exception as exc:
+        logger.error("Script monitor failed", run_uuid=run_uuid, error=_describe_exception(exc), exc_info=True)
+    finally:
+        script_processes.pop(run_uuid, None)
+        job_monitors.pop(run_uuid, None)
+        await session.close()
 
 # --- LIFECYCLE ---
 @app.on_event("startup")
@@ -356,6 +448,7 @@ async def submit_job(req: SubmitJobRequest):
             parent_block_id=req.parent_block_id,
             user_id=req.user_id,
         )
+        run_type = (req.run_type or "dogme").strip().lower()
         job.execution_mode = req.execution_mode
         job.ssh_profile_id = req.ssh_profile_id
         job.slurm_account = req.slurm_account
@@ -374,7 +467,7 @@ async def submit_job(req: SubmitJobRequest):
             session,
             run_uuid,
             "INFO",
-            f"Job submitted: {req.sample_name} ({req.mode} mode)",
+            f"Job submitted: {req.sample_name} ({req.mode} mode, run_type={run_type})",
             source="api",
         )
         
@@ -391,7 +484,73 @@ async def submit_job(req: SubmitJobRequest):
                 )
                 exec_mode = "local"
             
-            if exec_mode == "slurm":
+            if run_type == "script":
+                if exec_mode != "local":
+                    raise ValueError("Standalone script execution only supports local execution_mode")
+
+                resolved_script = resolve_allowlisted_script(
+                    script_id=req.script_id,
+                    script_path=req.script_path,
+                )
+                script_args = normalize_script_args(req.script_args)
+                script_cwd = validate_script_working_directory(req.script_working_directory)
+                if script_cwd is None:
+                    script_cwd = resolved_script.script_path.parent
+
+                stdout_log = (LAUNCHPAD_LOGS_DIR / f"{run_uuid}.script.stdout.log").resolve()
+                stderr_log = (LAUNCHPAD_LOGS_DIR / f"{run_uuid}.script.stderr.log").resolve()
+
+                with open(stdout_log, "ab") as stdout_handle, open(stderr_log, "ab") as stderr_handle:
+                    process = await asyncio.create_subprocess_exec(
+                        sys.executable,
+                        str(resolved_script.script_path),
+                        *script_args,
+                        cwd=str(script_cwd),
+                        stdout=stdout_handle,
+                        stderr=stderr_handle,
+                    )
+
+                script_processes[run_uuid] = process
+
+                job.status = JobStatus.RUNNING
+                job.started_at = datetime.utcnow()
+                job.run_stage = "SCRIPT_RUNNING"
+                job.nextflow_process_id = process.pid
+                job.nextflow_work_dir = str(script_cwd)
+                job.log_file = str(stdout_log)
+                job.stderr_log = str(stderr_log)
+                job.report_json = json.dumps(
+                    {
+                        "run_type": "script",
+                        "script_id": resolved_script.script_id,
+                        "script_path": str(resolved_script.script_path),
+                        "script_args": script_args,
+                        "script_working_directory": str(script_cwd),
+                    }
+                )
+                await session.commit()
+
+                await add_log_entry(
+                    session,
+                    run_uuid,
+                    "INFO",
+                    f"Started standalone script {resolved_script.script_path.name} (pid={process.pid})",
+                    source="api",
+                )
+
+                monitor_task = asyncio.create_task(
+                    _monitor_script_job(
+                        run_uuid,
+                        process,
+                        str(stdout_log),
+                        str(stderr_log),
+                    )
+                )
+                job_monitors[run_uuid] = monitor_task
+
+                work_directory = str(script_cwd)
+                response_status = JobStatus.RUNNING
+            elif exec_mode == "slurm":
                 workflow_number = None
                 local_workflow_dir = None
                 if req.resume_from_dir:
@@ -584,6 +743,18 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         job = await get_job(session, run_uuid)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
+        if (job.run_stage or "").startswith("SCRIPT_"):
+            return {
+                "run_uuid": run_uuid,
+                "status": job.status,
+                "progress_percent": 100 if job.status == JobStatus.COMPLETED else (50 if job.status == JobStatus.RUNNING else 0),
+                "message": job.error_message or f"Script job {str(job.status).lower()}.",
+                "tasks": {},
+                "execution_mode": "local",
+                "run_stage": job.run_stage,
+                "work_directory": job.nextflow_work_dir,
+            }
         
         terminal_statuses = (JobStatus.DELETED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
         pending_local_result_sync = (

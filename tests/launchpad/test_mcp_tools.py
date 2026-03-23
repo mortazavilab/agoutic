@@ -121,6 +121,7 @@ class TestSubmitDogmeJob:
             "sample_name": "sample-a",
             "mode": "DNA",
             "input_directory": "/data/input",
+            "run_type": "dogme",
             "reference_genome": ["GRCh38", "mm39"],
             "execution_mode": "slurm",
             "input_type": "pod5",
@@ -146,6 +147,36 @@ class TestSubmitDogmeJob:
         }
         assert "modifications" not in kwargs["json"]
         assert "entry_point" not in kwargs["json"]
+
+    @pytest.mark.asyncio
+    async def test_submit_dogme_job_passes_script_fields_when_provided(self):
+        fake_client = FakeAsyncClient(
+            post_response=FakeResponse(
+                json_data={"run_uuid": "run-script-1", "status": "RUNNING"}
+            )
+        )
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            result = await tools.submit_dogme_job(
+                project_id="proj-1",
+                sample_name="script-a",
+                mode="DNA",
+                input_directory="/tmp",
+                run_type="script",
+                script_id="reconcileBams",
+                script_path="/opt/agoutic/scripts/reconcile_bams.py",
+                script_args=["--threads", "4"],
+                script_working_directory="/opt/agoutic/scripts",
+            )
+
+        assert result == {"run_uuid": "run-script-1", "status": "RUNNING"}
+        _, kwargs = fake_client.post_calls[0]
+        assert kwargs["json"]["run_type"] == "script"
+        assert kwargs["json"]["script_id"] == "reconcileBams"
+        assert kwargs["json"]["script_path"] == "/opt/agoutic/scripts/reconcile_bams.py"
+        assert kwargs["json"]["script_args"] == ["--threads", "4"]
+        assert kwargs["json"]["script_working_directory"] == "/opt/agoutic/scripts"
 
     @pytest.mark.asyncio
     async def test_stage_remote_sample_posts_expected_payload(self, monkeypatch):

@@ -1,9 +1,23 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.5
+**Version:** 3.4.6
 **Status:** Active Prototype 
 
 ## Latest Updates (2026-03-23)
+
+- **RUN_SCRIPT plan-step support** — added a dedicated workflow step kind for
+  standalone utility-script execution paths so plans can represent script runs
+  without routing through full workflow-only submission.
+- **Local-only standalone script submission** — Launchpad `/jobs/submit` now
+  supports `run_type="script"` while preserving default Dogme behavior.
+- **Deny-by-default allowlist enforcement for scripts** — execution requires
+  an explicit allowlisted `script_id` mapping or an explicit absolute
+  `script_path` inside configured allowlisted roots.
+- **No repository script auto-discovery** — runnable scripts are not inferred
+  from repository contents; an explicit allowlisted selector is mandatory.
+- **Script status and log surfacing in existing job APIs** — script runs now
+  expose structured status and failure visibility through existing Launchpad
+  status/log paths to support plan dependency handling.
 
 - **Remote orchestration bridge removal** — removed the temporary
   compatibility shim used during helper extraction and eliminated reverse
