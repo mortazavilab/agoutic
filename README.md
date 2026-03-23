@@ -1,9 +1,20 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.4
+**Version:** 3.4.5
 **Status:** Active Prototype 
 
-## Latest Updates (2026-03-21)
+## Latest Updates (2026-03-23)
+
+- **Remote orchestration bridge removal** — removed the temporary
+  compatibility shim used during helper extraction and eliminated reverse
+  import coupling from remote orchestration back into Cortex app logic.
+- **Approval-context extractor injection** — remote approval-context building
+  now receives parameter extraction from the app call site, preserving behavior
+  while keeping module boundaries one-directional.
+- **Defaults fallback continuity for degraded profile enrichment** — when live
+  profile enrichment is unavailable, approval-context generation now preserves
+  `slurm_account`/`slurm_partition` from resolved `get_slurm_defaults` data so
+  approval summaries and gates remain stable.
 
 - **Remote SLURM config-path correctness** — generated `nextflow.config` for
   remote submissions now prioritizes staged remote reference cache paths in

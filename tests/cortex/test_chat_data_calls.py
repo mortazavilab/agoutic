@@ -1236,6 +1236,24 @@ class TestBrowsingToolBypass:
                     ]
                 ),
             ),
+            patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch(
+                "cortex.remote_orchestration._list_user_ssh_profiles",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "profile-123",
+                            "nickname": "hpc3",
+                            "ssh_username": "agoutic",
+                            "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                            "default_slurm_account": "SEYEDAM_LAB",
+                            "default_slurm_partition": "standard",
+                            "default_slurm_gpu_account": "SEYEDAM_LAB",
+                            "default_slurm_gpu_partition": "gpu",
+                        }
+                    ]
+                ),
+            ),
             patch(
                 "cortex.app.extract_job_parameters_from_conversation",
                 new=AsyncMock(

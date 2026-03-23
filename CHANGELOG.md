@@ -1,3 +1,27 @@
+## [3.4.5] - 2026-03-23
+
+### Fixes
+
+- **Removed temporary remote-orchestration compatibility bridge** — eliminated
+  the `_app_override` test-compat shim in Cortex remote orchestration and
+  removed the module back-import from `remote_orchestration` into `app`.
+
+- **Approval-context extraction dependency now injected at call site** —
+  `_build_remote_stage_approval_context` now receives
+  `extract_job_parameters_from_conversation` from `cortex/app.py`, preserving
+  behavior while removing reverse module coupling.
+
+- **Approval-context defaults continuity when profile enrichment is degraded** —
+  when live SSH profile enrichment is unavailable, approval-context construction
+  now falls back to resolved `get_slurm_defaults` values for
+  `slurm_account`/`slurm_partition` so summaries and gates remain consistent.
+
+### Tests
+
+- Updated monkeypatch boundaries in remote-execution tests to target runtime
+  call paths correctly (`cortex.app.*` for app-owned call sites and
+  `cortex.remote_orchestration.*` for extracted internals).
+
 ## [3.4.4] - 2026-03-21
 
 ### Improvements

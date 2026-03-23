@@ -381,8 +381,8 @@ class TestRemoteExecutionDetection:
         _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 on hpc3"})
         sess = self.sf()
         with patch("cortex.app.AGOUTIC_DATA", self.tmp), \
-             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-             patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+             patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
                  "id": "profile-123",
                  "nickname": "hpc3",
                  "ssh_username": "jdoe",
@@ -482,8 +482,8 @@ class TestRemoteExecutionDetection:
         sess.add(staged)
         sess.commit()
         with patch("cortex.app.AGOUTIC_DATA", self.tmp), \
-             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-             patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+             patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
                  "id": "profile-123",
                  "nickname": "hpc3",
                  "ssh_username": "jdoe",
@@ -511,8 +511,8 @@ class TestRemoteExecutionDetection:
 
         sess = self.sf()
         with patch("cortex.app.AGOUTIC_DATA", self.tmp), \
-             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-             patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+             patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
                  "id": "profile-123",
                  "nickname": "hpc3",
                  "ssh_username": "elnaza",
