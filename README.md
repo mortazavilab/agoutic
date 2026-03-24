@@ -1,9 +1,18 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.6
+**Version:** 3.4.7
 **Status:** Active Prototype 
 
-## Latest Updates (2026-03-23)
+## Latest Updates (2026-03-24)
+
+- **`chat_with_agent` decomposition** — extracted tag parsing, tool-call
+  dispatch, and embedded dataframe/plot handling from `cortex/app.py` into
+  owned helper modules to reduce app-level coupling and shrink the main chat
+  orchestration surface.
+- **Skill script auto-discovery for Launchpad allowlists** — `skills/*/scripts`
+  directories are now discovered automatically at startup and registered into
+  `LAUNCHPAD_SCRIPT_ALLOWLIST_IDS` and `LAUNCHPAD_SCRIPT_ALLOWLIST_ROOTS` with
+  deny-by-default behavior preserved for all non-discovered paths.
 
 - **RUN_SCRIPT plan-step support** — added a dedicated workflow step kind for
   standalone utility-script execution paths so plans can represent script runs

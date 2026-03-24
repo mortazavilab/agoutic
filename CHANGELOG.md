@@ -1,3 +1,32 @@
+## [3.4.7] - 2026-03-24
+
+### Improvements
+
+- **`chat_with_agent` decomposition** — extracted tag parsing, tool-call
+  dispatch, and embedded dataframe/plot resolution from `cortex/app.py` into
+  owned helper modules:
+  `cortex/tag_parser.py`, `cortex/tool_dispatch.py`, and
+  `cortex/chat_dataframes.py`. This reduces the size of the app-level chat
+  orchestration path while preserving existing runtime behavior.
+
+- **Automatic skill-script allowlist discovery** — Launchpad now scans
+  `skills/<skill_key>/scripts/*.py` at startup, adds discovered script roots to
+  `LAUNCHPAD_SCRIPT_ALLOWLIST_ROOTS`, and registers script identifiers in
+  `LAUNCHPAD_SCRIPT_ALLOWLIST_IDS` as `<skill_key>/<script_name>`.
+
+### Fixes
+
+- **Decomposition test boundary updates** — Cortex chat tests now patch tool
+  dispatch dependencies at their new ownership boundary in
+  `cortex.tool_dispatch` rather than through `cortex.app`, restoring focused
+  chat/data-call test coverage after the extraction.
+
+- **Follow-up regression hardening for extracted/runtime boundaries** — fixed
+  stale background-task session patching, stabilized approval/remote-stage chat
+  tests, aligned SLURM cache-flow submit assertions with current backend
+  contracts, and repaired UI/helper test harness gaps so the focused regression
+  set covering these areas passes again.
+
 ## [3.4.6] - 2026-03-23
 
 ### Improvements

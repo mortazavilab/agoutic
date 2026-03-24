@@ -22,7 +22,7 @@ def _load_function(name: str, extra_globals: dict | None = None):
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
     )
     module = ast.Module(body=[fn_node], type_ignores=[])
-    namespace = {"pd": pd, "px": px, "datetime": dt, "API_URL": "http://api.test"}
+    namespace = {"pd": pd, "px": px, "datetime": dt, "API_URL": "http://api.test", "PLOTLY_TEMPLATE": {}}
     if extra_globals:
         namespace.update(extra_globals)
     exec(compile(module, filename=str(UI_APP_PATH), mode="exec"), namespace)

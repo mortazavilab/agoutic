@@ -370,7 +370,9 @@ class TestRemoteExecutionDetection:
     async def test_detects_arbitrary_profile_nickname(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 on mycluster"})
         sess = self.sf()
-        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(side_effect=ValueError("SSH profile mycluster was not found"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[])):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["execution_mode"] == "slurm"
@@ -451,7 +453,9 @@ class TestRemoteExecutionDetection:
     async def test_detects_stage_only_remote_action_for_arbitrary_profile_nickname(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Stage the mouse cDNA sample called Jamshid at /data/pod5 on mycluster"})
         sess = self.sf()
-        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(side_effect=ValueError("SSH profile mycluster was not found"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[])):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
         assert result["execution_mode"] == "slurm"

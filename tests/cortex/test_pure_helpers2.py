@@ -9,7 +9,7 @@ Tests for additional pure/near-pure helper functions in cortex/app.py:
 
 import re
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -196,12 +196,13 @@ class TestValidateAnalyzerParams:
                 "run_uuid": "abc-123",
             }),
         )
-        result = _validate_analyzer_params(
-            tool="get_analysis_summary",
-            params={"work_dir": "/LLM/invented"},
-            user_message="show summary",
-            history_blocks=[blk],
-        )
+        with patch("cortex.data_call_generator.os.path.exists", return_value=True):
+            result = _validate_analyzer_params(
+                tool="get_analysis_summary",
+                params={"work_dir": "/LLM/invented"},
+                user_message="show summary",
+                history_blocks=[blk],
+            )
         assert result["work_dir"] == "/real/path/workflow1"
 
     def test_work_dir_project_dir_fallback(self):

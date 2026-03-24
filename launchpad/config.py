@@ -130,3 +130,26 @@ SCRIPT_ALLOWLIST_IDS = {
     for key, value in _script_id_map.items()
     if str(key).strip() and str(value).strip()
 }
+
+# --- AUTO-DISCOVER SKILL SCRIPTS ---
+# Scan skills/<skill_key>/scripts/ directories for runnable Python scripts.
+# Discovered scripts are merged into SCRIPT_ALLOWLIST_IDS (keyed as
+# "<skill_key>/<script_stem>") and their parent directories are added to
+# SCRIPT_ALLOWLIST_ROOTS.  Env-var entries always take precedence.
+_SKILLS_DIR = AGOUTIC_CODE / "skills"
+if _SKILLS_DIR.is_dir():
+    for _skill_dir in sorted(_SKILLS_DIR.iterdir()):
+        if not _skill_dir.is_dir():
+            continue
+        _scripts_dir = _skill_dir / "scripts"
+        if not _scripts_dir.is_dir():
+            continue
+        _resolved_scripts_dir = _scripts_dir.resolve()
+        if _resolved_scripts_dir not in SCRIPT_ALLOWLIST_ROOTS:
+            SCRIPT_ALLOWLIST_ROOTS.append(_resolved_scripts_dir)
+        for _script_file in sorted(_scripts_dir.glob("*.py")):
+            if _script_file.name.startswith("_"):
+                continue
+            _script_id = f"{_skill_dir.name}/{_script_file.stem}"
+            if _script_id not in SCRIPT_ALLOWLIST_IDS:
+                SCRIPT_ALLOWLIST_IDS[_script_id] = _script_file.resolve()

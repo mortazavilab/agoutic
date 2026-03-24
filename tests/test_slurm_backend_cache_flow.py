@@ -212,7 +212,7 @@ async def test_resolve_staging_cache_refreshes_stale_reference(monkeypatch, prof
     assert len(upload_calls) >= 2
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_submit_uses_fallback_when_cache_resolution_fails(monkeypatch, profile):
     backend = SlurmBackend()
     conn = _FakeConn()
@@ -251,10 +251,14 @@ async def test_submit_uses_fallback_when_cache_resolution_fails(monkeypatch, pro
     async def _connect(*args, **kwargs):
         return conn
 
+    async def _ensure_assets(*args, **kwargs):
+        return ({}, {})
+
     monkeypatch.setattr(backend, "_load_profile", _load_profile)
     monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
     monkeypatch.setattr(backend, "_resolve_staging_cache", _raise_cache)
     monkeypatch.setattr(backend, "_fallback_stage_inputs", _fallback)
+    monkeypatch.setattr(backend, "_ensure_reference_assets_present", _ensure_assets)
     monkeypatch.setattr(backend, "_update_job_stage", _noop)
     monkeypatch.setattr(backend, "_update_job_slurm_info", _noop)
     monkeypatch.setattr(backend, "_build_nextflow_command", lambda *args, **kwargs: "echo ok")
@@ -273,7 +277,7 @@ async def test_submit_uses_fallback_when_cache_resolution_fails(monkeypatch, pro
     assert run_uuid == "run-3"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_submit_writes_remote_config_and_references_it(monkeypatch, profile):
     backend = SlurmBackend()
     conn = _FakeConn()
@@ -312,9 +316,19 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
     async def _connect(*args, **kwargs):
         return conn
 
+    async def _ensure_assets(*args, **kwargs):
+        return ({
+            "mm39": {
+                "requires_kallisto": False,
+                "missing_required_assets": [],
+                "all_required_present": True,
+            }
+        }, {"mm39": "fallback"})
+
     monkeypatch.setattr(backend, "_load_profile", _load_profile)
     monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
     monkeypatch.setattr(backend, "_resolve_staging_cache", _fallback)
+    monkeypatch.setattr(backend, "_ensure_reference_assets_present", _ensure_assets)
     monkeypatch.setattr(backend, "_update_job_stage", _noop)
     monkeypatch.setattr(backend, "_update_job_slurm_info", _noop)
 
@@ -344,9 +358,9 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
     assert '"${AGOUTIC_NEXTFLOW_BIN:-nextflow}" run mortazavilab/dogme' in submit_script_payloads[0]
     assert "-c /remote/eli/agoutic/proj-1/workflow4/nextflow.config" in submit_script_payloads[0]
 
-    # CPU values come from request; GPU values come from profile defaults.
-    assert "cpuAccount = 'cpu-request'" in config_write[0]
-    assert "cpuPartition = 'cpu-part-request'" in config_write[0]
+    # Controller CPU values come from profile defaults; GPU values also use profile defaults.
+    assert "cpuAccount = 'cpu-default'" in config_write[0]
+    assert "cpuPartition = 'cpu-part-default'" in config_write[0]
     assert "gpuAccount = 'gpu-default'" in config_write[0]
     assert "gpuPartition = 'gpu-part-default'" in config_write[0]
 
@@ -727,7 +741,7 @@ def test_controller_resources_prefer_cpu_defaults(profile):
     assert partition == "cpu-part-default"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_submit_derives_reference_paths_when_cache_metadata_missing(monkeypatch, profile):
     backend = SlurmBackend()
     conn = _FakeConn()
@@ -764,9 +778,13 @@ async def test_submit_derives_reference_paths_when_cache_metadata_missing(monkey
     async def _connect(*args, **kwargs):
         return conn
 
+    async def _ensure_assets(*args, **kwargs):
+        return ({}, {})
+
     monkeypatch.setattr(backend, "_load_profile", _load_profile)
     monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
     monkeypatch.setattr(backend, "_resolve_staging_cache", _resolve_stage)
+    monkeypatch.setattr(backend, "_ensure_reference_assets_present", _ensure_assets)
     monkeypatch.setattr(backend, "_update_job_stage", _noop)
     monkeypatch.setattr(backend, "_update_job_slurm_info", _noop)
 

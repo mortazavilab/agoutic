@@ -490,8 +490,8 @@ class TestDataCallExecution:
                 )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think_multi, extra_patches=extra))
@@ -516,8 +516,8 @@ class TestDataCallExecution:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -554,8 +554,8 @@ class TestDataCallExecution:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -580,8 +580,8 @@ class TestDataCallExecution:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -613,8 +613,8 @@ class TestLegacyTags:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -640,8 +640,8 @@ class TestLegacyTags:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -675,8 +675,8 @@ class TestFallbackTagConversion:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -699,8 +699,8 @@ class TestFallbackTagConversion:
             return ("Done.", {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10})
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -782,8 +782,8 @@ class TestEmbeddedDataframes:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -830,8 +830,8 @@ class TestEmbeddedDataframes:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -862,8 +862,8 @@ class TestEmbeddedDataframes:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -939,8 +939,8 @@ class TestEmbeddedDataframes:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1034,8 +1034,8 @@ class TestBrowsingToolBypass:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1059,8 +1059,8 @@ class TestBrowsingToolBypass:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1087,8 +1087,8 @@ class TestBrowsingToolBypass:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
@@ -1124,8 +1124,8 @@ class TestBrowsingToolBypass:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
@@ -1155,8 +1155,8 @@ class TestBrowsingToolBypass:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
@@ -1215,8 +1215,8 @@ class TestBrowsingToolBypass:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
             patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
             patch(
@@ -1319,8 +1319,8 @@ class TestBrowsingToolBypass:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1371,8 +1371,8 @@ class TestBrowsingToolBypass:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
             patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
             patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
             patch(
@@ -1454,8 +1454,8 @@ class TestDownloadWorkflow:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1510,8 +1510,8 @@ class TestEncodeSearchSwap:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1553,8 +1553,8 @@ class TestEncodeSearchSwap:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1603,8 +1603,8 @@ class TestEncodeSearchSwap:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1648,8 +1648,8 @@ class TestResultTruncation:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://encode:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1700,8 +1700,8 @@ class TestFileToolChaining:
             )
 
         extra = [
-            patch("cortex.app.MCPHttpClient", return_value=mock_mcp),
-            patch("cortex.app.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))

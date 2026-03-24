@@ -63,6 +63,35 @@ from cortex.conversation_state import (
 )
 from cortex.context_injection import _inject_job_context
 from cortex.data_call_generator import _auto_generate_data_calls, _validate_analyzer_params, _validate_edgepython_params
+from cortex.tag_parser import (
+    apply_response_corrections,
+    parse_data_tags,
+    parse_approval_tag,
+    parse_plot_tags,
+    override_hallucinated_df_refs,
+    apply_plot_code_fallback,
+    suppress_tags_for_plot_command,
+    clean_tags_from_markdown,
+    fix_hallucinated_accessions,
+    user_wants_plot as _user_wants_plot_check,
+)
+from cortex.tool_dispatch import (
+    build_calls_by_source,
+    deduplicate_calls,
+    validate_call_schemas,
+    execute_tool_calls as _execute_tool_calls,
+    auto_fetch_missing_encff,
+    ChatCancelled,
+)
+from cortex.chat_dataframes import (
+    extract_embedded_dataframes,
+    extract_embedded_images,
+    assign_df_ids,
+    rebind_plots_to_new_df,
+    post_df_assignment_plot_fallback,
+    deduplicate_plot_specs,
+    collapse_competing_specs,
+)
 from cortex.db_helpers import (
     _resolve_project_dir, _create_block_internal,
     save_conversation_message, track_project_access,
@@ -242,14 +271,6 @@ class ChatRequest(BaseModel):
 # Entries are cleaned up after 5 minutes.
 import time as _time
 _chat_progress: dict[str, dict] = {}  # request_id -> {"stage": str, "detail": str, "ts": float}
-
-class ChatCancelled(Exception):
-    """Raised when user cancels an in-progress chat request."""
-    def __init__(self, stage: str, detail: str = ""):
-        self.stage = stage
-        self.detail = detail
-        super().__init__(f"Chat cancelled at stage={stage}: {detail}")
-
 
 def _detect_prompt_request(message: str) -> str | None:
     """Detect whether the user is asking to inspect the current system prompt."""
@@ -2083,350 +2104,32 @@ What would you like to do?
         _inject_debug["skill_switch"] = _skill_switch_debug
 
         
-        # 4. Parse the "Approval Gate Tag"
-        trigger_tag = "[[APPROVAL_NEEDED]]"
-        needs_approval = trigger_tag in raw_response
+        # 4. Parse approval tag, apply tag corrections, parse DATA_CALL tags
+        needs_approval, raw_response = parse_approval_tag(raw_response, active_skill)
+        corrected_response, fallback_fixes_applied = apply_response_corrections(raw_response)
+        data_call_matches, legacy_encode_matches, legacy_analysis_matches = parse_data_tags(corrected_response)
 
-        # Suppress spurious approval gates for skills that never submit jobs.
-        # The LLM sometimes echoes [[APPROVAL_NEEDED]] from conversation
-        # history even when the current skill is a search/browse skill.
-        _APPROVAL_SKILLS = {
-            "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
-            "analyze_local_sample", "download_files", "remote_execution",
-        }
-        if needs_approval and active_skill not in _APPROVAL_SKILLS:
-            logger.warning(
-                "Suppressing spurious APPROVAL_NEEDED for non-job skill",
-                skill=active_skill,
-            )
-            needs_approval = False
-            raw_response = raw_response.replace(trigger_tag, "").strip()
-        
-        # 5. Parse DATA_CALL Tags (unified format for all consortia and services)
-        # Format: [[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=K562]]
-        #     or: [[DATA_CALL: service=analyzer, tool=get_analysis_summary, run_uuid=...]]
-        
-        # FALLBACK: Fix common LLM mistakes by converting plain text patterns to proper tags
-        all_fallback_patterns = get_all_fallback_patterns()
-        
-        corrected_response = raw_response
-        fallback_fixes_applied = 0
-        for pattern, replacement in all_fallback_patterns.items():
-            before = corrected_response
-            corrected_response = re.sub(pattern, replacement, corrected_response, flags=re.IGNORECASE)
-            if before != corrected_response:
-                fallback_fixes_applied += 1
-
-        # FALLBACK: Convert [[TOOL_CALL: GET /analysis/...]] REST-style tags
-        # the LLM sometimes emits instead of proper DATA_CALL tags.
-        # Pattern: [[TOOL_CALL: GET /analysis/jobs/{work_dir}/summary?work_dir=...]]
-        _tool_call_pattern = r'\[\[TOOL_CALL:\s*(?:GET\s+)?/analysis/[^?]*\?([^\]]+)\]\]'
-        def _convert_tool_call_to_data_call(m: re.Match) -> str:
-            query_string = m.group(1)
-            # Parse query params: "work_dir=/path&foo=bar" → {work_dir: /path, foo: bar}
-            params = {}
-            for part in query_string.split("&"):
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    params[k.strip()] = v.strip()
-            # Determine tool from the URL path
-            url_path = m.group(0).lower()
-            if "summary" in url_path:
-                tool = "get_analysis_summary"
-            elif "categori" in url_path:
-                tool = "categorize_job_files"
-            elif "file" in url_path:
-                tool = "list_job_files"
-            else:
-                tool = "get_analysis_summary"  # default
-            param_str = ", ".join(f"{k}={v}" for k, v in params.items())
-            return f"[[DATA_CALL: service=analyzer, tool={tool}, {param_str}]]"
-
-        _before_tc = corrected_response
-        corrected_response = re.sub(_tool_call_pattern, _convert_tool_call_to_data_call, corrected_response)
-        if corrected_response != _before_tc:
-            fallback_fixes_applied += 1
-            logger.warning("Converted [[TOOL_CALL:...]] to [[DATA_CALL:...]]")
-
-        # FALLBACK: Convert Mistral-native [TOOL_CALLS]DATA_CALL[ARGS]{json} format
-        # devstral-small-2 sometimes uses its native tool-calling syntax instead
-        # of our custom [[DATA_CALL:...]] tags.
-        _mistral_tc_pattern = r'\[TOOL_CALLS\]\s*DATA_CALL\s*\[ARGS\]\s*(\{[^}]+\})'
-        def _convert_mistral_tool_call(m: re.Match) -> str:
-            try:
-                payload = json.loads(m.group(1))
-                source = payload.pop("service", payload.pop("consortium", "edgepython"))
-                tool = payload.pop("tool", "")
-                if not tool:
-                    return m.group(0)  # can't convert without a tool name
-                source_type = "consortium" if source == "encode" else "service"
-                param_str = ", ".join(f"{k}={v}" for k, v in payload.items())
-                tag = f"[[DATA_CALL: {source_type}={source}, tool={tool}"
-                if param_str:
-                    tag += f", {param_str}"
-                tag += "]]"
-                return tag
-            except (json.JSONDecodeError, TypeError):
-                return m.group(0)
-
-        _before_mistral = corrected_response
-        corrected_response = re.sub(_mistral_tc_pattern, _convert_mistral_tool_call, corrected_response)
-        if corrected_response != _before_mistral:
-            fallback_fixes_applied += 1
-            logger.warning("Converted [TOOL_CALLS]...[ARGS]{json} to [[DATA_CALL:...]]")
-
-        # FALLBACK: Convert [TOOL_CALLS]DATA_CALL: key=value, ... format
-        # devstral-small-2 sometimes emits the DATA_CALL params inline after
-        # [TOOL_CALLS] but without the [[...]] wrapper.
-        _mistral_inline_pattern = r'\[TOOL_CALLS\]\s*DATA_CALL:\s*(.+?)(?:\n|$)'
-        def _convert_mistral_inline(m: re.Match) -> str:
-            return f"[[DATA_CALL: {m.group(1).rstrip()}]]"
-        _before_inline = corrected_response
-        corrected_response = re.sub(_mistral_inline_pattern, _convert_mistral_inline, corrected_response)
-        if corrected_response != _before_inline:
-            fallback_fixes_applied += 1
-            logger.warning("Converted [TOOL_CALLS]DATA_CALL:... to [[DATA_CALL:...]]")
-        
-        if fallback_fixes_applied > 0:
-            logger.warning("Applied fallback tag fixes to LLM response", count=fallback_fixes_applied)
-        
-        # Parse unified DATA_CALL tags
-        # Groups: (1) source_type [consortium|service], (2) source_key, (3) tool_name, (4) remaining params
-        # The params group uses .+? (not [^\]]+) to allow ] inside JSON arrays like ["TP53"]
-        data_call_pattern = r'\[\[DATA_CALL:\s*(?:(consortium|service)=(\w+)),\s*tool=(\w+)(?:,\s*(.+))?\]\]'
-        data_call_matches = list(re.finditer(data_call_pattern, corrected_response))
-        
-        # Also support legacy ENCODE_CALL and ANALYSIS_CALL tags for backward compatibility
-        legacy_encode_pattern = r'\[\[ENCODE_CALL:\s*([\w_]+)(?:,\s*([^\]]+))?\]\]'
-        legacy_analysis_pattern = r'\[\[ANALYSIS_CALL:\s*(\w+),\s*run_uuid=([a-f0-9-]+)\]\]'
-        legacy_encode_matches = list(re.finditer(legacy_encode_pattern, corrected_response))
-        legacy_analysis_matches = list(re.finditer(legacy_analysis_pattern, corrected_response))
-
-        # 5a. Parse [[PLOT:...]] tags for interactive chart generation
-        # Format: [[PLOT: type=scatter, df=DF5, x=score, y=enrichment, color=biosample_type, title=My Title]]
-        # NOTE: use non-greedy .*? with DOTALL so that ] characters inside the tag
-        # (e.g. Columns: ['A', 'B']) don't break the match.
+        # 5a. Parse PLOT tags and fix hallucinated DF references
         plot_tag_pattern = r'\[\[PLOT:\s*(.*?)\]\]'
-        plot_tag_matches = list(re.finditer(plot_tag_pattern, corrected_response, re.DOTALL))
-        plot_specs = []
-        for _pm in plot_tag_matches:
-            _raw_inner = _pm.group(1)
-            _plot_params = _parse_tag_params(_raw_inner)
-            # If no key=value pairs were found (LLM wrote natural language inside
-            # the tag, e.g. "histogram of DF1 with Category on the x-axis"),
-            # attempt to extract parameters from the free-form text.
-            if not _plot_params.get("df"):
-                _nl = _raw_inner
-                # Chart type
-                for _ct in ("histogram", "scatter", "bar", "box", "heatmap", "pie"):
-                    if _ct in _nl.lower():
-                        _plot_params.setdefault("type", _ct)
-                        break
-                # DF reference: "DF1", "df 2", etc.
-                _nl_df_m = re.search(r'\bDF\s*(\d+)\b', _nl, re.IGNORECASE)
-                if _nl_df_m:
-                    _plot_params["df"] = f"DF{_nl_df_m.group(1)}"
-                # x column — "Category on the x-axis", "x=Category", "x: Category"
-                _x_m = re.search(
-                    r'\b(\w+)\s+(?:on\s+the\s+)?x[- ]axis', _nl, re.IGNORECASE
-                ) or re.search(
-                    r'\bx\s*[=:]\s*([\w][\w ]*?)(?:,|\.|\band\b|$)', _nl, re.IGNORECASE
-                )
-                if _x_m:
-                    _plot_params.setdefault("x", _x_m.group(1).strip())
-                # y column — "Count on the y-axis", "y=Count"
-                _y_m = re.search(
-                    r'\b(\w+)\s+(?:on\s+the\s+)?y[- ]axis', _nl, re.IGNORECASE
-                ) or re.search(
-                    r'\by\s*[=:]\s*([\w][\w ]*?)(?:,|\.|\band\b|$)', _nl, re.IGNORECASE
-                )
-                if _y_m:
-                    _plot_params.setdefault("y", _y_m.group(1).strip())
-            # Normalize: extract df_id integer from "DF5" or "5"
-            _df_ref = _plot_params.get("df", "")
-            _df_id_match = re.match(r'(?:DF)?\s*(\d+)', _df_ref, re.IGNORECASE)
-            if _df_id_match:
-                _plot_params["df_id"] = int(_df_id_match.group(1))
-            else:
-                _plot_params["df_id"] = None
-            # Default chart type to histogram if missing
-            if "type" not in _plot_params:
-                _plot_params["type"] = "histogram"
-            plot_specs.append(_plot_params)
-        if plot_specs:
-            logger.info("Parsed PLOT tags", count=len(plot_specs),
-                       specs=[{"type": s.get("type"), "df_id": s.get("df_id")} for s in plot_specs])
-
-        # 5a-fix. Override hallucinated DF references in PLOT tags.
-        # When the user says "plot this" / "plot it" without naming a specific DF,
-        # the LLM often defaults to DF1.  Correct to the most recent DF.
+        plot_specs = parse_plot_tags(corrected_response)
         _user_explicit_df = re.search(r'\bDF\s*(\d+)\b', req.message, re.IGNORECASE)
-        if plot_specs and not _user_explicit_df and _conv_state.latest_dataframe:
-            _latest_id_m = re.match(r'DF(\d+)', _conv_state.latest_dataframe)
-            if _latest_id_m:
-                _latest_id = int(_latest_id_m.group(1))
-                for _ps in plot_specs:
-                    if _ps.get("df_id") is not None and _ps["df_id"] != _latest_id:
-                        logger.warning(
-                            "Overriding PLOT df_id with latest DF",
-                            llm_df_id=_ps["df_id"], latest_df_id=_latest_id,
-                        )
-                        _ps["df_id"] = _latest_id
-                        _ps["df"] = f"DF{_latest_id}"
+        override_hallucinated_df_refs(plot_specs, req.message, _conv_state.latest_dataframe)
 
-        # 5a-b. FALLBACK: If LLM wrote Python code for plotting instead of [[PLOT:...]] tags,
-        #        auto-generate the tag from context clues (user message + DF references).
-        _plot_keywords = {"plot", "chart", "pie", "histogram", "scatter", "bar chart",
-                          "box plot", "heatmap", "visualize", "graph", "distribution"}
-        _user_wants_plot = any(kw in req.message.lower() for kw in _plot_keywords)
-        _has_code_plot = bool(re.search(
-            r'```python.*?(?:matplotlib|plt\.|plotly|px\.|fig\.|\.pie|\.bar|\.hist|\.scatter)',
-            corrected_response, re.DOTALL | re.IGNORECASE
-        ))
-        # Also trigger the fallback when:
-        # (a) the LLM produced [[PLOT:...]] tags but none resolved to a valid df_id, OR
-        # (b) no plot specs were parsed at all (regex match failed, e.g. ] inside tag
-        #     ate the match before the NL parser could run).
-        _plot_specs_invalid = plot_specs and all(s.get("df_id") is None for s in plot_specs)
-        _plot_specs_missing = _user_wants_plot and not plot_specs
-        if _user_wants_plot and (_has_code_plot or _plot_specs_invalid or _plot_specs_missing) and not (
-            plot_specs and any(s.get("df_id") is not None for s in plot_specs)
-        ):
-            logger.warning("LLM wrote Python plot code instead of [[PLOT:...]] tag — auto-generating")
-            # Detect which DF the user or LLM referenced
-            _auto_df_id = None
-            _df_ref_in_msg = re.search(r'\bDF\s*(\d+)\b', req.message, re.IGNORECASE)
-            if _df_ref_in_msg:
-                _auto_df_id = int(_df_ref_in_msg.group(1))
-            else:
-                _df_ref_in_resp = re.search(r'\bDF\s*(\d+)\b', corrected_response, re.IGNORECASE)
-                if _df_ref_in_resp:
-                    _auto_df_id = int(_df_ref_in_resp.group(1))
-                elif _injected_dfs:
-                    # Use the first injected DF's ID
-                    for _ij_data in _injected_dfs.values():
-                        _ij_id = _ij_data.get("metadata", {}).get("df_id")
-                        if _ij_id is not None:
-                            _auto_df_id = _ij_id
-                            break
-                # Last resort: use latest_dataframe from conversation state
-                if _auto_df_id is None and _conv_state.latest_dataframe:
-                    _ld_m = re.match(r'DF(\d+)', _conv_state.latest_dataframe)
-                    if _ld_m:
-                        _auto_df_id = int(_ld_m.group(1))
-            # Detect chart type from user message
-            _msg_l = req.message.lower()
-            if "pie" in _msg_l:
-                _auto_type = "pie"
-            elif "scatter" in _msg_l:
-                _auto_type = "scatter"
-            elif "bar" in _msg_l:
-                _auto_type = "bar"
-            elif "box" in _msg_l:
-                _auto_type = "box"
-            elif "heatmap" in _msg_l or "correlation" in _msg_l:
-                _auto_type = "heatmap"
-            elif "histogram" in _msg_l or "distribution" in _msg_l:
-                _auto_type = "histogram"
-            else:
-                _auto_type = "bar"
-            # Detect x column from user message (look for "by <column>", "of <column>")
-            # Prefer "by" matches over "of/for" since "by" usually indicates the grouping column.
-            # Skip DF references (e.g., "for DF1") — those aren't column names.
-            _auto_x = None
-            _by_match = re.search(r'\bby\s+(\w+)', req.message, re.IGNORECASE)
-            if _by_match and not re.match(r'DF\d+', _by_match.group(1), re.IGNORECASE):
-                _auto_x = _by_match.group(1)
-            if not _auto_x:
-                _of_match = re.search(r'\b(?:of|for)\s+(\w+)', req.message, re.IGNORECASE)
-                if _of_match and not re.match(r'DF\d+', _of_match.group(1), re.IGNORECASE):
-                    _auto_x = _of_match.group(1)
-            if _auto_df_id is not None:
-                _auto_spec = {
-                    "type": _auto_type,
-                    "df_id": _auto_df_id,
-                    "df": f"DF{_auto_df_id}",
-                }
-                if _auto_x:
-                    _auto_spec["x"] = _auto_x
-                _auto_spec.update(_extract_plot_style_params(req.message))
-                # Do NOT set agg=count for bar by default — if the DF is
-                # pre-aggregated (has a numeric value column), _build_plotly_figure
-                # will use it automatically via the categorical-x companion-column logic.
-                if _auto_type == "pie" and not _auto_spec.get("y"):
-                    # Pie charts with only x column count occurrences
-                    pass  # UI handles this automatically
-                plot_specs.append(_auto_spec)
-                logger.info("Auto-generated PLOT spec from code fallback",
-                           spec=_auto_spec)
-            # Strip the code block from the markdown so user doesn't see code
-            corrected_response = re.sub(
-                r'```python.*?```', '', corrected_response, flags=re.DOTALL
-            ).strip()
-            # Also strip any "Explanation:" boilerplate that follows code blocks
-            corrected_response = re.sub(
-                r'\n*(?:Explanation|Output|Note|Here is|The (?:pie|bar|scatter|histogram|box) chart).*$',
-                '', corrected_response, flags=re.DOTALL | re.IGNORECASE
-            ).strip()
-
-        # 5a-c. Plot-command override: when the user wants a plot and we have
-        # valid plot_specs, suppress any DATA_CALL / APPROVAL tags the LLM
-        # emitted.  Without this, "plot this" on Dogme skills triggers
-        # list_job_files + a spurious job submission approval gate.
-        if _user_wants_plot and plot_specs and any(s.get("df_id") is not None for s in plot_specs):
-            if data_call_matches or legacy_encode_matches or legacy_analysis_matches or needs_approval:
-                logger.warning(
-                    "Plot-command override: suppressing LLM DATA_CALL/APPROVAL tags",
-                    data_calls=len(data_call_matches),
-                    legacy_encode=len(legacy_encode_matches),
-                    needs_approval=needs_approval,
-                )
-            data_call_matches = []
-            legacy_encode_matches = []
-            legacy_analysis_matches = []
-            needs_approval = False
-            # Strip all tags from LLM response so only the plot placeholder remains
-            corrected_response = re.sub(data_call_pattern, '', corrected_response).strip()
-            corrected_response = re.sub(legacy_encode_pattern, '', corrected_response).strip()
-            corrected_response = re.sub(legacy_analysis_pattern, '', corrected_response).strip()
-            corrected_response = corrected_response.replace(trigger_tag, "").strip()
-
-        # Clean all tags from user-visible text
-        clean_markdown = corrected_response.replace(trigger_tag, "").strip()
-        clean_markdown = re.sub(r'\[\[SKILL_SWITCH_TO:\s*\w+\]\]', '', clean_markdown).strip()
-        clean_markdown = re.sub(data_call_pattern, '', clean_markdown).strip()
-        clean_markdown = re.sub(legacy_encode_pattern, '', clean_markdown).strip()
-        clean_markdown = re.sub(legacy_analysis_pattern, '', clean_markdown).strip()
-        clean_markdown = re.sub(plot_tag_pattern, '', clean_markdown, flags=re.DOTALL).strip()
-        
-        # Also remove any remaining plain text patterns that might not have been converted
-        for pattern in all_fallback_patterns.keys():
-            clean_markdown = re.sub(pattern, '', clean_markdown, flags=re.IGNORECASE).strip()
-
-        # If the LLM only emitted a PLOT tag (no surrounding text), insert a
-        # brief placeholder so the AGENT_PLAN block isn't empty in the UI.
-        if not clean_markdown and plot_specs:
-            _ps0 = plot_specs[0]
-            _chart_type = _ps0.get("type", "chart").replace("_", " ")
-            _df_label = _ps0.get("df", "")  # string like "DF2"
-            if not _df_label and _ps0.get("df_id") is not None:
-                _df_label = f"DF{_ps0['df_id']}"
-            clean_markdown = f"Here is the {_chart_type} for **{_df_label}**:" if _df_label else f"Here is the {_chart_type}:"
-
-        # Fix hallucinated ENCSR accessions in LLM text response.
-        # If the user explicitly stated exactly one ENCSR accession and the LLM
-        # mentions a *different* ENCSR in its text, replace the wrong one.
-        _encsr_in_user_msg = re.findall(r'(ENCSR[A-Z0-9]{6})', req.message, re.IGNORECASE)
-        if len(_encsr_in_user_msg) == 1:
-            _correct_encsr = _encsr_in_user_msg[0].upper()
-            _encsr_in_reply = re.findall(r'(ENCSR[A-Z0-9]{6})', clean_markdown, re.IGNORECASE)
-            _wrong_encsr = [a.upper() for a in _encsr_in_reply if a.upper() != _correct_encsr]
-            for _wrong in set(_wrong_encsr):
-                logger.warning("Fixing hallucinated ENCSR in LLM text",
-                               hallucinated=_wrong, correct=_correct_encsr)
-                clean_markdown = re.sub(
-                    re.escape(_wrong), _correct_encsr, clean_markdown, flags=re.IGNORECASE
-                )
+        # 5a-b. Plot code fallback and overrides
+        _user_wants_plot = _user_wants_plot_check(req.message)
+        plot_specs, corrected_response = apply_plot_code_fallback(
+            plot_specs, req.message, corrected_response,
+            _injected_dfs, _conv_state.latest_dataframe,
+            _extract_plot_style_params,
+        )
+        data_call_matches, legacy_encode_matches, legacy_analysis_matches, needs_approval, corrected_response = \
+            suppress_tags_for_plot_command(
+                req.message, plot_specs,
+                data_call_matches, legacy_encode_matches, legacy_analysis_matches,
+                needs_approval, corrected_response,
+            )
+        clean_markdown = clean_tags_from_markdown(corrected_response, plot_specs)
+        clean_markdown = fix_hallucinated_accessions(clean_markdown, req.message)
 
 
         #     detect patterns in the user message and auto-generate appropriate calls.
@@ -2731,723 +2434,55 @@ What would you like to do?
                     has_any_tags = False
                     clean_markdown = ""
 
-        # 6. Collect all tool calls into a unified structure
-        # Structure: {source_key: [{"tool": str, "params": dict}, ...]}
-        calls_by_source = {}
-        
-        # Load aliases for correcting LLM-hallucinated tool/param names
-        _tool_aliases = get_all_tool_aliases()
-        # Analyzer tool aliases (not in CONSORTIUM_REGISTRY)
-        _tool_aliases.update({
-            "list_workflows": "list_job_files",
-            "list_files": "list_job_files",
-            "browse_files": "list_job_files",
-            "browse_workflow": "list_job_files",
-            "find_files": "find_file",
-            "search_file": "find_file",
-            "search_files": "find_file",
-            "read_file": "read_file_content",
-            "get_file": "read_file_content",
-            "parse_csv": "parse_csv_file",
-            "parse_bed": "parse_bed_file",
-            "analysis_summary": "get_analysis_summary",
-            "job_summary": "get_analysis_summary",
-        })
-        # edgePython tool aliases (hallucinated gene lookup names)
-        _tool_aliases.update({
-            "get_gene_info": "lookup_gene",
-            "gene_info": "lookup_gene",
-            "gene_lookup": "lookup_gene",
-            "get_gene": "lookup_gene",
-            "find_gene": "lookup_gene",
-        })
-        _param_aliases = get_all_param_aliases()
-        # edgePython param aliases (hallucinated parameter names for lookup_gene)
-        _param_aliases.setdefault("lookup_gene", {}).update({
-            "gene_name": "gene_symbols",
-            "gene": "gene_symbols",
-            "symbols": "gene_symbols",
-            "ids": "gene_ids",
-        })
-        
-        # From auto-generated tags (safety net)
-        if not has_any_tags and auto_calls:
-            for ac in auto_calls:
-                _ac_tool = ac["tool"]
-                _ac_params = _hydrate_request_placeholders(
-                    dict(ac["params"]),
-                    user_id=user.id,
-                    project_id=req.project_id,
-                )
-                _ac_source = ac["source_key"]
+        # 6. Build tool calls from parsed tags and auto-generated calls
+        calls_by_source = build_calls_by_source(
+            data_call_matches=data_call_matches,
+            legacy_encode_matches=legacy_encode_matches,
+            legacy_analysis_matches=legacy_analysis_matches,
+            auto_calls=auto_calls,
+            has_any_tags=has_any_tags,
+            user_id=user.id,
+            project_id=req.project_id,
+            user_message=req.message,
+            conversation_history=conversation_history,
+            history_blocks=history_blocks,
+            project_dir=_project_dir_str,
+            active_skill=active_skill,
+        )
 
-                # Apply the same corrections as LLM-generated tags
-                if _ac_source == "encode":
-                    _ac_tool, _ac_params = _correct_tool_routing(
-                        _ac_tool, _ac_params, req.message, conversation_history)
-                    _ac_params = _validate_encode_params(_ac_tool, _ac_params, req.message)
-                elif _ac_source == "analyzer":
-                    _ac_params = _validate_analyzer_params(
-                        _ac_tool, _ac_params, req.message,
-                        conversation_history=conversation_history,
-                        history_blocks=history_blocks,
-                        project_dir=_project_dir_str,
-                    )
+        # 6b. Deduplicate and validate
+        calls_by_source = deduplicate_calls(calls_by_source)
+        validate_call_schemas(calls_by_source)
 
-                entry = {"tool": _ac_tool, "params": _ac_params}
-                if "_chain" in ac:
-                    entry["_chain"] = ac["_chain"]
-                calls_by_source.setdefault(_ac_source, []).append(entry)
+        # 6c. Execute all tool calls via MCP
+        _exec_result = await _execute_tool_calls(
+            calls_by_source,
+            user_id=user.id,
+            username=getattr(user, 'username', None),
+            project_id=req.project_id,
+            project_dir_path=_project_dir_path,
+            user_message=req.message,
+            active_skill=active_skill,
+            needs_approval=needs_approval,
+            request_id=req.request_id,
+            is_cancelled=_is_cancelled,
+            emit_progress=_emit_progress,
+        )
+        all_results = _exec_result.all_results
+        _pending_download_files = _exec_result.pending_download_files
+        if _exec_result.active_skill != active_skill:
+            active_skill = _exec_result.active_skill
+        if _exec_result.needs_approval:
+            needs_approval = True
+        if _exec_result.clean_markdown is not None:
+            clean_markdown = _exec_result.clean_markdown
 
-        # From new DATA_CALL tags
-        # Tools that MUST route to edgepython (DE-stateful)
-        _EDGEPYTHON_ONLY_TOOLS = frozenset({
-            "annotate_genes", "filter_de_genes",
-        })
-        # Tools that MUST route to analyzer (gene annotation + enrichment)
-        _ANALYZER_ONLY_TOOLS = frozenset({
-            "lookup_gene", "translate_gene_ids",
-            "run_go_enrichment", "run_pathway_enrichment",
-            "get_enrichment_results", "get_term_genes",
-        })
-        for match in data_call_matches:
-            source_type = match.group(1)  # "consortium" or "service"
-            source_key = match.group(2)   # e.g., "encode", "analyzer"
-            tool_name = match.group(3)
-            params_str = match.group(4)
-
-            # Fix hallucinated tool names using alias map
-            corrected_tool = _tool_aliases.get(tool_name, tool_name)
-            if corrected_tool != tool_name:
-                logger.warning("Corrected hallucinated tool name",
-                              original=tool_name, corrected=corrected_tool)
-
-            # Cross-source re-routing: DE-stateful tools belong to edgepython
-            if corrected_tool in _EDGEPYTHON_ONLY_TOOLS and source_key != "edgepython":
-                logger.warning("Re-routing tool to edgepython",
-                              tool=corrected_tool, original_source=f"{source_type}/{source_key}")
-                source_type = "service"
-                source_key = "edgepython"
-            # Cross-source re-routing: gene/enrichment tools belong to analyzer
-            elif corrected_tool in _ANALYZER_ONLY_TOOLS and source_key != "analyzer":
-                logger.warning("Re-routing tool to analyzer",
-                              tool=corrected_tool, original_source=f"{source_type}/{source_key}")
-                source_type = "service"
-                source_key = "analyzer"
-            
-            params = _hydrate_request_placeholders(
-                _parse_tag_params(params_str),
-                user_id=user.id,
-                project_id=req.project_id,
-            )
-
-            # Fix hallucinated parameter names using param alias map
-            _p_aliases = _param_aliases.get(corrected_tool, {})
-            if _p_aliases:
-                params = {_p_aliases.get(k, k): v for k, v in params.items()}
-
-            # Fix wrong tool for accession type (e.g. get_experiment for ENCFF)
-            corrected_tool, params = _correct_tool_routing(
-                corrected_tool, params, req.message, conversation_history)
-
-            # Validate/fix ENCODE params (missing search_term, wrong organism)
-            if source_key == "encode":
-                params = _validate_encode_params(corrected_tool, params, req.message)
-
-            # Validate/fix Analyzer params (placeholder work_dir)
-            if source_key == "analyzer":
-                params = _validate_analyzer_params(
-                    corrected_tool, params, req.message,
-                    conversation_history=conversation_history,
-                    history_blocks=history_blocks,
-                    project_dir=_project_dir_str,
-                )
-
-            # Validate/fix edgePython params (fill from user message)
-            if source_key == "edgepython":
-                params = _validate_edgepython_params(
-                    corrected_tool, params, req.message,
-                    conversation_history=conversation_history,
-                )
-
-            calls_by_source.setdefault(source_key, []).append({
-                "tool": corrected_tool,
-                "params": params,
-            })
-        
-        # From legacy ENCODE_CALL tags (backward compat)
-        for match in legacy_encode_matches:
-            tool_name = match.group(1)
-            params_str = match.group(2)
-            params = _hydrate_request_placeholders(
-                _parse_tag_params(params_str),
-                user_id=user.id,
-                project_id=req.project_id,
-            )
-            
-            # Fix hallucinated tool names using alias map
-            corrected_tool = _tool_aliases.get(tool_name, tool_name)
-            if corrected_tool != tool_name:
-                logger.warning("Corrected hallucinated tool name (legacy)",
-                              original=tool_name, corrected=corrected_tool)
-
-            # Fix hallucinated parameter names using param alias map
-            _p_aliases = _param_aliases.get(corrected_tool, {})
-            if _p_aliases:
-                params = {_p_aliases.get(k, k): v for k, v in params.items()}
-
-            # Fix wrong tool for accession type (e.g. get_experiment for ENCFF)
-            corrected_tool, params = _correct_tool_routing(
-                corrected_tool, params, req.message, conversation_history)
-
-            # Validate/fix ENCODE params (missing search_term, wrong organism)
-            params = _validate_encode_params(corrected_tool, params, req.message)
-
-            calls_by_source.setdefault("encode", []).append({
-                "tool": corrected_tool,
-                "params": params,
-            })
-        
-        # From legacy ANALYSIS_CALL tags (backward compat)
-        for match in legacy_analysis_matches:
-            analysis_type = match.group(1)
-            run_uuid = match.group(2)
-            
-            # Map legacy analysis types to Analyzer MCP tool names
-            tool_map = {
-                "summary": "get_analysis_summary",
-                "categorize_files": "categorize_job_files",
-                "list_files": "list_job_files",
-            }
-            tool_name = tool_map.get(analysis_type, analysis_type)
-            
-            calls_by_source.setdefault("analyzer", []).append({
-                "tool": tool_name,
-                "params": _hydrate_request_placeholders(
-                    {"run_uuid": run_uuid},
-                    user_id=user.id,
-                    project_id=req.project_id,
-                ),
-            })
-
-        # Remote execution hardening: if the LLM only asked for SSH profiles,
-        # also fetch SLURM defaults so account/partition values are available.
-        if active_skill == "remote_execution":
-            _remote_defaults_intent = bool(re.search(
-                r'\b(defaults?|account|partition|slurm|hpc\d+)\b',
-                req.message,
-                re.IGNORECASE,
-            ))
-            if _remote_defaults_intent:
-                _launchpad_calls = calls_by_source.setdefault("launchpad", [])
-                _has_list_profiles = any(c.get("tool") == "list_ssh_profiles" for c in _launchpad_calls)
-                _has_get_defaults = any(c.get("tool") == "get_slurm_defaults" for c in _launchpad_calls)
-                if _has_list_profiles and not _has_get_defaults:
-                    _nickname = None
-                    _invalid_nick_tokens = {
-                        "default", "defaults", "profile", "profiles", "slurm", "ssh", "remote",
-                        "account", "partition", "cpu", "gpu", "for", "use", "using",
-                    }
-                    _nick_match = re.search(
-                        r'\bnickname\s+([a-zA-Z0-9._-]+)\b',
-                        req.message,
-                        re.IGNORECASE,
-                    )
-                    if _nick_match:
-                        _cand = _nick_match.group(1).strip()
-                        if _cand.lower() not in _invalid_nick_tokens:
-                            _nickname = _cand
-
-                    if not _nickname:
-                        _profile_match = re.search(
-                            r'\bprofile\s+([a-zA-Z0-9._-]+)\b',
-                            req.message,
-                            re.IGNORECASE,
-                        )
-                        if _profile_match:
-                            _cand = _profile_match.group(1).strip()
-                            if _cand.lower() not in _invalid_nick_tokens:
-                                _nickname = _cand
-
-                    if not _nickname:
-                        _hpc_match = re.search(r'\b(hpc\d+)\b', req.message, re.IGNORECASE)
-                        if _hpc_match:
-                            _nickname = _hpc_match.group(1)
-
-                    _defaults_params: dict[str, str] = {"user_id": user.id}
-                    if req.project_id:
-                        _defaults_params["project_id"] = req.project_id
-                    if _nickname:
-                        _defaults_params["profile_nickname"] = _nickname
-
-                    _launchpad_calls.append({
-                        "tool": "get_slurm_defaults",
-                        "params": _defaults_params,
-                    })
-                    logger.info(
-                        "Augmented remote_execution call set with get_slurm_defaults",
-                        user_id=user.id,
-                        project_id=req.project_id,
-                        profile_nickname=_nickname,
-                    )
-        
-        # 6b. Deduplicate tool calls within each source.
-        # The LLM sometimes emits both a DATA_CALL and a legacy ENCODE_CALL
-        # (or two DATA_CALL tags with slightly different casing) for the same
-        # logical query.  Deduplicate by (tool, canonical_params) so the same
-        # search isn't executed twice.
-        for _src_key in list(calls_by_source):
-            _seen: set[str] = set()
-            _deduped: list[dict] = []
-            for _call in calls_by_source[_src_key]:
-                # Build a canonical key: tool + sorted params (case-insensitive values)
-                _canon_params = tuple(
-                    sorted((k, v.lower() if isinstance(v, str) else v)
-                           for k, v in _call["params"].items())
-                )
-                _key = (_call["tool"], _canon_params)
-                _key_str = str(_key)
-                if _key_str not in _seen:
-                    _seen.add(_key_str)
-                    _deduped.append(_call)
-                else:
-                    logger.info("Deduplicated duplicate tool call",
-                               tool=_call["tool"], params=_call["params"])
-            calls_by_source[_src_key] = _deduped
-
-        # 6b2. Schema validation: validate params against cached tool schemas
-        for _src_key, _calls_list in calls_by_source.items():
-            for _call in _calls_list:
-                if "__routing_error__" in _call.get("params", {}):
-                    continue  # will be handled as routing error
-                _cleaned, _violations = validate_against_schema(
-                    _call["tool"], _call["params"], _src_key
-                )
-                if _violations:
-                    logger.warning("Schema validation issues",
-                                  tool=_call["tool"], source=_src_key,
-                                  violations=_violations)
-                _call["params"] = _cleaned
-
-        # 6c. Execute all tool calls grouped by source
-        all_results = {}  # {source_key: [result_dicts]}
-        _pending_download_files: list[dict] = []  # populated by download chain
-        
-        for source_key, calls in calls_by_source.items():
-            logger.info("Executing tool calls", source=source_key, count=len(calls))
-            _source_label = CONSORTIUM_REGISTRY.get(source_key, {}).get("display_name") \
-                or SERVICE_REGISTRY.get(source_key, {}).get("display_name", source_key)
-            _emit_progress(req.request_id, "tools", f"Querying {_source_label}...")
-            
-            try:
-                url = get_service_url(source_key)
-            except KeyError:
-                logger.error("Unknown source", source=source_key)
-                all_results[source_key] = [{
-                    "tool": c["tool"],
-                    "params": c["params"],
-                    "error": f"Unknown source: {source_key}",
-                } for c in calls]
-                continue
-            
-            mcp_client = MCPHttpClient(name=source_key, base_url=url)
-            source_results = []
-            
-            try:
-                await mcp_client.connect()
-                
-                for call in calls:
-                    tool_name = call["tool"]
-                    params = call["params"]
-
-                    if source_key == "launchpad":
-                        _patched = _inject_launchpad_context_params(
-                            tool_name,
-                            params,
-                            user_id=user.id,
-                            project_id=req.project_id,
-                        )
-                        if _patched != params:
-                            logger.info(
-                                "Injected missing Launchpad context params",
-                                tool=tool_name,
-                                original_params=params,
-                                patched_params=_patched,
-                            )
-                        params = _patched
-
-                    # Check for user cancellation before each tool call
-                    if _is_cancelled(req.request_id):
-                        raise ChatCancelled("tools", f"Cancelled before running {tool_name} on {_source_label}.")
-
-                    # For sequential pipelines (edgepython), stop on first failure.
-                    # Each step depends on the previous one; continuing wastes time.
-                    if source_key == "edgepython" and source_results and "error" in source_results[-1]:
-                        logger.info("Skipping remaining edgepython calls after pipeline failure",
-                                   skipped_tool=tool_name)
-                        source_results.append({
-                            "tool": tool_name,
-                            "params": params,
-                            "error": "Skipped — previous pipeline step failed",
-                        })
-                        continue
-
-                    # Check for routing errors (e.g. missing parent experiment)
-                    if "__routing_error__" in params:
-                        error_msg = params.pop("__routing_error__")
-                        logger.warning("Skipping tool call due to routing error",
-                                      tool=tool_name, error=error_msg)
-                        source_results.append({
-                            "tool": tool_name,
-                            "params": params,
-                            "error": error_msg,
-                        })
-                        continue
-                    
-                    logger.info("Calling tool", source=source_key, tool=tool_name, params=params)
-
-                    # --- edgepython output path injection ---
-                    # Redirect output files (plots, results) to the project folder
-                    # so they appear alongside the user's project data in the UI.
-                    if source_key == "edgepython" and _project_dir_path:
-                        _ep_output_dir = _project_dir_path / "de_results"
-                        if tool_name == "generate_plot" and not params.get("output_path"):
-                            _ep_output_dir.mkdir(parents=True, exist_ok=True)
-                            _plot_type = params.get("plot_type", "plot")
-                            _result_name = params.get("result_name", "")
-                            _suffix = f"_{_result_name}" if _result_name else ""
-                            params["output_path"] = str(_ep_output_dir / f"{_plot_type}{_suffix}.png")
-                        elif tool_name == "save_results":
-                            _ep_output_dir.mkdir(parents=True, exist_ok=True)
-                            _fmt = params.get("format", "csv")
-                            _orig = params.get("output_path", "")
-                            _fname = Path(_orig).name if _orig else f"de_results.{_fmt}"
-                            params["output_path"] = str(_ep_output_dir / _fname)
-
-                    try:
-                        result_data = await mcp_client.call_tool(tool_name, **params)
-                    except (ConnectionError, TimeoutError, OSError) as _conn_err:
-                        # Single retry for transient connection errors
-                        logger.warning("Transient error, retrying once",
-                                      source=source_key, tool=tool_name, error=str(_conn_err))
-                        await asyncio.sleep(2)
-                        try:
-                            result_data = await mcp_client.call_tool(tool_name, **params)
-                        except Exception as _retry_err:
-                            logger.error("Retry also failed", source=source_key,
-                                        tool=tool_name, error=str(_retry_err))
-                            source_results.append({
-                                "tool": tool_name,
-                                "params": params,
-                                "error": f"Connection failed after retry: {_retry_err}",
-                            })
-                            continue
-                    except RuntimeError as _mcp_err:
-                        # MCP tool-level errors (e.g. server returned an error response)
-                        logger.error("MCP tool error", source=source_key,
-                                    tool=tool_name, error=str(_mcp_err))
-                        source_results.append({
-                            "tool": tool_name,
-                            "params": params,
-                            "error": f"MCP tool error: {_mcp_err}",
-                        })
-                        continue
-
-                    # --- ENCODE search retry: relaxation + biosample ↔ assay swap ---
-                    # Detect zero results for both list and dict return types.
-                    _is_zero_results = (
-                        source_key == "encode"
-                        and tool_name in ("search_by_biosample", "search_by_assay")
-                        and (
-                            (isinstance(result_data, list) and len(result_data) == 0)
-                            or (isinstance(result_data, dict) and result_data.get("total", -1) == 0)
-                        )
-                    )
-                    if _is_zero_results:
-                        # --- Phase 1: relax assay_title filter on compound queries ---
-                        # When both search_term and assay_title are present and we got
-                        # 0 results, the assay filter may be too restrictive.  Retry
-                        # without assay_title before trying the biosample↔assay swap.
-                        _relaxed = False
-                        if tool_name == "search_by_biosample" \
-                                and params.get("search_term") and params.get("assay_title"):
-                            _relaxed_params = {k: v for k, v in params.items()
-                                               if k != "assay_title"}
-                            logger.warning(
-                                "ENCODE compound search returned 0 — retrying without assay filter",
-                                original_params=params, relaxed_params=_relaxed_params,
-                            )
-                            try:
-                                _relax_result = await mcp_client.call_tool(
-                                    tool_name, **_relaxed_params)
-                                _relax_count = (
-                                    len(_relax_result) if isinstance(_relax_result, list)
-                                    else _relax_result.get("total", 0)
-                                        if isinstance(_relax_result, dict) else 0
-                                )
-                                if _relax_count > 0:
-                                    result_data = _relax_result
-                                    params = _relaxed_params
-                                    _relaxed = True
-                                    logger.info("Relaxed search returned results",
-                                               tool=tool_name, count=_relax_count)
-                            except Exception as _relax_err:
-                                logger.warning("Relaxed search failed",
-                                              tool=tool_name, error=str(_relax_err))
-
-                        # --- Phase 2: biosample ↔ assay swap ---
-                        # Only if relaxation didn't help (or wasn't applicable).
-                        if not _relaxed:
-                            _swap_tool = None
-                            _swap_params: dict = {}
-
-                            if tool_name == "search_by_biosample":
-                                _st = params.get("search_term", "")
-                                if _st and _looks_like_assay(_st):
-                                    _swap_tool = "search_by_assay"
-                                    _swap_params = {"assay_title": _st}
-                                    if "organism" in params:
-                                        _swap_params["organism"] = params["organism"]
-                                elif _st:
-                                    _swap_tool = "search_by_assay"
-                                    _swap_params = {"assay_title": _st}
-                                    if "organism" in params:
-                                        _swap_params["organism"] = params["organism"]
-
-                            elif tool_name == "search_by_assay":
-                                _at = params.get("assay_title", "")
-                                if _at and not _looks_like_assay(_at):
-                                    _swap_tool = "search_by_biosample"
-                                    _swap_params = {"search_term": _at}
-                                    if "organism" in params:
-                                        _swap_params["organism"] = params["organism"]
-
-                            if _swap_tool:
-                                logger.warning(
-                                    "ENCODE search returned 0 results — retrying with alternate tool",
-                                    original_tool=tool_name, swap_tool=_swap_tool,
-                                    original_params=params, swap_params=_swap_params,
-                                )
-                                try:
-                                    _swap_result = await mcp_client.call_tool(
-                                        _swap_tool, **_swap_params)
-                                    _swap_count = (
-                                        len(_swap_result) if isinstance(_swap_result, list)
-                                        else _swap_result.get("total", 0)
-                                            if isinstance(_swap_result, dict) else 0
-                                    )
-                                    if _swap_count > 0:
-                                        result_data = _swap_result
-                                        tool_name = _swap_tool
-                                        params = _swap_params
-                                        logger.info("Alternate tool returned results",
-                                                   tool=_swap_tool, count=_swap_count)
-                                    else:
-                                        logger.info("Alternate tool also returned 0 results",
-                                                   tool=_swap_tool)
-                                except Exception as _swap_err:
-                                    logger.warning("Alternate tool call failed",
-                                                  tool=_swap_tool, error=str(_swap_err))
-
-                    try:
-                        source_results.append({
-                            "tool": tool_name,
-                            "params": params,
-                            "data": result_data,
-                        })
-                        logger.info("Tool call successful", source=source_key, tool=tool_name)
-
-                        # --- Chaining: download after get_file_metadata ---
-                        # Trigger when _chain=="download" (auto-generated) OR
-                        # when active_skill is download_files and LLM generated
-                        # the get_file_metadata tag directly (no _chain key),
-                        # OR when the user's message has clear download intent
-                        # (e.g. "download ENCFF..." on any ENCODE skill).
-                        _msg_lower = req.message.lower() if hasattr(req, 'message') else ""
-                        _user_wants_download = any(
-                            w in _msg_lower for w in ("download", "grab", "fetch", "save")
-                        )
-                        _is_download_chain = (
-                            call.get("_chain") == "download"
-                            or active_skill == "download_files"
-                            or _user_wants_download
-                        )
-                        if _is_download_chain \
-                                and tool_name == "get_file_metadata" \
-                                and isinstance(result_data, dict):
-                            _dl_url = None
-                            _file_acc = params.get("file_accession", "")
-                            _file_size = result_data.get("file_size")
-                            _file_fmt = result_data.get("file_format", "")
-                            _file_name = f"{_file_acc}.{_file_fmt}" if _file_acc and _file_fmt else _file_acc
-
-                            # Prefer the cloud_metadata URL (direct S3 link)
-                            _cloud = result_data.get("cloud_metadata")
-                            if isinstance(_cloud, dict) and _cloud.get("url"):
-                                _dl_url = _cloud["url"]
-                            # Fallback: construct from href
-                            elif result_data.get("href"):
-                                _dl_url = f"https://www.encodeproject.org{result_data['href']}"
-
-                            if _dl_url:
-                                _dl_file_info = {
-                                    "url": _dl_url,
-                                    "filename": _file_name,
-                                    "size_bytes": _file_size,
-                                    "accession": _file_acc,
-                                }
-                                # Append (not replace) so multi-file downloads accumulate
-                                _pending_download_files.append(_dl_file_info)
-                                logger.info(
-                                    "Download chain: resolved URL from file metadata",
-                                    file_accession=_file_acc, url=_dl_url,
-                                    size_bytes=_file_size,
-                                )
-                                # Force download_files skill and approval
-                                active_skill = "download_files"
-                                needs_approval = True
-                                # Build a clean confirmation message listing all pending files
-                                _plan_lines = ["**Download Plan:**"]
-                                _total_mb = 0
-                                for _pf in _pending_download_files:
-                                    _sz = _pf.get("size_bytes") or 0
-                                    _mb = round(_sz / (1024 * 1024), 1)
-                                    _total_mb += _mb
-                                    _plan_lines.append(f"- **File:** `{_pf['filename']}` ({_mb} MB)")
-                                _plan_lines.append(f"- **Total:** {round(_total_mb, 1)} MB")
-                                _plan_lines.append(f"- **Destination:** `data/`\n")
-                                _plan_lines.append("Proceed with download?")
-                                clean_markdown = "\n".join(_plan_lines)
-
-                        # --- Chaining: follow up find_file with parse/read ---
-                        # Works whether _chain was set by auto_calls or needs
-                        # to be inferred (e.g. LLM generated the find_file tag directly).
-                        if tool_name == "find_file" and isinstance(result_data, dict) \
-                                and result_data.get("success") and result_data.get("primary_path"):
-                            chain_tool = call.get("_chain")
-                            primary_path = result_data["primary_path"]
-                            # Infer follow-up tool from filename if not explicitly set
-                            if not chain_tool:
-                                chain_tool = _pick_file_tool(primary_path)
-                            # Prefer work_dir over run_uuid for chaining
-                            chain_work_dir = result_data.get("work_dir") or params.get("work_dir")
-                            chain_uuid = result_data.get("run_uuid") or params.get("run_uuid")
-                            if chain_work_dir or chain_uuid:
-                                logger.info("Chaining find_file → parse/read",
-                                           chain_tool=chain_tool, file_path=primary_path)
-                                try:
-                                    chain_params: dict = {"file_path": primary_path}
-                                    if chain_work_dir:
-                                        chain_params["work_dir"] = chain_work_dir
-                                    elif chain_uuid:
-                                        chain_params["run_uuid"] = chain_uuid
-                                    if chain_tool == "parse_csv_file":
-                                        chain_params["max_rows"] = 100
-                                    elif chain_tool == "parse_bed_file":
-                                        chain_params["max_records"] = 100
-                                    elif chain_tool == "read_file_content":
-                                        chain_params["preview_lines"] = 50
-                                    chain_result = await mcp_client.call_tool(chain_tool, **chain_params)
-                                    source_results.append({
-                                        "tool": chain_tool,
-                                        "params": chain_params,
-                                        "data": chain_result,
-                                    })
-                                    logger.info("Chain call successful", tool=chain_tool)
-                                except Exception as ce:
-                                    logger.error("Chain call failed", tool=chain_tool, error=str(ce))
-                                    source_results.append({
-                                        "tool": chain_tool,
-                                        "params": chain_params,
-                                        "error": str(ce),
-                                    })
-
-                    except Exception as e:
-                        logger.error("Tool call failed", source=source_key, tool=tool_name, error=str(e))
-                        source_results.append({
-                            "tool": tool_name,
-                            "params": params,
-                            "error": str(e),
-                        })
-            except Exception as e:
-                logger.error("Failed to connect to source", source=source_key, error=str(e))
-                source_results = [{
-                    "tool": c["tool"],
-                    "params": c["params"],
-                    "error": f"Connection failed: {e}",
-                } for c in calls]
-            finally:
-                await mcp_client.disconnect()
-            
-            all_results[source_key] = source_results
-        
-        # 6c-auto. Auto-fetch missing ENCFF files for multi-file downloads.
-        # The LLM often emits only ONE get_file_metadata tag when the user
-        # requests multiple files.  Detect missing accessions and fetch them.
-        if _pending_download_files:
-            _msg_text = req.message if hasattr(req, 'message') else ""
-            _requested_encffs = set(
-                m.upper() for m in re.findall(r'ENCFF[A-Z0-9]{6}', _msg_text, re.IGNORECASE)
-            )
-            _fetched_encffs = set(
-                f.get("accession", "").upper() for f in _pending_download_files
-            )
-            _missing_encffs = _requested_encffs - _fetched_encffs
-            if _missing_encffs:
-                # We need the experiment accession for the API call
-                _exp_match = re.search(r'(ENCSR[A-Z0-9]{6})', _msg_text, re.IGNORECASE)
-                _exp_acc = _exp_match.group(1) if _exp_match else None
-                if _exp_acc:
-                    logger.info("Auto-fetching missing ENCFF files for download",
-                               missing=sorted(_missing_encffs), experiment=_exp_acc)
-                    try:
-                        _autofetch_url = get_service_url("encode")
-                        _autofetch_mcp = MCPHttpClient(name="encode", base_url=_autofetch_url)
-                        await _autofetch_mcp.connect()
-                        for _miss_acc in sorted(_missing_encffs):
-                            try:
-                                _miss_result = await _autofetch_mcp.call_tool(
-                                    "get_file_metadata",
-                                    accession=_exp_acc,
-                                    file_accession=_miss_acc,
-                                )
-                                if isinstance(_miss_result, dict):
-                                    _miss_dl_url = None
-                                    _miss_cloud = _miss_result.get("cloud_metadata")
-                                    if isinstance(_miss_cloud, dict) and _miss_cloud.get("url"):
-                                        _miss_dl_url = _miss_cloud["url"]
-                                    elif _miss_result.get("href"):
-                                        _miss_dl_url = f"https://www.encodeproject.org{_miss_result['href']}"
-                                    if _miss_dl_url:
-                                        _miss_fmt = _miss_result.get("file_format", "")
-                                        _miss_fname = f"{_miss_acc}.{_miss_fmt}" if _miss_fmt else _miss_acc
-                                        _pending_download_files.append({
-                                            "url": _miss_dl_url,
-                                            "filename": _miss_fname,
-                                            "size_bytes": _miss_result.get("file_size"),
-                                            "accession": _miss_acc,
-                                        })
-                                        logger.info("Auto-fetched missing file metadata",
-                                                   accession=_miss_acc, url=_miss_dl_url)
-                            except Exception as _mfe:
-                                logger.warning("Failed to auto-fetch file metadata",
-                                              accession=_miss_acc, error=str(_mfe))
-                        await _autofetch_mcp.disconnect()
-                        # Rebuild the Download Plan to include all files
-                        _plan_lines = ["**Download Plan:**"]
-                        _total_mb = 0
-                        for _pf in _pending_download_files:
-                            _sz = _pf.get("size_bytes") or 0
-                            _mb = round(_sz / (1024 * 1024), 1)
-                            _total_mb += _mb
-                            _plan_lines.append(f"- **File:** `{_pf['filename']}` ({_mb} MB)")
-                        _plan_lines.append(f"- **Total:** {round(_total_mb, 1)} MB")
-                        _plan_lines.append(f"- **Destination:** `data/`\n")
-                        _plan_lines.append("Proceed with download?")
-                        clean_markdown = "\n".join(_plan_lines)
-                    except Exception as _conn_e:
-                        logger.warning("Failed to connect for auto-fetch",
-                                      error=str(_conn_e))
+        # Auto-fetch missing ENCFF files for multi-file downloads
+        _autofetch_markdown = await auto_fetch_missing_encff(
+            _pending_download_files, req.message if hasattr(req, 'message') else "",
+        )
+        if _autofetch_markdown is not None:
+            clean_markdown = _autofetch_markdown
 
         # 6c. Build provenance records for all tool calls (audit trail)
         _provenance: list[dict] = []
@@ -3766,241 +2801,26 @@ What would you like to do?
                 # All errors or empty — show errors directly, no second pass
                 clean_markdown += formatted_data
         
-        # 7. Extract any parsed DataFrames from tool results so the UI
-        #    can render them interactively with st.dataframe.
-        #    This covers:
-        #      a) File-parsing tools (parse_csv_file, parse_bed_file)
-        #      b) Search/list tools that return a plain list of dicts
-        #         (search_by_biosample, search_by_target, search_by_organism,
-        #          list_experiments) — stored BEFORE markdown truncation so the
-        #         full result set is always available in the UI regardless of
-        #         how many rows the LLM saw.
-        _SEARCH_TOOLS = {
-            "search_by_biosample", "search_by_target",
-            "search_by_organism", "search_by_assay", "list_experiments",
-        }
-        _FILE_TOOLS = {"get_files_by_type"}
-        _embedded_dataframes = {}
-        for _src_key, _src_results in all_results.items():
-            _reg_entry = (SERVICE_REGISTRY.get(_src_key)
-                         or CONSORTIUM_REGISTRY.get(_src_key)
-                         or {})
-            _table_cols = _reg_entry.get("table_columns", [])  # [(header, field_key), ...]
-            for _r in _src_results:
-                _tool = _r.get("tool", "")
-                if _tool in ("parse_csv_file", "parse_bed_file") and "data" in _r:
-                    _rd = _r["data"]
-                    if isinstance(_rd, dict) and _rd.get("data"):
-                        _fname = _rd.get("file_path") or _r["params"].get("file_path", "unknown")
-                        _fname = _fname.rsplit("/", 1)[-1] if "/" in _fname else _fname
-                        _embedded_dataframes[_fname] = {
-                            "columns": _rd.get("columns", []),
-                            "data": _rd["data"],
-                            "row_count": _rd.get("row_count", len(_rd["data"])),
-                            "metadata": _rd.get("metadata", {}),
-                        }
-                elif _tool in _FILE_TOOLS and "data" in _r:
-                    # get_files_by_type returns {"bam": [...], "fastq": [...], ...}
-                    # Store ONE dataframe per file type so follow-up queries like
-                    # "which bam files are methylated reads?" inject ONLY the bam
-                    # rows — not a merged table of all 69+ files.
-                    _rd = _r["data"]
-                    if isinstance(_rd, dict):
-                        _exp_acc = _r.get("params", {}).get("accession", "files")
-                        _cols = ["Accession", "Output Type", "Replicate", "Size", "Status"]
-                        # Detect which file type(s) the user asked about so we
-                        # only show those tables prominently in the UI.  All
-                        # tables are still stored for follow-up queries.
-                        _msg_lower_ft = req.message.lower()
-                        _asked_file_types: set[str] = set()
-                        for _candidate_ft in _rd.keys():
-                            if _candidate_ft.lower().split()[0] in _msg_lower_ft:
-                                _asked_file_types.add(_candidate_ft)
-                        for _ftype, _flist in _rd.items():
-                            if not isinstance(_flist, list) or not _flist:
-                                continue
-                            _rows = []
-                            for _fobj in _flist:
-                                if isinstance(_fobj, dict):
-                                    _rows.append({
-                                        "Accession": _fobj.get("accession", ""),
-                                        "Output Type": _fobj.get("output_type", ""),
-                                        "Replicate": _fobj.get("biological_replicates_formatted")
-                                                     or ", ".join(
-                                                         f"Rep {x}" for x in
-                                                         _fobj.get("biological_replicates", [])
-                                                     ),
-                                        "Size": _fobj.get("file_size", ""),
-                                        "Status": _fobj.get("status", ""),
-                                    })
-                            if _rows:
-                                _df_label = f"{_exp_acc} {_ftype} files ({len(_rows)})"
-                                # Mark as visible if user asked about this type
-                                # (or all visible if no specific type mentioned).
-                                _is_visible = (not _asked_file_types
-                                               or _ftype in _asked_file_types)
-                                _embedded_dataframes[_df_label] = {
-                                    "columns": _cols,
-                                    "data": _rows,
-                                    "row_count": len(_rows),
-                                    "metadata": {
-                                        "file_type": _ftype,
-                                        "accession": _exp_acc,
-                                        "visible": _is_visible,
-                                    },
-                                }
-                elif _tool in _SEARCH_TOOLS and "data" in _r:
-                    _rd = _r["data"]
-                    # Normalise to a flat list of experiment dicts.
-                    # search_by_assay returns a dict with "experiments",
-                    # "human", or "mouse" sub-lists; other search tools
-                    # return a plain list directly.
-                    _experiment_list: list[dict] = []
-                    if isinstance(_rd, list):
-                        _experiment_list = _rd
-                    elif isinstance(_rd, dict):
-                        if "experiments" in _rd and isinstance(_rd["experiments"], list):
-                            _experiment_list = _rd["experiments"]
-                        else:
-                            # Merge human + mouse sub-lists (search_by_assay
-                            # without organism filter)
-                            for _sub_key in ("human", "mouse"):
-                                _sub = _rd.get(_sub_key)
-                                if isinstance(_sub, list):
-                                    _experiment_list.extend(_sub)
+        # 7. Extract DataFrames and images from tool results
+        _embedded_dataframes = extract_embedded_dataframes(all_results, req.message)
 
-                    if _experiment_list and isinstance(_experiment_list[0], dict):
-                        # Derive column list from registry table_columns or first row keys
-                        if _table_cols:
-                            _cols = [h for h, _ in _table_cols]
-                            _rows = [
-                                {h: (item.get(k) if not isinstance(item.get(k), list)
-                                     else ", ".join(str(v) for v in item.get(k, [])))
-                                 for h, k in _table_cols}
-                                for item in _experiment_list
-                            ]
-                        else:
-                            _cols = list(_experiment_list[0].keys())
-                            _rows = _experiment_list
-                        _params = _r.get("params", {})
-                        _label = _tool.replace("_", " ").title()
-                        if _params.get("search_term"):
-                            _label = _params["search_term"]
-                        elif _params.get("assay_title"):
-                            _label = _params["assay_title"]
-                        elif _params.get("target"):
-                            _label = _params["target"]
-                        elif _params.get("organism"):
-                            _label = _params["organism"]
-                        _fname = f"{_label} ({len(_experiment_list)} results)"
-                        _embedded_dataframes[_fname] = {
-                            "columns": _cols,
-                            "data": _rows,
-                            "row_count": len(_experiment_list),
-                            "metadata": {"visible": True},
-                        }
-
-        # 7b. Collect generated plot images from edgepython results.
-        #     Store as base64 PNG so the UI can render them with st.image.
-        _embedded_images = []
-        for _src_key, _src_results in all_results.items():
-            if _src_key != "edgepython":
-                continue
-            for _r in _src_results:
-                if _r.get("tool") != "generate_plot" or "error" in _r:
-                    continue
-                _data_str = _r.get("data", "")
-                if not isinstance(_data_str, str):
-                    continue
-                # Extract file path from result like "Volcano plot saved to: /path/to.png"
-                _saved_match = re.search(r'saved to:\s*(.+\.png)', _data_str, re.IGNORECASE)
-                if not _saved_match:
-                    continue
-                _img_path = Path(_saved_match.group(1).strip())
-                if not _img_path.exists():
-                    continue
-                try:
-                    import base64
-                    _img_bytes = _img_path.read_bytes()
-                    _b64 = base64.b64encode(_img_bytes).decode("ascii")
-                    _plot_type = _r.get("params", {}).get("plot_type", "plot")
-                    _embedded_images.append({
-                        "label": f"{_plot_type.replace('_', ' ').title()} Plot",
-                        "data_b64": _b64,
-                        "path": str(_img_path),
-                    })
-                    logger.info("Embedded plot image", plot_type=_plot_type,
-                               path=str(_img_path), size_kb=len(_img_bytes) // 1024)
-                except Exception as _img_err:
-                    logger.warning("Failed to embed plot image",
-                                  path=str(_img_path), error=str(_img_err))
+        _embedded_images = extract_embedded_images(all_results)
 
         # 8. Save AGENT_PLAN (The Text)
         # Status is DONE because the text itself is just informational. 
         # The flow control happens in the gate block below.
         _emit_progress(req.request_id, "done", "Complete")
-        # Merge any dataframes produced by _inject_job_context (server-side
-        # filtered follow-up results) into the embedded dataframes dict so
-        # the UI renders them as interactive tables.
-        if _injected_dfs:
-            _embedded_dataframes.update(_injected_dfs)
+        # Assign DF IDs (merges injected DFs and assigns sequential IDs)
+        _next_df_id = assign_df_ids(_embedded_dataframes, history_blocks, _injected_dfs)
 
-        # Assign sequential DF IDs (DF1, DF2, ...) to VISIBLE dataframes only.
-        # Non-visible DFs (e.g. tar/bed when user asked about bam) don't get
-        # numbered IDs — they appear collapsed inside raw query details.
-        # Scan history to find the highest existing ID, then continue from there.
-        _next_df_id = 1
-        for _hblk in history_blocks[:-1]:  # exclude the current USER_MESSAGE
-            if _hblk.type == "AGENT_PLAN":
-                _hblk_dfs = get_block_payload(_hblk).get("_dataframes", {})
-                for _dfd in _hblk_dfs.values():
-                    _existing_id = _dfd.get("metadata", {}).get("df_id")
-                    if isinstance(_existing_id, int):
-                        _next_df_id = max(_next_df_id, _existing_id + 1)
-        for _df_data in _embedded_dataframes.values():
-            _meta = _df_data.setdefault("metadata", {})
-            if _meta.get("df_id"):
-                continue  # already has an ID (e.g. injected df)
-            if _meta.get("visible", True):  # default True for DFs without flag
-                _meta["df_id"] = _next_df_id
-                _next_df_id += 1
-            # Non-visible DFs intentionally get no df_id
+        # Rebind plots to new DFs, update conv state, and deduplicate specs
+        rebind_plots_to_new_df(plot_specs, _embedded_dataframes, req.message)
 
-        # If this turn created a new dataframe and the user did not explicitly
-        # ask for a specific DF, bind any plot specs to the new DF from this
-        # turn rather than trusting an LLM-guessed stale DF number.
-        _newest_turn_df_id = None
-        for _df_data in _embedded_dataframes.values():
-            _df_id = _df_data.get("metadata", {}).get("df_id")
-            if isinstance(_df_id, int):
-                if _newest_turn_df_id is None or _df_id > _newest_turn_df_id:
-                    _newest_turn_df_id = _df_id
-        if _user_wants_plot and plot_specs and not _user_explicit_df and _newest_turn_df_id is not None:
-            _rebound_count = 0
-            _stale_df_ids = sorted({
-                _ps.get("df_id")
-                for _ps in plot_specs
-                if isinstance(_ps.get("df_id"), int) and _ps.get("df_id") != _newest_turn_df_id
-            })
-            for _ps in plot_specs:
-                if _ps.get("df_id") != _newest_turn_df_id:
-                    _ps["df_id"] = _newest_turn_df_id
-                    _ps["df"] = f"DF{_newest_turn_df_id}"
-                    _rebound_count += 1
-                elif _ps.get("df") != f"DF{_newest_turn_df_id}":
-                    _ps["df"] = f"DF{_newest_turn_df_id}"
-            if _rebound_count or _stale_df_ids:
-                logger.info(
-                    "Rebound plot specs to dataframe created in current turn",
-                    new_df_id=_newest_turn_df_id,
-                    stale_df_ids=_stale_df_ids,
-                    rebound_count=_rebound_count,
-                )
-
-        # Update _conv_state with the newly-embedded DFs so the cached state
-        # saved into this block is accurate for future requests' fast path.
+        # Update _conv_state with newly-embedded DFs
         if _embedded_dataframes:
             _max_new_id = 0
+            _edf_label = ""
+            _edf_rows = "?"
             for _edf_val in _embedded_dataframes.values():
                 _edf_meta = _edf_val.get("metadata", {})
                 _edf_id = _edf_meta.get("df_id")
@@ -4017,215 +2837,11 @@ What would you like to do?
                         f"{_new_latest} ({_edf_label}, {_edf_rows} rows)"
                     )
 
-        # ── POST-DF-ASSIGNMENT PLOT FALLBACK ───────────────────────────
-        # If the user wanted a plot but we still don't have valid plot specs
-        # (e.g. the LLM didn't emit [[PLOT:...]] tags in either pass), and
-        # we now have newly-created DFs from data calls, auto-generate a
-        # plot spec using the new DF ID.
-        _has_valid_plot = plot_specs and any(
-            s.get("df_id") is not None for s in plot_specs
+        post_df_assignment_plot_fallback(
+            plot_specs, _embedded_dataframes, req.message, _extract_plot_style_params,
         )
-        if _user_wants_plot and not _has_valid_plot and _embedded_dataframes:
-            # Find the newest DF with a valid ID
-            _newest_df_id = None
-            for _edf_val2 in _embedded_dataframes.values():
-                _edf_id2 = _edf_val2.get("metadata", {}).get("df_id")
-                if isinstance(_edf_id2, int):
-                    if _newest_df_id is None or _edf_id2 > _newest_df_id:
-                        _newest_df_id = _edf_id2
-            if _newest_df_id is not None:
-                # Detect chart type from user message
-                _msg_l2 = req.message.lower()
-                if "pie" in _msg_l2:
-                    _auto_type2 = "pie"
-                elif "scatter" in _msg_l2:
-                    _auto_type2 = "scatter"
-                elif "box" in _msg_l2:
-                    _auto_type2 = "box"
-                elif "heatmap" in _msg_l2 or "correlation" in _msg_l2:
-                    _auto_type2 = "heatmap"
-                elif "histogram" in _msg_l2 or "distribution" in _msg_l2:
-                    _auto_type2 = "histogram"
-                else:
-                    _auto_type2 = "bar"
-                # Detect x column from user message
-                _auto_x2 = None
-                _by_m2 = re.search(r'\bby\s+(\w+)', req.message, re.IGNORECASE)
-                if _by_m2 and not re.match(r'DF\d+', _by_m2.group(1), re.IGNORECASE):
-                    _auto_x2 = _by_m2.group(1)
-                if not _auto_x2:
-                    _of_m2 = re.search(r'\b(?:of|for)\s+(\w+)', req.message, re.IGNORECASE)
-                    if _of_m2 and not re.match(r'DF\d+', _of_m2.group(1), re.IGNORECASE):
-                        _auto_x2 = _of_m2.group(1)
-                _auto_post_spec = {
-                    "type": _auto_type2,
-                    "df_id": _newest_df_id,
-                    "df": f"DF{_newest_df_id}",
-                    "agg": "count",
-                }
-                if _auto_x2:
-                    _auto_post_spec["x"] = _auto_x2
-                _auto_post_spec.update(_extract_plot_style_params(req.message))
-                plot_specs.append(_auto_post_spec)
-                logger.info("Post-DF-assignment plot fallback generated",
-                           spec=_auto_post_spec)
-        # Also fix any plot specs with None df_id that can now be resolved
-        if plot_specs and _embedded_dataframes:
-            _newest_id_for_fix = None
-            for _v in _embedded_dataframes.values():
-                _id = _v.get("metadata", {}).get("df_id")
-                if isinstance(_id, int):
-                    if _newest_id_for_fix is None or _id > _newest_id_for_fix:
-                        _newest_id_for_fix = _id
-            if _newest_id_for_fix is not None:
-                for _ps_fix in plot_specs:
-                    if _ps_fix.get("df_id") is None:
-                        _ps_fix["df_id"] = _newest_id_for_fix
-                        _ps_fix["df"] = f"DF{_newest_id_for_fix}"
-                        logger.info("Fixed plot spec with None df_id",
-                                   new_df_id=_newest_id_for_fix)
-
-        # Deduplicate identical plot specs before serializing them into
-        # AGENT_PLOT blocks. The same chart can be accumulated from multiple
-        # phases (first-pass tag, second-pass tag, fallback), and the UI will
-        # otherwise overlay duplicate traces on the same figure.
-        if plot_specs:
-            _deduped_plot_specs = []
-            _seen_plot_specs = set()
-            for _ps_dedupe in plot_specs:
-                _semantic_plot_spec = {
-                    "type": _ps_dedupe.get("type"),
-                    "df_id": _ps_dedupe.get("df_id"),
-                    "x": _ps_dedupe.get("x"),
-                    "y": _ps_dedupe.get("y"),
-                    "color": _ps_dedupe.get("color"),
-                    "palette": _ps_dedupe.get("palette"),
-                    "agg": _ps_dedupe.get("agg"),
-                }
-                _plot_key = tuple(
-                    sorted(
-                        (str(_k), str(_v).strip().lower() if isinstance(_v, str) else _v)
-                        for _k, _v in _semantic_plot_spec.items()
-                        if _v is not None
-                    )
-                )
-                if _plot_key in _seen_plot_specs:
-                    continue
-                _seen_plot_specs.add(_plot_key)
-                _deduped_plot_specs.append(_ps_dedupe)
-            if len(_deduped_plot_specs) != len(plot_specs):
-                logger.info(
-                    "Deduplicated duplicate plot specs",
-                    original_count=len(plot_specs),
-                    deduped_count=len(_deduped_plot_specs),
-                )
-                plot_specs = _deduped_plot_specs
-
-        # For ordinary single-plot requests, multiple competing specs for the
-        # same dataframe/chart type are usually LLM leakage across passes, not
-        # intentional multi-trace overlays. Keep the spec that best matches the
-        # current user prompt and drop the rest.
-        if plot_specs:
-            def _normalize_plot_token(value: str | None) -> str:
-                if not value:
-                    return ""
-                _norm = re.sub(r'[^a-z0-9]+', '', str(value).lower())
-                if _norm.endswith("type"):
-                    _norm = _norm[:-4]
-                return _norm
-
-            def _requested_plot_type(message: str) -> str:
-                _msg = (message or "").lower()
-                if "pie" in _msg:
-                    return "pie"
-                if "scatter" in _msg:
-                    return "scatter"
-                if "box" in _msg:
-                    return "box"
-                if "heatmap" in _msg or "correlation" in _msg:
-                    return "heatmap"
-                if "histogram" in _msg or "distribution" in _msg:
-                    return "histogram"
-                if "bar" in _msg or "plot" in _msg or "chart" in _msg or "graph" in _msg:
-                    return "bar"
-                return ""
-
-            _multi_trace_requested = bool(re.search(
-                r'\b(compare|overlay|overlaid|versus|vs\.?|both|multiple|multi[- ]trace)\b',
-                req.message,
-                re.IGNORECASE,
-            ))
-            _requested_style = _extract_plot_style_params(req.message)
-            _requested_palette = _normalize_plot_token(_requested_style.get("palette"))
-            _requested_x_match = re.search(
-                r'\bby\s+([\w][\w ]*?)(?:\s+in\s+[#A-Za-z]|,|\.|$)',
-                req.message,
-                re.IGNORECASE,
-            ) or re.search(
-                r'\bof\s+([\w][\w ]*?)(?:\s+in\s+[#A-Za-z]|,|\.|$)',
-                req.message,
-                re.IGNORECASE,
-            )
-            _requested_x = _normalize_plot_token(_requested_x_match.group(1).strip()) if _requested_x_match else ""
-            _requested_type = _requested_plot_type(req.message)
-
-            if not _multi_trace_requested:
-                from collections import defaultdict
-                _grouped_specs = defaultdict(list)
-                for _plot_index, _plot_spec in enumerate(plot_specs):
-                    _grouped_specs[(_plot_spec.get("df_id"), _plot_spec.get("type"))].append((_plot_index, _plot_spec))
-
-                _selected_specs = []
-                for (_group_df_id, _group_type), _group_specs in _grouped_specs.items():
-                    if len(_group_specs) == 1:
-                        _selected_specs.append(_group_specs[0][1])
-                        continue
-
-                    _best_spec = None
-                    _best_score = None
-                    for _plot_index, _plot_spec in _group_specs:
-                        _score = 0
-                        _spec_x = _normalize_plot_token(_plot_spec.get("x"))
-                        _spec_palette = _normalize_plot_token(_plot_spec.get("palette") or _plot_spec.get("color"))
-                        _spec_type = str(_plot_spec.get("type") or "")
-
-                        if _requested_type and _spec_type == _requested_type:
-                            _score += 4
-                        if _requested_x:
-                            if _spec_x == _requested_x:
-                                _score += 10
-                            elif _spec_x and (_requested_x in _spec_x or _spec_x in _requested_x):
-                                _score += 6
-                        if _requested_palette:
-                            if _spec_palette == _requested_palette:
-                                _score += 5
-                        elif _spec_palette:
-                            _score -= 2
-                        if _plot_spec.get("agg") == "count":
-                            _score += 1
-                        if _plot_spec.get("x"):
-                            _score += 1
-                        # Prefer earlier specs on ties to avoid second-pass drift.
-                        _score -= _plot_index / 1000.0
-
-                        if _best_score is None or _score > _best_score:
-                            _best_score = _score
-                            _best_spec = _plot_spec
-
-                    if _best_spec is not None:
-                        _selected_specs.append(_best_spec)
-
-                if len(_selected_specs) != len(plot_specs):
-                    logger.info(
-                        "Collapsed competing plot specs to a single best-match chart",
-                        original_count=len(plot_specs),
-                        selected_count=len(_selected_specs),
-                        requested_x=_requested_x,
-                        requested_type=_requested_type,
-                        requested_palette=_requested_palette,
-                    )
-                    plot_specs = _selected_specs
-        # ── END POST-DF-ASSIGNMENT PLOT FALLBACK ───────────────────────
+        plot_specs = deduplicate_plot_specs(plot_specs)
+        plot_specs = collapse_competing_specs(plot_specs, req.message, _extract_plot_style_params)
 
         # Consolidate token usage from both LLM passes (think + analyze_results)
         _total_usage = {

@@ -30,6 +30,12 @@ from cortex.models import (
     ProjectBlock, Conversation, ConversationMessage,
 )
 from cortex.app import app
+from cortex.planner import _template_remote_stage_workflow
+
+
+def _capture_task_without_running(coro):
+    coro.close()
+    return MagicMock(name="closed_task")
 
 
 # ---------------------------------------------------------------------------
@@ -180,11 +186,19 @@ class TestApprovalGateCreation:
         assert payload["attempt_number"] == 1
 
     def test_approval_gate_has_skill(self, approval_client):
-        resp = approval_client.post("/chat", json={
-            "project_id": "proj-flow",
-            "message": "Analyze sample at /data/pod5",
-            "skill": "analyze_local_sample",
-        })
+        with patch(
+            "cortex.job_parameters.extract_job_parameters_from_conversation",
+            new=AsyncMock(return_value={
+                "sample_name": "sample",
+                "execution_mode": "local",
+                "gate_action": "job",
+            }),
+        ):
+            resp = approval_client.post("/chat", json={
+                "project_id": "proj-flow",
+                "message": "Analyze sample at /data/pod5",
+                "skill": "analyze_local_sample",
+            })
         payload = resp.json()["gate_block"]["payload"]
         assert payload["skill"] == "analyze_local_sample"
 
@@ -210,22 +224,59 @@ class TestApprovalGateCreation:
         md = resp.json()["agent_block"]["payload"]["markdown"]
         assert "[[APPROVAL_NEEDED]]" not in md
 
-    def test_stage_on_hpc3_routes_to_remote_stage_workflow(self, plain_client):
-        with patch("cortex.app.asyncio.create_task", MagicMock()):
-            resp = plain_client.post("/chat", json={
-                "project_id": "proj-flow",
-                "message": "stage the mouse CDNA sample called Jamshid at /media/backup_disk/agoutic_root/testdata/CDNA/pod5 on hpc3",
-                "skill": "welcome",
-            })
+    def test_stage_on_profile_routes_to_remote_stage_workflow(self, plain_client, session_factory):
+        expected_plan = _template_remote_stage_workflow(
+            {
+                "sample_name": "Jamshid",
+                "input_directory": "/media/backup_disk/agoutic_root/testdata/CDNA/pod5",
+                "ssh_profile_nickname": "mycluster",
+            }
+        )
+
+        with patch("cortex.app.asyncio.create_task", side_effect=_capture_task_without_running), \
+             patch("cortex.planner.classify_request", return_value="MULTI_STEP"), \
+             patch("cortex.app.run_in_threadpool", new=AsyncMock(return_value=expected_plan)):
+            resp = plain_client.post(
+                "/chat",
+                json={
+                    "project_id": "proj-flow",
+                    "message": "stage the mouse CDNA sample called Jamshid at /media/backup_disk/agoutic_root/testdata/CDNA/pod5 on mycluster",
+                    "skill": "welcome",
+                },
+            )
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["plan_block"] is not None
+        sess = session_factory()
+        plan_blocks = sess.execute(
+            select(ProjectBlock).where(
+                ProjectBlock.project_id == "proj-flow",
+                ProjectBlock.type == "WORKFLOW_PLAN",
+            )
+        ).scalars().all()
+        sess.close()
+        remote_stage_plans = [
+            block
+            for block in plan_blocks
+            if json.loads(block.payload_json).get("workflow_type") == "remote_sample_intake"
+        ]
+        plan_block = data.get("plan_block") or (
+            {
+                "id": remote_stage_plans[-1].id,
+                "type": remote_stage_plans[-1].type,
+                "status": remote_stage_plans[-1].status,
+                "payload": json.loads(remote_stage_plans[-1].payload_json),
+            }
+            if remote_stage_plans
+            else None
+        )
+        assert plan_block is not None
         assert data["gate_block"] is None
         assert data["agent_block"]["payload"]["skill"] == "remote_execution"
-        plan_payload = data["plan_block"]["payload"]
+        plan_payload = plan_block["payload"]
         assert plan_payload["workflow_type"] == "remote_sample_intake"
         assert plan_payload["remote_action"] == "stage_only"
+        assert plan_payload["input_directory"] == "/media/backup_disk/agoutic_root/testdata/CDNA/pod5"
 
 
 # ---------------------------------------------------------------------------
