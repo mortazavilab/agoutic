@@ -57,6 +57,20 @@ def _load_payload(session_factory, block_id: str) -> tuple[ProjectBlock, dict]:
     return block, payload
 
 
+def _create_workflow_block(session_factory, *, project_id: str, owner_id: str, payload: dict):
+    setup_session = session_factory()
+    block = _create_block_internal(
+        setup_session,
+        project_id,
+        "WORKFLOW_PLAN",
+        payload,
+        status="PENDING",
+        owner_id=owner_id,
+    )
+    setup_session.close()
+    return block
+
+
 @pytest.mark.asyncio
 async def test_execute_plan_concurrent_projects_remain_isolated(session_factory, monkeypatch):
     from cortex import plan_executor
@@ -197,3 +211,310 @@ async def test_execute_plan_concurrent_instances_same_project_keep_plan_instance
     assert len(step_tasks) >= 4
     assert any(f"workflow-step:{block_1.id}:p1_s1" == task.source_key for task in step_tasks)
     assert any(f"workflow-step:{block_2.id}:p2_s1" == task.source_key for task in step_tasks)
+
+
+@pytest.mark.asyncio
+async def test_parallel_safe_steps_run_concurrently_and_persist_in_plan_order(session_factory, monkeypatch):
+    from cortex import plan_executor
+
+    payload = {
+        "title": "Parallel safe",
+        "project_id": "proj-par",
+        "plan_instance_id": "pi-par",
+        "steps": [
+            {
+                "id": "b_step",
+                "order_index": 0,
+                "kind": "SEARCH_ENCODE",
+                "title": "Search",
+                "depends_on": [],
+                "requires_approval": False,
+            },
+            {
+                "id": "a_step",
+                "order_index": 1,
+                "kind": "LOCATE_DATA",
+                "title": "Locate",
+                "depends_on": [],
+                "requires_approval": False,
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-par",
+        owner_id="owner-par",
+        payload=payload,
+    )
+
+    active = {"count": 0, "max": 0}
+    completed_order: list[str] = []
+    completed_seen: set[str] = set()
+
+    async def _fake_call(source_key, tool_name, params):
+        active["count"] += 1
+        active["max"] = max(active["max"], active["count"])
+        await asyncio.sleep(0.03 if tool_name == "search_by_biosample" else 0.005)
+        active["count"] -= 1
+        return {"ok": True, "tool": tool_name, "source_key": source_key, "params": params}
+
+    original_persist = plan_executor._persist_step_update
+
+    def _capturing_persist(session, workflow_block, plan_payload):
+        for step in plan_payload.get("steps", []):
+            step_id = step.get("id")
+            if step.get("status") == "COMPLETED" and isinstance(step_id, str) and step_id not in completed_seen:
+                completed_seen.add(step_id)
+                completed_order.append(step_id)
+        return original_persist(session, workflow_block, plan_payload)
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+    monkeypatch.setattr(plan_executor, "_persist_step_update", _capturing_persist)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-par")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    assert final_payload["status"] == "COMPLETED"
+    assert active["max"] >= 2
+    # Deterministic persistence order follows plan order, not completion timing.
+    assert completed_order[:2] == ["b_step", "a_step"]
+
+
+@pytest.mark.asyncio
+async def test_dependent_step_waits_until_parallel_dependencies_complete(session_factory, monkeypatch):
+    from cortex import plan_executor
+
+    payload = {
+        "title": "Deps wait",
+        "project_id": "proj-deps",
+        "plan_instance_id": "pi-deps",
+        "steps": [
+            {
+                "id": "s_loc",
+                "order_index": 0,
+                "kind": "LOCATE_DATA",
+                "title": "Locate",
+                "depends_on": [],
+                "requires_approval": False,
+            },
+            {
+                "id": "s_search",
+                "order_index": 1,
+                "kind": "SEARCH_ENCODE",
+                "title": "Search",
+                "depends_on": [],
+                "requires_approval": False,
+            },
+            {
+                "id": "s_check",
+                "order_index": 2,
+                "kind": "CHECK_EXISTING",
+                "title": "Check",
+                "depends_on": ["s_loc", "s_search"],
+                "requires_approval": False,
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-deps",
+        owner_id="owner-deps",
+        payload=payload,
+    )
+
+    starts: dict[str, float] = {}
+    ends: dict[str, float] = {}
+
+    async def _fake_call(_source_key, tool_name, _params):
+        loop_time = asyncio.get_running_loop().time()
+        starts[tool_name] = loop_time
+        await asyncio.sleep(0.02 if tool_name == "search_by_biosample" else 0.005)
+        ends[tool_name] = asyncio.get_running_loop().time()
+        return {"ok": True}
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-deps")
+    session.close()
+
+    assert "find_file" in starts
+    assert starts["find_file"] >= ends["list_job_files"]
+    assert starts["find_file"] >= ends["search_by_biosample"]
+
+
+@pytest.mark.asyncio
+async def test_sequential_ready_step_is_not_parallelized_when_safe_batch_exists(session_factory, monkeypatch):
+    from cortex import plan_executor
+
+    payload = {
+        "title": "Mixed batch",
+        "project_id": "proj-mixed",
+        "plan_instance_id": "pi-mixed",
+        "steps": [
+            {
+                "id": "s_loc",
+                "order_index": 0,
+                "kind": "LOCATE_DATA",
+                "title": "Locate",
+                "depends_on": [],
+                "requires_approval": False,
+            },
+            {
+                "id": "s_script",
+                "order_index": 1,
+                "kind": "RUN_SCRIPT",
+                "title": "Run script",
+                "depends_on": [],
+                "requires_approval": False,
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-mixed",
+        owner_id="owner-mixed",
+        payload=payload,
+    )
+
+    seen = {"run_script_called": False}
+    original_execute_step = plan_executor.execute_step
+
+    async def _fake_call(_source_key, _tool_name, _params):
+        return {"ok": True}
+
+    async def _wrapped_execute_step(*args, **kwargs):
+        step_id = args[2]
+        plan_payload = kwargs.get("plan_payload") or {}
+        if step_id == "s_script":
+            locate = next(s for s in plan_payload.get("steps", []) if s.get("id") == "s_loc")
+            assert locate.get("status") == "COMPLETED"
+            seen["run_script_called"] = True
+        return await original_execute_step(*args, **kwargs)
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+    monkeypatch.setattr(plan_executor, "execute_step", _wrapped_execute_step)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-mixed")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    assert seen["run_script_called"] is True
+    assert next(s for s in final_payload["steps"] if s["id"] == "s_loc")["status"] == "COMPLETED"
+    assert next(s for s in final_payload["steps"] if s["id"] == "s_script")["status"] == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_parallel_batch_failure_triggers_existing_failure_path(session_factory, monkeypatch):
+    from cortex import plan_executor
+
+    payload = {
+        "title": "Parallel fail",
+        "project_id": "proj-fail",
+        "plan_instance_id": "pi-fail",
+        "steps": [
+            {
+                "id": "s_loc",
+                "order_index": 0,
+                "kind": "LOCATE_DATA",
+                "title": "Locate",
+                "depends_on": [],
+                "requires_approval": False,
+            },
+            {
+                "id": "s_search",
+                "order_index": 1,
+                "kind": "SEARCH_ENCODE",
+                "title": "Search",
+                "depends_on": [],
+                "requires_approval": False,
+            },
+            {
+                "id": "s_downstream",
+                "order_index": 2,
+                "kind": "PARSE_OUTPUT_FILE",
+                "title": "Parse",
+                "depends_on": ["s_search"],
+                "requires_approval": False,
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-fail",
+        owner_id="owner-fail",
+        payload=payload,
+    )
+
+    async def _fake_call(_source_key, tool_name, _params):
+        if tool_name == "search_by_biosample":
+            return {"error": "boom"}
+        return {"ok": True}
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-fail")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    assert final_payload["status"] == "FAILED"
+    assert next(s for s in final_payload["steps"] if s["id"] == "s_search")["status"] == "FAILED"
+    assert next(s for s in final_payload["steps"] if s["id"] == "s_downstream")["status"] == "SKIPPED"
+
+
+@pytest.mark.asyncio
+async def test_approval_semantics_unchanged_with_parallel_safe_step(session_factory, monkeypatch):
+    from cortex import plan_executor
+
+    payload = {
+        "title": "Approval pause",
+        "project_id": "proj-approval",
+        "plan_instance_id": "pi-approval",
+        "steps": [
+            {
+                "id": "s_loc",
+                "order_index": 0,
+                "kind": "LOCATE_DATA",
+                "title": "Locate",
+                "depends_on": [],
+                "requires_approval": False,
+            },
+            {
+                "id": "s_gate",
+                "order_index": 1,
+                "kind": "REQUEST_APPROVAL",
+                "title": "Approve",
+                "depends_on": [],
+                "requires_approval": True,
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-approval",
+        owner_id="owner-approval",
+        payload=payload,
+    )
+
+    async def _fake_call(_source_key, _tool_name, _params):
+        return {"ok": True}
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-approval")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    assert final_payload["status"] == "WAITING_APPROVAL"
+    assert next(s for s in final_payload["steps"] if s["id"] == "s_loc")["status"] == "COMPLETED"
+    assert next(s for s in final_payload["steps"] if s["id"] == "s_gate")["status"] == "WAITING_APPROVAL"

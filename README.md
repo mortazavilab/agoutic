@@ -5,6 +5,15 @@
 
 ## Latest Updates (2026-03-24)
 
+- **Executor parallel batching for safe step kinds** — execution now batches
+  dependency-ready `LOCATE_DATA`, `SEARCH_ENCODE`, and `CHECK_EXISTING` steps
+  in parallel, while approval-gated and orchestration-heavy kinds remain
+  sequential.
+
+- **Deterministic batch persistence ordering** — parallel batch outcomes are
+  persisted in deterministic plan order (with stable step-id tie-break), so
+  persisted state is consistent even when completion timing differs.
+
 - **Hybrid-first planner bridge for six non-core flows** — planner now
   attempts hybrid plan generation first for `compare_samples`,
   `download_analyze`, `summarize_results`, `parse_plot_interpret`,

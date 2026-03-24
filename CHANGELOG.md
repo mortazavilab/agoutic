@@ -2,6 +2,16 @@
 
 ### Improvements
 
+- **Executor parallel-batch bridge for safe step kinds** —
+  `cortex/plan_executor.py` now executes dependency-ready batches in parallel
+  for `LOCATE_DATA`, `SEARCH_ENCODE`, and `CHECK_EXISTING` via
+  `asyncio.gather`, while non-allowlisted and approval-sensitive steps remain
+  sequential.
+
+- **Deterministic persistence ordering for parallel batches** — batched step
+  outcomes are now persisted in deterministic order (plan order, then step id)
+  regardless of completion timing.
+
 - **Hybrid-first planner bridge for six non-core flows** —
   `cortex/planner.py` now attempts hybrid planning first for
   `compare_samples`, `download_analyze`, `summarize_results`,
@@ -73,6 +83,12 @@
   `tests/cortex/test_planner_hybrid_bridge.py` covering per-flow hybrid-first
   behavior, explicit fallback triggers, plan-type mismatch fallback, and core
   deterministic flow non-regression.
+
+- Added focused executor batch regressions in
+  `tests/cortex/test_plan_executor_concurrency.py` for safe-kind parallelism,
+  dependency gating, sequential fallback behavior, failure-path continuity,
+  approval pause semantics, isolation guarantees, and deterministic persistence
+  ordering.
 
 ## [3.4.6] - 2026-03-23
 

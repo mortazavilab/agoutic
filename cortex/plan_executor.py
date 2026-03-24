@@ -7,6 +7,7 @@ The LLM does NOT improvise execution — code controls it.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 from dataclasses import dataclass, field
@@ -68,6 +69,13 @@ _APPROVAL_STEP_KINDS = frozenset({
     "RUN_DE_PIPELINE",
     "RUN_SCRIPT",
     "REQUEST_APPROVAL",
+})
+
+
+_PARALLEL_BATCH_SAFE_KINDS = frozenset({
+    "LOCATE_DATA",
+    "SEARCH_ENCODE",
+    "CHECK_EXISTING",
 })
 
 
@@ -369,84 +377,154 @@ async def execute_plan(
         _persist_step_update(session, workflow_block, plan_payload)
         return
 
-    step_index = 0
     while True:
         plan_payload = get_block_payload(workflow_block)
         steps = plan_payload.get("steps", [])
-        if step_index >= len(steps):
+
+        if not steps:
             break
 
-        step = steps[step_index]
-        step_id = step.get("id")
-        status = step.get("status", "PENDING")
+        ordered_ready = _ordered_ready_steps(steps)
+        if not ordered_ready:
+            logger.info("No ready steps available, stopping", current_status=plan_payload.get("status"))
+            break
 
-        # Skip already-finished steps
-        if status in ("COMPLETED", "SKIPPED", "CANCELLED"):
-            step_index += 1
+        parallel_ready = [
+            s for s in ordered_ready
+            if s.get("kind") in _PARALLEL_BATCH_SAFE_KINDS and not s.get("requires_approval")
+        ]
+
+        if parallel_ready:
+            batch_ordered = _ordered_steps(parallel_ready)
+            batch_ids = [s.get("id") for s in batch_ordered if isinstance(s.get("id"), str)]
+            if not batch_ids:
+                logger.warning("Parallel batch had no valid step ids")
+                break
+
+            plan_payload["current_step_id"] = batch_ids[0]
+            now = datetime.datetime.utcnow().isoformat() + "Z"
+            for sid in batch_ids:
+                s = _find_step(plan_payload.get("steps", []), sid)
+                if not s:
+                    continue
+                s["status"] = "RUNNING"
+                s["started_at"] = now
+            _persist_step_update(session, workflow_block, plan_payload)
+
+            if emit_progress:
+                emit_progress(request_id, "executing",
+                              f"Running batch: {', '.join(batch_ids)}")
+
+            batch_results = await asyncio.gather(
+                *[_execute_parallel_safe_step(step) for step in batch_ordered],
+                return_exceptions=True,
+            )
+
+            plan_payload = get_block_payload(workflow_block)
+            failure_step_id: str | None = None
+            failure_error: str | None = None
+
+            for step, raw_result in zip(batch_ordered, batch_results, strict=False):
+                step_id = step.get("id")
+                if not isinstance(step_id, str):
+                    continue
+                current_step = _find_step(plan_payload.get("steps", []), step_id)
+                if not current_step:
+                    continue
+
+                completed_at = datetime.datetime.utcnow().isoformat() + "Z"
+                if isinstance(raw_result, Exception):
+                    current_step["status"] = "FAILED"
+                    current_step["error"] = str(raw_result)
+                    current_step["completed_at"] = completed_at
+                    if failure_step_id is None:
+                        failure_step_id = step_id
+                        failure_error = str(raw_result)
+                else:
+                    result = raw_result
+                    if not result.success:
+                        current_step["status"] = "FAILED"
+                        current_step["error"] = result.error
+                        current_step["completed_at"] = completed_at
+                        if failure_step_id is None:
+                            failure_step_id = step_id
+                            failure_error = result.error
+                    else:
+                        current_step["status"] = "COMPLETED"
+                        current_step["result"] = result.data.get("results") or result.data
+                        current_step["completed_at"] = completed_at
+
+                # Persist deterministic per-step batch outcomes in plan order.
+                _persist_step_update(session, workflow_block, plan_payload)
+
+                if failure_step_id is None and not isinstance(raw_result, Exception):
+                    action = raw_result.data.get("action")
+                    if action in ("approval_required", "special_handling"):
+                        return
+
+                    updated = replan_with_new_info(
+                        session, workflow_block, step_id, raw_result.data,
+                    )
+                    if updated:
+                        plan_payload = updated
+
+            if failure_step_id is not None:
+                logger.warning("Plan step failed", step_id=failure_step_id, error=failure_error)
+                plan_payload = replan_on_failure(session, workflow_block, failure_step_id)
+                plan_payload["status"] = "FAILED"
+                _persist_step_update(session, workflow_block, plan_payload)
+                return
+
             continue
 
-        # Check dependencies
-        depends_on = step.get("depends_on", [])
-        deps_met = True
-        for dep_id in depends_on:
-            dep_step = _find_step(steps, dep_id)
-            if dep_step and dep_step.get("status") != "COMPLETED":
-                deps_met = False
-                break
-        if not deps_met:
-            logger.info("Step dependencies not met, stopping", step_id=step_id,
-                       depends_on=depends_on)
-            break
+        step = ordered_ready[0]
+        step_id = step.get("id")
+        status = step.get("status", "PENDING")
+        if not isinstance(step_id, str):
+            logger.warning("Ready step missing id; skipping")
+            continue
 
         # Check if this step needs approval and hasn't been approved yet
         if step.get("requires_approval") and status != "RUNNING":
             if not should_auto_execute(step):
                 step["status"] = "WAITING_APPROVAL"
+                plan_payload["status"] = "WAITING_APPROVAL"
                 plan_payload["current_step_id"] = step_id
                 _persist_step_update(session, workflow_block, plan_payload)
                 if emit_progress:
                     emit_progress(request_id, "approval",
                                   f"Waiting for approval: {step.get('title', 'step')}")
-                return  # Pause here — will resume after approval
+                return
 
-        # Emit progress
         if emit_progress:
             emit_progress(request_id, "executing",
                           f"Running: {step.get('title', 'step')}")
 
-        # Update current step
         plan_payload["current_step_id"] = step_id
 
-        # Execute the step
         result = await execute_step(
             session, workflow_block, step_id,
             plan_payload=plan_payload,
             engine=engine, user=user, project_id=project_id,
         )
 
-        # Re-read payload (execute_step may have updated it)
         plan_payload = get_block_payload(workflow_block)
 
         if not result.success:
             logger.warning("Plan step failed", step_id=step_id, error=result.error)
-            # Trigger replanning
             plan_payload = replan_on_failure(session, workflow_block, step_id)
             plan_payload["status"] = "FAILED"
             _persist_step_update(session, workflow_block, plan_payload)
             return
 
-        # Check if step result requires replanning
         if result.data.get("action") in ("approval_required", "special_handling"):
-            # Execution paused — these need external handling
             return
 
-        # Check if new info requires plan adjustment
         updated = replan_with_new_info(
             session, workflow_block, step_id, result.data,
         )
         if updated:
             plan_payload = updated
-        step_index += 1
 
     # Check if all steps completed
     plan_payload = get_block_payload(workflow_block)
@@ -469,6 +547,80 @@ def _find_step(steps: list[dict], step_id: str) -> dict | None:
         if s.get("id") == step_id:
             return s
     return None
+
+
+def _ordered_steps(steps: list[dict]) -> list[dict]:
+    return sorted(
+        steps,
+        key=lambda s: (
+            int(s.get("order_index", 10**9)) if isinstance(s.get("order_index"), int) else 10**9,
+            str(s.get("id") or ""),
+        ),
+    )
+
+
+def _ordered_ready_steps(steps: list[dict]) -> list[dict]:
+    by_id = {
+        s.get("id"): s
+        for s in steps
+        if isinstance(s, dict) and isinstance(s.get("id"), str)
+    }
+    ready: list[dict] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if step.get("status", "PENDING") != "PENDING":
+            continue
+        depends_on = step.get("depends_on")
+        if not isinstance(depends_on, list):
+            continue
+        deps_met = True
+        for dep in depends_on:
+            dep_step = by_id.get(dep)
+            if dep_step and dep_step.get("status") != "COMPLETED":
+                deps_met = False
+                break
+        if deps_met:
+            ready.append(step)
+    return _ordered_steps(ready)
+
+
+async def _execute_parallel_safe_step(step: dict) -> StepResult:
+    """Execute a parallel-safe step without mutating shared payload/session."""
+    kind = str(step.get("kind", ""))
+    tool_calls = step.get("tool_calls") or []
+    if not isinstance(tool_calls, list):
+        return StepResult(success=False, error="Invalid tool_calls for step")
+
+    if not tool_calls:
+        defaults = STEP_TOOL_DEFAULTS.get(kind)
+        if defaults:
+            tool_calls = defaults
+
+    if not tool_calls:
+        return StepResult(success=True, data={"note": "No tool calls for this step"})
+
+    all_results = []
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            return StepResult(success=False, error="Invalid tool call entry")
+        source_key = tc.get("source_key", "")
+        tool_name = tc.get("tool", "")
+        params = dict(tc.get("params", {}))
+
+        if not source_key or not tool_name:
+            return StepResult(success=False, error="Empty source_key or tool in tool call")
+
+        result = await _call_mcp_tool(source_key, tool_name, params)
+        all_results.append({
+            "tool": tool_name,
+            "source_key": source_key,
+            "result": result,
+        })
+        if isinstance(result, dict) and "error" in result:
+            return StepResult(success=False, data={"results": all_results}, error=result["error"])
+
+    return StepResult(success=True, data={"results": all_results})
 
 
 def _persist_step_update(session, workflow_block: "ProjectBlock", payload: dict) -> None:
