@@ -2,6 +2,17 @@
 
 ### Improvements
 
+- **Hybrid-first planner bridge for six non-core flows** —
+  `cortex/planner.py` now attempts hybrid planning first for
+  `compare_samples`, `download_analyze`, `summarize_results`,
+  `parse_plot_interpret`, `compare_workflows`, and
+  `search_compare_to_local`, then falls back to deterministic templates only
+  on explicit bridge failure reasons.
+
+- **Plan-type mismatch safety in hybrid bridge** — hybrid output is now
+  rejected for scoped flows when returned `plan_type` does not match the
+  requested flow, and deterministic fallback is used.
+
 - **Strict pre-dispatch plan contract validation** — added a centralized
   validator (`cortex/plan_validation.py`) and enforced validation at executor
   entry so unknown step kinds, invalid dependencies, malformed step shapes,
@@ -57,6 +68,11 @@
 - Added concurrency integration tests validating parallel execution isolation
   across different projects and across multiple plan instances in the same
   project.
+
+- Added focused hybrid-bridge tests in
+  `tests/cortex/test_planner_hybrid_bridge.py` covering per-flow hybrid-first
+  behavior, explicit fallback triggers, plan-type mismatch fallback, and core
+  deterministic flow non-regression.
 
 ## [3.4.6] - 2026-03-23
 

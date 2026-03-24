@@ -5,6 +5,19 @@
 
 ## Latest Updates (2026-03-24)
 
+- **Hybrid-first planner bridge for six non-core flows** — planner now
+  attempts hybrid plan generation first for `compare_samples`,
+  `download_analyze`, `summarize_results`, `parse_plot_interpret`,
+  `compare_workflows`, and `search_compare_to_local`.
+
+- **Deterministic fallback is now reason-coded and explicit** — scoped flows
+  fall back only for defined hybrid failure reasons (engine/parse/fragment/
+  finalize failures and flow `plan_type` mismatch).
+
+- **Core deterministic flow ownership remains unchanged** —
+  `run_workflow`, `run_de_pipeline`, `run_enrichment`, and
+  `remote_stage_workflow` continue to use deterministic routing in this pass.
+
 - **Strict pre-dispatch plan validation** — workflow plans are now validated
   against a centralized contract before execution begins. Invalid step kinds,
   malformed dependencies, cyclic graphs, and project-scope mismatches now fail
