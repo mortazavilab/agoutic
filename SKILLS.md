@@ -9,21 +9,22 @@ decide how to handle a user request.
 
 ## How Skills Work
 
-1. **Registry** — `cortex/config.py` maps a skill key to a `.md` filename
-   in the `skills/` directory via `SKILLS_REGISTRY`:
+1. **Registry** — `cortex/config.py` maps a skill key to a relative
+  `skills/<skill_key>/SKILL.md` path via `SKILLS_REGISTRY`:
 
    ```python
    SKILLS_REGISTRY = {
-       "welcome": "Welcome.md",
-       "ENCODE_Search": "ENCODE_Search.md",
+       "welcome": "welcome/SKILL.md",
+       "ENCODE_Search": "ENCODE_Search/SKILL.md",
        ...
    }
    ```
 
 2. **Loading** — When a skill becomes active, `AgentEngine._load_skill_text()`
    reads the Markdown and injects it into the first-pass LLM system prompt.
-   Referenced `.md` files (detected via `[filename.md](filename.md)` links)
-   are automatically appended as included references.
+  Referenced `.md` files are automatically appended as included references.
+  Resolution order is: skill-local relative path, `skills/` relative path,
+  then `skills/shared/` by filename.
 
 3. **Three-pass LLM flow** — Every user message runs through:
    - **Pass 1 (Think):** The LLM reads the skill text and emits structured
@@ -60,7 +61,7 @@ A short paragraph explaining what the skill does and when it applies.
 
 ### Skill Scope & Routing
 
-Follows the pattern defined in `skills/SKILL_ROUTING_PATTERN.md`:
+Follows the pattern defined in `skills/shared/SKILL_ROUTING_PATTERN.md`:
 
 ```markdown
 ## Skill Scope & Routing
@@ -229,7 +230,7 @@ satisfies group 1 and `bar chart` satisfies group 2.  It does **not** match
 New action types can be added freely — they are display labels, not
 hard-coded enums.
 
-### Example: ENCODE_Search.md chains
+### Example: skills/ENCODE_Search/SKILL.md chains
 
 ```markdown
 ### search_and_visualize
@@ -275,9 +276,9 @@ hard-coded enums.
 
 ## Referenced File Inclusion
 
-If a skill Markdown file contains a link like
-`[DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md)`, the
-loader automatically reads that file and appends its contents under the
+If a skill Markdown file contains a link to another `.md` file, the
+loader resolves it relative to the skill file and shared references, then
+automatically appends that file's contents under the
 section marker `[INCLUDED REFERENCE: filename.md]`.
 
 This allows shared reference material (e.g. output file parsing guides) to
@@ -289,26 +290,28 @@ live in one place and be included by multiple skills.
 
 | Key | File | Purpose |
 |-----|------|---------|
-| `welcome` | Welcome.md | Entry point and router |
-| `ENCODE_Search` | ENCODE_Search.md | Search and browse ENCODE Portal |
-| `ENCODE_LongRead` | ENCODE_LongRead.md | Download ENCODE data + submit to Dogme |
-| `run_dogme_dna` | Dogme_DNA.md | DNA / Fiber-seq result interpretation |
-| `run_dogme_rna` | Dogme_RNA.md | Direct RNA result interpretation |
-| `run_dogme_cdna` | Dogme_cDNA.md | cDNA result interpretation |
-| `analyze_local_sample` | Local_Sample_Intake.md | Local data intake wizard |
-| `analyze_job_results` | Analyze_Job_Results.md | Completed job router |
-| `download_files` | Download_Files.md | File download manager |
-| `differential_expression` | Differential_Expression.md | DE analysis via edgePython |
+| `welcome` | welcome/SKILL.md | Entry point and router |
+| `ENCODE_Search` | ENCODE_Search/SKILL.md | Search and browse ENCODE Portal |
+| `ENCODE_LongRead` | ENCODE_LongRead/SKILL.md | Download ENCODE data + submit to Dogme |
+| `run_dogme_dna` | run_dogme_dna/SKILL.md | DNA / Fiber-seq result interpretation |
+| `run_dogme_rna` | run_dogme_rna/SKILL.md | Direct RNA result interpretation |
+| `run_dogme_cdna` | run_dogme_cdna/SKILL.md | cDNA result interpretation |
+| `analyze_local_sample` | analyze_local_sample/SKILL.md | Local data intake wizard |
+| `analyze_job_results` | analyze_job_results/SKILL.md | Completed job router |
+| `download_files` | download_files/SKILL.md | File download manager |
+| `differential_expression` | differential_expression/SKILL.md | DE analysis via edgePython |
+| `enrichment_analysis` | enrichment_analysis/SKILL.md | GO/pathway enrichment |
+| `remote_execution` | remote_execution/SKILL.md | Remote SLURM execution |
 
 **Shared references** (not registered as skills, but auto-included):
-- `SKILL_ROUTING_PATTERN.md` — Standard routing section template
-- `DOGME_QUICK_WORKFLOW_GUIDE.md` — Shared output file parsing guide
+- `shared/SKILL_ROUTING_PATTERN.md` — Standard routing section template
+- `shared/DOGME_QUICK_WORKFLOW_GUIDE.md` — Shared output file parsing guide
 
 ---
 
 ## Adding a New Skill
 
-1. **Create the Markdown file** in `skills/` following the structure above.
+1. **Create the Markdown file** at `skills/<skill_key>/SKILL.md` following the structure above.
    At minimum include: header, description, scope & routing, and plan logic.
 
 2. **Register it** in `cortex/config.py`:
@@ -316,13 +319,13 @@ live in one place and be included by multiple skills.
    ```python
    SKILLS_REGISTRY = {
        ...
-       "my_new_skill": "My_New_Skill.md",
+       "my_new_skill": "my_new_skill/SKILL.md",
    }
    ```
 
 3. **Add routing rules** — update other skills' "Does NOT Handle" sections
    to route relevant queries to your new skill.  Follow the pattern in
-   `skills/SKILL_ROUTING_PATTERN.md`.
+  `skills/shared/SKILL_ROUTING_PATTERN.md`.
 
 4. **(Optional) Add plan chains** — if the skill supports multi-step
    workflows, add a `## Plan Chains` section with trigger definitions.

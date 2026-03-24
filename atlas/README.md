@@ -229,7 +229,7 @@ To add a new data source (e.g., 4DN, GEO):
 
 3. **Startup** — Add port and process to `agoutic_servers.sh`
 
-4. **Skill file** — Create `skills/4DN_Search.md` with `[[DATA_CALL: consortium=4dn, tool=..., ...]]` tags
+4. **Skill file** — Create `skills/4DN_Search/SKILL.md` with `[[DATA_CALL: consortium=4dn, tool=..., ...]]` tags
 
 5. **No code changes needed** in `cortex/app.py` or `cortex/agent_engine.py` — the dispatch is fully registry-driven.
 

@@ -144,7 +144,7 @@ def _inject_job_context(user_message: str, active_skill: str,
     # concise [CONTEXT] line so the LLM doesn't have to re-parse history.
     if active_skill == "analyze_local_sample":
         _collected: dict[str, str] = {}
-        # Field names MUST match the skill doc (Local_Sample_Intake.md):
+        # Field names MUST match the skill doc (skills/analyze_local_sample/SKILL.md):
         #   sample_name, path, sample_type, reference_genome
         _field_patterns = {
             "sample_name": re.compile(

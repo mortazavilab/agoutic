@@ -73,35 +73,68 @@ class AgentEngine:
             raise ValueError(f"Skill '{skill_key}' not found in Registry.")
         
         filename = SKILLS_REGISTRY[skill_key]
-        file_path = SKILLS_DIR / filename
+        file_path = (SKILLS_DIR / filename).resolve()
         
         if not file_path.exists():
             raise FileNotFoundError(f"Skill file missing: {file_path}")
             
-        with open(file_path, "r") as f:
-            skill_content = f.read()
+        skill_content = file_path.read_text(encoding="utf-8")
         
-        # Auto-detect and load referenced .md files
-        # Pattern: [filename.md](filename.md) — both must match
-        pattern = r'\[([a-zA-Z0-9_\-\.]+\.md)\]\(\1\)'
+        # Auto-detect markdown references and include linked markdown files.
+        # Resolution order: skill-local relative path -> skills-root relative path
+        # -> skills/shared by basename.
+        pattern = r'\[[^\]]+\.md\]\(([^)]+\.md)\)'
         referenced_files = re.findall(pattern, skill_content)
-        
-        # Load each referenced file and append to content
-        for ref_filename in set(referenced_files):  # set() to avoid duplicates
-            ref_file_path = SKILLS_DIR / ref_filename
-            if ref_file_path.exists():
-                try:
-                    with open(ref_file_path, "r") as f:
-                        ref_content = f.read()
-                    # Append with a clear section marker
-                    skill_content += f"\n\n{'='*80}\n"
-                    skill_content += f"[INCLUDED REFERENCE: {ref_filename}]\n"
-                    skill_content += f"{'='*80}\n\n"
-                    skill_content += ref_content
-                except Exception as e:
-                    logger.warning(f"Failed to load referenced file {ref_filename}: {e}")
-            else:
-                logger.warning(f"Referenced file not found: {ref_filename} (referenced from {filename})")
+        loaded_refs: set[Path] = set()
+        skills_root = SKILLS_DIR.resolve()
+
+        for ref_target in set(referenced_files):
+            ref_path = Path(ref_target)
+            candidates = [
+                (file_path.parent / ref_path).resolve(),
+                (SKILLS_DIR / ref_path).resolve(),
+                (SKILLS_DIR / "shared" / ref_path.name).resolve(),
+            ]
+
+            selected: Path | None = None
+            for candidate in candidates:
+                if not candidate.exists() or not candidate.is_file():
+                    continue
+                if candidate == file_path or candidate in loaded_refs:
+                    continue
+                if not candidate.is_relative_to(skills_root):
+                    logger.warning(
+                        "Skipping out-of-tree skill reference",
+                        reference=ref_target,
+                        resolved=str(candidate),
+                    )
+                    continue
+                selected = candidate
+                break
+
+            if not selected:
+                logger.warning(
+                    "Referenced file not found",
+                    reference=ref_target,
+                    skill_file=filename,
+                )
+                continue
+
+            try:
+                ref_content = selected.read_text(encoding="utf-8")
+                loaded_refs.add(selected)
+                # Append with a clear section marker
+                skill_content += f"\n\n{'='*80}\n"
+                skill_content += f"[INCLUDED REFERENCE: {selected.name}]\n"
+                skill_content += f"{'='*80}\n\n"
+                skill_content += ref_content
+            except Exception as e:
+                logger.warning(
+                    "Failed to load referenced file",
+                    reference=ref_target,
+                    resolved=str(selected),
+                    error=str(e),
+                )
         
         return skill_content
 

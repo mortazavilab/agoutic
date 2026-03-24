@@ -74,9 +74,9 @@ This launches:
 | `launchpad/mcp_server.py` | Added `get_job_logs`, `get_job_debug` tools; expanded `submit_dogme_job` params |
 | `launchpad/mcp_tools.py` | Implemented `get_job_logs`, `get_job_debug`; added advanced submit params |
 | `analyzer/mcp_server.py` | Migrated from official MCP SDK (stdio) to FastMCP with HTTP support |
-| `skills/ENCODE_Search.md` | `ENCODE_CALL` → `DATA_CALL: consortium=encode, tool=...` |
-| `skills/ENCODE_LongRead.md` | `ENCODE_CALL` → `DATA_CALL: consortium=encode, tool=...` |
-| `skills/Analyze_Job_Results.md` | `ANALYSIS_CALL` → `DATA_CALL: service=analyzer, tool=...` |
+| `skills/ENCODE_Search/SKILL.md` | `ENCODE_CALL` → `DATA_CALL: consortium=encode, tool=...` |
+| `skills/ENCODE_LongRead/SKILL.md` | `ENCODE_CALL` → `DATA_CALL: consortium=encode, tool=...` |
+| `skills/analyze_job_results/SKILL.md` | `ANALYSIS_CALL` → `DATA_CALL: service=analyzer, tool=...` |
 
 ### Deleted
 | File | Reason |

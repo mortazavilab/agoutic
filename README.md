@@ -84,6 +84,13 @@
 - **Bridge-removal validation sweep completed** — compile checks plus focused
   submit/approval/extract tests and broader chat-data-call boundary suites
   passed after moving extraction/polling ownership out of `cortex/app.py`.
+- **Skills layout ownership refactor completed** — skills now live under
+  `skills/<skill_key>/SKILL.md`, shared markdown references moved to
+  `skills/shared/`, and registry/loader paths were updated without changing
+  skill routing or execution behavior.
+- **Skills-layout validation sweep completed** — compile checks, focused
+  skill-loading/plan-chain/skill-detection suites, stale-path audits, and
+  artifact hygiene checks passed after folderizing skill markdown ownership.
 
 ## 🧬 Overview
 
@@ -168,8 +175,8 @@ AGOUTIC is designed to help users:
   - Translate Ensembl IDs and normalize symbols for human and mouse datasets
 
 For deeper tool-level details, see [`analyzer/README.md`](analyzer/README.md),
-[`skills/Differential_Expression.md`](skills/Differential_Expression.md),
-[`skills/Enrichment_Analysis.md`](skills/Enrichment_Analysis.md), and
+[`skills/differential_expression/SKILL.md`](skills/differential_expression/SKILL.md),
+[`skills/enrichment_analysis/SKILL.md`](skills/enrichment_analysis/SKILL.md), and
 [`SKILLS.md`](SKILLS.md).
 
 ### Typical Analysis Workflow
@@ -553,19 +560,21 @@ agoutic/
 │   └── logging_middleware.py   # Request logging middleware
 │
 ├── skills/                      # Workflow Definitions
-│   ├── Dogme_DNA.md            # DNA pipeline definition
-│   ├── Dogme_RNA.md            # RNA pipeline definition
-│   ├── Dogme_cDNA.md           # cDNA pipeline definition
-│   ├── Differential_Expression.md # edgePython DE skill
-│   ├── Enrichment_Analysis.md  # GO & pathway enrichment skill
-│   ├── ENCODE_LongRead.md      # ENCODE pipeline definition
-│   ├── ENCODE_Search.md        # ENCODE search skill + routing rules
-│   ├── Local_Sample_Intake.md  # Sample intake workflow
-│   ├── Analyze_Job_Results.md  # Post-pipeline results analysis
-│   ├── Download_Files.md       # File download workflow
-│   ├── Welcome.md              # New-user onboarding
-│   ├── SKILL_ROUTING_PATTERN.md  # Skill routing reference
-│   └── DOGME_QUICK_WORKFLOW_GUIDE.md # Quick pipeline reference
+│   ├── welcome/SKILL.md                 # New-user onboarding
+│   ├── ENCODE_Search/SKILL.md           # ENCODE search skill + routing rules
+│   ├── ENCODE_LongRead/SKILL.md         # ENCODE pipeline definition
+│   ├── run_dogme_dna/SKILL.md           # DNA pipeline definition
+│   ├── run_dogme_rna/SKILL.md           # RNA pipeline definition
+│   ├── run_dogme_cdna/SKILL.md          # cDNA pipeline definition
+│   ├── analyze_local_sample/SKILL.md    # Sample intake workflow
+│   ├── analyze_job_results/SKILL.md     # Post-pipeline results analysis
+│   ├── download_files/SKILL.md          # File download workflow
+│   ├── differential_expression/SKILL.md # edgePython DE skill
+│   ├── enrichment_analysis/SKILL.md     # GO & pathway enrichment skill
+│   ├── remote_execution/SKILL.md        # Remote SLURM workflow
+│   └── shared/
+│       ├── SKILL_ROUTING_PATTERN.md     # Shared skill routing reference
+│       └── DOGME_QUICK_WORKFLOW_GUIDE.md # Shared workflow parsing guide
 │
 └── data/                        # Data & Database (created at runtime)
     ├── database/
@@ -927,17 +936,19 @@ DATABASE_URL = "postgresql://user:pass@localhost/agoutic"
 
 Pre-defined bioinformatics workflows are available in `skills/`:
 
-- **Dogme_DNA.md** - Genomic DNA analysis workflow
-- **Dogme_RNA.md** - Direct RNA-seq workflow
-- **Dogme_cDNA.md** - cDNA isoform workflow
-- **Differential_Expression.md** - edgePython DE pipeline (with gene annotation)
-- **Enrichment_Analysis.md** - GO & pathway enrichment analysis
-- **ENCODE_LongRead.md** - ENCODE consortium workflow
-- **ENCODE_Search.md** - ENCODE search and data discovery
-- **Local_Sample_Intake.md** - Sample intake and validation
-- **Analyze_Job_Results.md** - Post-pipeline results analysis
-- **Download_Files.md** - File download orchestration
-- **Welcome.md** - New-user onboarding
+- **welcome/SKILL.md** - New-user onboarding
+- **ENCODE_Search/SKILL.md** - ENCODE search and data discovery
+- **ENCODE_LongRead/SKILL.md** - ENCODE consortium workflow
+- **run_dogme_dna/SKILL.md** - Genomic DNA analysis workflow
+- **run_dogme_rna/SKILL.md** - Direct RNA-seq workflow
+- **run_dogme_cdna/SKILL.md** - cDNA isoform workflow
+- **analyze_local_sample/SKILL.md** - Sample intake and validation
+- **analyze_job_results/SKILL.md** - Post-pipeline results analysis
+- **download_files/SKILL.md** - File download orchestration
+- **differential_expression/SKILL.md** - edgePython DE pipeline (with gene annotation)
+- **enrichment_analysis/SKILL.md** - GO & pathway enrichment analysis
+- **remote_execution/SKILL.md** - Remote execution workflow
+- **shared/SKILL_ROUTING_PATTERN.md** and **shared/DOGME_QUICK_WORKFLOW_GUIDE.md** - Shared reference docs
 
 ## 🤝 Contributing
 

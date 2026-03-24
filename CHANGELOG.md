@@ -58,6 +58,12 @@
   `cortex/job_polling.py`, eliminating the last workflow-submission dependency
   on app-owned runtime symbols.
 
+- **Skills markdown ownership layout refactor** — moved skill definitions from
+  flat `skills/*.md` files to per-skill paths at
+  `skills/<skill_key>/SKILL.md`, moved shared markdown references to
+  `skills/shared/`, and updated `SKILLS_REGISTRY`/loader path resolution while
+  preserving runtime routing and execution semantics.
+
 - **MCP submission parity for script-mode payloads** — Launchpad MCP wrappers
   now pass script-mode fields through `submit_dogme_job` when explicitly
   provided, with backward-compatible defaults for existing callers.
@@ -76,6 +82,9 @@
   - final workflow-submission bridge removal stability via compile validation,
     focused submit/approval/extract suites, broader chat-data-call boundaries,
     and polling-focused subsets on the new ownership modules
+  - skills-layout boundary stability via compile validation, focused
+    `test_agent_engine`/`test_plan_chains`/`test_skill_detection`, stale
+    flat-path audits (active surfaces), and artifact hygiene checks
 
 ## [3.4.5] - 2026-03-23
 

@@ -29,7 +29,7 @@ Cortex is the **orchestration and reasoning engine** for AGOUTIC. It provides an
 User Request (REST/Chat)
         ↓
 Cortex Agent Engine
-  ├─ Load skill definitions (Dogme_DNA.md, Dogme_RNA.md, etc.)
+  ├─ Load skill definitions (skills/*/SKILL.md)
   ├─ Create system prompt with skill context
   ├─ Call LLM for reasoning
   ├─ (Optional) Request approval from user
@@ -342,28 +342,28 @@ CREATE TABLE project_blocks (
 
 ## Skills System
 
-Skills are Markdown files in `skills/` that define workflows:
+Skills are Markdown files in `skills/<skill_key>/SKILL.md` that define workflows:
 
-- **Dogme_DNA.md** - Genomic DNA analysis workflow
-- **Dogme_RNA.md** - Direct RNA-seq workflow
-- **Dogme_cDNA.md** - cDNA isoform workflow
-- **ENCODE_LongRead.md** - ENCODE consortium workflow
-- **Local_Sample_Intake.md** - Sample intake workflow
+- **skills/run_dogme_dna/SKILL.md** - Genomic DNA analysis workflow
+- **skills/run_dogme_rna/SKILL.md** - Direct RNA-seq workflow
+- **skills/run_dogme_cdna/SKILL.md** - cDNA isoform workflow
+- **skills/ENCODE_LongRead/SKILL.md** - ENCODE consortium workflow
+- **skills/analyze_local_sample/SKILL.md** - Sample intake workflow
 
 ### Loading Skills
 
 ```python
 # Auto-registered in config.py
 SKILLS_REGISTRY = {
-    "Dogme_DNA": "Dogme_DNA.md",
-    "Dogme_RNA": "Dogme_RNA.md",
-    "Dogme_cDNA": "Dogme_cDNA.md",
-    "ENCODE_LongRead": "ENCODE_LongRead.md",
-    "Local_Sample_Intake": "Local_Sample_Intake.md",
+  "run_dogme_dna": "run_dogme_dna/SKILL.md",
+  "run_dogme_rna": "run_dogme_rna/SKILL.md",
+  "run_dogme_cdna": "run_dogme_cdna/SKILL.md",
+  "ENCODE_LongRead": "ENCODE_LongRead/SKILL.md",
+  "analyze_local_sample": "analyze_local_sample/SKILL.md",
 }
 
 # Agent loads via:
-skill_text = agent._load_skill_text("Dogme_DNA")
+skill_text = agent._load_skill_text("run_dogme_dna")
 ```
 
 ## Configuration Examples
@@ -576,7 +576,7 @@ Error: Skill 'Dogme_DNA' not found in Registry
 ```
 
 **Solution:**
-- Verify skill file exists: `ls skills/Dogme_DNA.md`
+- Verify skill file exists: `ls skills/run_dogme_dna/SKILL.md`
 - Check SKILLS_REGISTRY in config.py
 - Verify file path in registry matches actual file
 
@@ -633,7 +633,7 @@ DATABASE_URL = "postgresql+asyncpg://user:pass@localhost/agoutic"
 
 ### Adding a New Skill
 
-1. Create markdown file in `skills/`:
+1. Create markdown file in `skills/<skill_key>/SKILL.md`:
    ```markdown
    # My Analysis Skill
    

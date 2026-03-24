@@ -1681,7 +1681,7 @@ async def chat_with_agent(req: ChatRequest, request: Request):
         # Check if user is asking for capabilities
         user_msg_lower = req.message.lower()
         if any(phrase in user_msg_lower for phrase in ["what can you do", "what are your capabilities", "help", "what can i do", "list features", "show capabilities"]):
-            # Return the same welcome menu defined in skills/Welcome.md
+            # Return the same welcome menu defined in skills/welcome/SKILL.md
             capabilities_text = """👋 Welcome to **Agoutic** — your autonomous bioinformatics agent for long-read sequencing data.
 
 Here's what I can help you with:
