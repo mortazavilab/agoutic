@@ -77,6 +77,17 @@ def test_classify_request_marks_remote_stage_on_arbitrary_profile_as_multistep()
     ) == "MULTI_STEP"
 
 
+def test_classify_request_marks_summarize_results_as_multistep():
+    class _State:
+        pass
+
+    assert classify_request(
+        "Summarize the results for the current project and tell me what I should look at next",
+        "welcome",
+        _State(),
+    ) == "MULTI_STEP"
+
+
 def test_extract_plan_params_keeps_remote_stage_sample_name_and_path():
     params = _extract_plan_params(
         "Stage the mouse cDNA sample called Jamshid at /data/pod5 on hpc3",

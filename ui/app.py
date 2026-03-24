@@ -1329,6 +1329,36 @@ def render_block(block, expected_project_id: str = ""):
         except Exception:
             return ""
 
+    def _workflow_status_presentation(raw_status: str) -> tuple[str, str, str]:
+        normalized = (raw_status or "pending").strip().lower()
+        if normalized in {"completed", "complete", "done", "approved"}:
+            return "complete", raw_status.replace("_", " ").title(), "✅"
+        if normalized in {"failed", "rejected", "cancelled"}:
+            return "failed", raw_status.replace("_", " ").title(), "❌"
+        if normalized in {"running", "active"}:
+            return "running", raw_status.replace("_", " ").title(), "🔄"
+        if normalized in {"follow_up", "waiting_approval", "blocked"}:
+            return "warning", raw_status.replace("_", " ").title(), "⏸️"
+        return "pending", raw_status.replace("_", " ").title(), "📝"
+
+    def _format_plan_timestamp(raw_value) -> str:
+        if not raw_value:
+            return ""
+        try:
+            if isinstance(raw_value, str):
+                dt = datetime.datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+            else:
+                dt = raw_value
+            return dt.strftime("%b %d, %H:%M:%S")
+        except Exception:
+            return str(raw_value)
+
+    def _render_step_payload(value) -> None:
+        if isinstance(value, (dict, list)):
+            st.json(value)
+        elif value not in (None, ""):
+            st.code(str(value), language="text")
+
     if btype == "USER_MESSAGE":
         with st.chat_message("user"):
             with st.container(border=True):
@@ -2141,25 +2171,93 @@ def render_block(block, expected_project_id: str = ""):
             show_metadata()
             st.divider()
 
+            plan_status = str(content.get("status") or status or "PENDING")
+            chip_kind, chip_label, chip_icon = _workflow_status_presentation(plan_status)
+            status_chip(chip_kind, label=chip_label, icon=chip_icon)
+
             summary = content.get("summary") or content.get("title") or content.get("label")
+            steps = content.get("steps")
+            step_count = len(steps) if isinstance(steps, list) else 0
+            current_step_id = content.get("current_step_id")
+            current_step = None
+            if isinstance(steps, list) and isinstance(current_step_id, str):
+                current_step = next(
+                    (step for step in steps if isinstance(step, dict) and step.get("id") == current_step_id),
+                    None,
+                )
+
+            metadata = {"Steps": step_count}
+            if current_step is not None:
+                metadata["Current Step"] = current_step.get("title") or current_step.get("id") or current_step_id
+            created_at = _block_timestamp()
+            if created_at:
+                metadata["Created"] = created_at
+            metadata_row(metadata)
+
             if summary:
                 st.markdown(f"**{summary}**")
 
-            steps = content.get("steps")
+            if current_step is not None and plan_status.strip().upper() in {"RUNNING", "FOLLOW_UP", "WAITING_APPROVAL"}:
+                st.caption(
+                    f"Current step: {current_step.get('title') or current_step.get('id') or current_step_id}"
+                )
+
             if isinstance(steps, list) and steps:
                 for idx, step in enumerate(steps, start=1):
                     if isinstance(step, dict):
                         title = step.get("title") or step.get("name") or f"Step {idx}"
                         detail = step.get("description") or step.get("details") or ""
-                        st.markdown(f"{idx}. **{title}**")
-                        if detail:
-                            st.caption(detail)
+                        step_id = step.get("id")
+                        step_status = str(step.get("status") or "PENDING")
+                        step_kind, step_label, step_icon = _workflow_status_presentation(step_status)
+                        is_current = isinstance(step_id, str) and step_id == current_step_id
+                        expander_title = f"{idx}. {title}"
+                        if is_current:
+                            expander_title += " · current"
+                        expanded = is_current or step_status.strip().upper() in {"RUNNING", "FAILED", "FOLLOW_UP", "WAITING_APPROVAL"}
+
+                        with st.expander(expander_title, expanded=expanded):
+                            status_chip(step_kind, label=step_label, icon=step_icon)
+
+                            step_meta = {"Kind": step.get("kind") or "workflow_step"}
+                            if step_id:
+                                step_meta["Step ID"] = step_id
+                            if step.get("requires_approval"):
+                                step_meta["Approval"] = "Required"
+
+                            started_at = _format_plan_timestamp(step.get("started_at"))
+                            completed_at = _format_plan_timestamp(step.get("completed_at"))
+                            if started_at:
+                                step_meta["Started"] = started_at
+                            if completed_at:
+                                step_meta["Completed"] = completed_at
+                            metadata_row(step_meta)
+
+                            depends_on = step.get("depends_on")
+                            if isinstance(depends_on, list) and depends_on:
+                                st.caption(f"Depends on: {', '.join(str(dep) for dep in depends_on)}")
+
+                            if detail:
+                                st.caption(detail)
+
+                            error = step.get("error")
+                            if error not in (None, ""):
+                                info_callout(str(error), kind="error", icon="❌")
+
+                            result = step.get("result")
+                            if result not in (None, "", [], {}):
+                                st.markdown("**Result**")
+                                _render_step_payload(result)
                     else:
                         st.markdown(f"{idx}. {step}")
 
             markdown = content.get("markdown")
             if markdown:
                 st.markdown(markdown)
+
+            if isinstance(steps, list) and steps:
+                with st.expander("Plan Payload", expanded=False):
+                    st.json(content)
 
             if not summary and not markdown and not (isinstance(steps, list) and steps):
                 with st.expander("Plan Payload", expanded=False):

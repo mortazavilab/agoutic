@@ -51,6 +51,27 @@
 
 ### Fixes
 
+- **Summarize-results requests now enter the planning path** — broadened
+  multi-step classification so summarize/interpret/explain-results requests are
+  routed into `WORKFLOW_PLAN` generation instead of falling through to the
+  single-turn analyzer flow.
+
+- **`PARSE_OUTPUT_FILE` now derives concrete CSV parse targets from prior
+  inventory results** — parse steps now reuse the analyzer `list_job_files`
+  result set, prioritize key result files such as `qc_summary` and
+  `final_stats`, and dispatch `parse_csv_file` with explicit `file_path` and
+  `work_dir` params instead of failing on missing arguments.
+
+- **Summarize/parse templates now scope initial discovery to result CSVs** —
+  `summarize_results` and `parse_plot_interpret` start by locating `.csv`
+  outputs only, reducing noisy full-directory inventories and aligning the
+  follow-up parse step with the files the analyzer already uses for summaries.
+
+- **Workflow-plan chat panel now documents execution lifecycle and step
+  outcomes** — the GUI now shows overall plan status, current step, per-step
+  state, timestamps, dependencies, and persisted result/error payloads for
+  auto-executed safe steps.
+
 - **Decomposition test boundary updates** — Cortex chat tests now patch tool
   dispatch dependencies at their new ownership boundary in
   `cortex.tool_dispatch` rather than through `cortex.app`, restoring focused
@@ -89,6 +110,10 @@
   dependency gating, sequential fallback behavior, failure-path continuity,
   approval pause semantics, isolation guarantees, and deterministic persistence
   ordering.
+
+- Added regressions covering summarize-results multi-step classification and
+  `PARSE_OUTPUT_FILE` reuse of discovered CSV outputs from the prior locate
+  step.
 
 ## [3.4.6] - 2026-03-23
 

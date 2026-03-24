@@ -518,3 +518,96 @@ async def test_approval_semantics_unchanged_with_parallel_safe_step(session_fact
     assert final_payload["status"] == "WAITING_APPROVAL"
     assert next(s for s in final_payload["steps"] if s["id"] == "s_loc")["status"] == "COMPLETED"
     assert next(s for s in final_payload["steps"] if s["id"] == "s_gate")["status"] == "WAITING_APPROVAL"
+
+
+@pytest.mark.asyncio
+async def test_parse_output_file_uses_located_csv_results(session_factory, monkeypatch):
+    from cortex import plan_executor
+
+    payload = {
+        "title": "Parse located csvs",
+        "project_id": "proj-parse",
+        "plan_instance_id": "pi-parse",
+        "steps": [
+            {
+                "id": "s_loc",
+                "order_index": 0,
+                "kind": "LOCATE_DATA",
+                "title": "Locate csv results",
+                "depends_on": [],
+                "requires_approval": False,
+                "tool_calls": [
+                    {
+                        "source_key": "analyzer",
+                        "tool": "list_job_files",
+                        "params": {"work_dir": "/tmp/workflow2", "extensions": ".csv"},
+                    }
+                ],
+            },
+            {
+                "id": "s_parse",
+                "order_index": 1,
+                "kind": "PARSE_OUTPUT_FILE",
+                "title": "Parse key result CSV files",
+                "depends_on": ["s_loc"],
+                "requires_approval": False,
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-parse",
+        owner_id="owner-parse",
+        payload=payload,
+    )
+
+    parse_calls: list[tuple[str, dict]] = []
+
+    async def _fake_call(_source_key, tool_name, params):
+        if tool_name == "list_job_files":
+            return {
+                "success": True,
+                "work_dir": "/tmp/workflow2",
+                "file_count": 3,
+                "files": [
+                    {"path": "annot/JamshidW.mm39_final_stats.csv", "name": "JamshidW.mm39_final_stats.csv", "extension": ".csv"},
+                    {"path": "annot/JamshidW.mm39_qc_summary.csv", "name": "JamshidW.mm39_qc_summary.csv", "extension": ".csv"},
+                    {"path": "qc_summary.csv", "name": "qc_summary.csv", "extension": ".csv"},
+                ],
+            }
+        if tool_name == "parse_csv_file":
+            parse_calls.append((tool_name, dict(params)))
+            return {
+                "success": True,
+                "work_dir": params.get("work_dir"),
+                "file_path": params.get("file_path"),
+                "columns": ["metric", "value"],
+                "row_count": 2,
+                "preview_rows": 2,
+                "data": [{"metric": "reads", "value": 1}],
+                "metadata": {},
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-parse")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    parse_step = next(step for step in final_payload["steps"] if step["id"] == "s_parse")
+
+    assert parse_step["status"] == "COMPLETED"
+    assert [call[1].get("file_path") for call in parse_calls] == [
+        "annot/JamshidW.mm39_qc_summary.csv",
+        "qc_summary.csv",
+        "annot/JamshidW.mm39_final_stats.csv",
+    ]
+    assert [entry["result"]["file_path"] for entry in parse_step["result"]] == [
+        "annot/JamshidW.mm39_qc_summary.csv",
+        "qc_summary.csv",
+        "annot/JamshidW.mm39_final_stats.csv",
+    ]
+    assert all(call[1]["work_dir"] == "/tmp/workflow2" for call in parse_calls)

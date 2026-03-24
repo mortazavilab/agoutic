@@ -60,6 +60,7 @@ _MULTI_STEP_PATTERNS: list[re.Pattern] = [
     # Parse + plot + interpret
     re.compile(r"(?:plot|graph|chart|visuali[sz]e).*(?:from|of|for)\s+(?:my|the|last|this)\s+(?:run|results?|workflow)", re.I),
     re.compile(r"(?:parse|read).*(?:and|then)\s+(?:plot|graph|chart|visuali[sz]e)", re.I),
+    re.compile(r"(?:summarize|interpret|explain)\s+(?:the\s+)?(?:results?|output|qc)", re.I),
     # Search + compare to local
     re.compile(r"(?:download|get|fetch)\s+.*encode.*(?:compare|vs)", re.I),
     re.compile(r"compare\s+(?:my\s+)?(?:local|sample).*(?:to|with|against)\s+.*(?:encode|public)", re.I),
@@ -651,13 +652,13 @@ def _template_summarize_results(params: dict) -> dict:
     steps = []
     idx = 0
 
-    s_locate = _make_step("LOCATE_DATA", f"Locate output files for {sample_name}", idx,
+    s_locate = _make_step("LOCATE_DATA", f"Locate result CSV files for {sample_name}", idx,
                           tool_calls=[{"source_key": "analyzer", "tool": "list_job_files",
-                                       "params": {"work_dir": work_dir}}])
+                                       "params": {"work_dir": work_dir, "extensions": ".csv"}}])
     steps.append(s_locate)
     idx += 1
 
-    s_parse = _make_step("PARSE_OUTPUT_FILE", f"Parse key output files", idx,
+    s_parse = _make_step("PARSE_OUTPUT_FILE", f"Parse key result CSV files", idx,
                          depends_on=[s_locate["id"]])
     steps.append(s_parse)
     idx += 1
@@ -1082,13 +1083,13 @@ def _template_parse_plot_interpret(params: dict) -> dict:
     steps = []
     idx = 0
 
-    s_locate = _make_step("LOCATE_DATA", f"Locate output files for {sample_name}", idx,
+    s_locate = _make_step("LOCATE_DATA", f"Locate result CSV files for {sample_name}", idx,
                           tool_calls=[{"source_key": "analyzer", "tool": "list_job_files",
-                                       "params": {"work_dir": work_dir}}])
+                                       "params": {"work_dir": work_dir, "extensions": ".csv"}}])
     steps.append(s_locate)
     idx += 1
 
-    s_parse = _make_step("PARSE_OUTPUT_FILE", "Parse key result files", idx,
+    s_parse = _make_step("PARSE_OUTPUT_FILE", "Parse key result CSV files", idx,
                          depends_on=[s_locate["id"]])
     steps.append(s_parse)
     idx += 1

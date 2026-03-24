@@ -92,6 +92,88 @@ def should_auto_execute(step: dict) -> bool:
     return False
 
 
+def _parse_candidate_priority(file_info: dict) -> tuple[int, str]:
+    name = str(file_info.get("name") or file_info.get("path") or "").lower()
+    path = str(file_info.get("path") or file_info.get("name") or "")
+    if "qc_summary" in name:
+        return (0, path)
+    if "final_stats" in name:
+        return (1, path)
+    if "stats" in name or "flagstat" in name:
+        return (2, path)
+    if "summary" in name:
+        return (3, path)
+    return (10, path)
+
+
+def _extract_located_tabular_files(step_result: Any) -> tuple[str | None, list[str]]:
+    work_dir: str | None = None
+    file_entries: list[dict[str, Any]] = []
+
+    results_to_scan = step_result if isinstance(step_result, list) else [step_result]
+    for item in results_to_scan:
+        if not isinstance(item, dict):
+            continue
+        payload = item.get("result") if "result" in item else item
+        if not isinstance(payload, dict):
+            continue
+        work_dir = work_dir or payload.get("work_dir")
+        files = payload.get("files")
+        if isinstance(files, list):
+            file_entries.extend(entry for entry in files if isinstance(entry, dict))
+
+    tabular = [
+        entry for entry in file_entries
+        if str(entry.get("extension") or "").lower() in {".csv", ".tsv"}
+    ]
+    ordered = sorted(tabular, key=_parse_candidate_priority)
+    file_paths = [str(entry.get("path")) for entry in ordered if entry.get("path")]
+    if len(file_paths) > 5:
+        file_paths = file_paths[:5]
+    return work_dir, file_paths
+
+
+def _derive_parse_tool_calls(plan_payload: dict, step: dict) -> list[dict]:
+    steps = plan_payload.get("steps", []) if isinstance(plan_payload, dict) else []
+    dependency_ids = step.get("depends_on") if isinstance(step.get("depends_on"), list) else []
+
+    candidate_locates: list[dict] = []
+    for dep_id in dependency_ids:
+        dep_step = _find_step(steps, dep_id) if isinstance(dep_id, str) else None
+        if dep_step and dep_step.get("kind") == "LOCATE_DATA":
+            candidate_locates.append(dep_step)
+
+    if not candidate_locates:
+        candidate_locates = [
+            s for s in steps
+            if isinstance(s, dict) and s.get("kind") == "LOCATE_DATA" and s.get("status") == "COMPLETED"
+        ]
+
+    work_dir: str | None = None
+    file_paths: list[str] = []
+    for locate_step in candidate_locates:
+        locate_work_dir, located_files = _extract_located_tabular_files(locate_step.get("result"))
+        work_dir = work_dir or locate_work_dir
+        for file_path in located_files:
+            if file_path not in file_paths:
+                file_paths.append(file_path)
+
+    if not file_paths:
+        return []
+
+    return [
+        {
+            "source_key": "analyzer",
+            "tool": "parse_csv_file",
+            "params": {
+                "file_path": file_path,
+                "work_dir": work_dir or plan_payload.get("work_dir") or "",
+            },
+        }
+        for file_path in file_paths
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Step kind → tool call mapping
 # ---------------------------------------------------------------------------
@@ -205,6 +287,7 @@ async def execute_step(
     _persist_step_update(session, workflow_block, plan_payload)
 
     # Resolve tool calls: use step-specific calls, or fall back to defaults
+    explicit_tool_calls = bool(step.get("tool_calls"))
     tool_calls = step.get("tool_calls") or []
     if not tool_calls:
         defaults = STEP_TOOL_DEFAULTS.get(kind)
@@ -262,6 +345,15 @@ async def execute_step(
         step["status"] = "RUNNING"
         _persist_step_update(session, workflow_block, plan_payload)
         return StepResult(success=True, data={"action": "special_handling", "kind": kind})
+
+    if kind == "PARSE_OUTPUT_FILE" and not explicit_tool_calls:
+        tool_calls = _derive_parse_tool_calls(plan_payload, step)
+        if not tool_calls:
+            step["status"] = "FAILED"
+            step["error"] = "Could not determine result files to parse from prior locate step output."
+            step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+            _persist_step_update(session, workflow_block, plan_payload)
+            return StepResult(success=False, error=step["error"])
 
     if kind in ("SUBMIT_WORKFLOW", "DOWNLOAD_DATA", "RUN_DE_ANALYSIS",
                 "COMPARE_SAMPLES", "GENERATE_PLOT", "WRITE_SUMMARY",
