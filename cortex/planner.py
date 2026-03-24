@@ -23,9 +23,10 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from common.logging_config import get_logger
+from cortex.plan_validation import PlanValidationError, validate_plan
 
 if TYPE_CHECKING:
     from cortex.agent_engine import AgentEngine
@@ -118,6 +119,217 @@ def classify_request(
 
 def _step_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+def _plan_instance_id() -> str:
+    return uuid.uuid4().hex
+
+
+_PLANNER_SAFE_STEP_KINDS = frozenset({
+    "LOCATE_DATA",
+    "VALIDATE_INPUTS",
+    "PARSE_OUTPUT_FILE",
+    "SUMMARIZE_QC",
+    "GENERATE_PLOT",
+    "WRITE_SUMMARY",
+    "CHECK_EXISTING",
+    "GENERATE_DE_PLOT",
+    "INTERPRET_RESULTS",
+    "RECOMMEND_NEXT",
+    "ANNOTATE_RESULTS",
+    "FILTER_DE_GENES",
+    "RUN_GO_ENRICHMENT",
+    "RUN_PATHWAY_ENRICHMENT",
+    "PLOT_ENRICHMENT",
+    "SUMMARIZE_ENRICHMENT",
+})
+
+
+_PLANNER_APPROVAL_STEP_KINDS = frozenset({
+    "SUBMIT_WORKFLOW",
+    "DOWNLOAD_DATA",
+    "RUN_DE_ANALYSIS",
+    "RUN_DE_PIPELINE",
+    "RUN_SCRIPT",
+    "REQUEST_APPROVAL",
+})
+
+
+_PLANNER_ALLOWED_STEP_KINDS = frozenset({
+    "LOCATE_DATA",
+    "SEARCH_ENCODE",
+    "DOWNLOAD_DATA",
+    "SUBMIT_WORKFLOW",
+    "MONITOR_WORKFLOW",
+    "PARSE_OUTPUT_FILE",
+    "SUMMARIZE_QC",
+    "RUN_DE_ANALYSIS",
+    "RUN_SCRIPT",
+    "COMPARE_SAMPLES",
+    "GENERATE_PLOT",
+    "WRITE_SUMMARY",
+    "REQUEST_APPROVAL",
+    "CHECK_EXISTING",
+    "RUN_DE_PIPELINE",
+    "GENERATE_DE_PLOT",
+    "INTERPRET_RESULTS",
+    "RECOMMEND_NEXT",
+    "ANNOTATE_RESULTS",
+    "FILTER_DE_GENES",
+    "RUN_GO_ENRICHMENT",
+    "RUN_PATHWAY_ENRICHMENT",
+    "PLOT_ENRICHMENT",
+    "SUMMARIZE_ENRICHMENT",
+    "CHECK_REMOTE_PROFILE_AUTH",
+    "check_remote_stage",
+    "CHECK_REMOTE_STAGE",
+    "remote_stage",
+    "REMOTE_STAGE",
+    "complete_stage_only",
+    "COMPLETE_STAGE_ONLY",
+    "FIND_REFERENCE_CACHE",
+    "FIND_DATA_CACHE",
+    "copy_sample",
+    "run",
+    "analysis",
+})
+
+
+def compose_plan_fragments(
+    fragments: list[dict[str, Any]],
+    *,
+    title: str,
+    goal: str,
+    plan_type: str = "custom",
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Compose plan fragments into a single plan with deterministic id remapping."""
+    if not isinstance(fragments, list) or not fragments:
+        raise ValueError("fragments must be a non-empty list")
+
+    composed_entries: list[tuple[dict[str, Any], str, dict[str, str]]] = []
+    all_ids: set[str] = set()
+    used_aliases: set[str] = set()
+
+    for frag_idx, fragment in enumerate(fragments, start=1):
+        if not isinstance(fragment, dict):
+            raise ValueError(f"Fragment at index {frag_idx - 1} must be an object")
+
+        raw_alias = str(fragment.get("fragment_alias") or fragment.get("fragment_id") or f"frag{frag_idx}")
+        alias = _normalize_fragment_alias(raw_alias, fallback=f"frag{frag_idx}")
+        if alias in used_aliases:
+            alias = f"{alias}_{frag_idx}"
+        used_aliases.add(alias)
+
+        fragment_steps = fragment.get("steps")
+        if not isinstance(fragment_steps, list) or not fragment_steps:
+            raise ValueError(f"Fragment '{alias}' must contain a non-empty steps list")
+
+        local_id_map: dict[str, str] = {}
+        for local_idx, step in enumerate(fragment_steps, start=1):
+            if not isinstance(step, dict):
+                raise ValueError(f"Fragment '{alias}' step {local_idx - 1} must be an object")
+
+            local_step_id = str(step.get("id") or f"step{local_idx}")
+            canonical_step_id = f"{alias}__{local_step_id}"
+            if canonical_step_id in all_ids:
+                raise ValueError(f"Duplicate canonical step id '{canonical_step_id}'")
+            all_ids.add(canonical_step_id)
+            local_id_map[local_step_id] = canonical_step_id
+
+            composed_step = dict(step)
+            composed_step["id"] = canonical_step_id
+            composed_step.setdefault("title", local_step_id)
+            composed_step.setdefault("status", "PENDING")
+            composed_step.setdefault("tool_calls", [])
+            composed_step.setdefault("requires_approval", False)
+            composed_step.setdefault("depends_on", [])
+            composed_step.setdefault("result", None)
+            composed_step.setdefault("error", None)
+            composed_step.setdefault("started_at", None)
+            composed_step.setdefault("completed_at", None)
+
+            provenance = composed_step.get("provenance")
+            if provenance is None or not isinstance(provenance, dict):
+                provenance = {}
+
+            provenance.setdefault("fragment_id", str(fragment.get("fragment_id") or alias))
+            if fragment.get("fragment_version") is not None:
+                provenance.setdefault("fragment_version", str(fragment.get("fragment_version")))
+            if fragment.get("source_template") is not None:
+                provenance.setdefault("source_template", str(fragment.get("source_template")))
+            composed_step["provenance"] = provenance
+
+            composed_entries.append((composed_step, alias, local_id_map))
+
+    for step, alias, local_map in composed_entries:
+        depends_on = step.get("depends_on")
+        if depends_on is None:
+            depends_on = []
+        if not isinstance(depends_on, list):
+            raise ValueError(f"Step '{step.get('id')}' has invalid depends_on type")
+
+        rewritten: list[str] = []
+        for dep in depends_on:
+            if not isinstance(dep, str) or not dep.strip():
+                raise ValueError(f"Step '{step.get('id')}' has invalid dependency id")
+            if dep in local_map:
+                rewritten.append(local_map[dep])
+            elif "__" in dep:
+                rewritten.append(dep)
+            else:
+                raise ValueError(
+                    f"Step '{step.get('id')}' in fragment '{alias}' references non-canonical cross-fragment dependency '{dep}'"
+                )
+        step["depends_on"] = rewritten
+
+    for step, _alias, _map in composed_entries:
+        for dep in step.get("depends_on", []):
+            if dep not in all_ids:
+                raise ValueError(f"Step '{step.get('id')}' depends on unknown step id '{dep}'")
+
+    steps = [entry[0] for entry in composed_entries]
+    for index, step in enumerate(steps):
+        step["order_index"] = index
+
+    return {
+        "plan_type": plan_type,
+        "title": title,
+        "goal": goal,
+        "project_id": project_id,
+        "plan_instance_id": _plan_instance_id(),
+        "status": "PENDING",
+        "auto_execute_safe_steps": True,
+        "current_step_id": steps[0]["id"],
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
+def _normalize_fragment_alias(raw_alias: str, *, fallback: str) -> str:
+    alias = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_alias).strip("_")
+    return alias or fallback
+
+
+def _finalize_plan(plan: dict[str, Any], conv_state: "ConversationState") -> dict[str, Any] | None:
+    if not isinstance(plan, dict):
+        return None
+
+    plan.setdefault("project_id", conv_state.active_project)
+    plan.setdefault("plan_instance_id", _plan_instance_id())
+
+    try:
+        validate_plan(
+            plan,
+            allowed_kinds=_PLANNER_ALLOWED_STEP_KINDS,
+            safe_step_kinds=_PLANNER_SAFE_STEP_KINDS,
+            approval_step_kinds=_PLANNER_APPROVAL_STEP_KINDS,
+            expected_project_id=conv_state.active_project,
+        )
+    except PlanValidationError as exc:
+        logger.warning("Generated plan failed validation", issues=exc.to_dict()["issues"])
+        return None
+    return plan
 
 
 def _make_step(
@@ -1054,15 +1266,19 @@ def _template_search_compare_to_local(params: dict) -> dict:
 
 def _parse_llm_plan(raw_response: str) -> dict | None:
     """Parse a [[PLAN:{...}]] JSON tag from LLM output."""
-    m = re.search(r'\[\[PLAN:\s*(\{.*?\})\s*\]\]', raw_response, re.DOTALL)
-    if not m:
+    start = raw_response.find("[[PLAN:")
+    if start < 0:
         return None
+    end = raw_response.find("]]", start)
+    if end < 0:
+        return None
+    payload = raw_response[start + len("[[PLAN:"):end].strip()
     try:
-        plan = json.loads(m.group(1))
-        if isinstance(plan, dict) and "steps" in plan:
+        plan = json.loads(payload)
+        if isinstance(plan, dict) and ("steps" in plan or "fragments" in plan):
             return plan
     except (json.JSONDecodeError, TypeError):
-        logger.warning("Failed to parse LLM plan JSON", raw=m.group(1)[:200])
+        logger.warning("Failed to parse LLM plan JSON", raw=payload[:200])
     return None
 
 
@@ -1091,39 +1307,39 @@ def generate_plan(
     if plan_type == "run_de_pipeline":
         plan = _template_run_de_pipeline(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return plan
+        return _finalize_plan(plan, conv_state)
     if plan_type == "run_enrichment":
         plan = _template_run_enrichment(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return plan
+        return _finalize_plan(plan, conv_state)
     if plan_type == "search_compare_to_local":
         plan = _template_search_compare_to_local(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return plan
+        return _finalize_plan(plan, conv_state)
     if plan_type == "compare_workflows":
         plan = _template_compare_workflows(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return plan
+        return _finalize_plan(plan, conv_state)
     if plan_type == "remote_stage_workflow":
         plan = _template_remote_stage_workflow(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return plan
+        return _finalize_plan(plan, conv_state)
     if plan_type == "run_workflow":
         plan = _template_run_workflow(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return plan
+        return _finalize_plan(plan, conv_state)
     if plan_type == "compare_samples":
         plan = _template_compare_samples(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return plan
+        return _finalize_plan(plan, conv_state)
     if plan_type == "download_analyze":
         plan = _template_download_analyze(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return plan
+        return _finalize_plan(plan, conv_state)
     if plan_type == "parse_plot_interpret":
         plan = _template_parse_plot_interpret(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return plan
+        return _finalize_plan(plan, conv_state)
 
     # Summarize results: needs work_dir from state
     if conv_state.work_dir and re.search(
@@ -1131,7 +1347,7 @@ def generate_plan(
     ):
         plan = _template_summarize_results(params)
         logger.info("Generated plan from template", plan_type="summarize_results", steps=len(plan["steps"]))
-        return plan
+        return _finalize_plan(plan, conv_state)
 
     # 2. LLM fallback — ask the engine to produce a structured plan
     try:
@@ -1140,6 +1356,16 @@ def generate_plan(
         if raw:
             llm_plan = _parse_llm_plan(raw)
             if llm_plan:
+                fragments = llm_plan.get("fragments")
+                if isinstance(fragments, list) and fragments:
+                    llm_plan = compose_plan_fragments(
+                        fragments,
+                        title=llm_plan.get("title", message[:80]),
+                        goal=llm_plan.get("goal", message),
+                        plan_type=llm_plan.get("plan_type", "custom"),
+                        project_id=conv_state.active_project,
+                    )
+
                 # Ensure required fields
                 llm_plan.setdefault("plan_type", "custom")
                 llm_plan.setdefault("title", message[:80])
@@ -1147,6 +1373,8 @@ def generate_plan(
                 llm_plan.setdefault("status", "PENDING")
                 llm_plan.setdefault("auto_execute_safe_steps", True)
                 llm_plan.setdefault("artifacts", [])
+                llm_plan.setdefault("project_id", conv_state.active_project)
+                llm_plan.setdefault("plan_instance_id", _plan_instance_id())
                 # Assign IDs and order to steps if missing
                 for i, step in enumerate(llm_plan.get("steps", [])):
                     step.setdefault("id", _step_id())
@@ -1162,7 +1390,7 @@ def generate_plan(
                 if llm_plan.get("steps"):
                     llm_plan.setdefault("current_step_id", llm_plan["steps"][0]["id"])
                 logger.info("Generated plan from LLM", steps=len(llm_plan.get("steps", [])))
-                return llm_plan
+                return _finalize_plan(llm_plan, conv_state)
     except Exception as e:
         logger.warning("LLM plan generation failed", error=str(e))
 

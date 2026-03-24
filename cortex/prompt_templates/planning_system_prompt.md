@@ -12,7 +12,7 @@ Do NOT output anything else — no explanations, no markdown, just the tag.
 ## Plan Structure
 
 The JSON object must have:
-- "plan_type": one of "run_workflow", "compare_samples", "download_analyze", "summarize_results", "run_de_pipeline", "parse_plot_interpret", "compare_workflows", "search_compare_to_local", "custom"
+- "plan_type": one of "run_workflow", "remote_stage_workflow", "compare_samples", "download_analyze", "summarize_results", "run_de_pipeline", "run_enrichment", "parse_plot_interpret", "compare_workflows", "search_compare_to_local", "custom"
 - "title": short user-visible title (under 60 characters)
 - "goal": the user's original request
 - "steps": array of step objects
@@ -51,6 +51,14 @@ Each step object must have:
 - RUN_PATHWAY_ENRICHMENT — run KEGG or Reactome pathway enrichment
 - PLOT_ENRICHMENT — generate enrichment visualization (bar or dot plot)
 - SUMMARIZE_ENRICHMENT — interpret and summarize enrichment findings
+- CHECK_REMOTE_PROFILE_AUTH — verify remote profile auth is available for staging
+- check_remote_stage — check whether staged remote data already exists
+- remote_stage — stage local input data to a remote profile
+- complete_stage_only — finalize a stage-only remote flow
+- FIND_REFERENCE_CACHE — check staged references before expensive work
+- FIND_DATA_CACHE — check staged input data cache before expensive work
+
+Use these step kind strings exactly as written.
 
 ## Current State
 

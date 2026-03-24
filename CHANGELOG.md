@@ -2,6 +2,20 @@
 
 ### Improvements
 
+- **Strict pre-dispatch plan contract validation** — added a centralized
+  validator (`cortex/plan_validation.py`) and enforced validation at executor
+  entry so unknown step kinds, invalid dependencies, malformed step shapes,
+  and project-scope mismatches fail before any step dispatch.
+
+- **Hybrid fragment-plan composition for planner output** — planner flow now
+  supports composing reusable plan fragments with deterministic step-id remap,
+  dependency rewrite, and optional provenance metadata checks so fragment-based
+  plans can be merged safely.
+
+- **Project-scoped plan metadata continuity** — workflow plans now carry
+  explicit `project_id` and `plan_instance_id` metadata through planning and
+  execution boundaries to reduce cross-plan leakage risk in parallel sessions.
+
 - **`chat_with_agent` decomposition** — extracted tag parsing, tool-call
   dispatch, and embedded dataframe/plot resolution from `cortex/app.py` into
   owned helper modules:
@@ -26,6 +40,23 @@
   tests, aligned SLURM cache-flow submit assertions with current backend
   contracts, and repaired UI/helper test harness gaps so the focused regression
   set covering these areas passes again.
+
+### Tests
+
+- Added focused plan-contract coverage for duplicate IDs, unknown kinds,
+  dependency integrity, cycle detection, approval-policy constraints,
+  provenance validation, and project-scope mismatch handling.
+
+- Added executor pre-dispatch rejection tests for invalid plans and mismatched
+  project scope.
+
+- Added planner fragment-composition tests for deterministic ID remap,
+  dependency rewrites, dangling-fragment reference rejection, and LLM fragment
+  payload composition paths.
+
+- Added concurrency integration tests validating parallel execution isolation
+  across different projects and across multiple plan instances in the same
+  project.
 
 ## [3.4.6] - 2026-03-23
 

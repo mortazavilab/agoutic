@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from common import MCPHttpClient
 from common.logging_config import get_logger
 from cortex.config import get_service_url
+from cortex.plan_validation import PlanValidationError, validate_plan
 
 if TYPE_CHECKING:
     from cortex.agent_engine import AgentEngine
@@ -103,6 +104,15 @@ STEP_TOOL_DEFAULTS: dict[str, list[dict] | None] = {
     "GENERATE_PLOT": None,          # uses PLOT tag system
     "WRITE_SUMMARY": None,          # uses LLM analyze_results
     "REQUEST_APPROVAL": None,       # creates APPROVAL_GATE block
+    "CHECK_REMOTE_PROFILE_AUTH": None,
+    "check_remote_stage": None,
+    "CHECK_REMOTE_STAGE": None,
+    "remote_stage": None,
+    "REMOTE_STAGE": None,
+    "complete_stage_only": None,
+    "COMPLETE_STAGE_ONLY": None,
+    "FIND_REFERENCE_CACHE": None,
+    "FIND_DATA_CACHE": None,
     # New plan step kinds
     "CHECK_EXISTING": [{"source_key": "analyzer", "tool": "find_file"}],
     "RUN_DE_PIPELINE": None,        # multi-call edgepython sequence (special handling)
@@ -331,6 +341,23 @@ async def execute_plan(
     from cortex.plan_replanner import replan_on_failure, replan_with_new_info
 
     plan_payload = get_block_payload(workflow_block)
+
+    try:
+        validate_plan(
+            plan_payload,
+            allowed_kinds=set(STEP_TOOL_DEFAULTS).union(_SAFE_STEP_KINDS).union(_APPROVAL_STEP_KINDS),
+            safe_step_kinds=_SAFE_STEP_KINDS,
+            approval_step_kinds=_APPROVAL_STEP_KINDS,
+            expected_project_id=getattr(workflow_block, "project_id", None),
+        )
+    except PlanValidationError as err:
+        logger.warning("Plan validation failed before execution", issues=err.to_dict()["issues"])
+        plan_payload["status"] = "FAILED"
+        plan_payload["validation_error"] = err.to_dict()
+        _persist_step_update(session, workflow_block, plan_payload)
+        if emit_progress:
+            emit_progress(request_id, "error", "Execution plan failed validation before dispatch.")
+        return
 
     # Mark plan as running
     plan_payload["status"] = "RUNNING"

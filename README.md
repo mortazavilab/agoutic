@@ -5,6 +5,23 @@
 
 ## Latest Updates (2026-03-24)
 
+- **Strict pre-dispatch plan validation** — workflow plans are now validated
+  against a centralized contract before execution begins. Invalid step kinds,
+  malformed dependencies, cyclic graphs, and project-scope mismatches now fail
+  early with structured validation errors.
+
+- **Hybrid fragment plan composition support** — planner output now supports
+  fragment-based composition with deterministic step-ID remapping and
+  dependency rewriting, enabling safe assembly of reusable planning fragments.
+
+- **Project-scoped plan instance continuity** — planning and execution now
+  preserve explicit `project_id` and `plan_instance_id` metadata for improved
+  isolation across concurrent workflows.
+
+- **Concurrency integration coverage added** — tests now validate parallel
+  plan execution isolation across separate projects and for multiple
+  plan instances inside one shared project.
+
 - **`chat_with_agent` decomposition** — extracted tag parsing, tool-call
   dispatch, and embedded dataframe/plot handling from `cortex/app.py` into
   owned helper modules to reduce app-level coupling and shrink the main chat
