@@ -1282,6 +1282,146 @@ def _parse_llm_plan(raw_response: str) -> dict | None:
     return None
 
 
+_HYBRID_FIRST_FLOWS = frozenset({
+    "compare_samples",
+    "download_analyze",
+    "summarize_results",
+    "parse_plot_interpret",
+    "compare_workflows",
+    "search_compare_to_local",
+})
+
+
+def _is_summarize_results_request(message: str, conv_state: "ConversationState") -> bool:
+    return bool(
+        conv_state.work_dir
+        and re.search(r"(?:summarize|interpret|explain)\s+(?:the\s+)?(?:results?|output|qc)", message, re.I)
+    )
+
+
+def _deterministic_template_for_plan_type(plan_type: str, params: dict) -> dict | None:
+    if plan_type == "compare_samples":
+        return _template_compare_samples(params)
+    if plan_type == "download_analyze":
+        return _template_download_analyze(params)
+    if plan_type == "summarize_results":
+        return _template_summarize_results(params)
+    if plan_type == "parse_plot_interpret":
+        return _template_parse_plot_interpret(params)
+    if plan_type == "compare_workflows":
+        return _template_compare_workflows(params)
+    if plan_type == "search_compare_to_local":
+        return _template_search_compare_to_local(params)
+    if plan_type == "run_workflow":
+        return _template_run_workflow(params)
+    if plan_type == "run_de_pipeline":
+        return _template_run_de_pipeline(params)
+    if plan_type == "run_enrichment":
+        return _template_run_enrichment(params)
+    if plan_type == "remote_stage_workflow":
+        return _template_remote_stage_workflow(params)
+    return None
+
+
+def _generate_hybrid_first_scoped_plan(
+    *,
+    requested_plan_type: str,
+    params: dict,
+    message: str,
+    conv_state: "ConversationState",
+    engine: "AgentEngine",
+    conversation_history: list | None,
+) -> dict | None:
+    def _fallback(reason_code: str) -> dict | None:
+        logger.info(
+            "Hybrid bridge fallback",
+            plan_type=requested_plan_type,
+            hybrid_attempted=True,
+            hybrid_succeeded=False,
+            hybrid_failed=True,
+            reason_code=reason_code,
+            deterministic_fallback_used=True,
+        )
+        fallback_plan = _deterministic_template_for_plan_type(requested_plan_type, params)
+        if not fallback_plan:
+            return None
+        return _finalize_plan(fallback_plan, conv_state)
+
+    try:
+        state_json = conv_state.to_json()
+        raw, _usage = engine.plan(message, state_json, conversation_history)
+    except Exception as exc:
+        logger.warning("Hybrid bridge engine.plan failed", plan_type=requested_plan_type, error=str(exc))
+        return _fallback("engine_plan_exception")
+
+    if not raw:
+        return _fallback("engine_plan_empty")
+
+    llm_plan = _parse_llm_plan(raw)
+    if not llm_plan:
+        return _fallback("parse_no_plan")
+
+    returned_plan_type = llm_plan.get("plan_type")
+    if not isinstance(returned_plan_type, str) or returned_plan_type != requested_plan_type:
+        return _fallback("plan_type_mismatch_for_requested_flow")
+
+    fragments = llm_plan.get("fragments")
+    if isinstance(fragments, list) and fragments:
+        try:
+            llm_plan = compose_plan_fragments(
+                fragments,
+                title=llm_plan.get("title", message[:80]),
+                goal=llm_plan.get("goal", message),
+                plan_type=returned_plan_type,
+                project_id=conv_state.active_project,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Hybrid bridge fragment composition failed",
+                plan_type=requested_plan_type,
+                error=str(exc),
+            )
+            return _fallback("fragment_compose_failed")
+
+    llm_plan.setdefault("plan_type", requested_plan_type)
+    llm_plan.setdefault("title", message[:80])
+    llm_plan.setdefault("goal", message)
+    llm_plan.setdefault("status", "PENDING")
+    llm_plan.setdefault("auto_execute_safe_steps", True)
+    llm_plan.setdefault("artifacts", [])
+    llm_plan.setdefault("project_id", conv_state.active_project)
+    llm_plan.setdefault("plan_instance_id", _plan_instance_id())
+
+    for i, step in enumerate(llm_plan.get("steps", [])):
+        step.setdefault("id", _step_id())
+        step.setdefault("status", "PENDING")
+        step.setdefault("order_index", i)
+        step.setdefault("tool_calls", [])
+        step.setdefault("requires_approval", False)
+        step.setdefault("depends_on", [])
+        step.setdefault("result", None)
+        step.setdefault("error", None)
+        step.setdefault("started_at", None)
+        step.setdefault("completed_at", None)
+    if llm_plan.get("steps"):
+        llm_plan.setdefault("current_step_id", llm_plan["steps"][0]["id"])
+
+    finalized = _finalize_plan(llm_plan, conv_state)
+    if finalized is None:
+        return _fallback("finalize_validation_failed")
+
+    logger.info(
+        "Hybrid bridge succeeded",
+        plan_type=requested_plan_type,
+        hybrid_attempted=True,
+        hybrid_succeeded=True,
+        hybrid_failed=False,
+        reason_code="",
+        deterministic_fallback_used=False,
+    )
+    return finalized
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -1301,7 +1441,25 @@ def generate_plan(
     3. Return None if planning fails (caller falls back to existing flow).
     """
     plan_type = _detect_plan_type(message)
+    if not plan_type and _is_summarize_results_request(message, conv_state):
+        plan_type = "summarize_results"
+
     params = _extract_plan_params(message, conv_state, plan_type or "")
+
+    # Temporary bridge: hybrid-first for selected non-core flows.
+    if plan_type in _HYBRID_FIRST_FLOWS:
+        bridge_plan = _generate_hybrid_first_scoped_plan(
+            requested_plan_type=plan_type,
+            params=params,
+            message=message,
+            conv_state=conv_state,
+            engine=engine,
+            conversation_history=conversation_history,
+        )
+        if bridge_plan is not None:
+            return bridge_plan
+        logger.info("Hybrid bridge returned no plan", plan_type=plan_type)
+        return None
 
     # 1. Deterministic templates
     if plan_type == "run_de_pipeline":
@@ -1312,14 +1470,6 @@ def generate_plan(
         plan = _template_run_enrichment(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
-    if plan_type == "search_compare_to_local":
-        plan = _template_search_compare_to_local(params)
-        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return _finalize_plan(plan, conv_state)
-    if plan_type == "compare_workflows":
-        plan = _template_compare_workflows(params)
-        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return _finalize_plan(plan, conv_state)
     if plan_type == "remote_stage_workflow":
         plan = _template_remote_stage_workflow(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
@@ -1327,26 +1477,6 @@ def generate_plan(
     if plan_type == "run_workflow":
         plan = _template_run_workflow(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return _finalize_plan(plan, conv_state)
-    if plan_type == "compare_samples":
-        plan = _template_compare_samples(params)
-        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return _finalize_plan(plan, conv_state)
-    if plan_type == "download_analyze":
-        plan = _template_download_analyze(params)
-        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return _finalize_plan(plan, conv_state)
-    if plan_type == "parse_plot_interpret":
-        plan = _template_parse_plot_interpret(params)
-        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
-        return _finalize_plan(plan, conv_state)
-
-    # Summarize results: needs work_dir from state
-    if conv_state.work_dir and re.search(
-        r"(?:summarize|interpret|explain)\s+(?:the\s+)?(?:results?|output|qc)", message, re.I
-    ):
-        plan = _template_summarize_results(params)
-        logger.info("Generated plan from template", plan_type="summarize_results", steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
 
     # 2. LLM fallback — ask the engine to produce a structured plan
