@@ -103,6 +103,7 @@ class TestGenerateConfig:
         assert "executor = 'local'" in config
         assert "docker {" in config
         assert "singularity {" not in config
+        assert "apptainer {" not in config
         assert "clusterOptions = \"--account=${cpuAccount}\"" not in config
 
     def test_slurm_execution_uses_accounts_partitions_and_singularity(self):
@@ -116,6 +117,8 @@ class TestGenerateConfig:
             slurm_gpu_partition="gpu-part",
             slurm_cpu_account="cpu-acct",
             slurm_gpu_account="gpu-acct",
+            slurm_bind_paths=["/share/crsp/lab/seyedam/share/agoutic/seyedam/testslurm1"],
+            apptainer_cache_dir="/share/crsp/lab/seyedam/share/agoutic/seyedam/.nxf-apptainer-cache",
             max_gpu_tasks=2,
         )
 
@@ -129,9 +132,12 @@ class TestGenerateConfig:
         assert "clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"" in config
         assert "queue = \"${gpuPartition}\"" in config
         assert f"--bind {REFERENCE_GENOMES['mm39']['fasta']}" not in config
-        assert "containerOptions = \"--nv\"" in config
-        assert "singularity {" in config
-        assert "autoMounts = true" in config
+        assert "containerOptions = \"--no-mount hostfs --bind /share/crsp/lab/seyedam/share/agoutic/seyedam/testslurm1\"" in config
+        assert "containerOptions = \"--nv --no-mount hostfs --bind /share/crsp/lab/seyedam/share/agoutic/seyedam/testslurm1\"" in config
+        assert "apptainer {" in config
+        assert "autoMounts = false" in config
+        assert 'cacheDir = "/share/crsp/lab/seyedam/share/agoutic/seyedam/.nxf-apptainer-cache"' in config
+        assert "singularity {" not in config
         assert "docker {" not in config
 
     def test_slurm_reference_overrides_replace_kallisto_sidecars(self):

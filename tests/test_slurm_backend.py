@@ -264,16 +264,18 @@ class TestGenerateSbatchScript:
         assert "tail -n 200 .nextflow.log" in script
         assert "Nextflow failed with exit code" in script
 
-    def test_sets_singularity_cache_dir_when_work_dir_present(self):
+    def test_sets_container_cache_dirs_when_work_dir_present(self):
         script = generate_sbatch_script(
             job_name="cache_job",
             account="acc",
             partition="standard",
             work_dir="/scratch/user/workflow1",
+            container_cache_dir="/scratch/user/agoutic",
             nextflow_command="nextflow run mortazavilab/dogme",
         )
-        assert "export NXF_SINGULARITY_CACHEDIR=/scratch/user/workflow1/.nxf-singularity-cache" in script
-        assert "mkdir -p \"$NXF_SINGULARITY_CACHEDIR\"" in script
+        assert "export NXF_APPTAINER_CACHEDIR=/scratch/user/agoutic/.nxf-apptainer-cache" in script
+        assert 'export NXF_SINGULARITY_CACHEDIR="$NXF_APPTAINER_CACHEDIR"' in script
+        assert "mkdir -p \"$NXF_APPTAINER_CACHEDIR\"" in script
 
     def test_includes_cluster_agnostic_runtime_bootstrap(self):
         script = generate_sbatch_script(
@@ -293,5 +295,12 @@ class TestGenerateSbatchScript:
         assert "SLURM jobs run in a non-login shell" in script
         assert 'echo "Nextflow: $AGOUTIC_NEXTFLOW_BIN"' in script
         assert "if ! command -v singularity >/dev/null 2>&1 && command -v apptainer >/dev/null 2>&1; then" in script
+        assert "for env_name in ${!SINGULARITYENV_@}; do" in script
+        assert "appt_name=APPTAINERENV_${suffix}" in script
+        assert "unset \"$env_name\"" in script
         assert "exec apptainer \"$@\"" in script
+        assert "if ! command -v apptainer >/dev/null 2>&1 && command -v singularity >/dev/null 2>&1; then" in script
+        assert "for env_name in ${!APPTAINERENV_@}; do" in script
+        assert "sing_name=SINGULARITYENV_${suffix}" in script
+        assert "exec singularity \"$@\"" in script
         assert "neither singularity nor apptainer is available" in script

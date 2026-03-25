@@ -47,6 +47,8 @@ class NextflowConfig:
         slurm_gpu_partition: str | None = None,
         slurm_cpu_account: str | None = None,
         slurm_gpu_account: str | None = None,
+        slurm_bind_paths: Optional[list[str]] = None,
+        apptainer_cache_dir: Optional[str] = None,
     ) -> str:
         """
         Generate a Nextflow configuration string for Dogme pipeline.
@@ -104,6 +106,18 @@ class NextflowConfig:
         gpu_partition = (slurm_gpu_partition or cpu_partition).strip() or cpu_partition
         cpu_account = (slurm_cpu_account or "default").strip() or "default"
         gpu_account = (slurm_gpu_account or cpu_account).strip() or cpu_account
+        normalized_bind_paths: list[str] = []
+        for bind_path in slurm_bind_paths or []:
+            cleaned = str(bind_path or "").strip()
+            if cleaned and cleaned not in normalized_bind_paths:
+                normalized_bind_paths.append(cleaned)
+        slurm_bind_args = ""
+        if normalized_bind_paths:
+            slurm_bind_args = f"--bind {','.join(normalized_bind_paths)}"
+        slurm_container_base_options = "--no-mount hostfs"
+        if slurm_bind_args:
+            slurm_container_base_options = f"{slurm_container_base_options} {slurm_bind_args}"
+        resolved_apptainer_cache_dir = str(apptainer_cache_dir or "").strip() or "${launchDir}/.nxf-apptainer-cache"
         
         # Build config string matching example format
         config_lines = []
@@ -167,7 +181,8 @@ class NextflowConfig:
         config_lines.append("    // <-- Container Settings --->")
         config_lines.append("    container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'")
         if is_slurm:
-            config_lines.append("    // Remote SLURM runs must not inject local workstation bind paths.")
+            config_lines.append("    // Remote SLURM runs bind only workflow-specific remote paths.")
+            config_lines.append(f"    containerOptions = \"{slurm_container_base_options}\"")
         else:
             config_lines.append(f"    containerOptions = \"-v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    beforeScript = 'export PATH=/opt/conda/bin:$PATH'")
@@ -209,7 +224,8 @@ class NextflowConfig:
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
         config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
-            config_lines.append("        containerOptions = \"--nv\"")
+            gpu_container_options = f"--nv {slurm_container_base_options}"
+            config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
@@ -222,7 +238,8 @@ class NextflowConfig:
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
         config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
-            config_lines.append("        containerOptions = \"--nv\"")
+            gpu_container_options = f"--nv {slurm_container_base_options}"
+            config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
@@ -235,7 +252,8 @@ class NextflowConfig:
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
         config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
-            config_lines.append("        containerOptions = \"--nv\"")
+            gpu_container_options = f"--nv {slurm_container_base_options}"
+            config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
@@ -246,9 +264,10 @@ class NextflowConfig:
         config_lines.append("}")
         config_lines.append("")
         if is_slurm:
-            config_lines.append("singularity {")
+            config_lines.append("apptainer {")
             config_lines.append("    enabled = true")
-            config_lines.append("    autoMounts = true")
+            config_lines.append("    autoMounts = false")
+            config_lines.append(f"    cacheDir = \"{resolved_apptainer_cache_dir}\"")
             config_lines.append("}")
         else:
             config_lines.append("docker {")

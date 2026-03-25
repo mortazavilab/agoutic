@@ -169,6 +169,7 @@ class SlurmBackend:
 
             remote_work = remote_paths["remote_work"]
             remote_output = remote_paths["remote_output"]
+            remote_cache_root = remote_paths["remote_base_path"]
             remote_input = cache_resolution["remote_input"]
 
             # Ensure workflow-local input folders point at staged cache paths.
@@ -202,6 +203,7 @@ class SlurmBackend:
                 output_log=f"{remote_work}/slurm-%j.out",
                 error_log=f"{remote_work}/slurm-%j.err",
                 work_dir=remote_work,
+                container_cache_dir=remote_cache_root,
                 nextflow_command=nf_cmd,
             )
 
@@ -818,6 +820,16 @@ class SlurmBackend:
             "Final reference_overrides passed to config generator",
             reference_overrides=ref_overrides,
         )
+        remote_roots = self._derive_remote_roots(params, profile)
+
+        bind_paths: list[str] = [remote_work]
+        remote_input = str(cache_resolution.get("remote_input") or "").strip()
+        if remote_input:
+            bind_paths.append(remote_input)
+        for remote_ref_root in remote_reference_paths.values():
+            cleaned = str(remote_ref_root or "").strip()
+            if cleaned:
+                bind_paths.append(cleaned)
 
         config = NextflowConfig.generate_config(
             sample_name=params.sample_name,
@@ -836,6 +848,8 @@ class SlurmBackend:
             slurm_gpu_partition=gpu_partition,
             slurm_cpu_account=cpu_account,
             slurm_gpu_account=gpu_account,
+            slurm_bind_paths=bind_paths,
+            apptainer_cache_dir=f"{remote_roots['remote_base_path']}/.nxf-apptainer-cache",
         )
 
         config_path = f"{remote_work}/nextflow.config"

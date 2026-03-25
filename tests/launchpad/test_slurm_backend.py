@@ -249,3 +249,4 @@ async def test_write_remote_nextflow_config_uses_profile_cpu_defaults_separately
     assert captured["slurm_cpu_partition"] == "standard"
     assert captured["slurm_gpu_account"] == "SEYEDAM_LAB_GPU"
     assert captured["slurm_gpu_partition"] == "gpu"
+    assert captured["apptainer_cache_dir"] == "/remote/agoutic/.nxf-apptainer-cache"

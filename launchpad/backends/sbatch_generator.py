@@ -16,6 +16,7 @@ def generate_sbatch_script(
     output_log: str = "slurm-%j.out",
     error_log: str = "slurm-%j.err",
     work_dir: str | None = None,
+    container_cache_dir: str | None = None,
     nextflow_command: str = "",
     module_loads: list[str] | None = None,
     conda_env: str | None = None,
@@ -61,7 +62,7 @@ def generate_sbatch_script(
     # Cluster-agnostic runtime bootstrap:
     # - Tries common module names when the module system is available
     # - Falls back to whatever is already on PATH
-    # - Provides a singularity shim when only apptainer exists
+    # - Provides compatibility shims when only one of singularity/apptainer exists
     lines.append("if [[ -n \"${LMOD_CMD:-}\" ]] || command -v module >/dev/null 2>&1; then")
     lines.append("    module load java/17 >/dev/null 2>&1 || module load java >/dev/null 2>&1 || true")
     lines.append("    module load singularity/3.11.3 >/dev/null 2>&1 || module load singularity >/dev/null 2>&1 || true")
@@ -91,8 +92,39 @@ def generate_sbatch_script(
     lines.append("if ! command -v singularity >/dev/null 2>&1 && command -v apptainer >/dev/null 2>&1; then")
     lines.append('    echo "INFO: singularity not found; creating local shim to apptainer"')
     lines.append('    mkdir -p .agoutic-bin')
-    lines.append("    printf '%s\\n' '#!/bin/bash' 'exec apptainer \"$@\"' > .agoutic-bin/singularity")
+    lines.append("    cat > .agoutic-bin/singularity <<'AGOUTIC_APPTAINER_SHIM'")
+    lines.append("#!/bin/bash")
+    lines.append("for env_name in ${!SINGULARITYENV_@}; do")
+    lines.append("    suffix=${env_name#SINGULARITYENV_}")
+    lines.append("    appt_name=APPTAINERENV_${suffix}")
+    lines.append("    if [[ -z \"${!appt_name:-}\" ]]; then")
+    lines.append("        export \"${appt_name}=${!env_name}\"")
+    lines.append("    fi")
+    lines.append("    unset \"$env_name\"")
+    lines.append("done")
+    lines.append("exec apptainer \"$@\"")
+    lines.append("AGOUTIC_APPTAINER_SHIM")
     lines.append("    chmod +x .agoutic-bin/singularity")
+    lines.append('    export PATH="$(pwd)/.agoutic-bin:$PATH"')
+    lines.append("fi")
+    lines.append("")
+
+    lines.append("if ! command -v apptainer >/dev/null 2>&1 && command -v singularity >/dev/null 2>&1; then")
+    lines.append('    echo "INFO: apptainer not found; creating local shim to singularity"')
+    lines.append('    mkdir -p .agoutic-bin')
+    lines.append("    cat > .agoutic-bin/apptainer <<'AGOUTIC_SINGULARITY_SHIM'")
+    lines.append("#!/bin/bash")
+    lines.append("for env_name in ${!APPTAINERENV_@}; do")
+    lines.append("    suffix=${env_name#APPTAINERENV_}")
+    lines.append("    sing_name=SINGULARITYENV_${suffix}")
+    lines.append("    if [[ -z \"${!sing_name:-}\" ]]; then")
+    lines.append("        export \"${sing_name}=${!env_name}\"")
+    lines.append("    fi")
+    lines.append("    unset \"$env_name\"")
+    lines.append("done")
+    lines.append("exec singularity \"$@\"")
+    lines.append("AGOUTIC_SINGULARITY_SHIM")
+    lines.append("    chmod +x .agoutic-bin/apptainer")
     lines.append('    export PATH="$(pwd)/.agoutic-bin:$PATH"')
     lines.append("fi")
     lines.append("")
@@ -103,10 +135,12 @@ def generate_sbatch_script(
     lines.append("fi")
     lines.append("")
 
-    # Keep Nextflow/Singularity cache in a stable workflow-local location.
-    if work_dir:
-        lines.append(f"export NXF_SINGULARITY_CACHEDIR={work_dir}/.nxf-singularity-cache")
-        lines.append('mkdir -p "$NXF_SINGULARITY_CACHEDIR"')
+    # Keep the container cache in a stable shared location when one is provided.
+    cache_dir = (container_cache_dir or work_dir)
+    if cache_dir:
+        lines.append(f"export NXF_APPTAINER_CACHEDIR={cache_dir}/.nxf-apptainer-cache")
+        lines.append('export NXF_SINGULARITY_CACHEDIR="$NXF_APPTAINER_CACHEDIR"')
+        lines.append('mkdir -p "$NXF_APPTAINER_CACHEDIR"')
         lines.append("")
 
     # Module loads

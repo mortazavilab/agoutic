@@ -49,6 +49,19 @@
   `LAUNCHPAD_SCRIPT_ALLOWLIST_ROOTS`, and registers script identifiers in
   `LAUNCHPAD_SCRIPT_ALLOWLIST_IDS` as `<skill_key>/<script_name>`.
 
+- **Native Apptainer path for SLURM Nextflow runs** — Launchpad SLURM
+  submissions now generate `apptainer { enabled = true }` config instead of
+  relying on Singularity compatibility mode, disable host filesystem
+  auto-mounts for task launches via `--no-mount hostfs`, and keep explicit
+  workflow/input/reference bind paths only.
+
+- **Shared per-user Apptainer cache for remote workflows** — remote SLURM
+  runs now point both `apptainer.cacheDir` and exported
+  `NXF_APPTAINER_CACHEDIR`/`NXF_SINGULARITY_CACHEDIR` at a stable
+  `${remote_base_path}/.nxf-apptainer-cache` directory so container images are
+  reused across workflow runs for the same user instead of being repulled into
+  each workflow folder.
+
 ### Fixes
 
 - **Workflow `GENERATE_PLOT` and `INTERPRET_RESULTS` steps now complete
@@ -111,6 +124,19 @@
   contracts, and repaired UI/helper test harness gaps so the focused regression
   set covering these areas passes again.
 
+- **Apptainer compatibility bootstrap now works in mixed-runtime clusters** —
+  the generated SLURM sbatch bootstrap now provides compatibility shims in both
+  directions (`singularity -> apptainer` and `apptainer -> singularity`) and
+  mirrors engine-prefixed environment variables between
+  `SINGULARITYENV_*` and `APPTAINERENV_*` when only one runtime binary is
+  present on the cluster path.
+
+- **Remote SLURM submit path restored after cache-root wiring** — fixed a
+  Launchpad submission regression where remote config generation referenced an
+  undefined `remote_roots` variable while computing the shared Apptainer cache
+  path, which caused approval-driven `submit_dogme_job` calls to fail with an
+  HTTP 500 before job submission.
+
 ### Tests
 
 - Added focused plan-contract coverage for duplicate IDs, unknown kinds,
@@ -119,6 +145,11 @@
 
 - Added executor pre-dispatch rejection tests for invalid plans and mismatched
   project scope.
+
+- Extended Launchpad SLURM regression coverage for native Apptainer config
+  generation, shared remote cache directory propagation, mixed-runtime sbatch
+  bootstrap shims, and the remote-config submit path used by approval-driven
+  job launches.
 
 - Added planner fragment-composition tests for deterministic ID remap,
   dependency rewrites, dangling-fragment reference rejection, and LLM fragment
