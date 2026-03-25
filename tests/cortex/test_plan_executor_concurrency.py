@@ -521,6 +521,124 @@ async def test_approval_semantics_unchanged_with_parallel_safe_step(session_fact
 
 
 @pytest.mark.asyncio
+async def test_parse_plot_interpret_steps_complete_with_inline_plot_payload(session_factory):
+    payload = {
+        "title": "Plot and interpret results for JamshidW",
+        "project_id": "proj-plot",
+        "plan_instance_id": "pi-plot",
+        "plot_type": "bar",
+        "steps": [
+            {
+                "id": "loc",
+                "order_index": 0,
+                "kind": "LOCATE_DATA",
+                "title": "Locate result CSV files",
+                "depends_on": [],
+                "requires_approval": False,
+                "status": "COMPLETED",
+                "result": [{
+                    "tool": "list_job_files",
+                    "source_key": "analyzer",
+                    "result": {
+                        "success": True,
+                        "work_dir": "/tmp/workflow1",
+                        "files": [
+                            {"path": "annot/JamshidW.mm39_final_stats.csv", "name": "JamshidW.mm39_final_stats.csv", "extension": ".csv"},
+                            {"path": "qc_summary.csv", "name": "qc_summary.csv", "extension": ".csv"},
+                        ],
+                    },
+                }],
+            },
+            {
+                "id": "parse",
+                "order_index": 1,
+                "kind": "PARSE_OUTPUT_FILE",
+                "title": "Parse key result CSV files",
+                "depends_on": ["loc"],
+                "requires_approval": False,
+                "status": "COMPLETED",
+                "result": [
+                    {
+                        "tool": "parse_csv_file",
+                        "source_key": "analyzer",
+                        "result": {
+                            "success": True,
+                            "work_dir": "/tmp/workflow1",
+                            "file_path": "annot/JamshidW.mm39_final_stats.csv",
+                            "columns": ["Category", "Count"],
+                            "row_count": 3,
+                            "data": [
+                                {"Category": "Known genes detected", "Count": 1038},
+                                {"Category": "Novel genes discovered", "Count": 1},
+                                {"Category": "Reads - Known", "Count": 1305},
+                            ],
+                        },
+                    },
+                    {
+                        "tool": "parse_csv_file",
+                        "source_key": "analyzer",
+                        "result": {
+                            "success": True,
+                            "work_dir": "/tmp/workflow1",
+                            "file_path": "qc_summary.csv",
+                            "columns": ["sample", "file_type", "n_reads", "mapped_pct", "mean_len"],
+                            "row_count": 2,
+                            "data": [
+                                {"sample": "JamshidW", "file_type": "FASTQ", "n_reads": 1750, "mapped_pct": None, "mean_len": 1375.07},
+                                {"sample": "JamshidW", "file_type": "BAM", "n_reads": 1750, "mapped_pct": 95.89, "mean_len": 1375.07},
+                            ],
+                        },
+                    },
+                ],
+            },
+            {
+                "id": "plot",
+                "order_index": 2,
+                "kind": "GENERATE_PLOT",
+                "title": "Generate bar chart",
+                "depends_on": ["parse"],
+                "requires_approval": False,
+            },
+            {
+                "id": "interpret",
+                "order_index": 3,
+                "kind": "INTERPRET_RESULTS",
+                "title": "Explain what the results mean",
+                "depends_on": ["plot"],
+                "requires_approval": False,
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-plot",
+        owner_id="owner-plot",
+        payload=payload,
+    )
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-plot")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    assert final_payload["status"] == "COMPLETED"
+
+    plot_step = next(step for step in final_payload["steps"] if step["id"] == "plot")
+    assert plot_step["status"] == "COMPLETED"
+    assert plot_step["result"]["selected_file"] == "annot/JamshidW.mm39_final_stats.csv"
+    assert plot_step["result"]["charts"][0]["type"] == "bar"
+    assert plot_step["result"]["charts"][0]["x"] == "Category"
+    assert plot_step["result"]["charts"][0]["y"] == "Count"
+    assert "JamshidW.mm39_final_stats.csv" in plot_step["result"]["_dataframes"]
+
+    interpret_step = next(step for step in final_payload["steps"] if step["id"] == "interpret")
+    assert interpret_step["status"] == "COMPLETED"
+    assert "95.89%" in interpret_step["result"]["markdown"]
+    assert "usable" in interpret_step["result"]["markdown"]
+
+
+@pytest.mark.asyncio
 async def test_parse_output_file_uses_located_csv_results(session_factory, monkeypatch):
     from cortex import plan_executor
 

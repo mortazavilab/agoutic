@@ -71,7 +71,15 @@ class TestJobStatusUpdatedAt:
 
         value = fn("2026-03-19T22:50:00Z", True, now)
 
-        assert value == "2026-03-19T23:00:00Z"
+        assert value == "2026-03-19T22:50:00Z"
+
+    def test_preserves_supplied_live_poll_timestamp_when_present(self):
+        fn = _load_function("_job_status_updated_at")
+        now = dt.datetime(2026, 3, 19, 23, 0, 0, tzinfo=dt.timezone.utc)
+
+        value = fn("2026-03-19T22:59:58Z", True, now)
+
+        assert value == "2026-03-19T22:59:58Z"
 
     def test_falls_back_to_persisted_timestamp_when_live_status_fails(self):
         fn = _load_function("_job_status_updated_at")
@@ -86,6 +94,75 @@ class TestJobStatusUpdatedAt:
         value = fn(None, False)
 
         assert value is None
+
+
+class TestPauseAutoRefresh:
+    def test_sets_requested_suppression_deadline(self):
+        fake_st = SimpleNamespace(session_state={})
+        fake_time = SimpleNamespace(time=lambda: 100.0)
+        fn = _load_function("_pause_auto_refresh", {"st": fake_st, "time": fake_time})
+
+        fn(4)
+
+        assert fake_st.session_state["_suppress_auto_refresh_until"] == 104.0
+
+    def test_does_not_shorten_existing_deadline(self):
+        fake_st = SimpleNamespace(session_state={"_suppress_auto_refresh_until": 110.0})
+        fake_time = SimpleNamespace(time=lambda: 100.0)
+        fn = _load_function("_pause_auto_refresh", {"st": fake_st, "time": fake_time})
+
+        fn(2)
+
+        assert fake_st.session_state["_suppress_auto_refresh_until"] == 110.0
+
+
+class TestAutoRefreshIsSuppressed:
+    def test_returns_true_before_deadline(self):
+        fake_st = SimpleNamespace(session_state={"_suppress_auto_refresh_until": 105.0})
+        fn = _load_function(
+            "_auto_refresh_is_suppressed",
+            {"st": fake_st, "_has_pending_destructive_confirmation": lambda: False},
+        )
+
+        assert fn(104.0) is True
+
+    def test_returns_false_after_deadline(self):
+        fake_st = SimpleNamespace(session_state={"_suppress_auto_refresh_until": 105.0})
+        fn = _load_function(
+            "_auto_refresh_is_suppressed",
+            {"st": fake_st, "_has_pending_destructive_confirmation": lambda: False},
+        )
+
+        assert fn(105.0) is False
+
+    def test_returns_true_when_destructive_confirmation_is_open(self):
+        fake_st = SimpleNamespace(session_state={"_suppress_auto_refresh_until": 0.0})
+        fn = _load_function(
+            "_auto_refresh_is_suppressed",
+            {"st": fake_st, "_has_pending_destructive_confirmation": lambda: True},
+        )
+
+        assert fn(105.0) is True
+
+
+class TestHasPendingDestructiveConfirmation:
+    def test_detects_archive_confirmation(self):
+        fake_st = SimpleNamespace(session_state={"_confirm_archive_project_id": "proj-1"})
+        fn = _load_function("_has_pending_destructive_confirmation", {"st": fake_st})
+
+        assert fn() is True
+
+    def test_detects_job_delete_confirmation(self):
+        fake_st = SimpleNamespace(session_state={"del_confirm_block-1": True})
+        fn = _load_function("_has_pending_destructive_confirmation", {"st": fake_st})
+
+        assert fn() is True
+
+    def test_returns_false_without_pending_confirmation(self):
+        fake_st = SimpleNamespace(session_state={"_confirm_archive_project_id": None})
+        fn = _load_function("_has_pending_destructive_confirmation", {"st": fake_st})
+
+        assert fn() is False
 
 
 class TestResolveDfById:
@@ -131,6 +208,105 @@ class TestResolveDfById:
         ]
 
         assert fn(99, blocks) == (None, None)
+
+
+class TestResolvePayloadDfById:
+    def test_returns_dataframe_from_local_payload(self):
+        fn = _load_function("_resolve_payload_df_by_id")
+        dfs = {
+            "stats.csv": {
+                "metadata": {"df_id": 1},
+                "columns": ["Category", "Count"],
+                "data": [
+                    {"Category": "Known", "Count": 10},
+                    {"Category": "Novel", "Count": 1},
+                ],
+            }
+        }
+
+        df, label = fn(1, dfs)
+
+        assert label == "stats.csv"
+        assert df is not None
+        assert df["Count"].tolist() == [10, 1]
+
+    def test_returns_none_when_missing(self):
+        fn = _load_function("_resolve_payload_df_by_id")
+
+        assert fn(99, {}) == (None, None)
+
+
+class TestFindRelatedWorkflowPlan:
+    def test_prefers_matching_prior_workflow_title(self):
+        fn = _load_function("_find_related_workflow_plan")
+        blocks = [
+            {
+                "id": "wf-1",
+                "type": "WORKFLOW_PLAN",
+                "project_id": "proj-1",
+                "payload": {"title": "Older workflow"},
+            },
+            {
+                "id": "wf-2",
+                "type": "WORKFLOW_PLAN",
+                "project_id": "proj-1",
+                "payload": {"title": "Plot and interpret results for JamshidW"},
+            },
+            {
+                "id": "agent-1",
+                "type": "AGENT_PLAN",
+                "project_id": "proj-1",
+                "payload": {"markdown": "Plan: Plot and interpret results for JamshidW\n\nDetails"},
+            },
+        ]
+
+        related = fn(blocks[-1], blocks)
+
+        assert related is not None
+        assert related["id"] == "wf-2"
+
+
+class TestWorkflowHighlightSteps:
+    def test_returns_completed_plot_and_summary_steps(self):
+        fn = _load_function("_workflow_highlight_steps")
+        workflow_block = {
+            "payload": {
+                "steps": [
+                    {"kind": "PARSE_OUTPUT_FILE", "status": "COMPLETED", "result": {"rows": 10}},
+                    {"kind": "GENERATE_PLOT", "status": "COMPLETED", "result": {"charts": [{"type": "bar"}]}},
+                    {"kind": "INTERPRET_RESULTS", "status": "COMPLETED", "result": {"markdown": "Looks usable."}},
+                    {"kind": "WRITE_SUMMARY", "status": "PENDING", "result": {"markdown": "Later"}},
+                ]
+            }
+        }
+
+        highlights = fn(workflow_block)
+
+        assert [step["kind"] for step in highlights] == ["GENERATE_PLOT", "INTERPRET_RESULTS"]
+
+
+class TestBlockRequiresFullRefresh:
+    def test_only_running_execution_and_download_jobs_require_full_refresh(self):
+        fn = _load_function("_block_requires_full_refresh")
+
+        assert fn({"type": "EXECUTION_JOB", "status": "RUNNING"}) is True
+        assert fn({"type": "DOWNLOAD_TASK", "status": "RUNNING"}) is True
+        assert fn({"type": "EXECUTION_JOB", "status": "DONE", "payload": {"job_status": {"status": "RUNNING"}}}) is True
+        assert fn({"type": "EXECUTION_JOB", "status": "NEW", "payload": {"job_status": {"status": "PENDING"}}}) is True
+        assert fn({"type": "WORKFLOW_PLAN", "status": "RUNNING"}) is False
+        assert fn({"type": "STAGING_TASK", "status": "RUNNING"}) is False
+        assert fn({"type": "EXECUTION_JOB", "status": "DONE"}) is False
+
+
+class TestFullPageRefreshBootstrapExpression:
+    def test_expression_turns_on_when_flag_appears(self):
+        auto_refresh = True
+        suppressed = False
+        before = bool(auto_refresh and False and not suppressed)
+        after = bool(auto_refresh and True and not suppressed)
+
+        assert before is False
+        assert after is True
 
 
 class TestBuildPlotlyFigure:

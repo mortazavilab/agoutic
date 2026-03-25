@@ -51,6 +51,34 @@
 
 ### Fixes
 
+- **Workflow `GENERATE_PLOT` and `INTERPRET_RESULTS` steps now complete
+  deterministically** — `cortex/plan_executor.py` now derives plot payloads
+  directly from prior parsed result tables and generates markdown
+  interpretations/summaries for workflow-local result review instead of
+  leaving those steps pending under special handling.
+
+- **Workflow outputs now surface in both step detail and the main chat
+  flow** — the UI renders workflow-local chart payloads inline inside
+  completed `WORKFLOW_PLAN` steps and mirrors completed plot/interpretation
+  outputs into the related `AGENT_PLAN` chat bubble so results no longer feel
+  trapped inside step expanders.
+
+- **Nextflow live status refresh restored without reintroducing full-page
+  flicker everywhere** — `ui/app.py` now uses fragment refresh for normal
+  chat/workflow updates, restores whole-page reruns only for active
+  `EXECUTION_JOB` and `DOWNLOAD_TASK` cards, and bootstraps that heavier
+  refresh path automatically when a fragment first discovers an active job.
+
+- **Execution-job freshness indicators now reflect real poll timestamps** —
+  live status polls store per-run update times in session state and preserve
+  them in the job card instead of always displaying a misleading synthetic
+  "Updated 0s ago" timestamp.
+
+- **Delete/archive confirmations no longer fight the auto-refresh loop** —
+  destructive actions now pause refresh through stable confirmation-aware
+  suppression logic, preserving working project deletion/archive flows without
+  leaving Nextflow monitoring stuck in a suppressed state afterward.
+
 - **Summarize-results requests now enter the planning path** — broadened
   multi-step classification so summarize/interpret/explain-results requests are
   routed into `WORKFLOW_PLAN` generation instead of falling through to the
@@ -114,6 +142,14 @@
 - Added regressions covering summarize-results multi-step classification and
   `PARSE_OUTPUT_FILE` reuse of discovered CSV outputs from the prior locate
   step.
+
+- Added workflow executor regression coverage for parse → plot → interpret
+  chains, including inline plot-payload generation and deterministic
+  interpretation text.
+
+- Expanded UI helper coverage for workflow-result surfacing, selective
+  full-refresh detection, live job timestamp preservation, refresh bootstrap
+  state transitions, and destructive-action refresh suppression behavior.
 
 ## [3.4.6] - 2026-03-23
 

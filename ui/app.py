@@ -192,9 +192,50 @@ def _launchpad_headers() -> dict:
 
 def _job_status_updated_at(persisted_timestamp: str | None, live_poll_succeeded: bool, now: datetime.datetime | None = None) -> str | None:
     if live_poll_succeeded:
+        if persisted_timestamp:
+            return persisted_timestamp
         current = now or datetime.datetime.now(datetime.timezone.utc)
         return current.isoformat().replace("+00:00", "Z")
     return persisted_timestamp or None
+
+
+def _pause_auto_refresh(reruns: int = 4) -> None:
+    """Pause auto-refresh for a short time-based window."""
+    try:
+        desired = max(float(reruns), 0.5)
+    except Exception:
+        desired = 1.0
+    current = st.session_state.get("_suppress_auto_refresh_until", 0.0)
+    try:
+        current_float = float(current)
+    except Exception:
+        current_float = 0.0
+    st.session_state["_suppress_auto_refresh_until"] = max(current_float, time.time() + desired)
+
+
+def _has_pending_destructive_confirmation() -> bool:
+    """Return True when a destructive-action confirmation is currently open."""
+    if st.session_state.get("_confirm_archive_project_id"):
+        return True
+    if st.session_state.get("_confirm_bulk_delete"):
+        return True
+    for key, value in st.session_state.items():
+        if isinstance(key, str) and key.startswith("del_confirm_") and value:
+            return True
+    return False
+
+
+def _auto_refresh_is_suppressed(now: float | None = None) -> bool:
+    """Return True while the time-based suppression window is active."""
+    if _has_pending_destructive_confirmation():
+        return True
+    current = now if now is not None else time.time()
+    until = st.session_state.get("_suppress_auto_refresh_until", 0.0)
+    try:
+        until_float = float(until)
+    except Exception:
+        until_float = 0.0
+    return until_float > current
 
 
 def _load_user_ssh_profiles(user_id: str) -> list[dict]:
@@ -342,7 +383,7 @@ if st.session_state.get("_last_rendered_project") != st.session_state.active_pro
     st.session_state.pop("_welcome_sent_for", None)
     # Suppress auto-refresh for a few cycles after switching to avoid
     # Streamlit DOM-reuse artefacts (old messages blinking).
-    st.session_state["_suppress_auto_refresh"] = 3
+    _pause_auto_refresh(3)
 
 # --- 2. SIDEBAR ---
 with st.sidebar:
@@ -472,6 +513,7 @@ with st.sidebar:
                     proj_id = proj.get("id", "")
                     proj_name = proj.get("name", proj_id)[:30]
                     is_current = proj_id == st.session_state.active_project_id
+                    archive_confirm_id = st.session_state.get("_confirm_archive_project_id")
 
                     # Build label with job count if available
                     job_count = proj.get("job_count")
@@ -482,7 +524,9 @@ with st.sidebar:
                     else:
                         col_name, col_archive = st.columns([5, 1])
                         with col_name:
-                            if st.button(f"📂 {proj_name}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
+                            if archive_confirm_id == proj_id:
+                                st.warning(f"Archive {proj_name}?")
+                            elif st.button(f"📂 {proj_name}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
                                 # Switch to this project
                                 st.session_state.active_project_id = proj_id
                                 st.session_state.blocks = []
@@ -492,20 +536,30 @@ with st.sidebar:
                                 st.session_state.pop("_welcome_sent_for", None)
                                 st.rerun()
                         with col_archive:
-                            if st.button("🗑", key=f"arch_{proj_id}", help=f"Archive '{proj_name}'"):
-                                try:
-                                    del_resp = make_authenticated_request(
-                                        "DELETE",
-                                        f"{API_URL}/projects/{proj_id}",
-                                        timeout=5,
-                                    )
-                                    if del_resp.status_code == 200:
-                                        st.toast(f"Archived: {proj_name}")
-                                        st.rerun()
-                                    else:
-                                        st.error(f"Archive failed: {del_resp.status_code}")
-                                except Exception as e:
-                                    st.error(f"Error: {e}")
+                            if archive_confirm_id == proj_id:
+                                if st.button("✅", key=f"arch_yes_{proj_id}", help=f"Confirm archive '{proj_name}'"):
+                                    _pause_auto_refresh(4)
+                                    try:
+                                        del_resp = make_authenticated_request(
+                                            "DELETE",
+                                            f"{API_URL}/projects/{proj_id}",
+                                            timeout=5,
+                                        )
+                                        if del_resp.status_code == 200:
+                                            st.session_state.pop("_confirm_archive_project_id", None)
+                                            st.toast(f"Archived: {proj_name}")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Archive failed: {del_resp.status_code}")
+                                    except Exception as e:
+                                        st.error(f"Error: {e}")
+                                if st.button("✖", key=f"arch_no_{proj_id}", help="Cancel archive"):
+                                    st.session_state.pop("_confirm_archive_project_id", None)
+                                    st.rerun()
+                            elif st.button("🗑", key=f"arch_{proj_id}", help=f"Archive '{proj_name}'"):
+                                st.session_state["_confirm_archive_project_id"] = proj_id
+                                _pause_auto_refresh(4)
+                                st.rerun()
     except Exception:
         pass  # Silently fail if projects not available
     
@@ -1002,6 +1056,96 @@ def _resolve_df_by_id(df_id: int, all_blocks: list):
     return None, None
 
 
+def _resolve_payload_df_by_id(df_id: int, dfs: dict):
+    """Look up an embedded dataframe by DF ID inside a single payload dict."""
+    for fname, fdata in (dfs or {}).items():
+        meta = fdata.get("metadata", {}) if isinstance(fdata, dict) else {}
+        if meta.get("df_id") == df_id:
+            rows = fdata.get("data", []) if isinstance(fdata, dict) else []
+            cols = fdata.get("columns") if isinstance(fdata, dict) else None
+            return pd.DataFrame(rows, columns=cols or None), fname
+    return None, None
+
+
+def _find_related_workflow_plan(agent_block: dict, all_blocks: list):
+    """Return the nearest prior workflow block that matches an agent plan summary."""
+    if not isinstance(agent_block, dict):
+        return None
+
+    block_id = agent_block.get("id")
+    project_id = agent_block.get("project_id")
+    markdown = str(agent_block.get("payload", {}).get("markdown") or "")
+
+    import re as _re
+    title_match = _re.search(r"^Plan:\s*(.+)$", markdown, _re.MULTILINE)
+    target_title = title_match.group(1).strip() if title_match else ""
+
+    block_index = None
+    for idx, candidate in enumerate(all_blocks):
+        if isinstance(candidate, dict) and candidate.get("id") == block_id:
+            block_index = idx
+            break
+    if block_index is None:
+        return None
+
+    fallback = None
+    for candidate in reversed(all_blocks[:block_index]):
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("type") != "WORKFLOW_PLAN":
+            continue
+        if project_id and candidate.get("project_id") != project_id:
+            continue
+        payload = candidate.get("payload", {})
+        candidate_title = str(payload.get("title") or payload.get("summary") or "").strip()
+        if target_title and candidate_title == target_title:
+            return candidate
+        if fallback is None:
+            fallback = candidate
+    return fallback
+
+
+def _workflow_highlight_steps(workflow_block: dict) -> list[dict]:
+    """Return completed workflow steps worth surfacing in the main chat flow."""
+    if not isinstance(workflow_block, dict):
+        return []
+    payload = workflow_block.get("payload", {})
+    steps = payload.get("steps", []) if isinstance(payload, dict) else []
+    if not isinstance(steps, list):
+        return []
+
+    highlight_kinds = {"GENERATE_PLOT", "INTERPRET_RESULTS", "WRITE_SUMMARY", "RECOMMEND_NEXT"}
+    highlights: list[dict] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if step.get("kind") not in highlight_kinds:
+            continue
+        if step.get("status") != "COMPLETED":
+            continue
+        result = step.get("result")
+        if result in (None, "", [], {}):
+            continue
+        highlights.append(step)
+    return highlights
+
+
+def _block_requires_full_refresh(block: dict) -> bool:
+    """Return True when a block needs whole-page reruns, not just fragment refresh."""
+    if not isinstance(block, dict):
+        return False
+    btype = block.get("type")
+    bstatus = block.get("status")
+    if btype == "DOWNLOAD_TASK":
+        return bstatus == "RUNNING"
+    if btype == "EXECUTION_JOB":
+        payload = block.get("payload", {}) if isinstance(block.get("payload"), dict) else {}
+        job_status = payload.get("job_status", {}) if isinstance(payload.get("job_status"), dict) else {}
+        nested_status = str(job_status.get("status") or "").upper()
+        return bstatus == "RUNNING" or nested_status in {"RUNNING", "PENDING"}
+    return False
+
+
 def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str):
     """Build a single Plotly figure from a chart spec and dataframe.
 
@@ -1292,6 +1436,34 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str):
         chart_idx += 1
 
 
+def _render_workflow_plot_payload(payload: dict, block_id: str, step_suffix: str):
+    """Render workflow-local plots embedded in a step result payload."""
+    import re as _re
+
+    charts = payload.get("charts", []) if isinstance(payload, dict) else []
+    dfs = payload.get("_dataframes", {}) if isinstance(payload, dict) else {}
+    if not charts or not isinstance(dfs, dict):
+        return
+
+    for chart_idx, chart in enumerate(charts):
+        if not isinstance(chart, dict):
+            continue
+        df_id = chart.get("df_id")
+        if df_id is None:
+            st.warning("Workflow chart is missing a dataframe reference.")
+            continue
+        df, df_label = _resolve_payload_df_by_id(df_id, dfs)
+        if df is None or df.empty:
+            st.warning(f"Workflow chart source DF{df_id} is missing.")
+            continue
+        fig = _build_plotly_figure(chart, df, df_label)
+        if fig is None:
+            st.warning(f"Could not render workflow chart for DF{df_id}.")
+            continue
+        _safe_key = _re.sub(r"[^a-zA-Z0-9_]", "_", f"wf_plot_{block_id}_{step_suffix}_{chart_idx}")
+        st.plotly_chart(fig, width="stretch", key=_safe_key)
+
+
 def render_block(block, expected_project_id: str = ""):
     """Render a single block.
 
@@ -1414,6 +1586,22 @@ def render_block(block, expected_project_id: str = ""):
                     _dfs = content.get("_dataframes")
                     if _dfs and isinstance(_dfs, dict):
                         _render_embedded_dataframes(_dfs, block_id)
+
+            _all_blocks = st.session_state.get("blocks", [])
+            _related_workflow = _find_related_workflow_plan(block, _all_blocks)
+            _workflow_highlights = _workflow_highlight_steps(_related_workflow)
+            if _workflow_highlights:
+                st.divider()
+                st.markdown("**Workflow Results**")
+                for _wf_idx, _wf_step in enumerate(_workflow_highlights, start=1):
+                    _wf_title = _wf_step.get("title") or _wf_step.get("kind") or f"Workflow step {_wf_idx}"
+                    st.caption(_wf_title)
+                    _wf_result = _wf_step.get("result")
+                    if isinstance(_wf_result, dict):
+                        _render_workflow_plot_payload(_wf_result, block_id, f"agent_{_wf_idx}")
+                        _wf_markdown = _wf_result.get("markdown")
+                        if isinstance(_wf_markdown, str) and _wf_markdown.strip():
+                            st.markdown(_wf_markdown)
 
             # ── Render embedded images (DE plots, etc.) ──
             _images = content.get("_images")
@@ -2247,6 +2435,11 @@ def render_block(block, expected_project_id: str = ""):
                             result = step.get("result")
                             if result not in (None, "", [], {}):
                                 st.markdown("**Result**")
+                                if isinstance(result, dict):
+                                    _render_workflow_plot_payload(result, block_id, f"step_{idx}")
+                                    result_markdown = result.get("markdown")
+                                    if isinstance(result_markdown, str) and result_markdown.strip():
+                                        st.markdown(result_markdown)
                                 _render_step_payload(result)
                     else:
                         st.markdown(f"{idx}. {step}")
@@ -2428,6 +2621,9 @@ def render_block(block, expected_project_id: str = ""):
                     if live_resp.status_code == 200:
                         job_status = live_resp.json()
                         live_status_poll_succeeded = True
+                        st.session_state[f"_job_polled_at_{run_uuid}"] = (
+                            datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                        )
                 except Exception:
                     pass  # Fall back to block payload
             
@@ -2690,6 +2886,7 @@ def render_block(block, expected_project_id: str = ""):
                             _yes_col, _no_col = st.columns(2)
                             with _yes_col:
                                 if st.button("Yes, delete", key=f"del_yes_{block_id}", type="primary"):
+                                    _pause_auto_refresh(4)
                                     try:
                                         _del_resp = make_authenticated_request(
                                             "DELETE", f"{API_URL}/jobs/{run_uuid}", timeout=30
@@ -2710,6 +2907,7 @@ def render_block(block, expected_project_id: str = ""):
                         else:
                             if st.button(f"🗑️ Delete {_work_dir_name or 'Workflow Folder'}", key=_del_key):
                                 st.session_state[_confirm_key] = True
+                                _pause_auto_refresh(4)
                                 st.rerun()
                     with _resub_col:
                         if st.button("🔄 Resubmit Job", key=f"resub_{block_id}"):
@@ -2737,7 +2935,7 @@ def render_block(block, expected_project_id: str = ""):
                     # Job timing info
                     _job_created = block.get("created_at", "")
                     _last_upd = _job_status_updated_at(
-                        content.get("last_updated", ""),
+                        st.session_state.get(f"_job_polled_at_{run_uuid}") or content.get("last_updated", ""),
                         live_status_poll_succeeded,
                     )
                     _timing_parts = []
@@ -2981,8 +3179,11 @@ st.title(f"🧬 {_active_project_name}")
 
 # Determine if the chat area needs periodic auto-refresh.
 # This is evaluated ONCE per full script run; the fragment uses it.
-_needs_auto_refresh = st.session_state.get("_has_running_job", False)
-_refresh_interval = timedelta(seconds=min(poll_seconds, 2)) if _needs_auto_refresh else None
+_auto_refresh_suppressed = _auto_refresh_is_suppressed()
+_needs_auto_refresh = bool((auto_refresh or st.session_state.get("_has_running_job", False)) and not _auto_refresh_suppressed)
+_needs_full_page_auto_refresh = bool(auto_refresh and st.session_state.get("_has_full_refresh_job", False) and not _auto_refresh_suppressed)
+_refresh_seconds = min(poll_seconds, 2) if st.session_state.get("_has_running_job", False) else poll_seconds
+_refresh_interval = timedelta(seconds=_refresh_seconds) if _needs_auto_refresh else None
 
 
 @st.fragment(run_every=_refresh_interval)
@@ -3047,11 +3248,14 @@ def _render_chat():
 
     # 3. Scan ALL blocks for running jobs
     _has_running_job = False
+    _has_full_refresh_job = False
     _has_pending_submission = False
     _has_finished_job = False
     for blk in blocks:
         btype = blk.get("type")
         bstatus = blk.get("status")
+        if _block_requires_full_refresh(blk):
+            _has_full_refresh_job = True
         if btype == "EXECUTION_JOB" and bstatus == "RUNNING":
             _has_running_job = True
         if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
@@ -3085,6 +3289,7 @@ def _render_chat():
         st.session_state.pop("_job_finished_at", None)
 
     st.session_state["_has_running_job"] = _has_running_job
+    st.session_state["_has_full_refresh_job"] = _has_full_refresh_job
 
     # Show refresh indicator inside the fragment
     if _needs_auto_refresh:
@@ -3118,12 +3323,12 @@ def _render_task_dock():
 
 _render_task_dock()
 
-# Bootstrap: if a running job was just detected but the fragment was NOT
-# started with run_every (because _has_running_job was False before the
-# fragment ran), trigger ONE full rerun so the fragment gets re-registered
-# with auto-refresh enabled.  Likewise when auto-refresh should stop.
-_running_now = st.session_state.get("_has_running_job", False)
-if _running_now != _needs_auto_refresh:
+# Bootstrap: if the desired fragment auto-refresh state changed during the
+# fragment run, trigger one full rerun so Streamlit re-registers the fragment
+# with the new run_every value.
+_refresh_now = bool((auto_refresh or st.session_state.get("_has_running_job", False)) and not _auto_refresh_suppressed)
+_full_refresh_now = bool(auto_refresh and st.session_state.get("_has_full_refresh_job", False) and not _auto_refresh_suppressed)
+if _refresh_now != _needs_auto_refresh or _full_refresh_now != _needs_full_page_auto_refresh:
     time.sleep(0.3)
     st.rerun()
 
@@ -3295,14 +3500,12 @@ if prompt:
     time.sleep(0.5)
     st.rerun()
 
-# 4. Auto-Refresh (only for general "Live Stream" toggle, NOT for job monitoring)
-# Job monitoring is handled by the @st.fragment(run_every=...) above — no
-# full-page rerun needed.
-_suppress = st.session_state.get("_suppress_auto_refresh", 0)
-if _suppress > 0:
-    st.session_state["_suppress_auto_refresh"] = _suppress - 1
-elif auto_refresh and not st.session_state.get("_has_running_job", False):
-    # General background refresh when Live Stream is on and no job is running.
-    # (When a job IS running, the fragment handles its own refresh.)
-    time.sleep(poll_seconds)
+# 4. Auto-Refresh suppression bookkeeping
+if _auto_refresh_is_suppressed():
+    pass
+elif auto_refresh and st.session_state.get("_has_full_refresh_job", False):
+    # Restore the older double-polling path for active execution/download jobs.
+    # This is heavier than fragment-only refresh, but it keeps Nextflow status
+    # cards updating reliably.
+    time.sleep(min(poll_seconds, 2))
     st.rerun()

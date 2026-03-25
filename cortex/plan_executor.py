@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -172,6 +173,289 @@ def _derive_parse_tool_calls(plan_payload: dict, step: dict) -> list[dict]:
         }
         for file_path in file_paths
     ]
+
+
+def _iter_dependency_steps(plan_payload: dict, step: dict) -> list[dict]:
+    steps = plan_payload.get("steps", []) if isinstance(plan_payload, dict) else []
+    if not isinstance(steps, list):
+        return []
+
+    dep_ids = step.get("depends_on")
+    if isinstance(dep_ids, list) and dep_ids:
+        resolved: list[dict] = []
+        for dep_id in dep_ids:
+            if isinstance(dep_id, str):
+                dep_step = _find_step(steps, dep_id)
+                if dep_step:
+                    resolved.append(dep_step)
+        if resolved:
+            return resolved
+
+    step_index = None
+    for idx, candidate in enumerate(steps):
+        if candidate is step:
+            step_index = idx
+            break
+
+    if step_index is None:
+        return []
+    return [candidate for candidate in steps[:step_index] if isinstance(candidate, dict)]
+
+
+def _coerce_step_result_items(step_result: Any) -> list[dict[str, Any]]:
+    if isinstance(step_result, list):
+        return [item for item in step_result if isinstance(item, dict)]
+    if isinstance(step_result, dict):
+        return [step_result]
+    return []
+
+
+def _extract_parsed_tables(step_result: Any) -> list[dict[str, Any]]:
+    tables: list[dict[str, Any]] = []
+    for item in _coerce_step_result_items(step_result):
+        payload = item.get("result") if "result" in item else item
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("success") is False:
+            continue
+        rows = payload.get("data")
+        columns = payload.get("columns")
+        if not isinstance(rows, list) or not isinstance(columns, list) or not columns:
+            continue
+        file_path = str(payload.get("file_path") or item.get("file_path") or "parsed_results.csv")
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        tables.append({
+            "file_path": file_path,
+            "label": Path(file_path).name or file_path,
+            "columns": columns,
+            "data": rows,
+            "row_count": int(payload.get("row_count") or len(rows)),
+            "metadata": metadata,
+        })
+    return tables
+
+
+def _extract_all_dependency_tables(plan_payload: dict, step: dict) -> list[dict[str, Any]]:
+    tables: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for dep_step in _iter_dependency_steps(plan_payload, step):
+        for table in _extract_parsed_tables(dep_step.get("result")):
+            file_path = table.get("file_path")
+            if isinstance(file_path, str) and file_path not in seen_paths:
+                seen_paths.add(file_path)
+                tables.append(table)
+
+    if tables:
+        return tables
+
+    steps = plan_payload.get("steps", []) if isinstance(plan_payload, dict) else []
+    for candidate in steps:
+        if candidate is step:
+            break
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("status") != "COMPLETED":
+            continue
+        for table in _extract_parsed_tables(candidate.get("result")):
+            file_path = table.get("file_path")
+            if isinstance(file_path, str) and file_path not in seen_paths:
+                seen_paths.add(file_path)
+                tables.append(table)
+    return tables
+
+
+def _table_plot_priority(table: dict[str, Any]) -> tuple[int, int, str]:
+    columns = {str(col).lower() for col in table.get("columns", [])}
+    file_path = str(table.get("file_path") or "")
+    if {"category", "count"}.issubset(columns):
+        return (0, -int(table.get("row_count") or 0), file_path)
+    if "file_type" in columns and ("n_reads" in columns or "mapped_pct" in columns):
+        return (1, -int(table.get("row_count") or 0), file_path)
+
+    numeric_candidates = [
+        str(col) for col in table.get("columns", [])
+        if str(col).lower() in {"count", "counts", "value", "values", "n", "total", "mapped_pct", "n_reads"}
+    ]
+    if numeric_candidates:
+        return (2, -int(table.get("row_count") or 0), file_path)
+    return (10, -int(table.get("row_count") or 0), file_path)
+
+
+def _is_number_like(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        try:
+            float(value)
+            return True
+        except ValueError:
+            return False
+    return False
+
+
+def _choose_plot_axes(table: dict[str, Any], plot_type: str) -> tuple[str | None, str | None, str | None]:
+    columns = [str(col) for col in table.get("columns", [])]
+    lower_to_original = {col.lower(): col for col in columns}
+    rows = table.get("data") if isinstance(table.get("data"), list) else []
+
+    if "category" in lower_to_original and "count" in lower_to_original:
+        return lower_to_original["category"], lower_to_original["count"], None
+    if "file_type" in lower_to_original:
+        if "n_reads" in lower_to_original:
+            return lower_to_original["file_type"], lower_to_original["n_reads"], None
+        if "mapped_pct" in lower_to_original:
+            return lower_to_original["file_type"], lower_to_original["mapped_pct"], None
+
+    numeric_cols: list[str] = []
+    categorical_cols: list[str] = []
+    sample_rows = rows[: min(len(rows), 25)]
+    for col in columns:
+        values = [row.get(col) for row in sample_rows if isinstance(row, dict)]
+        present = [value for value in values if value not in (None, "")]
+        if present and all(_is_number_like(value) for value in present):
+            numeric_cols.append(col)
+        else:
+            categorical_cols.append(col)
+
+    if plot_type == "scatter" and len(numeric_cols) >= 2:
+        return numeric_cols[0], numeric_cols[1], None
+
+    if categorical_cols and numeric_cols:
+        return categorical_cols[0], numeric_cols[0], None
+    if numeric_cols:
+        return numeric_cols[0], None, None
+    if columns:
+        return columns[0], None, None
+    return None, None, None
+
+
+def _build_workflow_plot_payload(plan_payload: dict, step: dict) -> dict[str, Any] | None:
+    tables = _extract_all_dependency_tables(plan_payload, step)
+    if not tables:
+        return None
+
+    selected = min(tables, key=_table_plot_priority)
+    requested_type = str(
+        step.get("plot_type")
+        or plan_payload.get("plot_type")
+        or "bar"
+    ).strip().lower() or "bar"
+    x_col, y_col, color_col = _choose_plot_axes(selected, requested_type)
+    if not x_col:
+        return None
+
+    chart_spec: dict[str, Any] = {
+        "type": requested_type,
+        "df_id": 1,
+        "x": x_col,
+        "title": step.get("title") or f"{requested_type.title()} chart",
+    }
+    if y_col:
+        chart_spec["y"] = y_col
+    if color_col:
+        chart_spec["color"] = color_col
+
+    dataframe_payload = {
+        selected.get("label") or "plot_source.csv": {
+            "columns": selected.get("columns", []),
+            "data": selected.get("data", []),
+            "row_count": selected.get("row_count", 0),
+            "metadata": {
+                **(selected.get("metadata") or {}),
+                "df_id": 1,
+                "visible": True,
+                "label": selected.get("label") or "plot_source.csv",
+                "row_count": selected.get("row_count", 0),
+            },
+        }
+    }
+
+    return {
+        "selected_file": selected.get("file_path"),
+        "charts": [chart_spec],
+        "_dataframes": dataframe_payload,
+    }
+
+
+def _normalize_table_rows(table: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    rows = table.get("data")
+    if isinstance(rows, list):
+        return (row for row in rows if isinstance(row, dict))
+    return []
+
+
+def _build_qc_interpretation(plan_payload: dict, step: dict) -> str:
+    tables = _extract_all_dependency_tables(plan_payload, step)
+    if not tables:
+        return "No parsed result tables were available to interpret."
+
+    qc_table = next(
+        (
+            table for table in tables
+            if "qc_summary" in str(table.get("file_path") or "").lower()
+        ),
+        None,
+    )
+    final_stats_table = next(
+        (
+            table for table in tables
+            if "final_stats" in str(table.get("file_path") or "").lower()
+        ),
+        None,
+    )
+
+    observations: list[str] = []
+    verdict = "usable"
+
+    if qc_table:
+        rows = list(_normalize_table_rows(qc_table))
+        bam_row = next((row for row in rows if str(row.get("file_type") or "").lower() == "bam"), None)
+        annotated_row = next((row for row in rows if "annotated" in str(row.get("file_type") or "").lower()), None)
+        source_row = annotated_row or bam_row
+        if source_row:
+            mapped_pct = source_row.get("mapped_pct")
+            n_reads = source_row.get("n_reads")
+            mean_len = source_row.get("mean_len")
+            if mapped_pct not in (None, ""):
+                observations.append(f"Mapped reads are {float(mapped_pct):.2f}%.")
+                if float(mapped_pct) < 70:
+                    verdict = "not yet usable"
+                elif float(mapped_pct) < 85 and verdict != "not yet usable":
+                    verdict = "usable with caution"
+            if n_reads not in (None, ""):
+                observations.append(f"The main output contains about {int(float(n_reads)):,} reads.")
+                if float(n_reads) < 500 and verdict == "usable":
+                    verdict = "usable with caution"
+            if mean_len not in (None, ""):
+                observations.append(f"Mean read length is {float(mean_len):.2f} bases.")
+
+    if final_stats_table:
+        rows = list(_normalize_table_rows(final_stats_table))
+        counts_by_category = {
+            str(row.get("Category") or ""): row.get("Count")
+            for row in rows
+        }
+        known_reads = counts_by_category.get("Reads - Known")
+        novel_genes = counts_by_category.get("Novel genes discovered")
+        novel_tx = counts_by_category.get("Novel transcripts discovered")
+        if known_reads not in (None, ""):
+            observations.append(f"Known transcript support accounts for {int(float(known_reads)):,} reads.")
+        if novel_genes not in (None, "") or novel_tx not in (None, ""):
+            observations.append(
+                "Novel discovery is limited "
+                f"({int(float(novel_genes or 0))} genes, {int(float(novel_tx or 0))} transcripts)."
+            )
+
+    if not observations:
+        lead = f"Parsed {len(tables)} result table(s) and generated a plot from the most informative one."
+    else:
+        lead = " ".join(observations)
+
+    return f"{lead} Overall, this run looks {verdict}."
 
 
 # ---------------------------------------------------------------------------
@@ -355,9 +639,31 @@ async def execute_step(
             _persist_step_update(session, workflow_block, plan_payload)
             return StepResult(success=False, error=step["error"])
 
+    if kind == "GENERATE_PLOT":
+        plot_result = _build_workflow_plot_payload(plan_payload, step)
+        if not plot_result:
+            step["status"] = "FAILED"
+            step["error"] = "Could not derive a plot from prior parsed results."
+            step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+            _persist_step_update(session, workflow_block, plan_payload)
+            return StepResult(success=False, error=step["error"])
+
+        step["status"] = "COMPLETED"
+        step["result"] = plot_result
+        step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+        _persist_step_update(session, workflow_block, plan_payload)
+        return StepResult(success=True, data=plot_result)
+
+    if kind in {"INTERPRET_RESULTS", "WRITE_SUMMARY", "RECOMMEND_NEXT"}:
+        summary_text = _build_qc_interpretation(plan_payload, step)
+        step["status"] = "COMPLETED"
+        step["result"] = {"markdown": summary_text}
+        step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+        _persist_step_update(session, workflow_block, plan_payload)
+        return StepResult(success=True, data=step["result"])
+
     if kind in ("SUBMIT_WORKFLOW", "DOWNLOAD_DATA", "RUN_DE_ANALYSIS",
-                "COMPARE_SAMPLES", "GENERATE_PLOT", "WRITE_SUMMARY",
-                "RUN_DE_PIPELINE", "RUN_SCRIPT", "INTERPRET_RESULTS", "RECOMMEND_NEXT"):
+                "COMPARE_SAMPLES", "RUN_DE_PIPELINE", "RUN_SCRIPT"):
         # These kinds need special orchestration — mark as needing attention
         # and return a marker so the caller can handle them
         step["status"] = "WAITING_APPROVAL" if step.get("requires_approval") else "PENDING"
