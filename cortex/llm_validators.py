@@ -244,6 +244,21 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
                 if _signal_count >= 1:
                     return "analyze_local_sample"
 
+    # --- Signals for reconcile_bams ---
+    _reconcile_words = [
+        "reconcile bam",
+        "reconcile bams",
+        "merge annotated bam",
+        "merge annotated bams",
+        "cross-workflow bam",
+        "cross workflow bam",
+        "combine annotated bam",
+        "combine annotated bams",
+    ]
+    if current_skill != "reconcile_bams":
+        if any(w in msg_lower for w in _reconcile_words):
+            return "reconcile_bams"
+
     # --- Signals for ENCODE_Search ---
     _encode_words = ["encode", "encsr", "encff", "encode portal"]
     _search_words = ["search", "how many", "experiments", "accession", "biosample"]

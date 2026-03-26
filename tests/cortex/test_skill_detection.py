@@ -250,6 +250,28 @@ class TestNoSwitch:
         assert result is None
 
 
+class TestReconcileBams:
+    """Tests for routing to reconcile_bams skill."""
+
+    def test_reconcile_bams_phrase_routes_skill(self):
+        result = _auto_detect_skill_switch(
+            "reconcile bams across workflow outputs", "welcome"
+        )
+        assert result == "reconcile_bams"
+
+    def test_merge_annotated_bam_phrase_routes_skill(self):
+        result = _auto_detect_skill_switch(
+            "merge annotated bam files from workflow1 and workflow2", "welcome"
+        )
+        assert result == "reconcile_bams"
+
+    def test_already_on_reconcile_skill_no_switch(self):
+        result = _auto_detect_skill_switch(
+            "reconcile bams from prior workflows", "reconcile_bams"
+        )
+        assert result is None
+
+
 class TestDifferentialExpression:
     """Tests for routing to differential_expression skill."""
 

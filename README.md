@@ -1,9 +1,40 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.7
+**Version:** 3.4.8
 **Status:** Active Prototype 
 
-## Latest Updates (2026-03-24)
+## Latest Updates (2026-03-26)
+
+- **New `reconcile_bams` skill and routing support** — added a dedicated skill
+  for cross-workflow annotated BAM reconciliation, registered in Cortex skill
+  and service registries, with auto-detection keywords for reconcile intents.
+
+- **Reconcile planning flow now includes strict preflight before approval** —
+  reconcile plans in `cortex/planner.py` now run helper-based reference checks,
+  then run reconcile preflight GTF resolution before `REQUEST_APPROVAL`, and
+  only execute reconcile run script after approval.
+
+- **Helper script for workflow Nextflow reference consistency** — added
+  `skills/reconcile_bams/scripts/check_workflow_references.py` to parse
+  workflow Nextflow config artifacts, normalize reference identifiers, and fail
+  on mixed/missing/ambiguous reference resolution.
+
+- **Reconcile script now performs real workflow-scoped execution** —
+  `skills/reconcile_bams/scripts/reconcile_bams.py` now enforces BAM filename
+  contract (`<sample>.<reference>.annotated.bam`), rejects mixed references,
+  resolves default GTFs from Dogme reference config, emits explicit
+  `needs_manual_gtf` follow-up state when defaults are unavailable, creates a
+  dedicated `workflow_reconcile_*` directory, symlinks inputs, and writes
+  reconcile output artifacts.
+
+- **Manual-GTF follow-up state propagated via replanner** —
+  `cortex/plan_replanner.py` now inspects reconcile preflight JSON output and
+  transitions the downstream approval step into `FOLLOW_UP` when manual GTF
+  input is required.
+
+- **Focused reconcile test coverage added and passing** — added targeted tests
+  for skill routing, reconcile planner ordering, reconcile preflight/execution,
+  and replanner payload extraction.
 
 - **Executor parallel batching for safe step kinds** — execution now batches
   dependency-ready `LOCATE_DATA`, `SEARCH_ENCODE`, and `CHECK_EXISTING` steps

@@ -40,6 +40,9 @@ logger = get_logger(__name__)
 
 # Patterns that signal a MULTI_STEP request
 _MULTI_STEP_PATTERNS: list[re.Pattern] = [
+    # Reconcile annotated BAMs
+    re.compile(r"(?:reconcile|merge|combine)\s+(?:annotated\s+)?bams?", re.I),
+    re.compile(r"cross[-\s]?workflow\s+bam\s+reconcil", re.I),
     # Remote stage-only flows
     re.compile(r"stage\s+.+\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)[a-zA-Z0-9_-]+(?:\s+profile)?(?:[?.!,]|$)|on\s+slurm|using\s+slurm|remotely|on\s+the\s+cluster|(?:using|via)\s+(?:the\s+)?[a-zA-Z0-9_-]+\s+profile)", re.I),
     # Download + analyze
@@ -743,6 +746,11 @@ _RUN_WORKFLOW_PATTERNS = [
     re.compile(r"analyze\s+(?:my\s+)?(?:local\s+)?(?:sample|data)", re.I),
 ]
 
+_RECONCILE_BAMS_PATTERNS = [
+    re.compile(r"(?:reconcile|merge|combine)\s+(?:annotated\s+)?bams?", re.I),
+    re.compile(r"cross[-\s]?workflow\s+bam\s+reconcil", re.I),
+]
+
 _REMOTE_STAGE_PATTERNS = [
     re.compile(r"stage(?:\s+only)?\s+(?:the\s+)?(?:sample\s+)?(?:.+?)\s+(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)[a-zA-Z0-9_-]+(?:\s+profile)?(?:[?.!,]|$)|on\s+slurm|using\s+slurm|remotely|on\s+the\s+cluster|(?:using|via)\s+(?:the\s+)?[a-zA-Z0-9_-]+\s+profile)", re.I),
 ]
@@ -765,6 +773,11 @@ def _detect_plan_type(message: str) -> str | None:
     for pat in _DE_PATTERNS:
         if pat.search(message):
             return "run_de_pipeline"
+    # 1b. Reconcile BAM workflows
+    for pat in _RECONCILE_BAMS_PATTERNS:
+        if pat.search(message):
+            return "reconcile_bams"
+
     # 2. Enrichment analysis
     for pat in _ENRICHMENT_PATTERNS:
         if pat.search(message):
@@ -878,6 +891,37 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             params["database"] = "KEGG"
         elif "reactome" in msg:
             params["database"] = "REAC"
+        return params
+
+    if plan_type == "reconcile_bams":
+        m = re.search(r"(?:output\s+(?:prefix|name)|prefix)\s*[=:]?\s*([a-zA-Z0-9._-]+)", message, re.I)
+        if m:
+            params["output_prefix"] = m.group(1)
+
+        m = re.search(r"(?:output\s+(?:dir|directory)|into|to)\s+(\S+)", message, re.I)
+        if m:
+            params["output_directory"] = m.group(1).rstrip(".,;:!?")
+
+        m = re.search(r"(?:annotation\s+gtf|gtf\s+(?:path|file)|use\s+gtf)\s*[=:]?\s*(\S+\.(?:gtf|gtf\.gz))", message, re.I)
+        if m:
+            params["annotation_gtf"] = m.group(1).rstrip(".,;:!?")
+
+        workflow_dirs: list[str] = []
+        if getattr(conv_state, "workflows", None):
+            for wf in conv_state.workflows:
+                if isinstance(wf, dict):
+                    wf_dir = wf.get("work_dir")
+                    if isinstance(wf_dir, str) and wf_dir and wf_dir not in workflow_dirs:
+                        workflow_dirs.append(wf_dir)
+
+        for match in re.findall(r"(workflow[\w.-]+)", message, re.I):
+            normalized = match.strip()
+            if normalized and normalized not in workflow_dirs:
+                workflow_dirs.append(normalized)
+
+        if workflow_dirs:
+            params["workflow_dirs"] = workflow_dirs
+
         return params
 
     if plan_type == "parse_plot_interpret":
@@ -1117,6 +1161,162 @@ def _template_parse_plot_interpret(params: dict) -> dict:
     }
 
 
+# ---- Template: reconcile_bams -------------------------------------------
+
+def _template_reconcile_bams(params: dict) -> dict:
+    """
+    Deterministic plan for reconciling annotated BAMs across workflows.
+    Steps: locate inputs -> check references -> approval -> run reconcile script -> summarize
+    """
+    output_prefix = params.get("output_prefix", "reconciled")
+    output_directory = params.get("output_directory", "")
+    annotation_gtf = params.get("annotation_gtf", "")
+    work_dir = params.get("work_dir", "")
+    workflow_dirs = [str(item) for item in params.get("workflow_dirs", []) if isinstance(item, str) and item]
+
+    steps = []
+    idx = 0
+
+    s_locate = _make_step(
+        "LOCATE_DATA",
+        "Locate annotated BAM candidates across workflow annot directories",
+        idx,
+        tool_calls=[
+            {
+                "source_key": "analyzer",
+                "tool": "find_file",
+                "params": {
+                    "work_dir": work_dir,
+                    "file_name": "annotated.bam",
+                },
+            }
+        ] if work_dir else [],
+    )
+    steps.append(s_locate)
+    idx += 1
+
+    helper_args = ["--json"]
+    if workflow_dirs:
+        for workflow_dir in workflow_dirs:
+            helper_args.extend(["--workflow-dir", workflow_dir])
+    elif work_dir:
+        helper_args.extend(["--project-dir", work_dir])
+
+    s_ref_check = _make_step(
+        "CHECK_EXISTING",
+        "Check workflow Nextflow configs for a shared reference",
+        idx,
+        depends_on=[s_locate["id"]],
+        tool_calls=[
+            {
+                "source_key": "launchpad",
+                "tool": "run_allowlisted_script",
+                "params": {
+                    "script_id": "reconcile_bams/check_workflow_references",
+                    "script_args": helper_args,
+                },
+            }
+        ],
+    )
+    steps.append(s_ref_check)
+    idx += 1
+
+    preflight_args = ["--json", "--preflight-only", "--output-prefix", output_prefix]
+    if workflow_dirs:
+        for workflow_dir in workflow_dirs:
+            preflight_args.extend(["--workflow-dir", workflow_dir])
+    elif work_dir:
+        preflight_args.extend(["--project-dir", work_dir])
+    if output_directory:
+        preflight_args.extend(["--output-dir", output_directory])
+    if isinstance(annotation_gtf, str) and annotation_gtf:
+        preflight_args.extend(["--annotation-gtf", annotation_gtf])
+
+    s_preflight = _make_step(
+        "CHECK_EXISTING",
+        "Run reconcile preflight and resolve annotation GTF before approval",
+        idx,
+        depends_on=[s_ref_check["id"]],
+        tool_calls=[
+            {
+                "source_key": "launchpad",
+                "tool": "run_allowlisted_script",
+                "params": {
+                    "script_id": "reconcile_bams/reconcile_bams",
+                    "script_args": preflight_args,
+                },
+            }
+        ],
+    )
+    steps.append(s_preflight)
+    idx += 1
+
+    s_approve = _make_step(
+        "REQUEST_APPROVAL",
+        "Approve reconcile BAM execution",
+        idx,
+        requires_approval=True,
+        depends_on=[s_preflight["id"]],
+    )
+    steps.append(s_approve)
+    idx += 1
+
+    script_args = ["--json", "--output-prefix", output_prefix]
+    if workflow_dirs:
+        for workflow_dir in workflow_dirs:
+            script_args.extend(["--workflow-dir", workflow_dir])
+    elif work_dir:
+        script_args.extend(["--project-dir", work_dir])
+
+    if output_directory:
+        script_args.extend(["--output-dir", output_directory])
+    if isinstance(annotation_gtf, str) and annotation_gtf:
+        script_args.extend(["--annotation-gtf", annotation_gtf])
+
+    s_run = _make_step(
+        "RUN_SCRIPT",
+        "Run reconcile BAM script using symlinked workflow inputs",
+        idx,
+        requires_approval=True,
+        depends_on=[s_approve["id"]],
+        tool_calls=[
+            {
+                "source_key": "launchpad",
+                "tool": "run_allowlisted_script",
+                "params": {
+                    "script_id": "reconcile_bams/reconcile_bams",
+                    "script_args": script_args,
+                },
+            }
+        ],
+    )
+    steps.append(s_run)
+    idx += 1
+
+    s_summary = _make_step(
+        "WRITE_SUMMARY",
+        "Summarize reconcile outputs and generated files",
+        idx,
+        depends_on=[s_run["id"]],
+    )
+    steps.append(s_summary)
+
+    return {
+        "plan_type": "reconcile_bams",
+        "title": "Reconcile annotated BAMs across workflows",
+        "goal": params.get("goal", "Reconcile annotated BAM outputs using a shared reference"),
+        "workflow_type": "reconcile_bams",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "output_prefix": output_prefix,
+        "output_directory": output_directory,
+        "annotation_gtf": annotation_gtf,
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
 # ---- Template: compare_workflows ----------------------------------------
 
 def _template_compare_workflows(params: dict) -> dict:
@@ -1321,6 +1521,8 @@ def _deterministic_template_for_plan_type(plan_type: str, params: dict) -> dict 
         return _template_run_enrichment(params)
     if plan_type == "remote_stage_workflow":
         return _template_remote_stage_workflow(params)
+    if plan_type == "reconcile_bams":
+        return _template_reconcile_bams(params)
     return None
 
 
@@ -1477,6 +1679,10 @@ def generate_plan(
         return _finalize_plan(plan, conv_state)
     if plan_type == "run_workflow":
         plan = _template_run_workflow(params)
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return _finalize_plan(plan, conv_state)
+    if plan_type == "reconcile_bams":
+        plan = _template_reconcile_bams(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
 

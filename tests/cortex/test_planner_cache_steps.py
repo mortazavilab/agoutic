@@ -4,6 +4,7 @@ from cortex.schemas import ConversationState
 from cortex.planner import (
     _detect_plan_type,
     _extract_plan_params,
+    _template_reconcile_bams,
     _template_remote_stage_workflow,
     _template_run_workflow,
     classify_request,
@@ -53,6 +54,41 @@ def test_detect_plan_type_matches_remote_stage_request():
 
 def test_detect_plan_type_matches_remote_stage_request_for_arbitrary_profile_nickname():
     assert _detect_plan_type("Stage the mouse cDNA sample called Jamshid at /data/pod5 on mycluster") == "remote_stage_workflow"
+
+
+def test_detect_plan_type_matches_reconcile_bams_request():
+    assert _detect_plan_type("Reconcile annotated BAM files across workflows") == "reconcile_bams"
+
+
+def test_reconcile_bams_template_orders_reference_check_before_approval_and_run():
+    plan = _template_reconcile_bams({"work_dir": "/tmp/project", "output_prefix": "merged"})
+    kinds = [step["kind"] for step in plan["steps"]]
+
+    assert plan["plan_type"] == "reconcile_bams"
+    assert kinds == [
+        "LOCATE_DATA",
+        "CHECK_EXISTING",
+        "CHECK_EXISTING",
+        "REQUEST_APPROVAL",
+        "RUN_SCRIPT",
+        "WRITE_SUMMARY",
+    ]
+
+    check_indices = [idx for idx, kind in enumerate(kinds) if kind == "CHECK_EXISTING"]
+    approve_idx = kinds.index("REQUEST_APPROVAL")
+    run_idx = kinds.index("RUN_SCRIPT")
+    assert len(check_indices) == 2
+    assert check_indices[0] < check_indices[1] < approve_idx < run_idx
+
+    preflight_step = plan["steps"][check_indices[1]]
+    assert preflight_step["tool_calls"][0]["params"]["script_id"] == "reconcile_bams/reconcile_bams"
+    preflight_args = preflight_step["tool_calls"][0]["params"]["script_args"]
+    assert "--preflight-only" in preflight_args
+
+    run_step = plan["steps"][run_idx]
+    assert run_step["requires_approval"] is True
+    assert run_step["tool_calls"][0]["params"]["script_id"] == "reconcile_bams/reconcile_bams"
+    assert "--json" in run_step["tool_calls"][0]["params"]["script_args"]
 
 
 def test_classify_request_marks_remote_stage_as_multistep():
@@ -108,6 +144,16 @@ def test_extract_plan_params_keeps_remote_stage_sample_name_and_path_for_arbitra
 
     assert params["sample_name"] == "Jamshid"
     assert params["input_directory"] == "/data/pod5"
+
+
+def test_extract_plan_params_reconcile_annotation_gtf():
+    params = _extract_plan_params(
+        "Reconcile annotated BAMs using annotation gtf /tmp/manual.GRCh38.annotation.gtf into /tmp/out",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+    )
+
+    assert params["annotation_gtf"] == "/tmp/manual.GRCh38.annotation.gtf"
 
 
 def test_compose_plan_fragments_remaps_ids_and_dependencies():

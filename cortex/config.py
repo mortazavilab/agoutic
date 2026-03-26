@@ -81,6 +81,7 @@ SERVICE_REGISTRY = {
         "skills": [
             "analyze_local_sample",
             "remote_execution",
+            "reconcile_bams",
         ],
         "fallback_patterns": {},
     },
@@ -190,4 +191,7 @@ SKILLS_REGISTRY = {
 
     # Remote Execution (HPC3/SLURM)
     "remote_execution": "remote_execution/SKILL.md",
+
+    # Reconcile annotated BAM outputs across workflows
+    "reconcile_bams": "reconcile_bams/SKILL.md",
 }

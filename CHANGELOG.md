@@ -1,3 +1,50 @@
+## [3.4.8] - 2026-03-26
+
+### Improvements
+
+- **New `reconcile_bams` skill registration and routing** — added
+  `reconcile_bams` to Cortex skill and Launchpad service registries and added
+  reconcile-intent keyword routing in `cortex/llm_validators.py`.
+
+- **Deterministic reconcile planning flow with preflight-before-approval** —
+  `cortex/planner.py` now detects reconcile requests, extracts reconcile
+  parameters (including optional annotation GTF path), and generates a scoped
+  plan sequence:
+  `LOCATE_DATA -> CHECK_EXISTING(helper) -> CHECK_EXISTING(preflight) -> REQUEST_APPROVAL -> RUN_SCRIPT -> WRITE_SUMMARY`.
+
+- **Workflow-reference helper for Nextflow configs** — added
+  `skills/reconcile_bams/scripts/check_workflow_references.py` to inspect
+  per-workflow Nextflow config artifacts (including includes), normalize
+  reference aliases, and report hard failures for mixed/missing/ambiguous
+  references.
+
+- **Reconcile script now executes real workflow-scoped preparation and run** —
+  `skills/reconcile_bams/scripts/reconcile_bams.py` now enforces BAM filename
+  contract (`<sample>.<reference>.annotated.bam`), rejects mixed references,
+  resolves default GTF from `launchpad.config.REFERENCE_GENOMES`, supports
+  explicit manual GTF override with reference checks, creates dedicated
+  `workflow_reconcile_<timestamp>` directories, symlinks inputs, and writes
+  reconcile artifacts (reconciled BAM + manifest, plus index when available).
+
+- **Manual-GTF follow-up pause semantics in replanner** —
+  `cortex/plan_replanner.py` now parses reconcile preflight JSON output and
+  converts dependent approval step state to `FOLLOW_UP` when
+  `status=needs_manual_gtf` is returned.
+
+### Tests
+
+- Added focused reconcile script tests in
+  `tests/skills/test_reconcile_bams_scripts.py` covering:
+  filename contract rejection, mixed-reference rejection, default-GTF success,
+  manual-GTF-needed follow-up state, and manual-GTF preflight success.
+
+- Added reconcile planner tests in `tests/cortex/test_planner_cache_steps.py`
+  for plan-type detection, helper/preflight-before-approval ordering, and
+  annotation-GTF parameter extraction.
+
+- Added reconcile replanner extraction coverage in
+  `tests/cortex/test_plan_replanner_reconcile.py`.
+
 ## [3.4.7] - 2026-03-24
 
 ### Improvements

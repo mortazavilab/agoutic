@@ -136,6 +136,30 @@ def replan_with_new_info(
 
     # --- CHECK_EXISTING finds files: flag downstream expensive step ---
     if kind == "CHECK_EXISTING":
+        reconcile_preflight = _extract_reconcile_preflight_payload(results_data)
+        if reconcile_preflight and reconcile_preflight.get("status") == "needs_manual_gtf":
+            follow_up_reason = (
+                (reconcile_preflight.get("required_input") or {}).get("reason")
+                or reconcile_preflight.get("message")
+                or "Manual annotation GTF is required before approval."
+            )
+            for s in steps:
+                if (
+                    s.get("kind") == "REQUEST_APPROVAL"
+                    and completed_step_id in s.get("depends_on", [])
+                    and s.get("status") == "PENDING"
+                ):
+                    s["status"] = "FOLLOW_UP"
+                    s["error"] = follow_up_reason
+                    s["title"] = "Provide manual annotation GTF path before approval"
+                    payload["status"] = "FOLLOW_UP"
+                    payload["current_step_id"] = s.get("id")
+                    changed = True
+                    logger.info(
+                        "Replan: pausing reconcile workflow for manual GTF follow-up",
+                        step_id=s.get("id"),
+                    )
+
         has_files = _has_existing_files(results_data)
         if has_files:
             _EXPENSIVE_KINDS = {"SUBMIT_WORKFLOW", "DOWNLOAD_DATA", "RUN_DE_PIPELINE", "RUN_DE_ANALYSIS"}
@@ -227,3 +251,35 @@ def _has_existing_files(results: list | dict) -> bool:
         if isinstance(files, list) and len(files) > 0:
             return True
     return False
+
+
+def _extract_reconcile_preflight_payload(results: list | dict) -> dict | None:
+    """Extract JSON payload from reconcile preflight script stdout when available."""
+    if not isinstance(results, list):
+        return None
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if item.get("tool") != "run_allowlisted_script":
+            continue
+
+        result_data = item.get("result")
+        if not isinstance(result_data, dict):
+            continue
+        if result_data.get("script_id") != "reconcile_bams/reconcile_bams":
+            continue
+
+        stdout_text = result_data.get("stdout")
+        if not isinstance(stdout_text, str) or not stdout_text.strip():
+            continue
+
+        try:
+            parsed = json.loads(stdout_text)
+        except (TypeError, ValueError):
+            continue
+
+        if isinstance(parsed, dict):
+            return parsed
+
+    return None
