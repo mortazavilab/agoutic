@@ -1,3 +1,51 @@
+## [3.4.9] - 2026-03-26
+
+### Fixes
+
+- **Approval-time SLURM safety checks now block mode/path drift** —
+  `cortex/remote_orchestration.py` now rejects approvals when requested vs
+  extracted execution mode diverge, requested absolute input path differs from
+  extracted input path, or a rewritten absolute mount path shows duplicated
+  `/media/` segments.
+
+- **Stale staged-sample metadata is no longer reused for remote cache hits** —
+  staged sample lookup now invalidates and skips reuse when the stored input
+  fingerprint is empty (`e3b0...`) and when an explicitly provided input source
+  path mismatches the staged source.
+
+- **Empty-input fingerprints cannot trigger remote data-cache reuse** —
+  SLURM cache preflight now forces `data_action=stage` for empty/invalid
+  fingerprints instead of incorrectly selecting reuse from cache metadata.
+
+- **Remote workflow recovery now avoids duplicate workflow-plan creation** —
+  when resuming remote analysis for the same sample without a `run_uuid`,
+  Cortex now reuses the active `remote_sample_intake` workflow block rather
+  than creating a second concurrent workflow shell.
+
+- **SLURM stage/run transition deadlock hardening in submission flow** —
+  `cortex/workflow_submission.py` now advances `stage_input` to
+  `RUNNING`/`COMPLETED` before submit for non-stage-only SLURM runs, and marks
+  both `stage_input` and `run_dogme` as `FAILED` when submission fails (including
+  no `run_uuid` responses), preventing stale
+  `check_remote_stage=COMPLETED` + `stage_input=PENDING` plan states.
+
+- **Parameter extraction now preserves explicit local intent and absolute
+  paths** — `cortex/job_parameters.py` now keeps absolute input paths unchanged,
+  prefers absolute over relative path matches, and lets explicit local language
+  override stale SLURM context from prior approvals.
+
+### Tests
+
+- Added/extended focused remote orchestration and submission regressions in
+  `tests/cortex/test_background_tasks.py` for:
+  empty-fingerprint staged-sample invalidation, explicit source-mismatch
+  invalidation, active workflow reuse without duplication, requested
+  execution-mode mismatch rejection, and no-`run_uuid` failure-state
+  propagation.
+
+- Added extraction regressions in `tests/cortex/test_extract_params.py` for
+  explicit-local override behavior and absolute BAM path preservation.
+
 ## [3.4.8] - 2026-03-26
 
 ### Improvements

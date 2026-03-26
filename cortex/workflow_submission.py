@@ -122,9 +122,15 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         remote_action = (job_params.get("remote_action") or "").strip().lower()
         remote_intent = run_type != "script" and _has_remote_stage_intent(job_params, gate_payload)
         execution_mode = (job_params.get("execution_mode") or "local").strip().lower()
+        requested_execution_mode = (job_params.get("requested_execution_mode") or "").strip().lower()
         if remote_intent and execution_mode != "slurm":
             execution_mode = "slurm"
             job_params["execution_mode"] = "slurm"
+        elif requested_execution_mode in {"local", "slurm"} and execution_mode != requested_execution_mode:
+            raise ValueError(
+                f"Requested execution_mode={requested_execution_mode} but extracted execution_mode={execution_mode}. "
+                "Regenerate approval parameters."
+            )
         if run_type == "script":
             execution_mode = "local"
             job_params["execution_mode"] = "local"
@@ -377,6 +383,36 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 extra={"cache_preflight": job_data.get("cache_preflight")},
             )
 
+        if execution_mode == "slurm" and workflow_block is not None and stage_input_step_id and not remote_stage_only:
+            cache_preflight = job_data.get("cache_preflight") if isinstance(job_data.get("cache_preflight"), dict) else {}
+            data_action = cache_preflight.get("data_action") if isinstance(cache_preflight, dict) else {}
+            data_action_name = str((data_action or {}).get("action") or "").strip().lower()
+            if job_data.get("staged_remote_input_path") and data_action_name == "reuse":
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    stage_input_step_id,
+                    "COMPLETED",
+                    extra={
+                        "decision": "reuse",
+                        "staged_input_directory": job_data.get("staged_remote_input_path"),
+                        "data_action": data_action,
+                    },
+                )
+            else:
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    stage_input_step_id,
+                    "RUNNING",
+                    extra={
+                        "decision": "stage",
+                        "source_path": job_data.get("input_directory"),
+                        "staged_input_directory": job_data.get("staged_remote_input_path"),
+                        "data_action": data_action,
+                    },
+                )
+
         if remote_stage_only:
             stage_parts = _initial_stage_parts(job_data.get("cache_preflight"))
             stage_task_block = _create_block_internal(
@@ -607,6 +643,14 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             # Show the actual result for debugging
             error_detail = str(result) if result else "empty response"
             if workflow_block is not None:
+                if execution_mode == "slurm":
+                    _set_workflow_step_status(
+                        session,
+                        workflow_block,
+                        "stage_input",
+                        "FAILED",
+                        extra={"error": f"Submission did not return run_uuid: {error_detail}"},
+                    )
                 _set_workflow_step_status(
                     session,
                     workflow_block,
@@ -650,6 +694,14 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     "stage_input",
                     kinds=("remote_stage", "REMOTE_STAGE"),
                 ) or "stage_input"
+            elif locals().get("execution_mode") == "slurm":
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    "stage_input",
+                    "FAILED",
+                    extra={"error": error_msg},
+                )
             _set_workflow_step_status(
                 session,
                 workflow_block,

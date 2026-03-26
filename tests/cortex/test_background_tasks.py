@@ -49,6 +49,11 @@ from cortex.job_polling import (
 )
 from cortex.workflow_submission import submit_job_after_approval
 from cortex.planner import _template_remote_stage_workflow
+from cortex.remote_orchestration import (
+    _find_remote_staged_sample,
+    _ensure_remote_sample_workflow,
+)
+from launchpad.models import RemoteStagedSample
 
 
 def test_initial_stage_parts_describe_preflight_reference_actions_without_implying_active_transfer():
@@ -67,6 +72,133 @@ def test_initial_stage_parts_describe_preflight_reference_actions_without_implyi
     details = references.get("details") or []
     assert details
     assert details[0]["message"] == "Planned refresh for mm39 on the remote profile."
+
+
+def test_find_remote_staged_sample_invalidates_empty_fingerprint(session_factory, seed_data):
+    sess = session_factory()
+    entry = RemoteStagedSample(
+        id=str(uuid.uuid4()),
+        user_id="u-bg",
+        ssh_profile_id="profile-123",
+        ssh_profile_nickname="hpc3",
+        sample_name="jamshid",
+        sample_slug="jamshid",
+        mode="CDNA",
+        reference_genome_json=["mm39"],
+        source_path="/data/pod5",
+        input_fingerprint="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        remote_base_path="/remote/u1/agoutic",
+        remote_data_path="/remote/u1/agoutic/data/fp1",
+        remote_reference_paths_json={"mm39": "/remote/u1/agoutic/ref/mm39"},
+        status="READY",
+        last_staged_at=datetime.datetime.utcnow(),
+        last_used_at=datetime.datetime.utcnow(),
+    )
+    sess.add(entry)
+    sess.commit()
+
+    result = _find_remote_staged_sample(
+        sess,
+        owner_id="u-bg",
+        ssh_profile_id="profile-123",
+        sample_name="jamshid",
+        mode="CDNA",
+        input_directory="/data/pod5",
+        input_directory_explicit=True,
+    )
+
+    sess.refresh(entry)
+    assert result is None
+    assert entry.status == "INVALID_EMPTY_FINGERPRINT"
+    sess.close()
+
+
+def test_find_remote_staged_sample_invalidates_source_mismatch(session_factory, seed_data):
+    sess = session_factory()
+    entry = RemoteStagedSample(
+        id=str(uuid.uuid4()),
+        user_id="u-bg",
+        ssh_profile_id="profile-123",
+        ssh_profile_nickname="hpc3",
+        sample_name="jamshid",
+        sample_slug="jamshid",
+        mode="CDNA",
+        reference_genome_json=["mm39"],
+        source_path="/data/old_pod5",
+        input_fingerprint="abc123deadbeef",
+        remote_base_path="/remote/u1/agoutic",
+        remote_data_path="/remote/u1/agoutic/data/fp1",
+        remote_reference_paths_json={"mm39": "/remote/u1/agoutic/ref/mm39"},
+        status="READY",
+        last_staged_at=datetime.datetime.utcnow(),
+        last_used_at=datetime.datetime.utcnow(),
+    )
+    sess.add(entry)
+    sess.commit()
+
+    result = _find_remote_staged_sample(
+        sess,
+        owner_id="u-bg",
+        ssh_profile_id="profile-123",
+        sample_name="jamshid",
+        mode="CDNA",
+        input_directory="/data/new_pod5",
+        input_directory_explicit=True,
+    )
+
+    sess.refresh(entry)
+    assert result is None
+    assert entry.status == "INVALID_SOURCE_MISMATCH"
+    sess.close()
+
+
+def test_ensure_remote_sample_workflow_reuses_active_workflow(session_factory, seed_data):
+    sess = session_factory()
+    existing = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "workflow_type": "remote_sample_intake",
+            "title": "Run remote analysis for jamshid",
+            "sample_name": "jamshid",
+            "mode": "CDNA",
+            "source_path": "/data/pod5",
+            "staged_input_directory": "",
+            "remote_base_path": "/remote/u1/agoutic",
+            "ssh_profile_id": "profile-123",
+            "run_uuid": None,
+            "status": "RUNNING",
+            "steps": [],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+    sess.commit()
+
+    workflow_block = _ensure_remote_sample_workflow(
+        sess,
+        "proj-bg",
+        "u-bg",
+        gate_block_id="gate-1",
+        job_data={
+            "sample_name": "jamshid",
+            "mode": "CDNA",
+            "input_directory": "/data/pod5_new",
+            "staged_remote_input_path": "/remote/u1/agoutic/data/fp1",
+            "remote_base_path": "/remote/u1/agoutic",
+            "ssh_profile_id": "profile-123",
+        },
+        stage_only=False,
+    )
+
+    all_workflows = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").all()
+    payload = get_block_payload(workflow_block)
+    assert workflow_block.id == existing.id
+    assert len(all_workflows) == 1
+    assert payload["source_path"] == "/data/pod5_new"
+    assert payload["staged_input_directory"] == "/remote/u1/agoutic/data/fp1"
+    sess.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1165,6 +1297,83 @@ class TestSubmitJobAfterApproval:
         workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
         workflow_payload = get_block_payload(workflow_block)
         assert workflow_payload["steps"][1]["status"] == "FAILED"
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_submit_rejects_requested_execution_mode_mismatch(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "extracted_params": {
+                "sample_name": "mode-mismatch",
+                "mode": "CDNA",
+                "input_directory": "/data/pod5",
+                "reference_genome": ["mm39"],
+                "execution_mode": "slurm",
+                "requested_execution_mode": "local",
+            },
+        })
+
+        async def _passthrough_prepare(session, project_id, owner_id, params):
+            return dict(params)
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={"run_uuid": "should-not-run"})
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission._prepare_remote_execution_params", new=_passthrough_prepare), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.call_count == 0
+        sess = session_factory()
+        job_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
+        assert job_blocks
+        payload = get_block_payload(job_blocks[-1])
+        assert "Requested execution_mode=local" in payload.get("error", "")
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_slurm_submission_without_run_uuid_marks_stage_input_failed(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "extracted_params": {
+                "sample_name": "no-run-uuid",
+                "mode": "CDNA",
+                "input_directory": "/data/pod5",
+                "reference_genome": ["mm39"],
+                "execution_mode": "slurm",
+                "ssh_profile_nickname": "hpc3",
+                "remote_base_path": "/remote/u1/agoutic",
+                "cache_preflight": {
+                    "status": "ready",
+                    "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
+                    "data_action": {"action": "stage"},
+                },
+            },
+        })
+
+        async def _passthrough_prepare(session, project_id, owner_id, params):
+            return dict(params)
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={})
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission._prepare_remote_execution_params", new=_passthrough_prepare), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        sess = session_factory()
+        workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
+        workflow_payload = get_block_payload(workflow_block)
+        step_status = {step["id"]: step["status"] for step in workflow_payload["steps"]}
+        assert step_status["check_remote_stage"] == "COMPLETED"
+        assert step_status["stage_input"] == "FAILED"
+        assert step_status["run_dogme"] == "FAILED"
         sess.close()
 
 

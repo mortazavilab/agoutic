@@ -33,6 +33,7 @@ logger = get_logger(__name__)
 _WORKFLOW_PLAN_TYPE = "WORKFLOW_PLAN"
 _LOCAL_SAMPLE_WORKFLOW = "local_sample_intake"
 _REMOTE_SAMPLE_WORKFLOW = "remote_sample_intake"
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 def _launchpad_internal_headers() -> dict[str, str]:
@@ -129,6 +130,38 @@ async def _get_ssh_profile_auth_session(user_id: str, profile_id: str) -> dict:
 
 async def _ensure_gate_remote_profile_unlocked(user_id: str, gate_payload: dict) -> None:
     job_params = gate_payload.get("edited_params") or gate_payload.get("extracted_params") or {}
+    requested_mode = (job_params.get("requested_execution_mode") or "").strip().lower()
+    effective_mode = (job_params.get("execution_mode") or "local").strip().lower()
+    if requested_mode and requested_mode in {"local", "slurm"} and effective_mode != requested_mode:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Requested execution_mode '{requested_mode}' does not match extracted execution_mode "
+                f"'{effective_mode}'. Regenerate approval parameters before approving."
+            ),
+        )
+
+    requested_input_path = str(job_params.get("requested_input_directory") or "").strip()
+    effective_input_path = str(job_params.get("input_directory") or "").strip()
+    if requested_input_path and requested_input_path.startswith("/") and effective_input_path != requested_input_path:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Input path mismatch detected between requested and extracted values. "
+                "Regenerate approval parameters before approving."
+            ),
+        )
+
+    if effective_input_path.startswith("/") and "/media/" in effective_input_path:
+        if effective_input_path.count("/media/") > 1:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Detected rewritten absolute input path (duplicated mount segment). "
+                    "Regenerate approval parameters before approving."
+                ),
+            )
+
     if (job_params.get("execution_mode") or "local") != "slurm":
         return
 
@@ -421,9 +454,19 @@ def _find_remote_staged_sample(
     if entry is None:
         return None
 
-    if input_directory_explicit and input_directory:
+    entry_fingerprint = str(entry.input_fingerprint or "")
+    if not entry_fingerprint or entry_fingerprint == _EMPTY_SHA256 or entry_fingerprint.startswith("e3b0c442"):
+        entry.status = "INVALID_EMPTY_FINGERPRINT"
+        entry.updated_at = datetime.datetime.utcnow()
+        session.commit()
+        return None
+
+    if input_directory and input_directory_explicit:
         source_path = str(entry.source_path or "")
         if source_path and source_path != str(input_directory):
+            entry.status = "INVALID_SOURCE_MISMATCH"
+            entry.updated_at = datetime.datetime.utcnow()
+            session.commit()
             return None
 
     return entry
@@ -632,23 +675,31 @@ async def _build_slurm_cache_preflight(
                 }
             )
 
-        data_entry = session.execute(
-            select(RemoteInputCache).where(
-                RemoteInputCache.user_id == owner_id,
-                RemoteInputCache.ssh_profile_id == (ssh_profile_id or ""),
-                RemoteInputCache.reference_id == primary_ref,
-                RemoteInputCache.input_fingerprint == input_fingerprint,
-            )
-        ).scalar_one_or_none()
-        if data_entry is not None:
+        if input_fingerprint == _EMPTY_SHA256 or input_fingerprint.startswith("e3b0c442"):
             preflight["data_action"].update(
                 {
-                    "action": "reuse",
-                    "reason": "cache_hit_validate_remote",
-                    "cache_path": data_entry.remote_path,
-                    "last_used_at": data_entry.last_used_at.isoformat() if data_entry.last_used_at else None,
+                    "action": "stage",
+                    "reason": "invalid_empty_input_fingerprint",
                 }
             )
+        else:
+            data_entry = session.execute(
+                select(RemoteInputCache).where(
+                    RemoteInputCache.user_id == owner_id,
+                    RemoteInputCache.ssh_profile_id == (ssh_profile_id or ""),
+                    RemoteInputCache.reference_id == primary_ref,
+                    RemoteInputCache.input_fingerprint == input_fingerprint,
+                )
+            ).scalar_one_or_none()
+            if data_entry is not None:
+                preflight["data_action"].update(
+                    {
+                        "action": "reuse",
+                        "reason": "cache_hit_validate_remote",
+                        "cache_path": data_entry.remote_path,
+                        "last_used_at": data_entry.last_used_at.isoformat() if data_entry.last_used_at else None,
+                    }
+                )
 
     except Exception as cache_err:
         preflight["status"] = "degraded"
@@ -1145,6 +1196,24 @@ def _ensure_remote_sample_workflow(
     stage_only: bool,
 ) -> ProjectBlock:
     workflow_block = _find_workflow_plan(session, project_id, workflow_block_id=workflow_block_id)
+    if workflow_block is None and not workflow_block_id:
+        query = select(ProjectBlock).where(
+            ProjectBlock.project_id == project_id,
+            ProjectBlock.type == _WORKFLOW_PLAN_TYPE,
+        ).order_by(ProjectBlock.seq.desc())
+        for candidate in session.execute(query).scalars().all():
+            payload = get_block_payload(candidate)
+            if payload.get("workflow_type") != _REMOTE_SAMPLE_WORKFLOW:
+                continue
+            if payload.get("sample_name") != job_data.get("sample_name"):
+                continue
+            if payload.get("run_uuid"):
+                continue
+            if payload.get("status") in {"FAILED", "COMPLETED", "CANCELLED"}:
+                continue
+            workflow_block = candidate
+            break
+
     if workflow_block is not None:
         payload = get_block_payload(workflow_block)
         payload["sample_name"] = job_data["sample_name"]

@@ -21,6 +21,9 @@ def _resolve_relative_input_path(
     project_id: str,
 ):
     """Resolve relative input paths against project or central user data roots."""
+    if cleaned_path.startswith("/"):
+        return cleaned_path
+
     path_parts = cleaned_path.split("/", 1)
     first_component = path_parts[0].lower() if path_parts else ""
 
@@ -131,6 +134,9 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     conversation_text = "\n".join(conversation)
     all_user_text_original = " ".join(user_messages)  # Keep original case for path extraction
     all_user_text = all_user_text_original.lower()  # Lowercase for keyword matching
+    explicit_local_requested = bool(
+        re.search(r"\b(local|locally|on\s+this\s+machine|run\s+local(?:ly)?)\b", all_user_text)
+    )
 
     # First, use simple heuristics for quick detection
     params = {
@@ -195,6 +201,13 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     if profile_match:
         params["execution_mode"] = "slurm"
         params["ssh_profile_nickname"] = profile_match.group(1)
+
+    if explicit_local_requested:
+        params["execution_mode"] = "local"
+        params["remote_action"] = "job"
+        params["gate_action"] = "job"
+        params["ssh_profile_id"] = None
+        params["ssh_profile_nickname"] = None
 
     account_match = re.search(r"\baccount\s+([a-zA-Z0-9_-]+)\b", all_user_text, re.IGNORECASE)
     if account_match:
@@ -307,14 +320,18 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
 
     # Look for paths in user messages (use ORIGINAL case to preserve path)
     # First try: relative paths with known sequencing extensions (data/ENCFF921XAH.bam)
-    _rel_path_pattern = r'\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq|fq|fast5))\b'
+    _rel_path_pattern = r'(?<!/)\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq|fq|fast5))\b'
     _rel_paths = re.findall(_rel_path_pattern, all_user_text_original)
     # Second try: absolute paths
     # Avoid false positives like "account/partition" by requiring a sensible prefix.
     _abs_path_pattern = r'(?:(?<=^)|(?<=[\s"\'(]))(/[^\s,]+(?:/[^\s,]+)*)'
     _abs_paths = re.findall(_abs_path_pattern, all_user_text_original)
 
-    if _rel_paths:
+    if _abs_paths:
+        cleaned_path = _abs_paths[0].rstrip('.,;:!?')
+        params["input_directory"] = cleaned_path
+        params["input_directory_explicit"] = True
+    elif _rel_paths:
         cleaned_path = _rel_paths[0].rstrip('.,;:!?')
         params["input_directory_explicit"] = True
         # Resolve relative path against project directory
@@ -336,10 +353,6 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
             )
         else:
             params["input_directory"] = cleaned_path
-    elif _abs_paths:
-        cleaned_path = _abs_paths[0].rstrip('.,;:!?')
-        params["input_directory"] = cleaned_path
-        params["input_directory_explicit"] = True
     else:
         params["input_directory"] = "/data/samples/test"
 
