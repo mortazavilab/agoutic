@@ -880,6 +880,36 @@ class SlurmBackend:
 
         link_path = str(PurePosixPath(remote_work) / link_dir_name)
         await conn.mkdir_p(remote_work)
+
+        # Dogme remap expects an `*.unmapped.bam` basename in the workflow-local bams folder.
+        # Keep cache paths immutable by creating a local alias link rather than renaming staged files.
+        if input_type == "bam" and (params.entry_point or "").strip().lower() == "remap":
+            sample_slug = self._slugify(params.sample_name or "sample")
+            alias_name = f"{sample_slug}.unmapped.bam"
+            quoted_link_path = shlex.quote(link_path)
+            quoted_remote_input = shlex.quote(remote_input)
+            quoted_alias_name = shlex.quote(alias_name)
+            await conn.run(f"rm -rf {quoted_link_path}", check=True)
+            await conn.run(f"mkdir -p {quoted_link_path}", check=True)
+            await conn.run(
+                (
+                    "set -euo pipefail; "
+                    f"src={quoted_remote_input}; "
+                    "if [ -d \"$src\" ]; then "
+                    "  bam_src=$(find \"$src\" -maxdepth 1 -type f -name '*.bam' | sort | head -n1); "
+                    "  if [ -n \"$bam_src\" ]; then "
+                    f"    ln -sfn \"$bam_src\" {quoted_link_path}/{quoted_alias_name}; "
+                    "  else "
+                    f"    ln -sfn \"$src\" {quoted_link_path}; "
+                    "  fi; "
+                    "else "
+                    f"  ln -sfn \"$src\" {quoted_link_path}/{quoted_alias_name}; "
+                    "fi"
+                ),
+                check=True,
+            )
+            return
+
         await conn.run(
             f"ln -sfn {shlex.quote(remote_input)} {shlex.quote(link_path)}",
             check=True,

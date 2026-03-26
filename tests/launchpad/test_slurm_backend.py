@@ -32,6 +32,51 @@ class _FakeWriteConn:
         self.run_calls.append((command, check))
 
 
+@pytest.mark.asyncio
+async def test_ensure_workflow_input_links_uses_unmapped_alias_for_bam_remap():
+    backend = SlurmBackend()
+    params = SubmitParams(
+        sample_name="C2C12r1",
+        input_type="bam",
+        entry_point="remap",
+    )
+    conn = _FakeWriteConn()
+
+    await backend._ensure_workflow_input_links(
+        conn=conn,
+        params=params,
+        remote_work="/remote/project/workflow1",
+        remote_input="/remote/cache/fingerprint1234",
+    )
+
+    commands = [command for command, _ in conn.run_calls]
+    assert any("rm -rf /remote/project/workflow1/bams" in command for command in commands)
+    assert any("mkdir -p /remote/project/workflow1/bams" in command for command in commands)
+    assert any("c2c12r1.unmapped.bam" in command for command in commands)
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_input_links_preserves_default_linking_for_non_remap_bam():
+    backend = SlurmBackend()
+    params = SubmitParams(
+        sample_name="C2C12r1",
+        input_type="bam",
+        entry_point="annotateRNA",
+    )
+    conn = _FakeWriteConn()
+
+    await backend._ensure_workflow_input_links(
+        conn=conn,
+        params=params,
+        remote_work="/remote/project/workflow1",
+        remote_input="/remote/cache/fingerprint1234",
+    )
+
+    assert conn.run_calls == [
+        ("ln -sfn /remote/cache/fingerprint1234 /remote/project/workflow1/bams", True),
+    ]
+
+
 class _FakeStageConn:
     def __init__(self, *, existing_paths=None, listings=None):
         self.existing_paths = set(existing_paths or [])
