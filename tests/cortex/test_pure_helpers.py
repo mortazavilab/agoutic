@@ -16,6 +16,8 @@ from cortex.path_helpers import (
     _resolve_workflow_path,
     _resolve_file_path,
 )
+from cortex.chat_dataframes import _build_specialized_dataframe_plot_spec
+from cortex.tag_parser import user_wants_plot
 
 
 # =========================================================================
@@ -231,3 +233,37 @@ class TestResolveFilePath:
     def test_leading_trailing_slashes_stripped(self):
         wd, fn = _resolve_file_path("/File.csv/", self.DEFAULT_WD, self.WORKFLOWS)
         assert fn == "File.csv"
+
+
+# =========================================================================
+# plot intent
+# =========================================================================
+
+class TestUserWantsPlot:
+    def test_immediate_plot_request_detected(self):
+        assert user_wants_plot("plot a histogram of DF1") is True
+
+    def test_deferred_plot_request_not_detected(self):
+        assert user_wants_plot("I want a DF so the data can be plotted later") is False
+
+
+class TestSpecializedDataframePlotSpec:
+    def test_bed_count_dataframe_prefers_bar_by_chromosome_and_genome(self):
+        df_data = {
+            "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+            "data": [
+                {"Sample": "JamshidP", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                {"Sample": "JamshidP", "Genome": "hg38", "Modification": "inosine", "Chromosome": "chr1", "Count": 2},
+            ],
+            "metadata": {"kind": "bed_chromosome_counts"},
+        }
+
+        spec = _build_specialized_dataframe_plot_spec(df_data)
+
+        assert spec == {
+            "type": "bar",
+            "x": "Chromosome",
+            "y": "Count",
+            "color": "Genome",
+            "title": "Regions per Chromosome by Genome",
+        }

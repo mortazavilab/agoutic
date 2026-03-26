@@ -25,6 +25,25 @@ from common.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+_BED_COUNT_INTENT_RE = re.compile(
+    r'\b(count|counts|summarize|summarise|tally|show)\b.*\bbed\b.*\b(chromosome|chromosomes|chr)\b'
+    r'|\b(chromosome|chromosomes|chr)\b.*\bbed\b',
+    re.IGNORECASE,
+)
+
+_MODIFICATION_COUNT_INTENT_RE = re.compile(
+    r'\b(?:count|counts|summarize|summarise|tally|show|plot|graph|chart)\b.*?\b(?P<mod>[A-Za-z0-9_+\-]+)\b\s+modifications?\b.*?\b(chromosome|chromosomes|chr)\b'
+    r'|\b(?P<mod2>[A-Za-z0-9_+\-]+)\b\s+modifications?\b.*?\b(chromosome|chromosomes|chr)\b',
+    re.IGNORECASE,
+)
+
+
+def _extract_modification_name(user_message: str) -> str | None:
+    match = _MODIFICATION_COUNT_INTENT_RE.search(user_message)
+    if not match:
+        return None
+    return (match.group("mod") or match.group("mod2") or "").lower() or None
+
 
 # ---------------------------------------------------------------------------
 # _auto_generate_data_calls
@@ -556,6 +575,57 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
         # instead of emitting a DATA_CALL, auto-generate get_analysis_summary
         # so the analysis actually executes. ---
         if not calls and skill_key == "analyze_job_results" and (work_dir or run_uuid):
+            _bed_count_intent = bool(_BED_COUNT_INTENT_RE.search(msg_lower))
+            _modification_name = _extract_modification_name(user_message)
+            if _bed_count_intent:
+                _bed_match = re.search(r'(\S+\.bed)\b', user_message, re.IGNORECASE)
+                if _bed_match:
+                    _bed_ref = _bed_match.group(1).rstrip('.,;:!?')
+                    _resolved_wd, _resolved_file = _resolve_file_path(
+                        _bed_ref, work_dir, workflows,
+                    )
+                    if not _resolved_wd and work_dir:
+                        _resolved_wd = work_dir
+                    _params: dict = {"file_name": _resolved_file}
+                    if _resolved_wd:
+                        _params["work_dir"] = _resolved_wd
+                    elif run_uuid:
+                        _params["run_uuid"] = run_uuid
+                    calls.append({
+                        "source_type": "service", "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": _params,
+                    })
+                    logger.warning(
+                        "Auto-generated find_file for analyze_job_results BED chromosome-count request",
+                        work_dir=_resolved_wd or work_dir,
+                        run_uuid=run_uuid,
+                        bed_ref=_bed_ref,
+                    )
+                    return calls
+
+            if _modification_name:
+                _params: dict = {
+                    "extensions": ".bed",
+                    "max_depth": 1,
+                }
+                if work_dir:
+                    _params["work_dir"] = _resolve_workflow_path("bedMethyl", work_dir, workflows)
+                elif run_uuid:
+                    _params["run_uuid"] = run_uuid
+                calls.append({
+                    "source_type": "service", "source_key": "analyzer",
+                    "tool": "list_job_files",
+                    "params": _params,
+                })
+                logger.warning(
+                    "Auto-generated list_job_files for analyze_job_results modification chromosome-count request",
+                    work_dir=_params.get("work_dir"),
+                    run_uuid=run_uuid,
+                    modification=_modification_name,
+                )
+                return calls
+
             _summary_params: dict = {}
             if work_dir:
                 _summary_params["work_dir"] = work_dir

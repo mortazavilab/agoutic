@@ -45,6 +45,25 @@ tools = LaunchpadMCPTools()
 
 # Register all tools via decorators
 @mcp.tool()
+async def run_allowlisted_script(
+    script_id: str | None = None,
+    script_path: str | None = None,
+    script_args: list[str] | None = None,
+    script_working_directory: str | None = None,
+    timeout_seconds: float | None = 60.0,
+) -> str:
+    """Run a small allowlisted local Python utility script and return stdout/stderr directly."""
+    result = await tools.run_allowlisted_script(
+        script_id=script_id,
+        script_path=script_path,
+        script_args=script_args,
+        script_working_directory=script_working_directory,
+        timeout_seconds=timeout_seconds,
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 async def submit_dogme_job(
     sample_name: str,
     mode: str,

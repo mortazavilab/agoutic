@@ -407,3 +407,23 @@ class TestAnalyzeJobResultsCatchAll:
         tools = [c["tool"] for c in calls]
         assert "find_file" in tools
         assert "get_analysis_summary" not in tools
+
+    def test_modification_count_uses_bedmethyl_listing(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "aaaa-bbbb",
+                "sample_name": "JamshidP",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "count inosine modifications by chromosome",
+            "analyze_job_results",
+            history_blocks=blocks,
+        )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
+        assert calls[0]["params"]["extensions"] == ".bed"
+        assert calls[0]["params"]["max_depth"] == 1

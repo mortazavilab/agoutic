@@ -31,6 +31,29 @@ from launchpad import mcp_server
 
 
 @pytest.mark.asyncio
+async def test_run_allowlisted_script_forwards_arguments(monkeypatch):
+    run_mock = AsyncMock(return_value={"success": True, "stdout": "chr1 | 5\n"})
+    monkeypatch.setattr(mcp_server.tools, "run_allowlisted_script", run_mock)
+
+    result = await mcp_server.run_allowlisted_script(
+        script_id="analyze_job_results/count_bed",
+        script_args=["/tmp/example.bed"],
+        timeout_seconds=30.0,
+    )
+
+    parsed = json.loads(result)
+    assert parsed["success"] is True
+    assert "chr1 | 5" in parsed["stdout"]
+    run_mock.assert_awaited_once_with(
+        script_id="analyze_job_results/count_bed",
+        script_path=None,
+        script_args=["/tmp/example.bed"],
+        script_working_directory=None,
+        timeout_seconds=30.0,
+    )
+
+
+@pytest.mark.asyncio
 async def test_submit_dogme_job_forwards_cache_fields(monkeypatch):
     submit_mock = AsyncMock(return_value={"run_uuid": "run-123", "status": "PENDING"})
     monkeypatch.setattr(mcp_server.tools, "submit_dogme_job", submit_mock)

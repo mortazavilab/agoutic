@@ -11,6 +11,7 @@ import datetime
 import json
 import re
 import uuid
+from pathlib import Path
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -1711,6 +1712,200 @@ class TestFileToolChaining:
         payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
         md = payload.get("markdown", "")
         assert "SKILL_SWITCH" not in md
+
+    def test_find_file_chains_to_allowlisted_bed_counter(self, SL, seed, tmp_path):
+        """BED counting requests should chain find_file into run_allowlisted_script."""
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_dir = tmp_path / "proj"
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "find_file":
+                return {
+                    "success": True,
+                    "primary_path": "results/data.bed",
+                    "work_dir": str(workflow_dir),
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"JamshidP\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 5}], \"row_count\": 1, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [{"Sample": "JamshidP", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 5}],
+                "row_count": 1,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "Let me count those regions.\n"
+                "[[DATA_CALL: service=analyzer, tool=find_file, run_uuid=abc, filename=data.bed]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "count bed regions by chromosome for data.bed",
+            skill="analyze_job_results",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=["--json", str((workflow_dir / "results/data.bed").resolve())],
+            timeout_seconds=60.0,
+        )
+        data = resp.json()
+        payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        dfs = payload.get("_dataframes", {})
+        assert "BED chromosome counts" in dfs
+        assert dfs["BED chromosome counts"]["row_count"] == 1
+
+    def test_find_file_bed_regression_does_not_send_script_working_directory(self, SL, seed, tmp_path):
+        """Workflow-relative BED results should resolve against work_dir without assuming the file exists."""
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_dir = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/testslurm1/workflow6")
+        relative_bed = "bedMethyl/JamshidP.mm39.minus.m6A.filtered.bed"
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "find_file":
+                return {
+                    "success": True,
+                    "work_dir": str(workflow_dir),
+                    "search_term": "JamshidP.mm39.minus.m6A.filtered.bed",
+                    "file_count": 1,
+                    "paths": [relative_bed],
+                    "primary_path": relative_bed,
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"JamshidP\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chrM\", \"Count\": 12}], \"row_count\": 1, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [{"Sample": "JamshidP", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chrM", "Count": 12}],
+                "row_count": 1,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "Let me count those regions.\n"
+                "[[DATA_CALL: service=analyzer, tool=find_file, run_uuid=abc, filename=JamshidP.mm39.minus.m6A.filtered.bed]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "count BED regions by chromosome for JamshidP.mm39.minus.m6A.filtered.bed",
+            skill="analyze_job_results",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once()
+        call_args = launchpad_mcp.call_tool.await_args
+        assert call_args.args == ("run_allowlisted_script",)
+        assert call_args.kwargs == {
+            "script_id": "analyze_job_results/count_bed",
+            "script_args": ["--json", str((workflow_dir / relative_bed).resolve())],
+            "timeout_seconds": 60.0,
+        }
+
+    def test_list_job_files_chains_modification_count_to_dataframe(self, SL, seed, tmp_path):
+        """Modification chromosome-count requests should browse bedMethyl and create a dataframe."""
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_dir = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/testslurm1/workflow6/bedMethyl")
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                return {
+                    "success": True,
+                    "work_dir": str(workflow_dir),
+                    "file_count": 3,
+                    "files": [
+                        {"path": "JamshidP.mm39.plus.inosine.filtered.bed", "name": "JamshidP.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "JamshidP.mm39.minus.inosine.filtered.bed", "name": "JamshidP.mm39.minus.inosine.filtered.bed", "size": 10},
+                        {"path": "JamshidP.hg38.plus.inosine.filtered.bed", "name": "JamshidP.hg38.plus.inosine.filtered.bed", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"JamshidP\", \"Genome\": \"hg38\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 2}, {\"Sample\": \"JamshidP\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}], \"row_count\": 2, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "JamshidP", "Genome": "hg38", "Modification": "inosine", "Chromosome": "chr1", "Count": 2},
+                    {"Sample": "JamshidP", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                ],
+                "row_count": 2,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "Let me inspect the workflow BED files.\n"
+                "[[DATA_CALL: service=analyzer, tool=list_job_files, work_dir=/media/backup_disk/agoutic_root/users/ali-mortazavi/testslurm1/workflow6/bedMethyl, extensions=.bed, max_depth=1]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "count inosine modifications by chromosome",
+            skill="analyze_job_results",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow_dir / "JamshidP.hg38.plus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "JamshidP.mm39.minus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "JamshidP.mm39.plus.inosine.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
+        data = resp.json()
+        payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        dfs = payload.get("_dataframes", {})
+        assert "BED chromosome counts" in dfs
+        assert dfs["BED chromosome counts"]["row_count"] == 2
 
 
 # ===========================================================================

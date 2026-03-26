@@ -62,6 +62,30 @@
   reused across workflow runs for the same user instead of being repulled into
   each workflow folder.
 
+- **BED chromosome-count utility now emits plot-ready dataframes** —
+  `skills/analyze_job_results/scripts/count_bed.py` now accepts one or more
+  BED files, parses `sample/genome/strand/modification` from filenames like
+  `<sample>.<genome>.<plus|minus>.<modification>.filtered.bed`, aggregates
+  counts per `Sample`, `Genome`, `Modification`, and `Chromosome`, and emits
+  structured JSON when invoked with `--json`.
+
+- **Modification-by-chromosome planning from workflow `bedMethyl/` outputs** —
+  `analyze_job_results` can now satisfy requests such as “count inosine
+  modifications by chromosome” by listing `.bed` files under the workflow’s
+  `bedMethyl/` folder, selecting matching `plus`/`minus` files for the
+  requested modification, and combining them into a single per-genome result
+  dataframe.
+
+- **Allowlisted script results now flow into chat dataframes** — Launchpad
+  `run_allowlisted_script` now parses structured JSON stdout into a dataframe
+  payload, and Cortex embeds that payload as a conversation dataframe so
+  downstream plotting can target BED-count results directly.
+
+- **Smarter fallback charts for BED chromosome-count dataframes** — explicit
+  plot requests against the BED-count dataframe shape now default to a grouped
+  bar chart using `Chromosome` on the x-axis, `Count` on the y-axis, and
+  `Genome` as the grouping dimension when multiple genomes are present.
+
 ### Fixes
 
 - **Workflow `GENERATE_PLOT` and `INTERPRET_RESULTS` steps now complete
@@ -137,6 +161,20 @@
   path, which caused approval-driven `submit_dogme_job` calls to fail with an
   HTTP 500 before job submission.
 
+- **Workflow-relative BED script chaining now resolves against the workflow
+  directory** — `find_file` results that return relative BED paths are now
+  resolved against analyzer `work_dir` before invoking the allowlisted script,
+  avoiding incorrect resolution against the code checkout.
+
+- **BED counting no longer passes invalid script working directories** — the
+  chained script invocation now omits `script_working_directory` for workflow
+  BED counting, preventing Launchpad allowlist validation failures for
+  non-allowlisted workflow folders.
+
+- **Deferred plotting language no longer triggers immediate chart rendering** —
+  phrases like “so the data can be plotted later” are no longer treated as an
+  immediate visualization request by the plot fallback logic.
+
 ### Tests
 
 - Added focused plan-contract coverage for duplicate IDs, unknown kinds,
@@ -181,6 +219,11 @@
 - Expanded UI helper coverage for workflow-result surfacing, selective
   full-refresh detection, live job timestamp preservation, refresh bootstrap
   state transitions, and destructive-action refresh suppression behavior.
+
+- Added focused regressions for workflow-relative BED chaining,
+  modification-count auto-planning from `bedMethyl/`, JSON dataframe parsing
+  from `run_allowlisted_script`, deferred-vs-immediate plot intent detection,
+  and specialized fallback plot specs for BED chromosome-count dataframes.
 
 ## [3.4.6] - 2026-03-23
 

@@ -42,6 +42,117 @@ from cortex.tool_contracts import validate_against_schema
 
 logger = get_logger(__name__)
 
+_BED_COUNT_INTENT_RE = re.compile(
+    r"\b(count|counts|summarize|summarise|tally|show)\b.*\bbed\b.*\b(chromosome|chromosomes|chr)\b"
+    r"|\b(chromosome|chromosomes|chr)\b.*\bbed\b",
+    re.IGNORECASE,
+)
+
+_MODIFICATION_COUNT_INTENT_RE = re.compile(
+    r"\b(?:count|counts|summarize|summarise|tally|show|plot|graph|chart)\b.*?\b(?P<mod>[A-Za-z0-9_+\-]+)\b\s+modifications?\b.*?\b(chromosome|chromosomes|chr)\b"
+    r"|\b(?P<mod2>[A-Za-z0-9_+\-]+)\b\s+modifications?\b.*?\b(chromosome|chromosomes|chr)\b",
+    re.IGNORECASE,
+)
+
+_BED_FILENAME_METADATA_RE = re.compile(
+    r"^(?P<sample>.+?)\.(?P<genome>[^.]+)\.(?P<strand>plus|minus)\.(?P<modification>[^.]+)\.filtered\.bed$",
+    re.IGNORECASE,
+)
+
+
+def _extract_modification_name(user_message: str) -> str | None:
+    match = _MODIFICATION_COUNT_INTENT_RE.search(user_message)
+    if not match:
+        return None
+    return (match.group("mod") or match.group("mod2") or "").lower() or None
+
+
+def _parse_bed_filename_metadata(file_path: str) -> dict[str, str] | None:
+    match = _BED_FILENAME_METADATA_RE.match(Path(file_path).name)
+    if not match:
+        return None
+    return {key: value for key, value in match.groupdict().items()}
+
+
+async def _run_bed_counter_script(
+    bed_paths: list[str],
+    source_results: list[dict],
+) -> None:
+    """Run the allowlisted BED counter script and append its result."""
+    chain_params = {
+        "script_id": "analyze_job_results/count_bed",
+        "script_args": ["--json", *bed_paths],
+        "timeout_seconds": 60.0,
+    }
+    launchpad_client = MCPHttpClient(
+        name="launchpad",
+        base_url=get_service_url("launchpad"),
+    )
+    await launchpad_client.connect()
+    try:
+        chain_result = await launchpad_client.call_tool("run_allowlisted_script", **chain_params)
+    finally:
+        await launchpad_client.disconnect()
+
+    source_results.append({
+        "tool": "run_allowlisted_script",
+        "params": chain_params,
+        "data": chain_result,
+    })
+    logger.info("Chain call successful", tool="run_allowlisted_script")
+
+
+async def _chain_list_job_files(
+    result_data: dict,
+    source_results: list[dict],
+    *,
+    user_message: str,
+    active_skill: str,
+) -> None:
+    """After list_job_files, optionally chain into modification BED counting."""
+    if active_skill != "analyze_job_results":
+        return
+
+    modification_name = _extract_modification_name(user_message)
+    if not modification_name:
+        return
+
+    work_dir = result_data.get("work_dir")
+    files = result_data.get("files")
+    if not work_dir or not isinstance(files, list):
+        return
+
+    matched_paths: list[str] = []
+    for file_entry in files:
+        if not isinstance(file_entry, dict):
+            continue
+        relative_path = file_entry.get("path") or file_entry.get("name")
+        if not relative_path:
+            continue
+        metadata = _parse_bed_filename_metadata(relative_path)
+        if not metadata:
+            continue
+        if metadata["modification"].lower() != modification_name:
+            continue
+        bed_path = Path(relative_path).expanduser()
+        if not bed_path.is_absolute():
+            bed_path = (Path(work_dir) / bed_path).resolve()
+        else:
+            bed_path = bed_path.resolve()
+        matched_paths.append(str(bed_path))
+
+    if not matched_paths:
+        return
+
+    deduped_paths = sorted(dict.fromkeys(matched_paths))
+    logger.info(
+        "Chaining list_job_files follow-up",
+        chain_tool="run_allowlisted_script",
+        matched_files=deduped_paths,
+        modification=modification_name,
+    )
+    await _run_bed_counter_script(deduped_paths, source_results)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -526,6 +637,19 @@ async def execute_tool_calls(
                         user_message, result,
                     )
 
+                    # --- list_job_files -> modification BED counting ---
+                    if (
+                        tool_name == "list_job_files"
+                        and isinstance(result_data, dict)
+                        and result_data.get("success")
+                    ):
+                        await _chain_list_job_files(
+                            result_data,
+                            source_results,
+                            user_message=user_message,
+                            active_skill=result.active_skill,
+                        )
+
                     # --- find_file → parse/read chaining ---
                     if (tool_name == "find_file"
                             and isinstance(result_data, dict)
@@ -533,6 +657,8 @@ async def execute_tool_calls(
                             and result_data.get("primary_path")):
                         await _chain_find_file(
                             mcp_client, call, params, result_data, source_results,
+                            user_message=user_message,
+                            active_skill=result.active_skill,
                         )
 
                 except Exception as e:
@@ -781,10 +907,19 @@ async def _chain_find_file(
     params: dict,
     result_data: dict,
     source_results: list[dict],
+    *,
+    user_message: str,
+    active_skill: str,
 ) -> None:
     """After a successful find_file, chain into parse/read for the found file."""
     chain_tool = call.get("_chain")
     primary_path = result_data["primary_path"]
+    if (
+        active_skill == "analyze_job_results"
+        and primary_path.lower().endswith(".bed")
+        and _BED_COUNT_INTENT_RE.search(user_message)
+    ):
+        chain_tool = "run_allowlisted_script"
     if not chain_tool:
         chain_tool = _pick_file_tool(primary_path)
 
@@ -794,21 +929,30 @@ async def _chain_find_file(
     if not (chain_work_dir or chain_uuid):
         return
 
-    logger.info("Chaining find_file → parse/read",
+    logger.info("Chaining find_file follow-up",
                 chain_tool=chain_tool, file_path=primary_path)
     try:
-        chain_params: dict = {"file_path": primary_path}
-        if chain_work_dir:
-            chain_params["work_dir"] = chain_work_dir
-        elif chain_uuid:
-            chain_params["run_uuid"] = chain_uuid
-        if chain_tool == "parse_csv_file":
-            chain_params["max_rows"] = 100
-        elif chain_tool == "parse_bed_file":
-            chain_params["max_records"] = 100
-        elif chain_tool == "read_file_content":
-            chain_params["preview_lines"] = 50
-        chain_result = await mcp_client.call_tool(chain_tool, **chain_params)
+        if chain_tool == "run_allowlisted_script":
+            resolved_primary_path = Path(primary_path).expanduser()
+            if not resolved_primary_path.is_absolute() and chain_work_dir:
+                resolved_primary_path = (Path(chain_work_dir) / resolved_primary_path).resolve()
+            elif resolved_primary_path.is_absolute():
+                resolved_primary_path = resolved_primary_path.resolve()
+            await _run_bed_counter_script([str(resolved_primary_path)], source_results)
+            return
+        else:
+            chain_params = {"file_path": primary_path}
+            if chain_work_dir:
+                chain_params["work_dir"] = chain_work_dir
+            elif chain_uuid:
+                chain_params["run_uuid"] = chain_uuid
+            if chain_tool == "parse_csv_file":
+                chain_params["max_rows"] = 100
+            elif chain_tool == "parse_bed_file":
+                chain_params["max_records"] = 100
+            elif chain_tool == "read_file_content":
+                chain_params["preview_lines"] = 50
+            chain_result = await mcp_client.call_tool(chain_tool, **chain_params)
         source_results.append({
             "tool": chain_tool, "params": chain_params, "data": chain_result,
         })

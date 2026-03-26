@@ -5,9 +5,17 @@ Exposes Dogme/Nextflow job management as Model Context Protocol tools.
 This allows Cortex's LLM Agent to directly invoke job functions as part
 of its planning and reasoning process.
 """
+import asyncio
+import sys
 from typing import Optional
 import json
 import httpx
+
+from launchpad.script_execution import (
+    normalize_script_args,
+    resolve_allowlisted_script,
+    validate_script_working_directory,
+)
 
 
 def _describe_exception(exc: Exception) -> str:
@@ -16,6 +24,36 @@ def _describe_exception(exc: Exception) -> str:
     if message:
         return message
     return f"{type(exc).__name__}: {exc!r}"
+
+
+def _truncate_script_output(text: str, limit: int = 20000) -> str:
+    """Keep synchronous script tool responses bounded for chat display."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n... [truncated]"
+
+
+def _extract_script_dataframe(stdout_text: str) -> dict | None:
+    """Parse structured JSON stdout from utility scripts into a dataframe payload."""
+    if not stdout_text.strip():
+        return None
+
+    try:
+        parsed = json.loads(stdout_text)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+    if not isinstance(parsed.get("columns"), list) or not isinstance(parsed.get("data"), list):
+        return None
+
+    return {
+        "columns": parsed["columns"],
+        "data": parsed["data"],
+        "row_count": int(parsed.get("row_count") or len(parsed["data"])),
+        "metadata": parsed.get("metadata") or {},
+    }
 
 class LaunchpadMCPTools:
     """MCP tools for Launchpad job management."""
@@ -37,6 +75,73 @@ class LaunchpadMCPTools:
         if self._api_secret:
             headers["X-Internal-Secret"] = self._api_secret
         return headers
+
+    async def run_allowlisted_script(
+        self,
+        script_id: Optional[str] = None,
+        script_path: Optional[str] = None,
+        script_args: Optional[list[str]] = None,
+        script_working_directory: Optional[str] = None,
+        timeout_seconds: Optional[float] = 60.0,
+    ) -> dict:
+        """Run an allowlisted Python utility script synchronously and return its output."""
+
+        resolved_script = resolve_allowlisted_script(
+            script_id=script_id,
+            script_path=script_path,
+        )
+        normalized_args = normalize_script_args(script_args)
+        script_cwd = validate_script_working_directory(script_working_directory)
+        if script_cwd is None:
+            script_cwd = resolved_script.script_path.parent
+
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(resolved_script.script_path),
+            *normalized_args,
+            cwd=str(script_cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            if timeout_seconds and timeout_seconds > 0:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
+            else:
+                stdout, stderr = await process.communicate()
+        except asyncio.TimeoutError:
+            process.kill()
+            stdout, stderr = await process.communicate()
+            return {
+                "success": False,
+                "error": "Script timed out",
+                "script_id": resolved_script.script_id,
+                "script_path": str(resolved_script.script_path),
+                "script_args": normalized_args,
+                "script_working_directory": str(script_cwd),
+                "stdout": _truncate_script_output(stdout.decode("utf-8", errors="replace")),
+                "stderr": _truncate_script_output(stderr.decode("utf-8", errors="replace")),
+            }
+
+        stdout_text = _truncate_script_output(stdout.decode("utf-8", errors="replace"))
+        stderr_text = _truncate_script_output(stderr.decode("utf-8", errors="replace"))
+        success = process.returncode == 0
+        result = {
+            "success": success,
+            "script_id": resolved_script.script_id,
+            "script_path": str(resolved_script.script_path),
+            "script_args": normalized_args,
+            "script_working_directory": str(script_cwd),
+            "exit_code": process.returncode,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+        }
+        dataframe = _extract_script_dataframe(stdout_text)
+        if dataframe is not None:
+            result["dataframe"] = dataframe
+        if not success:
+            result["error"] = f"Script exited with code {process.returncode}"
+        return result
     
     async def submit_dogme_job(
         self,
@@ -779,6 +884,20 @@ TOOL_REGISTRY = {
         }
     },
     "get_job_logs": {
+        "run_allowlisted_script": {
+            "description": "Run a small allowlisted local Python utility script synchronously and return stdout/stderr directly. Use for lightweight helper scripts, not for Dogme/Nextflow workflows.",
+            "tool_function": "run_allowlisted_script",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "script_id": {"type": "string", "description": "Explicit allowlisted script identifier"},
+                    "script_path": {"type": "string", "description": "Explicit script path under allowlisted roots"},
+                    "script_args": {"type": "array", "items": {"type": "string"}, "description": "Arguments passed to the script"},
+                    "script_working_directory": {"type": "string", "description": "Optional working directory for resolving relative input files"},
+                    "timeout_seconds": {"type": "number", "description": "Optional timeout in seconds (default: 60)"}
+                }
+            }
+        },
         "description": "Get recent log entries for a job",
         "tool_function": "get_job_logs",
         "input_schema": {

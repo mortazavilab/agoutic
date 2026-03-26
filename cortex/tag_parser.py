@@ -66,6 +66,13 @@ _PLOT_KEYWORDS = frozenset({
     "box plot", "heatmap", "visualize", "graph", "distribution",
 })
 
+_DEFERRED_PLOT_RE = re.compile(
+    r"\b(?:plot(?:ted|ting)?|chart(?:ed|ing)?|visualiz(?:e|ed|ing)|graph(?:ed|ing)?)\b.*\b(?:later|later on|eventually)\b"
+    r"|\b(?:for|to enable|so (?:it|they|the data) can be|can be|could be)\s+"
+    r"(?:plot(?:ted|ting)?|chart(?:ed|ing)?|visualiz(?:ed|ing)?|graph(?:ed|ing)?)\b",
+    re.IGNORECASE,
+)
+
 _PLOT_CODE_RE = re.compile(
     r'```python.*?(?:matplotlib|plt\.|plotly|px\.|fig\.|\.pie|\.bar|\.hist|\.scatter)',
     re.DOTALL | re.IGNORECASE,
@@ -318,7 +325,7 @@ def apply_plot_code_fallback(
 
     Returns ``(updated_plot_specs, updated_response)``.
     """
-    user_wants_plot = any(kw in user_message.lower() for kw in _PLOT_KEYWORDS)
+    user_wants_plot = user_wants_plot_intent(user_message)
     has_code_plot = bool(_PLOT_CODE_RE.search(corrected_response))
     specs_invalid = plot_specs and all(s.get("df_id") is None for s in plot_specs)
     specs_missing = user_wants_plot and not plot_specs
@@ -392,7 +399,7 @@ def suppress_tags_for_plot_command(
     Returns ``(data_call_matches, legacy_encode_matches,
     legacy_analysis_matches, needs_approval, corrected_response)``.
     """
-    user_wants_plot = any(kw in user_message.lower() for kw in _PLOT_KEYWORDS)
+    user_wants_plot = user_wants_plot_intent(user_message)
     if not (user_wants_plot and plot_specs and any(s.get("df_id") is not None for s in plot_specs)):
         return data_call_matches, legacy_encode_matches, legacy_analysis_matches, needs_approval, corrected_response
 
@@ -456,6 +463,20 @@ def fix_hallucinated_accessions(clean_markdown: str, user_message: str) -> str:
     return clean_markdown
 
 
+def user_wants_plot_intent(message: str) -> bool:
+    """Return True only for an immediate plot/chart request.
+
+    Mentions like "so this can be plotted later" should not trigger chart
+    generation in the current turn.
+    """
+    lowered = (message or "").lower()
+    if not any(kw in lowered for kw in _PLOT_KEYWORDS):
+        return False
+    if _DEFERRED_PLOT_RE.search(message or ""):
+        return False
+    return True
+
+
 def user_wants_plot(message: str) -> bool:
-    """Return True if the user's message indicates a plot/chart request."""
-    return any(kw in message.lower() for kw in _PLOT_KEYWORDS)
+    """Backward-compatible alias for immediate plot intent checks."""
+    return user_wants_plot_intent(message)

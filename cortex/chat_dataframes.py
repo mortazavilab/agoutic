@@ -22,6 +22,7 @@ from atlas.config import CONSORTIUM_REGISTRY
 from common.logging_config import get_logger
 from cortex.config import SERVICE_REGISTRY
 from cortex.llm_validators import get_block_payload
+from cortex.tag_parser import user_wants_plot
 
 logger = get_logger(__name__)
 
@@ -70,6 +71,9 @@ def extract_embedded_dataframes(
             if tool in ("parse_csv_file", "parse_bed_file") and "data" in r:
                 _extract_file_parse(r, embedded)
 
+            elif tool == "run_allowlisted_script" and "data" in r:
+                _extract_script_dataframe(r, embedded)
+
             elif tool in _FILE_TOOLS and "data" in r:
                 _extract_files_by_type(r, user_message, embedded)
 
@@ -90,6 +94,22 @@ def _extract_file_parse(r: dict, embedded: dict) -> None:
         "data": rd["data"],
         "row_count": rd.get("row_count", len(rd["data"])),
         "metadata": rd.get("metadata", {}),
+    }
+
+
+def _extract_script_dataframe(r: dict, embedded: dict) -> None:
+    rd = r["data"]
+    dataframe = rd.get("dataframe") if isinstance(rd, dict) else None
+    if not (isinstance(dataframe, dict) and dataframe.get("data")):
+        return
+
+    metadata = dict(dataframe.get("metadata") or {})
+    label = metadata.get("label") or rd.get("script_id") or "script_result"
+    embedded[label] = {
+        "columns": dataframe.get("columns", []),
+        "data": dataframe["data"],
+        "row_count": dataframe.get("row_count", len(dataframe["data"])),
+        "metadata": metadata,
     }
 
 
@@ -296,9 +316,9 @@ def rebind_plots_to_new_df(
     Modifies *plot_specs* in place.
     """
     user_explicit_df = re.search(r'\bDF\s*(\d+)\b', user_message, re.IGNORECASE)
-    user_wants_plot = any(kw in user_message.lower() for kw in _PLOT_KEYWORDS)
+    user_requested_plot = user_wants_plot(user_message)
 
-    if not (user_wants_plot and plot_specs and not user_explicit_df):
+    if not (user_requested_plot and plot_specs and not user_explicit_df):
         return
 
     newest_turn_df_id = None
@@ -344,30 +364,27 @@ def post_df_assignment_plot_fallback(
     Also fixes any specs with ``df_id=None`` that can now be resolved.
     Modifies *plot_specs* in place.
     """
-    user_wants_plot = any(kw in user_message.lower() for kw in _PLOT_KEYWORDS)
+    user_requested_plot = user_wants_plot(user_message)
     has_valid_plot = plot_specs and any(
         s.get("df_id") is not None for s in plot_specs
     )
 
-    if user_wants_plot and not has_valid_plot and embedded_dataframes:
+    if user_requested_plot and not has_valid_plot and embedded_dataframes:
         newest_df_id = None
+        newest_df_data = None
         for edf_val in embedded_dataframes.values():
             edf_id = edf_val.get("metadata", {}).get("df_id")
             if isinstance(edf_id, int):
                 if newest_df_id is None or edf_id > newest_df_id:
                     newest_df_id = edf_id
+                    newest_df_data = edf_val
 
         if newest_df_id is not None:
-            auto_type = _detect_chart_type(user_message)
-            auto_x = _detect_x_column(user_message)
-            auto_post_spec: dict = {
-                "type": auto_type,
-                "df_id": newest_df_id,
-                "df": f"DF{newest_df_id}",
-                "agg": "count",
-            }
-            if auto_x:
-                auto_post_spec["x"] = auto_x
+            auto_post_spec = _build_fallback_plot_spec(
+                newest_df_id,
+                newest_df_data or {},
+                user_message,
+            )
             auto_post_spec.update(extract_plot_style_params(user_message))
             plot_specs.append(auto_post_spec)
             logger.info("Post-DF-assignment plot fallback generated",
@@ -519,6 +536,69 @@ def _detect_chart_type(message: str) -> str:
     if "histogram" in msg or "distribution" in msg:
         return "histogram"
     return "bar"
+
+
+def _build_fallback_plot_spec(
+    df_id: int,
+    df_data: dict,
+    user_message: str,
+) -> dict:
+    """Choose a sensible fallback plot spec for the newest dataframe."""
+    specialized = _build_specialized_dataframe_plot_spec(df_data)
+    if specialized is not None:
+        specialized["df_id"] = df_id
+        specialized["df"] = f"DF{df_id}"
+        return specialized
+
+    auto_type = _detect_chart_type(user_message)
+    auto_x = _detect_x_column(user_message)
+    auto_post_spec: dict = {
+        "type": auto_type,
+        "df_id": df_id,
+        "df": f"DF{df_id}",
+        "agg": "count",
+    }
+    if auto_x:
+        auto_post_spec["x"] = auto_x
+    return auto_post_spec
+
+
+def _build_specialized_dataframe_plot_spec(df_data: dict) -> dict | None:
+    """Return a chart spec for known dataframe shapes, if applicable."""
+    metadata = df_data.get("metadata") or {}
+    columns = df_data.get("columns") or []
+    rows = df_data.get("data") or []
+
+    is_bed_counts = (
+        metadata.get("kind") == "bed_chromosome_counts"
+        or all(col in columns for col in ("Chromosome", "Count"))
+    )
+    if not is_bed_counts:
+        return None
+
+    spec: dict = {
+        "type": "bar",
+        "x": "Chromosome",
+        "y": "Count",
+        "title": "Regions per Chromosome",
+    }
+
+    if _column_has_multiple_values(rows, "Genome"):
+        spec["color"] = "Genome"
+        spec["title"] = "Regions per Chromosome by Genome"
+    elif _column_has_multiple_values(rows, "Modification"):
+        spec["color"] = "Modification"
+        spec["title"] = "Regions per Chromosome by Modification"
+    elif _column_has_multiple_values(rows, "Sample"):
+        spec["color"] = "Sample"
+        spec["title"] = "Regions per Chromosome by Sample"
+
+    return spec
+
+
+def _column_has_multiple_values(rows: list[dict], column: str) -> bool:
+    values = {str(row.get(column, "")).strip() for row in rows if str(row.get(column, "")).strip()}
+    return len(values) > 1
 
 
 def _detect_x_column(message: str) -> str | None:

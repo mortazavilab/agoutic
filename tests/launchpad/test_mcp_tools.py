@@ -178,6 +178,73 @@ class TestSubmitDogmeJob:
         assert kwargs["json"]["script_args"] == ["--threads", "4"]
         assert kwargs["json"]["script_working_directory"] == "/opt/agoutic/scripts"
 
+
+class TestRunAllowlistedScript:
+    @pytest.mark.asyncio
+    async def test_run_allowlisted_script_returns_stdout(self, monkeypatch, tmp_path):
+        script_path = tmp_path / "count_bed.py"
+        script_path.write_text("print('chr1 | 5')\n")
+
+        class _FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"chr1 | 5\n", b"")
+
+        monkeypatch.setattr(
+            "launchpad.mcp_tools.resolve_allowlisted_script",
+            lambda **_kwargs: SimpleNamespace(script_id="analyze_job_results/count_bed", script_path=script_path.resolve()),
+        )
+        monkeypatch.setattr("launchpad.mcp_tools.normalize_script_args", lambda args: args or [])
+        monkeypatch.setattr("launchpad.mcp_tools.validate_script_working_directory", lambda _path: script_path.parent.resolve())
+        monkeypatch.setattr("launchpad.mcp_tools.asyncio.create_subprocess_exec", AsyncMock(return_value=_FakeProcess()))
+
+        tools = LaunchpadMCPTools("http://launchpad.local")
+        result = await tools.run_allowlisted_script(
+            script_id="analyze_job_results/count_bed",
+            script_args=["/tmp/example.bed"],
+        )
+
+        assert result["success"] is True
+        assert result["script_id"] == "analyze_job_results/count_bed"
+        assert result["script_args"] == ["/tmp/example.bed"]
+        assert "chr1 | 5" in result["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_run_allowlisted_script_extracts_dataframe_from_json_stdout(self, monkeypatch, tmp_path):
+        script_path = tmp_path / "count_bed.py"
+        script_path.write_text("print('ok')\n")
+        json_stdout = json.dumps({
+            "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+            "data": [{"Sample": "JamshidP", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7}],
+            "row_count": 1,
+            "metadata": {"label": "BED chromosome counts"},
+        })
+
+        class _FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return (json_stdout.encode("utf-8"), b"")
+
+        monkeypatch.setattr(
+            "launchpad.mcp_tools.resolve_allowlisted_script",
+            lambda **_kwargs: SimpleNamespace(script_id="analyze_job_results/count_bed", script_path=script_path.resolve()),
+        )
+        monkeypatch.setattr("launchpad.mcp_tools.normalize_script_args", lambda args: args or [])
+        monkeypatch.setattr("launchpad.mcp_tools.validate_script_working_directory", lambda _path: script_path.parent.resolve())
+        monkeypatch.setattr("launchpad.mcp_tools.asyncio.create_subprocess_exec", AsyncMock(return_value=_FakeProcess()))
+
+        tools = LaunchpadMCPTools("http://launchpad.local")
+        result = await tools.run_allowlisted_script(
+            script_id="analyze_job_results/count_bed",
+            script_args=["--json", "/tmp/example.bed"],
+        )
+
+        assert result["success"] is True
+        assert result["dataframe"]["row_count"] == 1
+        assert result["dataframe"]["metadata"]["label"] == "BED chromosome counts"
+
     @pytest.mark.asyncio
     async def test_stage_remote_sample_posts_expected_payload(self, monkeypatch):
         fake_client = FakeAsyncClient(

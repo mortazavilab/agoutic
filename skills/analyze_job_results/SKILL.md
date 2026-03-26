@@ -4,7 +4,7 @@
 
 This skill analyzes completed Dogme pipeline job results. It examines output files (txt, csv, bed) from completed jobs and generates QC reports, summaries, and statistical analyses.
 
-**⚠️ CRITICAL: This skill is for ANALYSIS ONLY. Do NOT submit new jobs. Do NOT call job submission endpoints. Only use the /analysis/* endpoints listed below.**
+**⚠️ CRITICAL: This skill is analysis-first. Do NOT submit new Dogme or Nextflow jobs. The only allowed execution exception is a local allowlisted utility script that inspects an existing BED file and returns per-chromosome counts. For normal result analysis, only use the /analysis/* endpoints listed below.**
 
 ## Skill Scope & Routing
 
@@ -14,6 +14,7 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 - **Routing to mode-specific analysis skills** (DNA/RNA/cDNA)
 - File discovery and categorization for any completed job
 - Initial QC overview before detailed interpretation
+- Counting BED regions per chromosome via the bundled allowlisted script when the user explicitly asks for chromosome counts from a BED file
 
 **Example questions:**
 - "Analyze job results for UUID xyz"
@@ -66,6 +67,111 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 * `work_dir`: (String) The workflow directory path of the completed job to analyze (preferred)
 * `run_uuid`: (String, Legacy) The UUID of the completed job — only used as fallback
 * `analysis_type`: (String, Optional) Type of analysis: "qc_report", "summary", "detailed", "files_only"
+* `bed_file_path`: (String, Optional) Absolute or workflow-relative BED file path when the user asks for chromosome-region counts
+* `modification_name`: (String, Optional) Modification token such as `inosine` or `m6A` when the user asks for modification counts by chromosome
+
+## Bundled Script: Count BED Regions per Chromosome
+
+Use the bundled helper script at `skills/analyze_job_results/scripts/count_bed.py` when the user asks to count BED regions per chromosome or to count a modification by chromosome from workflow BED files.
+
+Treat this as a local utility-script execution, not as a Dogme workflow submission.
+
+### When to use it
+
+Use this path for requests such as:
+- "Count BED regions by chromosome"
+- "How many regions are on each chromosome in this BED file?"
+- "Run the BED chromosome counter on this file"
+- "Count inosine modifications by chromosome"
+- "Count m6A modifications by chromosome"
+
+### Required information
+
+For explicit BED-file requests, ensure you have the BED file path.
+
+For modification-count requests, use the workflow's `bedMethyl` folder and match files named like:
+
+`<sample>.<genome>.plus.<modification>.filtered.bed`
+
+and
+
+`<sample>.<genome>.minus.<modification>.filtered.bed`
+
+Use both plus and minus files when both exist for the requested modification. If only one exists, use the one that exists.
+
+### Execution behavior
+
+Once a BED path is available:
+- Do NOT tell the user to run the script manually
+- Do NOT route to Dogme DNA/RNA/CDNA skills
+- Do NOT treat this like a Nextflow pipeline run
+- Do NOT request approval for this lightweight utility script
+- Do treat it as a local utility execution using Launchpad tool `run_allowlisted_script` and allowlisted script id `analyze_job_results/count_bed`
+
+### How the LLM should plan it
+
+Use a two-step plan when the user gives only a filename or workflow-relative BED path:
+
+1. Resolve the BED file with Analyzer:
+
+```text
+[[DATA_CALL: service=analyzer, tool=find_file, file_name=<bed_file_name>, work_dir=<work_dir>]]
+```
+
+2. After the BED file is resolved, run the utility script through Launchpad's dedicated script tool.
+
+If the BED path is already explicit and absolute, call Launchpad directly:
+
+```text
+[[DATA_CALL: service=launchpad, tool=run_allowlisted_script, script_id=analyze_job_results/count_bed, script_args=["--json", "<absolute_bed_file_path>"]]]
+```
+
+If you first call `find_file`, the runtime will automatically use the resolved `primary_path` to run `analyze_job_results/count_bed` for this BED chromosome-count intent.
+
+For modification-count requests such as "count inosine modifications by chromosome":
+
+1. List `.bed` files in the workflow's `bedMethyl` folder:
+
+```text
+[[DATA_CALL: service=analyzer, tool=list_job_files, work_dir=<work_dir>/bedMethyl, extensions=.bed, max_depth=1]]
+```
+
+2. The runtime will automatically select matching plus/minus files for the requested modification and run `analyze_job_results/count_bed` on all matches.
+
+3. The resulting dataframe will contain per-sample, per-genome, per-modification chromosome counts, with plus/minus files summed together within the same sample/genome/modification/chromosome bucket.
+
+### Exact script-run parameters
+
+When preparing the local utility execution, use these values:
+- `tool`: `run_allowlisted_script`
+- `script_id`: `analyze_job_results/count_bed`
+- `script_args`: `["--json", "<bed_file_path>", ...]`
+- `script_working_directory`: optional; omit unless a specific working directory is needed
+
+### Response format
+
+After the utility runs, summarize the result clearly and keep the dataframe available for plotting.
+
+Use this structure:
+
+```text
+BED chromosome counts for <bed_file_path or modification query>:
+
+<brief summary of the counts, explicitly noting the genomes represented>
+
+This was produced by the local allowlisted utility script `analyze_job_results/count_bed`, and the dataframe can be plotted later.
+```
+
+### Script behavior
+
+The script:
+- Reads the first BED column as the chromosome name
+- Counts one region per non-empty BED record
+- Accepts one or more BED files
+- Sums matching plus/minus BED files together when multiple files are provided
+- Tracks `Sample`, `Genome`, `Modification`, `Chromosome`, and `Count` in structured output
+- Ignores blank lines and header/meta lines beginning with `#`, `track`, or `browser`
+- Emits JSON dataframe output when `--json` is provided
 
 ## Plan Logic
 
@@ -291,7 +397,7 @@ User: "analyze job UUID xyz"
 [[SKILL_SWITCH_TO: run_dogme_cdna]]
 ```
 
-**CRITICAL: This is a READ-ONLY skill. Do NOT create approval gates. Do NOT submit jobs.**
+**CRITICAL: This is a READ-ONLY skill for normal analysis. The single exception is the local allowlisted BED-count utility described above, which should run directly through the dedicated script tool without approval and without Dogme/Nextflow submission semantics.**
 
 ### 3. File Discovery & Categorization
 
@@ -467,3 +573,23 @@ When presenting parsed CSV/TSV data with QC metrics, you MAY suggest plots to he
   `[[PLOT: type=heatmap, df=DFN, title=Metric Correlation Matrix]]`
 
 Replace `DFN` with the actual DF number. Only include these tags if the user asks for visualization or if a chart would be informative.
+
+## Plan Chains
+
+### count_bed_by_chromosome
+- description: Run the allowlisted BED chromosome-count utility on a specific BED file and keep the result as a dataframe
+- trigger: count|summarize|tally|show + bed + chromosome|chromosomes|chr
+- steps:
+  1. FIND_FILE: Resolve the BED file path in the current workflow when needed
+  2. RUN_SCRIPT: Run `analyze_job_results/count_bed` against the resolved BED file path
+  3. WRITE_SUMMARY: Return chromosome counts clearly to the user
+- auto_approve: true
+
+### count_modification_by_chromosome
+- description: Count a named modification by chromosome from the workflow's `bedMethyl` plus/minus BED files and keep the result as a dataframe
+- trigger: count|summarize|tally|show + <modification> + modifications + chromosome|chromosomes|chr
+- steps:
+  1. LIST_FILES: Inspect `<work_dir>/bedMethyl` for matching `plus` and `minus` BED files for the requested modification
+  2. RUN_SCRIPT: Run `analyze_job_results/count_bed` on all matching files, summing counts within each sample/genome/modification/chromosome
+  3. WRITE_SUMMARY: Return a concise summary and mention that the dataframe can be plotted later
+- auto_approve: true
