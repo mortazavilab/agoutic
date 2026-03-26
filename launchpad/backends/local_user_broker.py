@@ -16,6 +16,15 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_local_rsync_source(source: str) -> str:
+    """Append a trailing slash only when the local rsync source is a directory."""
+    candidate = Path(source).expanduser()
+    normalized = str(candidate)
+    if candidate.exists() and candidate.is_dir() and not normalized.endswith("/"):
+        return normalized + "/"
+    return normalized
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 SSH_KNOWN_HOSTS = os.getenv("SSH_KNOWN_HOSTS", "").strip() or None
@@ -136,23 +145,24 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
 
     if op == "rsync_transfer":
         profile = request["profile"]
-        source = request["source"]
+        source = _normalize_local_rsync_source(request["source"])
         dest = request["dest"]
         include_patterns = request.get("include_patterns") or []
         exclude_patterns = request.get("exclude_patterns") or []
         timeout_seconds = request.get("timeout_seconds")
+        copy_links = bool(request.get("copy_links"))
 
         cmd = [
             "rsync", "-avz", "--partial", "--progress",
             "-e", " ".join(_build_ssh_transport(profile)),
         ]
+        if copy_links:
+            cmd.append("--copy-links")
         for pattern in include_patterns:
             cmd.extend(["--include", pattern])
         for pattern in exclude_patterns:
             cmd.extend(["--exclude", pattern])
 
-        if not source.endswith("/"):
-            source += "/"
         cmd.extend([source, dest])
 
         logger.info(

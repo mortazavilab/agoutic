@@ -73,6 +73,12 @@ _HUMAN_BIOSAMPLES = frozenset([
 _ENCSR_PATTERN = re.compile(r'^ENCSR[A-Z0-9]{6}$', re.IGNORECASE)
 # Pattern for a valid ENCODE file accession (ENCFF...)
 _ENCFF_PATTERN = re.compile(r'^ENCFF[A-Z0-9]{6}$', re.IGNORECASE)
+# Standalone ENCFF mentions should reroute ENCODE tools; path fragments like
+# data/ENCFF921XAH.bam should not.
+_ENCFF_MENTION_PATTERN = re.compile(
+    r'(?<![A-Z0-9_./-])(ENCFF[A-Z0-9]{6})(?![A-Z0-9_.-])',
+    re.IGNORECASE,
+)
 # Substrings that indicate a string is an assay name rather than a biosample name.
 _ASSAY_INDICATORS = (
     "-seq", " seq", "chip", "atac", "clip", "wgbs", "rrbs", "hi-c",
@@ -150,6 +156,13 @@ def _find_experiment_for_file(file_accession: str,
             return experiments[0].upper()
 
     return None
+
+
+def _extract_standalone_encff_mentions(text: str) -> list[str]:
+    """Return ENCFF accessions that appear as standalone mentions, not paths."""
+    if not text:
+        return []
+    return [match.upper() for match in _ENCFF_MENTION_PATTERN.findall(text)]
 
 
 def _extract_encode_search_term(user_message: str) -> str | None:
@@ -305,7 +318,7 @@ def _correct_tool_routing(tool: str, params: dict, user_message: str,
         # hallucinated a completely different ENCSR accession for get_experiment.
         # Extract the ENCFF from the user message directly.
         if not file_acc:
-            encff_in_msg = re.findall(r'(ENCFF[A-Z0-9]{6})', msg_upper)
+            encff_in_msg = _extract_standalone_encff_mentions(user_message)
             if encff_in_msg:
                 file_acc = encff_in_msg[0]
                 logger.warning(
@@ -370,7 +383,7 @@ def _correct_tool_routing(tool: str, params: dict, user_message: str,
     # called is *not* get_file_metadata (e.g. LLM called get_files_by_type
     # with a hallucinated ENCSR instead).
     if tool not in ("get_file_metadata",):
-        encff_in_msg = re.findall(r'(ENCFF[A-Z0-9]{6})', user_message.upper())
+        encff_in_msg = _extract_standalone_encff_mentions(user_message)
         if encff_in_msg:
             file_acc = encff_in_msg[0]
             exp_acc = _find_experiment_for_file(file_acc, conversation_history)

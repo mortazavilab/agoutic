@@ -7,8 +7,43 @@ from cortex.config import AGOUTIC_DATA, GENOME_ALIASES
 from cortex.llm_validators import get_block_payload
 from cortex.models import Project, ProjectBlock, User
 from cortex.remote_orchestration import _prepare_remote_execution_params
+from cortex.user_jail import get_user_data_dir
 
 logger = get_logger(__name__)
+
+
+def _resolve_relative_input_path(
+    *,
+    cleaned_path: str,
+    owner_user: User | None,
+    owner_id: str | None,
+    project: Project | None,
+    project_id: str,
+):
+    """Resolve relative input paths against project or central user data roots."""
+    path_parts = cleaned_path.split("/", 1)
+    first_component = path_parts[0].lower() if path_parts else ""
+
+    username = getattr(owner_user, "username", None) if owner_user else None
+    project_slug = getattr(project, "slug", None) if project else None
+
+    if username and project_slug:
+        project_dir = AGOUTIC_DATA / "users" / username / project_slug
+    elif owner_id:
+        project_dir = AGOUTIC_DATA / "users" / owner_id / project_id
+    else:
+        return cleaned_path
+
+    project_candidate = project_dir / cleaned_path
+
+    if first_component == "data" and len(path_parts) == 2 and username:
+        central_candidate = get_user_data_dir(username) / path_parts[1]
+        if project_candidate.exists():
+            return str(project_candidate)
+        if central_candidate.exists():
+            return str(central_candidate)
+
+    return str(project_candidate)
 
 
 async def extract_job_parameters_from_conversation(session, project_id: str) -> dict:
@@ -292,13 +327,13 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
                 break
         if _owner_id:
             _owner_user = session.execute(select(User).where(User.id == _owner_id)).scalar_one_or_none()
-            _uname = getattr(_owner_user, "username", None) if _owner_user else None
-            _slug = _proj.slug if _proj else None
-            if _uname and _slug:
-                _project_dir = AGOUTIC_DATA / "users" / _uname / _slug
-            else:
-                _project_dir = AGOUTIC_DATA / "users" / _owner_id / project_id
-            params["input_directory"] = str(_project_dir / cleaned_path)
+            params["input_directory"] = _resolve_relative_input_path(
+                cleaned_path=cleaned_path,
+                owner_user=_owner_user,
+                owner_id=_owner_id,
+                project=_proj,
+                project_id=project_id,
+            )
         else:
             params["input_directory"] = cleaned_path
     elif _abs_paths:

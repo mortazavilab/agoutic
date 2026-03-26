@@ -1,5 +1,6 @@
 """Tests for launchpad/backends/local_auth_sessions.py."""
 
+import asyncio
 import errno
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from launchpad.backends.local_auth_sessions import LocalAuthSession, LocalAuthSessionManager, _launch_helper_via_su
-from launchpad.backends.local_user_broker import _build_ssh_transport
+from launchpad.backends.local_user_broker import _build_ssh_transport, _handle_request
 
 
 class DummyProcess:
@@ -82,6 +83,44 @@ def test_local_broker_transport_uses_fail_fast_publickey_options():
     assert "IdentitiesOnly=yes" in transport
     assert "ConnectTimeout=600" in transport
     assert "ConnectionAttempts=1" in transport
+
+
+@pytest.mark.asyncio
+async def test_local_broker_rsync_transfer_keeps_single_file_source(monkeypatch, tmp_path):
+    local_file = tmp_path / "ENCFF921XAH.bam"
+    local_file.write_text("BAM")
+    captured = {}
+
+    async def fake_run_subprocess(cmd, timeout_seconds=None):
+        captured["cmd"] = cmd
+        return {"ok": True, "stdout": "total size is 42\n", "stderr": "", "exit_status": 0}
+
+    monkeypatch.setattr("launchpad.backends.local_user_broker._run_subprocess", fake_run_subprocess)
+
+    result = await _handle_request(
+        {
+            "auth_token": "token-123",
+            "op": "rsync_transfer",
+            "profile": {
+                "ssh_host": "hpc3.example.edu",
+                "ssh_port": 22,
+                "ssh_username": "seyedam",
+                "auth_method": "key_file",
+                "key_file_path": "~/.ssh/id_ed25519",
+            },
+            "source": str(local_file),
+            "dest": "seyedam@hpc3.example.edu:/scratch/seyedam/agoutic/data/sample",
+            "copy_links": True,
+            "timeout_seconds": 30,
+        },
+        shutdown_event=asyncio.Event(),
+        auth_token="token-123",
+    )
+
+    assert result["ok"] is True
+    assert str(local_file) in captured["cmd"]
+    assert f"{local_file}/" not in captured["cmd"]
+    assert "--copy-links" in captured["cmd"]
 
 
 @pytest.mark.asyncio

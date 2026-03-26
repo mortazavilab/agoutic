@@ -140,7 +140,7 @@ class SlurmBackend:
             try:
                 if params.staged_remote_input_path:
                     logger.info(f"Reusing pre-staged input: {params.staged_remote_input_path}")
-                    cache_resolution = await self._reuse_pre_staged_input(run_uuid, params)
+                    cache_resolution = await self._reuse_pre_staged_input(run_uuid, params, conn=conn)
                 else:
                     logger.info("Resolving staging cache (fresh stage or reuse)")
                     cache_resolution = await self._resolve_staging_cache(run_uuid, params, profile, conn)
@@ -1032,13 +1032,19 @@ class SlurmBackend:
 
         data_cache_path = data_entry.remote_path if data_entry else target_data_remote
         data_exists = await conn.path_exists(data_cache_path)
+        data_has_symlinks = False
+        if data_exists:
+            data_has_symlinks = await self._remote_dir_contains_symlinks(conn, data_cache_path)
 
-        if data_entry is not None and data_exists:
+        if data_entry is not None and data_exists and not data_has_symlinks:
             data_status = "reused"
         else:
             if run_uuid:
                 await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
                 await self._update_job_transfer_state(run_uuid, "uploading_inputs")
+            if data_exists and data_has_symlinks:
+                await conn.run(f"rm -rf {shlex.quote(data_cache_path)}", check=True)
+                data_status = "refreshed"
             await conn.mkdir_p(data_cache_path)
             result = await self._transfer_manager.upload_inputs(
                 profile=profile,
@@ -1049,7 +1055,8 @@ class SlurmBackend:
                 if run_uuid:
                     await self._update_job_transfer_state(run_uuid, "transfer_failed")
                 raise RuntimeError(f"Input transfer failed: {result['message']}")
-            data_status = "staged"
+            if not (data_exists and data_has_symlinks):
+                data_status = "staged"
 
         await upsert_remote_input_cache_entry(
             user_id=params.user_id or user_key,
@@ -1105,6 +1112,16 @@ class SlurmBackend:
             "reference_cache_statuses": reference_statuses,
             "remote_reference_paths": remote_reference_paths,
         }
+
+    @staticmethod
+    async def _remote_dir_contains_symlinks(conn, path: str) -> bool:
+        """Return True when a staged cache directory contains symlink entries."""
+        try:
+            entries = await conn.list_dir(path)
+        except Exception as exc:
+            logger.warning("Failed to inspect remote cache directory for symlinks", path=path, error=str(exc))
+            return False
+        return any((entry.get("type") or "") == "symlink" for entry in entries)
 
     async def _collect_reference_asset_evidence(
         self,
@@ -1268,13 +1285,20 @@ class SlurmBackend:
 
         return evidence, reference_statuses
 
-    async def _reuse_pre_staged_input(self, run_uuid: str, params: SubmitParams) -> dict:
+    async def _reuse_pre_staged_input(self, run_uuid: str, params: SubmitParams, *, conn) -> dict:
         """Use a previously staged remote data path without restaging local inputs."""
         from launchpad.db import update_job_fields
 
         remote_input = (params.staged_remote_input_path or "").strip()
         if not remote_input:
             raise ValueError("staged_remote_input_path is required when reusing a staged remote sample")
+
+        if not await conn.path_exists(remote_input):
+            raise FileNotFoundError(f"Pre-staged remote input path no longer exists: {remote_input}")
+
+        if await self._remote_dir_contains_symlinks(conn, remote_input):
+            await conn.run(f"rm -rf {shlex.quote(remote_input)}", check=True)
+            raise RuntimeError(f"Pre-staged remote input cache contained symlinks and was removed: {remote_input}")
 
         await update_job_fields(
             run_uuid,

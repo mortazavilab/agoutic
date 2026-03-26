@@ -22,6 +22,15 @@ from launchpad.backends.ssh_manager import SSHConnection, SSHProfileData, resolv
 logger = get_logger(__name__)
 
 
+def _normalize_local_rsync_source(source: str) -> str:
+    """Append a trailing slash only when the local rsync source is a directory."""
+    candidate = Path(source).expanduser()
+    normalized = str(candidate)
+    if candidate.exists() and candidate.is_dir() and not normalized.endswith("/"):
+        return normalized + "/"
+    return normalized
+
+
 class FileTransferManager:
     """Handles file transfers between local and remote systems."""
 
@@ -33,6 +42,7 @@ class FileTransferManager:
         include_patterns: list[str] | None,
         exclude_patterns: list[str] | None,
         direction: str,
+        copy_links: bool,
     ) -> dict | None:
         """Use a local auth broker session when one is active for the profile."""
         if profile.auth_method != "key_file" or not profile.local_username or not profile.key_file_path:
@@ -58,6 +68,7 @@ class FileTransferManager:
                 "dest": dest,
                 "include_patterns": include_patterns or [],
                 "exclude_patterns": exclude_patterns or [],
+                "copy_links": copy_links,
                 "timeout_seconds": LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
             },
         )
@@ -92,13 +103,15 @@ class FileTransferManager:
                 "message": f"Local source path does not exist on the Launchpad server: {candidate}",
                 "bytes_transferred": 0,
             }
+        source = _normalize_local_rsync_source(local_path)
         return await self._rsync_transfer(
             profile=profile,
-            source=local_path,
+            source=source,
             dest=f"{profile.ssh_username}@{profile.ssh_host}:{remote_path}",
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             direction="upload",
+            copy_links=True,
         )
 
     async def download_outputs(
@@ -123,6 +136,7 @@ class FileTransferManager:
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             direction="download",
+            copy_links=False,
         )
 
     async def _rsync_transfer(
@@ -133,12 +147,16 @@ class FileTransferManager:
         include_patterns: list[str] | None,
         exclude_patterns: list[str] | None,
         direction: str,
+        copy_links: bool,
     ) -> dict:
         """Execute rsync transfer."""
         cmd = [
             "rsync", "-avz", "--partial", "--progress",
             "-e", self._build_ssh_command(profile),
         ]
+
+        if copy_links:
+            cmd.append("--copy-links")
 
         if include_patterns:
             for pat in include_patterns:
@@ -147,12 +165,6 @@ class FileTransferManager:
         if exclude_patterns:
             for pat in exclude_patterns:
                 cmd.extend(["--exclude", pat])
-
-        # Ensure source directory has trailing slash for contents transfer
-        if not source.endswith("/") and ":" in source:
-            source += "/"
-        elif not source.endswith("/"):
-            source += "/"
 
         cmd.extend([source, dest])
 
@@ -166,6 +178,7 @@ class FileTransferManager:
                 include_patterns=include_patterns,
                 exclude_patterns=exclude_patterns,
                 direction=direction,
+                copy_links=copy_links,
             )
             if broker_result is not None:
                 return broker_result

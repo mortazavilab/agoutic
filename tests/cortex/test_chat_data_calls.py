@@ -1433,6 +1433,107 @@ class TestBrowsingToolBypass:
         assert extracted.get("slurm_account") == "SEYEDAM_LAB"
         assert extracted.get("slurm_partition") == "standard"
 
+    def test_remote_run_with_encff_like_local_filename_keeps_launchpad_calls_and_creates_approval(self, SL, seed, tmp_path):
+        """Remote execution requests with ENCFF-like local filenames should not reroute launchpad calls to ENCODE."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            if tool_name == "list_ssh_profiles":
+                return [
+                    {
+                        "id": "profile-123",
+                        "nickname": "hpc3",
+                        "ssh_username": "agoutic",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                    }
+                ]
+            if tool_name == "get_slurm_defaults":
+                return {
+                    "found": True,
+                    "source": "ssh_profile_defaults",
+                    "account": "SEYEDAM_LAB",
+                    "partition": "standard",
+                    "selected_profile_defaults": {
+                        "ssh_profile_id": "profile-123",
+                        "nickname": "hpc3",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                    },
+                }
+            raise AssertionError(f"unexpected tool: {tool_name}")
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "I will prepare the remote submission.\n"
+                "[[DATA_CALL: service=launchpad, tool=list_ssh_profiles, user_id=<user_id>]]\n"
+                "[[DATA_CALL: service=launchpad, tool=get_slurm_defaults, user_id=<user_id>, profile_nickname=hpc3]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
+            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch(
+                "cortex.app._list_user_ssh_profiles",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "profile-123",
+                            "nickname": "hpc3",
+                            "ssh_username": "agoutic",
+                            "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                            "default_slurm_account": "SEYEDAM_LAB",
+                            "default_slurm_partition": "standard",
+                        }
+                    ]
+                ),
+            ),
+            patch(
+                "cortex.job_parameters.extract_job_parameters_from_conversation",
+                new=AsyncMock(
+                    return_value={
+                        "sample_name": "C2C12r1",
+                        "input_directory": "data/ENCFF921XAH.bam",
+                        "mode": "RNA",
+                        "reference_genome": ["mm39"],
+                        "ssh_profile_nickname": "hpc3",
+                        "execution_mode": "slurm",
+                    }
+                ),
+            ),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "Analyze the mouse RNA sample C2C12r1 using the file data/ENCFF921XAH.bam on hpc3",
+            skill="remote_execution",
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        assert payload.get("skill") == "remote_execution"
+        assert "I found the saved remote defaults needed to submit this run." in md
+        assert "Unknown tool" not in md
+        assert mock_mcp.call_tool.await_count == 2
+
+        gate = data.get("gate_block") or {}
+        gate_payload = gate.get("payload") or {}
+        assert gate_payload.get("skill") == "remote_execution"
+        assert gate_payload.get("gate_action") == "job"
+        extracted = gate_payload.get("extracted_params") or {}
+        assert extracted.get("input_directory") == "data/ENCFF921XAH.bam"
+        assert extracted.get("execution_mode") == "slurm"
+
 
 class TestDownloadWorkflow:
     def test_download_skill_skip_second_pass(self, SL, seed, tmp_path):

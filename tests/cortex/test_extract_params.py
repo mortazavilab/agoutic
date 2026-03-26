@@ -340,6 +340,51 @@ class TestInputType:
         assert result["input_type"] == "bam"
         assert result["entry_point"] == "remap"
 
+    @pytest.mark.asyncio
+    async def test_relative_data_path_prefers_central_user_data_when_project_copy_missing(self):
+        central_file = self.tmp / "users" / "tuser" / "data" / "ENCFF921XAH.bam"
+        central_file.parent.mkdir(parents=True, exist_ok=True)
+        central_file.write_text("BAM")
+
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {"text": "Analyze the mouse RNA sample C2C12r1 using the file data/ENCFF921XAH.bam locally"},
+        )
+
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.user_jail.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["input_directory"] == str(central_file)
+        assert result["input_directory_explicit"] is True
+
+    @pytest.mark.asyncio
+    async def test_relative_data_path_prefers_project_data_when_symlink_exists(self):
+        project_file = self.tmp / "users" / "tuser" / "test" / "data" / "ENCFF921XAH.bam"
+        project_file.parent.mkdir(parents=True, exist_ok=True)
+        project_file.write_text("BAM")
+
+        central_file = self.tmp / "users" / "tuser" / "data" / "ENCFF921XAH.bam"
+        central_file.parent.mkdir(parents=True, exist_ok=True)
+        central_file.write_text("CENTRAL")
+
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {"text": "Analyze the mouse RNA sample C2C12r1 using the file data/ENCFF921XAH.bam locally"},
+        )
+
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.user_jail.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["input_directory"] == str(project_file)
+
 
 class TestRemoteExecutionDetection:
     @pytest.fixture(autouse=True)

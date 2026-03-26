@@ -32,6 +32,66 @@ class _FakeWriteConn:
         self.run_calls.append((command, check))
 
 
+class _FakeStageConn:
+    def __init__(self, *, existing_paths=None, listings=None):
+        self.existing_paths = set(existing_paths or [])
+        self.listings = listings or {}
+        self.mkdir_calls = []
+        self.run_calls = []
+
+    async def path_exists(self, path):
+        return path in self.existing_paths
+
+    async def list_dir(self, path):
+        return self.listings.get(path, [])
+
+    async def mkdir_p(self, path):
+        self.mkdir_calls.append(path)
+        self.existing_paths.add(path)
+
+    async def run(self, command, check=False):
+        self.run_calls.append((command, check))
+        return SimpleNamespace(stdout="", stderr="", exit_status=0)
+
+
+@pytest.mark.asyncio
+async def test_reuse_pre_staged_input_raises_when_remote_path_missing():
+    backend = SlurmBackend()
+    params = SubmitParams(
+        staged_remote_input_path="/remote/agoutic/data/fingerprint123456",
+        reference_cache_path="/remote/agoutic/ref/mm39",
+        reference_genome=["mm39"],
+    )
+    fake_conn = _FakeStageConn(existing_paths=set())
+
+    with pytest.raises(FileNotFoundError, match="no longer exists"):
+        await backend._reuse_pre_staged_input("run-1", params, conn=fake_conn)
+
+
+@pytest.mark.asyncio
+async def test_reuse_pre_staged_input_removes_symlink_cache_and_raises():
+    backend = SlurmBackend()
+    remote_input = "/remote/agoutic/data/fingerprint123456"
+    params = SubmitParams(
+        staged_remote_input_path=remote_input,
+        reference_cache_path="/remote/agoutic/ref/mm39",
+        reference_genome=["mm39"],
+    )
+    fake_conn = _FakeStageConn(
+        existing_paths={remote_input},
+        listings={
+            remote_input: [
+                {"name": "ENCFF921XAH.bam", "type": "symlink", "size": 72},
+            ]
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="contained symlinks"):
+        await backend._reuse_pre_staged_input("run-1", params, conn=fake_conn)
+
+    assert (f"rm -rf {remote_input}", True) in fake_conn.run_calls
+
+
 @pytest.mark.asyncio
 async def test_list_remote_files_resolves_relative_path_under_remote_base(monkeypatch):
     backend = SlurmBackend()
@@ -250,3 +310,84 @@ async def test_write_remote_nextflow_config_uses_profile_cpu_defaults_separately
     assert captured["slurm_gpu_account"] == "SEYEDAM_LAB_GPU"
     assert captured["slurm_gpu_partition"] == "gpu"
     assert captured["apptainer_cache_dir"] == "/remote/agoutic/.nxf-apptainer-cache"
+
+
+@pytest.mark.asyncio
+async def test_stage_sample_inputs_refreshes_remote_cache_when_top_level_symlink_is_present(monkeypatch):
+    backend = SlurmBackend()
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        sample_name="C2C12r1",
+        mode="RNA",
+        input_directory="data/ENCFF921XAH.bam",
+        reference_genome=["mm39"],
+    )
+    data_cache_path = "/remote/agoutic/data/fingerprint123456"
+    fake_conn = _FakeStageConn(
+        existing_paths={data_cache_path},
+        listings={
+            data_cache_path: [
+                {"name": "ENCFF921XAH.bam", "type": "symlink", "size": 72},
+            ]
+        },
+    )
+    uploaded = []
+
+    async def fake_get_remote_reference_cache_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_get_remote_input_cache_entry(*_args, **_kwargs):
+        return SimpleNamespace(remote_path=data_cache_path)
+
+    async def fake_upsert_remote_reference_cache_entry(**_kwargs):
+        return None
+
+    async def fake_upsert_remote_input_cache_entry(**_kwargs):
+        return None
+
+    async def fake_upsert_remote_staged_sample(**_kwargs):
+        return None
+
+    async def fake_upload_inputs(**kwargs):
+        uploaded.append(kwargs)
+        return {"ok": True, "message": "Upload completed", "bytes_transferred": 123}
+
+    monkeypatch.setattr("launchpad.db.get_remote_reference_cache_entry", fake_get_remote_reference_cache_entry)
+    monkeypatch.setattr("launchpad.db.get_remote_input_cache_entry", fake_get_remote_input_cache_entry)
+    monkeypatch.setattr("launchpad.db.upsert_remote_reference_cache_entry", fake_upsert_remote_reference_cache_entry)
+    monkeypatch.setattr("launchpad.db.upsert_remote_input_cache_entry", fake_upsert_remote_input_cache_entry)
+    monkeypatch.setattr("launchpad.db.upsert_remote_staged_sample", fake_upsert_remote_staged_sample)
+    monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda _ref: None)
+    monkeypatch.setattr(backend, "_compute_input_fingerprint", lambda _path: "fingerprint1234567890")
+    monkeypatch.setattr(backend._transfer_manager, "upload_inputs", fake_upload_inputs)
+
+    result = await backend._stage_sample_inputs(
+        params=params,
+        profile=profile,
+        conn=fake_conn,
+        run_uuid=None,
+    )
+
+    assert result["data_cache_status"] == "refreshed"
+    assert uploaded == [
+        {
+            "profile": profile,
+            "local_path": "data/ENCFF921XAH.bam",
+            "remote_path": data_cache_path,
+        }
+    ]
+    assert (f"rm -rf {data_cache_path}", True) in fake_conn.run_calls

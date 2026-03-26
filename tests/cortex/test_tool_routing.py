@@ -180,3 +180,13 @@ class TestCorrectToolRouting:
         )
         assert tool == "list_job_files"
         assert params == {"work_dir": "/tmp/work"}
+
+    def test_path_embedded_encff_does_not_reroute_non_encode_tool(self):
+        """Local paths containing ENCFF-like filenames should not trigger ENCODE rerouting."""
+        tool, params = _correct_tool_routing(
+            "list_ssh_profiles",
+            {"user_id": "u-1"},
+            "Analyze the mouse RNA sample C2C12r1 using the file data/ENCFF921XAH.bam on hpc3",
+        )
+        assert tool == "list_ssh_profiles"
+        assert params == {"user_id": "u-1"}

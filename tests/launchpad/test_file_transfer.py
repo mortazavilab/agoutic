@@ -65,7 +65,42 @@ async def test_upload_prefers_active_broker_session(monkeypatch, tmp_path, key_f
     assert payload["source"] == f"{local_dir}/"
     assert payload["dest"] == "seyedam@hpc3.example.edu:/scratch/seyedam/agoutic/data/sample"
     assert payload["include_patterns"] == []
+    assert payload["copy_links"] is True
     assert payload["timeout_seconds"] == LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_upload_single_file_prefers_active_broker_session_without_trailing_slash(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_file = tmp_path / "ENCFF921XAH.bam"
+    local_file.write_text("BAM")
+    fake_session = SimpleNamespace(session_id="sess-1")
+    invoke_calls = []
+
+    class FakeSessionManager:
+        async def get_active_session(self, profile):
+            return fake_session
+
+        async def invoke(self, session, payload):
+            invoke_calls.append((session, payload))
+            return {"ok": True, "bytes_transferred": 321}
+
+    async def fail_subprocess(*args, **kwargs):
+        raise AssertionError("direct rsync subprocess should not be used when broker session is active")
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+    monkeypatch.setattr("launchpad.backends.file_transfer.asyncio.create_subprocess_exec", fail_subprocess)
+
+    result = await manager.upload_inputs(
+        profile=key_file_profile,
+        local_path=str(local_file),
+        remote_path="/scratch/seyedam/agoutic/data/sample",
+    )
+
+    assert result == {"ok": True, "message": "Upload completed", "bytes_transferred": 321}
+    _, payload = invoke_calls[0]
+    assert payload["source"] == str(local_file)
+    assert payload["copy_links"] is True
 
 
 @pytest.mark.asyncio
@@ -97,6 +132,7 @@ async def test_download_passes_include_patterns_to_broker_session(monkeypatch, t
     _, payload = invoke_calls[0]
     assert payload["include_patterns"] == ["annot/***", "*.html"]
     assert payload["exclude_patterns"] == ["*"]
+    assert payload["copy_links"] is False
 
 
 @pytest.mark.asyncio
@@ -123,6 +159,43 @@ async def test_upload_requires_unlock_when_key_unreadable_and_no_session(monkeyp
         "message": "No active local auth session for this profile. Unlock the profile in Remote Profiles first.",
         "bytes_transferred": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_upload_single_file_direct_rsync_omits_trailing_slash(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_file = tmp_path / "ENCFF921XAH.bam"
+    local_file.write_text("BAM")
+    captured = {}
+
+    class FakeSessionManager:
+        async def get_active_session(self, profile):
+            return None
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"total size is 123\n", b"")
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        return FakeProcess()
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+    monkeypatch.setattr("launchpad.backends.file_transfer.os.access", lambda path, mode: True)
+    monkeypatch.setattr("launchpad.backends.file_transfer.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await manager.upload_inputs(
+        profile=key_file_profile,
+        local_path=str(local_file),
+        remote_path="/scratch/seyedam/agoutic/data/sample",
+    )
+
+    assert result == {"ok": True, "message": "Upload completed", "bytes_transferred": 123}
+    assert str(local_file) in captured["cmd"]
+    assert f"{local_file}/" not in captured["cmd"]
+    assert "--copy-links" in captured["cmd"]
 
 
 def test_rsync_ssh_command_uses_fail_fast_publickey_transport(key_file_profile):

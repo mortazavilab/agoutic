@@ -161,6 +161,11 @@
   path, which caused approval-driven `submit_dogme_job` calls to fail with an
   HTTP 500 before job submission.
 
+- **Remote staging now supports single-file uploads** — brokered and direct
+  rsync input transfers no longer force a trailing slash onto local upload
+  sources, so approval-driven remote runs can stage a single BAM/FASTQ/POD5
+  file without rsync misclassifying it as a directory.
+
 - **Workflow-relative BED script chaining now resolves against the workflow
   directory** — `find_file` results that return relative BED paths are now
   resolved against analyzer `work_dir` before invoking the allowlisted script,
@@ -224,6 +229,10 @@
   modification-count auto-planning from `bedMethyl/`, JSON dataframe parsing
   from `run_allowlisted_script`, deferred-vs-immediate plot intent detection,
   and specialized fallback plot specs for BED chromosome-count dataframes.
+
+- Added transfer regressions covering single-file rsync uploads in both the
+  direct file-transfer path and the local-auth broker path used by remote
+  staging on locked key-file SSH profiles.
 
 ## [3.4.6] - 2026-03-23
 
