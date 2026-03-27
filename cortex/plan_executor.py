@@ -759,6 +759,7 @@ async def execute_plan(
     except PlanValidationError as err:
         logger.warning("Plan validation failed before execution", issues=err.to_dict()["issues"])
         plan_payload["status"] = "FAILED"
+        plan_payload["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
         plan_payload["validation_error"] = err.to_dict()
         _persist_step_update(session, workflow_block, plan_payload)
         if emit_progress:
@@ -767,11 +768,13 @@ async def execute_plan(
 
     # Mark plan as running
     plan_payload["status"] = "RUNNING"
+    plan_payload.setdefault("started_at", datetime.datetime.utcnow().isoformat() + "Z")
     _persist_step_update(session, workflow_block, plan_payload)
 
     steps = plan_payload.get("steps", [])
     if not steps:
         plan_payload["status"] = "COMPLETED"
+        plan_payload["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
         _persist_step_update(session, workflow_block, plan_payload)
         return
 
@@ -870,6 +873,7 @@ async def execute_plan(
                 logger.warning("Plan step failed", step_id=failure_step_id, error=failure_error)
                 plan_payload = replan_on_failure(session, workflow_block, failure_step_id)
                 plan_payload["status"] = "FAILED"
+                plan_payload["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
                 _persist_step_update(session, workflow_block, plan_payload)
                 return
 
@@ -912,6 +916,7 @@ async def execute_plan(
             logger.warning("Plan step failed", step_id=step_id, error=result.error)
             plan_payload = replan_on_failure(session, workflow_block, step_id)
             plan_payload["status"] = "FAILED"
+            plan_payload["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
             _persist_step_update(session, workflow_block, plan_payload)
             return
 
@@ -932,6 +937,7 @@ async def execute_plan(
     )
     if all_done:
         plan_payload["status"] = "COMPLETED"
+        plan_payload["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
         _persist_step_update(session, workflow_block, plan_payload)
         logger.info("Plan completed", title=plan_payload.get("title"))
 

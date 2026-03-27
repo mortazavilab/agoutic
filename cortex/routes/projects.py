@@ -403,8 +403,8 @@ async def get_project_stats(project_id: str, request: Request):
 
         # Query dogme_jobs for this project (shared DB, raw SQL)
         jobs_result = session.execute(text(
-            "SELECT run_uuid, sample_name, mode, status, submitted_at, "
-            "completed_at, nextflow_work_dir, user_id "
+            "SELECT run_uuid, sample_name, mode, status, submitted_at, started_at, "
+            "completed_at, nextflow_work_dir, remote_work_dir, execution_mode, user_id "
             "FROM dogme_jobs WHERE project_id = :pid ORDER BY submitted_at DESC"
         ), {"pid": project_id}).fetchall()
 
@@ -420,14 +420,39 @@ async def get_project_stats(project_id: str, request: Request):
                 total_failed += 1
             elif status == "RUNNING":
                 total_running += 1
+
+            submitted_at = row[4]
+            started_at = row[5]
+            completed_at = row[6]
+            work_dir = row[7] or row[8]
+            duration_seconds = None
+            start_dt = started_at or submitted_at
+            end_dt = completed_at or datetime.datetime.utcnow()
+            if start_dt:
+                try:
+                    duration_seconds = max(0, int((end_dt - start_dt).total_seconds()))
+                except Exception:
+                    duration_seconds = None
+
+            workflow_label = None
+            if work_dir:
+                try:
+                    workflow_label = Path(work_dir).name
+                except Exception:
+                    workflow_label = None
+
             jobs.append({
                 "run_uuid": row[0],
                 "sample_name": row[1],
                 "mode": row[2],
                 "status": status,
-                "submitted_at": str(row[4]) if row[4] else None,
-                "completed_at": str(row[5]) if row[5] else None,
-                "work_dir": row[6],
+                "submitted_at": str(submitted_at) if submitted_at else None,
+                "started_at": str(started_at) if started_at else None,
+                "completed_at": str(completed_at) if completed_at else None,
+                "duration_seconds": duration_seconds,
+                "work_dir": work_dir,
+                "workflow_label": workflow_label,
+                "execution_mode": row[9],
             })
 
         # Calculate disk usage — scan actual work directories from dogme_jobs

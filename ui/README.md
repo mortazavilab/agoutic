@@ -29,7 +29,7 @@ The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUT
 ```bash
 conda activate agoutic_core
 cd ui
-streamlit run app.py
+streamlit run appUI.py
 ```
 
 The UI will be available at `http://localhost:8501`.
@@ -59,7 +59,7 @@ The UI follows a strict **single-gateway** pattern: every request goes through C
 
 ## Pages
 
-### Main App ([app.py](app.py))
+### Main App ([appUI.py](appUI.py))
 - Chat with the AGOUTIC agent
 - Approval gates for job submission parameters
 - Live Nextflow job progress with task-level detail
@@ -80,4 +80,4 @@ The UI follows a strict **single-gateway** pattern: every request goes through C
 
 ## Development Notes
 
-See [app.py](app.py) and [auth.py](auth.py) for implementation details.
+See [appUI.py](appUI.py) and [auth.py](auth.py) for implementation details.

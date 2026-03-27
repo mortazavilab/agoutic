@@ -33,6 +33,7 @@ from cortex.app import (
     handle_rejection,
     download_after_approval,
     _auto_execute_plan_steps,
+    _ensure_workflow_plan_approval_gate,
     _initial_stage_parts,
     _build_auto_analysis_context,
     _build_static_analysis_summary,
@@ -664,8 +665,8 @@ class TestSubmitJobAfterApproval:
         with _patch_session(session_factory), \
              patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
              patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.workflow_submission.asyncio") as mock_aio:
-            mock_aio.create_task = MagicMock()
+             patch("cortex.workflow_submission.job_polling.poll_job_status", return_value=MagicMock()), \
+             patch("cortex.workflow_submission.asyncio.create_task", return_value=MagicMock()):
             await submit_job_after_approval("proj-bg", gate.id)
 
         sess = session_factory()
@@ -793,6 +794,79 @@ class TestSubmitJobAfterApproval:
         ).all()
         assert len(job_blocks) == 1
         assert job_blocks[0].status == "FAILED"
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_script_submission_marks_reconcile_run_step_running(self, session_factory, seed_data):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "plan_type": "reconcile_bams",
+                "status": "RUNNING",
+                "current_step_id": "run_reconcile",
+                "steps": [
+                    {
+                        "id": "approve_reconcile",
+                        "kind": "REQUEST_APPROVAL",
+                        "status": "COMPLETED",
+                    },
+                    {
+                        "id": "run_reconcile",
+                        "kind": "RUN_SCRIPT",
+                        "status": "PENDING",
+                    },
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        gate = _create_block_internal(
+            sess,
+            "proj-bg",
+            "APPROVAL_GATE",
+            {
+                "gate_action": "reconcile_bams",
+                "extracted_params": {
+                    "sample_name": "reconciled",
+                    "mode": "RNA",
+                    "input_directory": "/proj/reconcile",
+                    "run_type": "script",
+                    "script_id": "reconcile_bams/reconcile_bams",
+                    "script_args": ["--workflow-dir", "/proj/workflow2", "--json"],
+                    "workflow_block_id": workflow_block.id,
+                },
+                "model": "default",
+            },
+            status="APPROVED",
+            owner_id="u-bg",
+        )
+        sess.commit()
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "script-run-1",
+            "work_directory": "/work/script-run-1",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        sess = session_factory()
+        workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        workflow_payload = get_block_payload(workflow)
+        run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_reconcile")
+        assert run_step["status"] == "RUNNING"
+        assert run_step["run_uuid"] == "script-run-1"
+        job_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
+        assert any(get_block_payload(block).get("run_type") == "script" for block in job_blocks)
         sess.close()
 
     @pytest.mark.asyncio
@@ -1592,6 +1666,115 @@ async def test_auto_execute_plan_steps_blocks_when_remote_profile_locked(session
     sess.close()
 
 
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_builds_reconcile_specific_payload(session_factory, seed_data):
+    preflight_payload = {
+        "success": True,
+        "status": "preflight_ready",
+        "message": "Reconcile preflight validation passed. Ready for approval.",
+        "reference": "mm39",
+        "gtf": {
+            "path": "/refs/mm39.gtf",
+            "source": "default",
+        },
+        "inputs": {
+            "count": 2,
+            "bams": [
+                {"sample": "C2C12r1", "reference": "mm39", "path": "/proj/workflow2/annot/C2C12r1.mm39.annotated.bam"},
+                {"sample": "C2C12r3", "reference": "mm39", "path": "/proj/workflow3/annot/C2C12r3.mm39.annotated.bam"},
+            ],
+        },
+        "outputs": {
+            "output_prefix": "reconciled",
+            "output_root": "/proj/reconcile",
+            "artifacts": [],
+        },
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "skill": "reconcile_bams",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_reconcile",
+            "output_prefix": "reconciled",
+            "output_directory": "/proj/reconcile",
+            "steps": [
+                {
+                    "id": "preflight_reconcile",
+                    "kind": "CHECK_EXISTING",
+                    "title": "Validate reconcile inputs",
+                    "status": "COMPLETED",
+                    "result": [
+                        {
+                            "tool": "run_allowlisted_script",
+                            "result": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "stdout": json.dumps(preflight_payload),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "id": "approve_reconcile",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "depends_on": ["preflight_reconcile"],
+                },
+                {
+                    "id": "run_reconcile",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "depends_on": ["approve_reconcile"],
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": [
+                                    "--workflow-dir", "/proj/workflow2",
+                                    "--workflow-dir", "/proj/workflow3",
+                                    "--output-dir", "/proj/reconcile",
+                                    "--output-prefix", "reconciled",
+                                    "--json",
+                                ],
+                            },
+                        }
+                    ],
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["gate_action"] == "reconcile_bams"
+    assert gate_payload["skill"] == "reconcile_bams"
+    assert gate_payload["extracted_params"]["run_type"] == "script"
+    assert gate_payload["extracted_params"]["script_id"] == "reconcile_bams/reconcile_bams"
+    assert gate_payload["extracted_params"]["reference"] == "mm39"
+    assert gate_payload["extracted_params"]["annotation_gtf"] == "/refs/mm39.gtf"
+    assert gate_payload["extracted_params"]["bam_count"] == 2
+    sess.close()
+
+
 # ---------------------------------------------------------------------------
 # poll_job_status
 # ---------------------------------------------------------------------------
@@ -1717,6 +1900,91 @@ class TestPollJobStatus:
         call_args = mock_auto.call_args
         assert call_args[0][0] == "proj-bg"  # project_id
         assert call_args[0][1] == "auto-test"  # run_uuid
+
+    @pytest.mark.anyio
+    async def test_completes_reconcile_run_script_and_resumes_plan(self, session_factory, seed_data):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "plan_type": "reconcile_bams",
+                "status": "RUNNING",
+                "run_uuid": "script-test",
+                "current_step_id": "run_reconcile",
+                "steps": [
+                    {
+                        "id": "approve_reconcile",
+                        "kind": "REQUEST_APPROVAL",
+                        "status": "COMPLETED",
+                    },
+                    {
+                        "id": "run_reconcile",
+                        "kind": "RUN_SCRIPT",
+                        "status": "RUNNING",
+                    },
+                    {
+                        "id": "write_summary",
+                        "kind": "WRITE_SUMMARY",
+                        "status": "PENDING",
+                        "depends_on": ["run_reconcile"],
+                    },
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "script-test",
+                "work_directory": "/work/script-test",
+                "sample_name": "reconciled",
+                "mode": "RNA",
+                "run_type": "script",
+                "model": "default",
+                "workflow_plan_block_id": workflow_block.id,
+                "job_status": {"status": "PENDING"},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            {"status": "COMPLETED", "progress_percent": 100, "message": "Done"},
+            {"logs": []},
+        ])
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+             patch("cortex.job_polling._auto_trigger_analysis", new_callable=AsyncMock) as mock_auto, \
+             patch("cortex.job_polling.asyncio.create_task") as mock_create_task, \
+             patch("cortex.app.AgentEngine") as mock_engine_cls, \
+             patch("cortex.plan_executor.execute_plan", new=AsyncMock(return_value=None)):
+            mock_sleep.return_value = None
+            mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+            mock_engine = MagicMock()
+            mock_engine.model_name = "default"
+            mock_engine_cls.return_value = mock_engine
+            await poll_job_status("proj-bg", job_block.id, "script-test")
+
+        assert mock_auto.await_count == 0
+        assert mock_create_task.called
+
+        sess = session_factory()
+        workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        workflow_payload = get_block_payload(workflow)
+        run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_reconcile")
+        assert run_step["status"] == "COMPLETED"
+        sess.close()
 
     @pytest.mark.anyio
     async def test_waits_for_local_result_copy_before_auto_analysis(self, session_factory, seed_data):

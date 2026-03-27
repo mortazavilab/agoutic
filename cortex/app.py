@@ -881,10 +881,23 @@ async def update_block(
             gate_payload = get_block_payload(block)
             if gate_payload.get("gate_action") == "download":
                 asyncio.create_task(download_after_approval(block.project_id, block_id))
+            elif gate_payload.get("gate_action") == "reconcile_bams":
+                asyncio.create_task(workflow_submission.submit_job_after_approval(block.project_id, block_id))
+                if block.parent_id:
+                    _plan_block = _find_workflow_plan(session, block.project_id,
+                                                      workflow_block_id=block.parent_id)
+                    if _plan_block:
+                        _mark_workflow_plan_approval_complete(session, _plan_block, block.id)
+                        _advance_workflow_plan_to_step_kind(
+                            session,
+                            _plan_block,
+                            kind="RUN_SCRIPT",
+                            approval_gate_id=block.id,
+                        )
             else:
                 asyncio.create_task(workflow_submission.submit_job_after_approval(block.project_id, block_id))
             # If this gate belongs to a plan, resume plan execution after the job
-            if block.parent_id:
+            if block.parent_id and gate_payload.get("gate_action") != "reconcile_bams":
                 _plan_block = _find_workflow_plan(session, block.project_id,
                                                   workflow_block_id=block.parent_id)
                 if _plan_block:
@@ -1369,17 +1382,26 @@ async def _ensure_workflow_plan_approval_gate(
     if existing_gate is not None:
         return existing_gate
 
-    extracted_params = await job_parameters.extract_job_parameters_from_conversation(session, workflow_block.project_id)
-    gate_action = "job"
-    gate_skill = payload.get("skill") or "welcome"
-    if isinstance(extracted_params, dict):
-        gate_action = extracted_params.get("gate_action") or gate_action
-        if (extracted_params.get("execution_mode") or "local") == "slurm":
-            gate_skill = "remote_execution"
+    reconcile_context = _build_reconcile_plan_approval_context(workflow_block)
+    if reconcile_context is not None:
+        extracted_params = reconcile_context["extracted_params"]
+        gate_action = reconcile_context["gate_action"]
+        gate_skill = reconcile_context["skill"]
+        gate_label = reconcile_context["label"]
+        cache_preflight = reconcile_context.get("cache_preflight")
+    else:
+        extracted_params = await job_parameters.extract_job_parameters_from_conversation(session, workflow_block.project_id)
+        gate_action = "job"
+        gate_skill = payload.get("skill") or "welcome"
+        if isinstance(extracted_params, dict):
+            gate_action = extracted_params.get("gate_action") or gate_action
+            if (extracted_params.get("execution_mode") or "local") == "slurm":
+                gate_skill = "remote_execution"
 
-    gate_label = "Do you authorize the Agent to proceed with this plan?"
-    if gate_action == "remote_stage":
-        gate_label = "Do you authorize the Agent to stage these input files to the selected remote profile?"
+        gate_label = "Do you authorize the Agent to proceed with this plan?"
+        if gate_action == "remote_stage":
+            gate_label = "Do you authorize the Agent to stage these input files to the selected remote profile?"
+        cache_preflight = extracted_params.get("cache_preflight") if isinstance(extracted_params, dict) else None
 
     gate_block = _create_block_internal(
         session,
@@ -1388,7 +1410,7 @@ async def _ensure_workflow_plan_approval_gate(
         {
             "label": gate_label,
             "extracted_params": extracted_params,
-            "cache_preflight": extracted_params.get("cache_preflight") if isinstance(extracted_params, dict) else None,
+            "cache_preflight": cache_preflight,
             "gate_action": gate_action,
             "attempt_number": 1,
             "rejection_history": [],
@@ -1525,6 +1547,113 @@ def _mark_workflow_plan_approval_complete(session, workflow_block: ProjectBlock,
         payload["status"] = "RUNNING"
         _persist_workflow_plan(session, workflow_block, payload)
         return
+
+
+def _advance_workflow_plan_to_step_kind(
+    session,
+    workflow_block: ProjectBlock,
+    *,
+    kind: str,
+    approval_gate_id: str | None = None,
+) -> None:
+    """Move a workflow plan pointer to the next matching pending step."""
+    payload = get_block_payload(workflow_block)
+    for step in payload.get("steps", []):
+        if step.get("kind") != kind:
+            continue
+        if step.get("status") not in {"PENDING", "WAITING_APPROVAL"}:
+            continue
+        payload["current_step_id"] = step.get("id")
+        payload["status"] = "RUNNING"
+        if approval_gate_id:
+            step["approval_gate_id"] = approval_gate_id
+        _persist_workflow_plan(session, workflow_block, payload)
+        return
+
+
+def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict | None:
+    """Build a reconcile-specific approval gate payload from plan state."""
+    from cortex.plan_replanner import _extract_reconcile_preflight_payload
+
+    payload = get_block_payload(workflow_block)
+    if payload.get("plan_type") != "reconcile_bams":
+        return None
+
+    preflight_step = next(
+        (
+            step for step in payload.get("steps", [])
+            if step.get("kind") == "CHECK_EXISTING" and step.get("status") == "COMPLETED"
+        ),
+        None,
+    )
+    run_step = next(
+        (step for step in payload.get("steps", []) if step.get("kind") == "RUN_SCRIPT"),
+        None,
+    )
+    if not isinstance(run_step, dict):
+        return None
+
+    preflight_payload = _extract_reconcile_preflight_payload(preflight_step.get("result")) if isinstance(preflight_step, dict) else None
+    tool_call = next(
+        (
+            call for call in (run_step.get("tool_calls") or [])
+            if call.get("tool") == "run_allowlisted_script"
+        ),
+        None,
+    )
+    params = dict((tool_call or {}).get("params") or {})
+    script_args = params.get("script_args") if isinstance(params.get("script_args"), list) else []
+
+    output_root = payload.get("output_directory")
+    output_prefix = payload.get("output_prefix") or "reconciled"
+    reference = None
+    annotation_gtf = None
+    annotation_gtf_source = None
+    bam_inputs = []
+    if isinstance(preflight_payload, dict):
+        reference = preflight_payload.get("reference")
+        gtf_info = preflight_payload.get("gtf") or {}
+        if isinstance(gtf_info, dict):
+            annotation_gtf = gtf_info.get("path")
+            annotation_gtf_source = gtf_info.get("source")
+        inputs_info = preflight_payload.get("inputs") or {}
+        if isinstance(inputs_info, dict):
+            bam_inputs = inputs_info.get("bams") or []
+        outputs_info = preflight_payload.get("outputs") or {}
+        if isinstance(outputs_info, dict):
+            output_root = outputs_info.get("output_root") or output_root
+            output_prefix = outputs_info.get("output_prefix") or output_prefix
+
+    extracted_params = {
+        "plan_type": "reconcile_bams",
+        "workflow_block_id": workflow_block.id,
+        "run_type": "script",
+        "script_id": params.get("script_id"),
+        "script_path": params.get("script_path"),
+        "script_args": script_args,
+        "script_working_directory": params.get("script_working_directory"),
+        "sample_name": output_prefix,
+        "mode": "RNA",
+        "input_type": "bam",
+        "input_directory": output_root or ".",
+        "output_directory": output_root,
+        "output_prefix": output_prefix,
+        "reference_genome": [reference] if reference else [],
+        "reference": reference,
+        "annotation_gtf": annotation_gtf,
+        "annotation_gtf_source": annotation_gtf_source,
+        "bam_inputs": bam_inputs,
+        "bam_count": len(bam_inputs),
+        "preflight_summary": preflight_payload,
+        "gate_action": "reconcile_bams",
+    }
+    return {
+        "label": "Do you authorize the Agent to reconcile these annotated BAMs?",
+        "extracted_params": extracted_params,
+        "cache_preflight": None,
+        "gate_action": "reconcile_bams",
+        "skill": "reconcile_bams",
+    }
 
 
 # --- CHAT PROGRESS STATUS ---

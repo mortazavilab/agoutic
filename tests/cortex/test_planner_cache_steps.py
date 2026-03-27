@@ -60,7 +60,11 @@ def test_detect_plan_type_matches_reconcile_bams_request():
     assert _detect_plan_type("Reconcile annotated BAM files across workflows") == "reconcile_bams"
 
 
-def test_reconcile_bams_template_orders_reference_check_before_approval_and_run():
+def test_detect_plan_type_matches_reconcile_the_bams_request():
+    assert _detect_plan_type("I want to reconcile the bams of C2C12r1 and C2C12r3") == "reconcile_bams"
+
+
+def test_reconcile_bams_template_orders_preflight_before_approval_and_run():
     plan = _template_reconcile_bams({"work_dir": "/tmp/project", "output_prefix": "merged"})
     kinds = [step["kind"] for step in plan["steps"]]
 
@@ -68,19 +72,17 @@ def test_reconcile_bams_template_orders_reference_check_before_approval_and_run(
     assert kinds == [
         "LOCATE_DATA",
         "CHECK_EXISTING",
-        "CHECK_EXISTING",
         "REQUEST_APPROVAL",
         "RUN_SCRIPT",
         "WRITE_SUMMARY",
     ]
 
-    check_indices = [idx for idx, kind in enumerate(kinds) if kind == "CHECK_EXISTING"]
+    preflight_idx = kinds.index("CHECK_EXISTING")
     approve_idx = kinds.index("REQUEST_APPROVAL")
     run_idx = kinds.index("RUN_SCRIPT")
-    assert len(check_indices) == 2
-    assert check_indices[0] < check_indices[1] < approve_idx < run_idx
+    assert preflight_idx < approve_idx < run_idx
 
-    preflight_step = plan["steps"][check_indices[1]]
+    preflight_step = plan["steps"][preflight_idx]
     assert preflight_step["tool_calls"][0]["params"]["script_id"] == "reconcile_bams/reconcile_bams"
     preflight_args = preflight_step["tool_calls"][0]["params"]["script_args"]
     assert "--preflight-only" in preflight_args
@@ -89,6 +91,53 @@ def test_reconcile_bams_template_orders_reference_check_before_approval_and_run(
     assert run_step["requires_approval"] is True
     assert run_step["tool_calls"][0]["params"]["script_id"] == "reconcile_bams/reconcile_bams"
     assert "--json" in run_step["tool_calls"][0]["params"]["script_args"]
+
+
+def test_reconcile_bams_template_locate_step_uses_workflow_annot_dirs():
+    plan = _template_reconcile_bams(
+        {
+            "workflow_dirs": ["/tmp/workflow2", "/tmp/workflow3"],
+            "output_prefix": "merged",
+        }
+    )
+
+    locate_step = plan["steps"][0]
+    assert locate_step["kind"] == "LOCATE_DATA"
+    assert locate_step["tool_calls"] == [
+        {
+            "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": {
+                "work_dir": "/tmp/workflow2/annot",
+                "extensions": ".bam",
+                "max_depth": 1,
+            },
+        },
+        {
+            "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": {
+                "work_dir": "/tmp/workflow3/annot",
+                "extensions": ".bam",
+                "max_depth": 1,
+            },
+        },
+    ]
+
+
+def test_reconcile_bams_template_defaults_output_directory_to_common_workflow_parent():
+    plan = _template_reconcile_bams(
+        {
+            "workflow_dirs": ["/tmp/project/workflow2", "/tmp/project/workflow3"],
+            "output_prefix": "merged",
+        }
+    )
+
+    assert plan["output_directory"] == "/tmp/project"
+    preflight_args = plan["steps"][1]["tool_calls"][0]["params"]["script_args"]
+    run_args = plan["steps"][3]["tool_calls"][0]["params"]["script_args"]
+    assert ["--output-dir", "/tmp/project"] == preflight_args[preflight_args.index("--output-dir"):preflight_args.index("--output-dir") + 2]
+    assert ["--output-dir", "/tmp/project"] == run_args[run_args.index("--output-dir"):run_args.index("--output-dir") + 2]
 
 
 def test_classify_request_marks_remote_stage_as_multistep():
@@ -124,6 +173,17 @@ def test_classify_request_marks_summarize_results_as_multistep():
     ) == "MULTI_STEP"
 
 
+def test_classify_request_marks_reconcile_the_bams_as_multistep():
+    class _State:
+        pass
+
+    assert classify_request(
+        "I want to reconcile the bams of C2C12r1 and C2C12r3",
+        "run_dogme_rna",
+        _State(),
+    ) == "MULTI_STEP"
+
+
 def test_extract_plan_params_keeps_remote_stage_sample_name_and_path():
     params = _extract_plan_params(
         "Stage the mouse cDNA sample called Jamshid at /data/pod5 on hpc3",
@@ -154,6 +214,52 @@ def test_extract_plan_params_reconcile_annotation_gtf():
     )
 
     assert params["annotation_gtf"] == "/tmp/manual.GRCh38.annotation.gtf"
+
+
+def test_extract_plan_params_reconcile_named_workflows_from_state():
+    params = _extract_plan_params(
+        "I want to reconcile the bams of C2C12r1 and C2C12r3",
+        ConversationState(
+            active_skill="run_dogme_rna",
+            active_project="proj-1",
+            workflows=[
+                {"sample_name": "C2C12r1", "work_dir": "/tmp/C2C12r1"},
+                {"sample_name": "C2C12r2", "work_dir": "/tmp/C2C12r2"},
+                {"sample_name": "C2C12r3", "work_dir": "/tmp/C2C12r3"},
+            ],
+        ),
+        "reconcile_bams",
+    )
+
+    assert params["workflow_dirs"] == ["/tmp/C2C12r1", "/tmp/C2C12r3"]
+
+
+def test_extract_plan_params_reconcile_workflow_qualified_names_from_state():
+    params = _extract_plan_params(
+        "I want to reconcile the bams of C2C12r1 in workflow2 and C2C12r3 in workflow3",
+        ConversationState(
+            active_skill="run_dogme_rna",
+            active_project="proj-1",
+            workflows=[
+                {"sample_name": "C2C12r1", "work_dir": "/tmp/workflow2"},
+                {"sample_name": "C2C12r2", "work_dir": "/tmp/workflow9"},
+                {"sample_name": "C2C12r3", "work_dir": "/tmp/workflow3"},
+            ],
+        ),
+        "reconcile_bams",
+    )
+
+    assert params["workflow_dirs"] == ["/tmp/workflow2", "/tmp/workflow3"]
+
+
+def test_extract_plan_params_reconcile_does_not_treat_to_reconcile_as_output_dir():
+    params = _extract_plan_params(
+        "I want to reconcile the bams of C2C12r1 in workflow2 and C2C12r3 in workflow3",
+        ConversationState(active_skill="run_dogme_rna", active_project="proj-1"),
+        "reconcile_bams",
+    )
+
+    assert "output_directory" not in params
 
 
 def test_compose_plan_fragments_remaps_ids_and_dependencies():

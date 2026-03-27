@@ -14,7 +14,7 @@ from cortex.db import SessionLocal
 from cortex.db_helpers import _create_block_internal, save_conversation_message
 from cortex.llm_validators import get_block_payload
 from cortex.models import ProjectBlock
-from cortex.remote_orchestration import _find_workflow_plan, _set_workflow_step_status
+from cortex.remote_orchestration import _find_workflow_plan, _resolve_workflow_step_id, _set_workflow_step_status
 from cortex.task_service import sync_project_tasks
 
 logger = get_logger(__name__)
@@ -98,18 +98,36 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
 
                         workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
                         if workflow_block is not None:
+                            workflow_payload = get_block_payload(workflow_block)
+                            run_step_id = _resolve_workflow_step_id(
+                                workflow_payload,
+                                "run_dogme",
+                                kinds=("RUN_SCRIPT",),
+                            )
                             _set_workflow_step_status(
                                 session,
                                 workflow_block,
-                                "run_dogme",
+                                run_step_id or "run_dogme",
                                 "COMPLETED" if job_status == "COMPLETED" else "FAILED",
                                 extra={"run_uuid": run_uuid, "block_id": block_id},
                             )
 
                         # On completion, auto-trigger analysis
-                        if job_status == "COMPLETED":
+                        if job_status == "COMPLETED" and payload.get("run_type") != "script":
                             await _auto_trigger_analysis(
                                 project_id, run_uuid, payload, block.owner_id
+                            )
+                        elif job_status == "COMPLETED" and workflow_block is not None and payload.get("run_type") == "script":
+                            from cortex.app import _auto_execute_plan_steps
+
+                            user_stub = type("UserStub", (), {"id": block.owner_id})()
+                            asyncio.create_task(
+                                _auto_execute_plan_steps(
+                                    project_id,
+                                    workflow_block.id,
+                                    user_stub,
+                                    payload.get("model", "default"),
+                                )
                             )
 
                         _job_done = True

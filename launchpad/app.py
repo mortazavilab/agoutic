@@ -92,6 +92,28 @@ def _effective_job_work_directory(job) -> str | None:
         return local_work_dir
     return remote_work_dir or local_work_dir
 
+
+def _job_timing_payload(job) -> dict[str, str | int | None]:
+    submitted_at = job.submitted_at.isoformat() if job.submitted_at else None
+    started_at = job.started_at.isoformat() if job.started_at else None
+    completed_at = job.completed_at.isoformat() if job.completed_at else None
+
+    duration_seconds = None
+    start_dt = job.started_at or job.submitted_at
+    end_dt = job.completed_at or datetime.utcnow()
+    if start_dt:
+        try:
+            duration_seconds = max(0, int((end_dt - start_dt).total_seconds()))
+        except Exception:
+            duration_seconds = None
+
+    return {
+        "submitted_at": submitted_at,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "duration_seconds": duration_seconds,
+    }
+
 # Internal API secret validation middleware
 class InternalSecretMiddleware(BaseHTTPMiddleware):
     """
@@ -754,6 +776,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "execution_mode": "local",
                 "run_stage": job.run_stage,
                 "work_directory": job.nextflow_work_dir,
+                **_job_timing_payload(job),
             }
         
         terminal_statuses = (JobStatus.DELETED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
@@ -772,6 +795,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "message": job.error_message or f"Job {job.status.lower()}.",
                 "tasks": {},
                 "work_directory": work_directory,
+                **_job_timing_payload(job),
             }
             if job.execution_mode == "slurm":
                 base_payload.update(
@@ -803,6 +827,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "result_destination": status_data.result_destination,
                 "ssh_profile_nickname": status_data.ssh_profile_nickname,
                 "work_directory": status_data.work_directory,
+                **_job_timing_payload(job),
             }
 
         # Get detailed status including tasks from check_status
@@ -818,6 +843,8 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             "message": status_data.get("message", job.error_message or f"Status: {job.status}"),
             "tasks": status_data.get("tasks", {}),
             "execution_mode": "local",
+            "work_directory": job.nextflow_work_dir,
+            **_job_timing_payload(job),
         }
     
     finally:

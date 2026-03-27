@@ -26,6 +26,40 @@ user = require_auth(API_URL)
 
 section_header("Projects Dashboard", "Project state, activity, jobs, and storage at a glance", icon="📁")
 
+
+def _format_timestamp(raw_value: str | None) -> str:
+    if not raw_value:
+        return "—"
+    try:
+        return datetime.fromisoformat(str(raw_value).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(raw_value)[:16] or "—"
+
+
+def _format_duration(duration_seconds: int | None) -> str:
+    if duration_seconds is None:
+        return "—"
+    total = max(int(duration_seconds), 0)
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _status_badge(status: str) -> str:
+    normalized = (status or "UNKNOWN").upper()
+    return {
+        "COMPLETED": "✅ Succeeded",
+        "FAILED": "❌ Failed",
+        "RUNNING": "⏳ Running",
+        "PENDING": "⏳ Pending",
+        "CANCELLED": "🛑 Cancelled",
+        "DELETED": "🗑️ Deleted",
+    }.get(normalized, f"❓ {normalized.title()}")
+
 # ── Disk Usage Summary ───────────────────────────────────────────────
 try:
     disk_resp = make_authenticated_request("GET", f"{API_URL}/user/disk-usage", timeout=5)
@@ -320,13 +354,15 @@ with tab_jobs:
                 job_rows = []
                 for j in jobs:
                     status = j.get("status", "UNKNOWN")
-                    emoji = {"COMPLETED": "✅", "RUNNING": "⏳", "FAILED": "❌"}.get(status, "❓")
                     job_rows.append({
-                        "Status": f"{emoji} {status}",
+                        "Status": _status_badge(status),
                         "Sample": j.get("sample_name", "—"),
+                        "Workflow": j.get("workflow_label", "—") or "—",
                         "Mode": j.get("mode", "—"),
                         "UUID": j.get("run_uuid", "—"),
-                        "Created": (j.get("created_at") or "")[:16],
+                        "Submitted": _format_timestamp(j.get("submitted_at")),
+                        "Started": _format_timestamp(j.get("started_at")),
+                        "Duration": _format_duration(j.get("duration_seconds")),
                     })
                 st.dataframe(
                     pd.DataFrame(job_rows),
@@ -337,7 +373,22 @@ with tab_jobs:
                 # Quick-view: select a job to analyze
                 job_uuids = [j.get("run_uuid") for j in jobs if j.get("run_uuid")]
                 if job_uuids:
-                    sel_uuid = st.selectbox("Analyze a job", job_uuids, key="job_sel")
+                    job_options = {}
+                    for j in jobs:
+                        run_uuid = j.get("run_uuid")
+                        if not run_uuid:
+                            continue
+                        workflow_label = j.get("workflow_label") or "workflow?"
+                        label = (
+                            f"{_status_badge(j.get('status', 'UNKNOWN'))} · "
+                            f"{j.get('sample_name', 'Unknown')} · {workflow_label} · "
+                            f"{_format_timestamp(j.get('started_at') or j.get('submitted_at'))} · "
+                            f"{run_uuid[:8]}…"
+                        )
+                        job_options[label] = run_uuid
+
+                    sel_label = st.selectbox("Analyze a job", list(job_options.keys()), key="job_sel")
+                    sel_uuid = job_options[sel_label]
                     if st.button("📊 View Results"):
                         # Persist selected UUID so Results pre-fills consistently.
                         st.session_state["selected_job_run_uuid"] = sel_uuid
@@ -367,6 +418,47 @@ with tab_jobs:
                                 st.error(f"Cancel failed: {_resp.status_code} — {_resp.text[:200]}")
                         except Exception as _e:
                             st.error(f"Error cancelling job: {_e}")
+
+                failed_jobs = [j for j in jobs if j.get("status") == "FAILED" and j.get("run_uuid")]
+                if failed_jobs:
+                    st.divider()
+                    st.subheader("🗑️ Delete a Failed Run")
+                    failed_options = {
+                        (
+                            f"❌ {j.get('sample_name', 'Unknown')} · "
+                            f"{j.get('workflow_label') or 'workflow?'} · "
+                            f"{_format_timestamp(j.get('started_at') or j.get('submitted_at'))} · "
+                            f"{j.get('run_uuid', '')[:8]}…"
+                        ): j.get("run_uuid")
+                        for j in failed_jobs
+                    }
+                    failed_label = st.selectbox("Select failed run to delete", list(failed_options.keys()), key="failed_sel")
+                    failed_uuid = failed_options[failed_label]
+                    confirm_key = f"delete_failed_confirm_{failed_uuid}"
+                    if st.session_state.get(confirm_key):
+                        st.warning("This deletes the failed run's workflow folder and archives the job record.")
+                        col_yes, col_no = st.columns(2)
+                        with col_yes:
+                            if st.button("🗑️ Confirm Delete", key=f"failed_del_yes_{failed_uuid}", type="primary"):
+                                try:
+                                    _resp = make_authenticated_request(
+                                        "DELETE", f"{API_URL}/jobs/{failed_uuid}", timeout=30
+                                    )
+                                    if _resp.status_code == 200:
+                                        st.session_state.pop(confirm_key, None)
+                                        st.success(_resp.json().get("message", "Failed run deleted."))
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Delete failed: {_resp.status_code} — {_resp.text[:200]}")
+                                except Exception as _e:
+                                    st.error(f"Error deleting failed run: {_e}")
+                        with col_no:
+                            if st.button("Keep Run", key=f"failed_del_no_{failed_uuid}"):
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                    elif st.button("🗑️ Delete Failed Run", key=f"failed_del_btn_{failed_uuid}"):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
             else:
                 st.info("No jobs in this project yet.")
         else:

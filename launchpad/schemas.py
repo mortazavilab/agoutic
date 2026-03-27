@@ -264,3 +264,7 @@ class JobStatusExtendedResponse(JobStatusResponse):
     result_destination: Optional[str] = None
     ssh_profile_nickname: Optional[str] = None
     work_directory: Optional[str] = None
+    submitted_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    duration_seconds: Optional[int] = None

@@ -2000,62 +2000,6 @@ def render_block(block, expected_project_id: str = ""):
                             )
                             st.rerun()
 
-                elif _gate_action == "reconcile_bams" and extracted_params:
-                    preflight_summary = extracted_params.get("preflight_summary") or {}
-                    bam_inputs = extracted_params.get("bam_inputs") or []
-                    reference = extracted_params.get("reference") or "unknown"
-                    annotation_gtf = extracted_params.get("annotation_gtf") or "not resolved"
-                    annotation_gtf_source = extracted_params.get("annotation_gtf_source") or "unknown"
-                    output_directory = extracted_params.get("output_directory") or extracted_params.get("input_directory") or ""
-                    output_prefix = extracted_params.get("output_prefix") or extracted_params.get("sample_name") or "reconciled"
-
-                    with st.form(key=f"reconcile_form_{block_id}"):
-                        grouped_section("Reconcile Summary")
-                        st.write(f"**Reference**: `{reference}`")
-                        st.write(f"**Output Root**: `{output_directory}`")
-                        st.write(f"**Output Prefix**: `{output_prefix}`")
-                        st.write(f"**Annotation GTF**: `{annotation_gtf}`")
-                        st.caption(f"GTF source: `{annotation_gtf_source}`")
-
-                        grouped_section("Validated Inputs")
-                        st.write(f"{len(bam_inputs)} annotated BAM(s) passed preflight validation.")
-                        for bam in bam_inputs:
-                            if not isinstance(bam, dict):
-                                continue
-                            sample_label = bam.get("sample") or "sample"
-                            bam_path = bam.get("path") or ""
-                            st.caption(f"{sample_label}: `{bam_path}`")
-
-                        message = preflight_summary.get("message") if isinstance(preflight_summary, dict) else None
-                        if message:
-                            st.info(message)
-
-                        st.divider()
-                        col1, col2 = st.columns(2)
-                        submit_approve = col1.form_submit_button("✅ Approve Reconcile", width="stretch")
-                        submit_reject = col2.form_submit_button("❌ Reject", width="stretch")
-
-                        if submit_approve:
-                            payload_update = dict(content)
-                            payload_update["edited_params"] = dict(extracted_params)
-                            resp = make_authenticated_request(
-                                "PATCH",
-                                f"{API_URL}/block/{block_id}",
-                                json={"status": "APPROVED", "payload": payload_update}
-                            )
-                            if resp.status_code == 200:
-                                st.rerun()
-                            else:
-                                try:
-                                    error_detail = resp.json().get("detail") or resp.text
-                                except Exception:
-                                    error_detail = resp.text
-                                st.error(f"Approval failed: {error_detail}")
-
-                        if submit_reject:
-                            st.session_state[f"rejecting_{block_id}"] = True
-                            st.rerun()
-
                 elif extracted_params:
                     st.write("**📋 Extracted Parameters** (edit if needed):")
                     

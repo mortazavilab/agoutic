@@ -359,7 +359,7 @@ conda activate agoutic_core
 ./agoutic_servers.sh --start
 
 # Then start the UI separately
-streamlit run ui/app.py --server.address 0.0.0.0 --server.port 8501
+streamlit run ui/appUI.py --server.address 0.0.0.0 --server.port 8501
 ```
 
 For local development, you can still run services manually:
@@ -375,10 +375,10 @@ python -m launchpad.mcp_server --host 0.0.0.0 --port 8002
 uvicorn cortex.app:app --host 0.0.0.0 --port 8000 --reload
 
 # Terminal 4: Start UI
-cd ui && streamlit run app.py
+cd ui && streamlit run appUI.py
 ```
 
-Note: running `python ui/app.py` directly will not work correctly because the UI
+Note: running `python ui/appUI.py` directly will not work correctly because the UI
 auth flow depends on Streamlit request context and browser cookies.
 
 ### Verify Installation
@@ -833,7 +833,7 @@ When servers are started or restarted via `agoutic_servers.sh`, existing log fil
 ./agoutic_servers.sh --start
 
 # Start the UI separately
-streamlit run ui/app.py --server.port 8501
+streamlit run ui/appUI.py --server.port 8501
 ```
 
 If you need manual development startup:
@@ -850,7 +850,7 @@ python -m launchpad.mcp_server --host 0.0.0.0 --port 8002
 uvicorn cortex.app:app --port 8000 --reload
 
 # Terminal 4: Start UI (if using Streamlit)
-cd ui && streamlit run app.py
+cd ui && streamlit run appUI.py
 ```
 
 ### Using MCP Interface

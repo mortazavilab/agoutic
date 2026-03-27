@@ -245,18 +245,13 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
                     return "analyze_local_sample"
 
     # --- Signals for reconcile_bams ---
-    _reconcile_words = [
-        "reconcile bam",
-        "reconcile bams",
-        "merge annotated bam",
-        "merge annotated bams",
-        "cross-workflow bam",
-        "cross workflow bam",
-        "combine annotated bam",
-        "combine annotated bams",
-    ]
     if current_skill != "reconcile_bams":
-        if any(w in msg_lower for w in _reconcile_words):
+        if re.search(r"(?:reconcile|merge|combine)\s+(?:the\s+)?(?:annotated\s+)?bams?", msg_lower):
+            return "reconcile_bams"
+        if any(w in msg_lower for w in (
+            "cross-workflow bam",
+            "cross workflow bam",
+        )):
             return "reconcile_bams"
 
     # --- Signals for ENCODE_Search ---

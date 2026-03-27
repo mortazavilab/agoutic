@@ -246,6 +246,39 @@ class TestRunAllowlistedScript:
         assert result["dataframe"]["metadata"]["label"] == "BED chromosome counts"
 
     @pytest.mark.asyncio
+    async def test_run_allowlisted_script_surfaces_json_error_payload(self, monkeypatch, tmp_path):
+        script_path = tmp_path / "reconcile_check.py"
+        script_path.write_text("print('bad')\n")
+        json_stdout = json.dumps({
+            "ok": False,
+            "errors": ["/path/workflow2: missing", "/path/workflow3: missing"],
+        })
+
+        class _FakeProcess:
+            returncode = 1
+
+            async def communicate(self):
+                return (json_stdout.encode("utf-8"), b"")
+
+        monkeypatch.setattr(
+            "launchpad.mcp_tools.resolve_allowlisted_script",
+            lambda **_kwargs: SimpleNamespace(script_id="reconcile_bams/check_workflow_references", script_path=script_path.resolve()),
+        )
+        monkeypatch.setattr("launchpad.mcp_tools.normalize_script_args", lambda args: args or [])
+        monkeypatch.setattr("launchpad.mcp_tools.validate_script_working_directory", lambda _path: script_path.parent.resolve())
+        monkeypatch.setattr("launchpad.mcp_tools.asyncio.create_subprocess_exec", AsyncMock(return_value=_FakeProcess()))
+
+        tools = LaunchpadMCPTools("http://launchpad.local")
+        result = await tools.run_allowlisted_script(
+            script_id="reconcile_bams/check_workflow_references",
+            script_args=["--json", "/tmp/example"],
+        )
+
+        assert result["success"] is False
+        assert "workflow2: missing" in result["error"]
+        assert result["script_output"]["ok"] is False
+
+    @pytest.mark.asyncio
     async def test_stage_remote_sample_posts_expected_payload(self, monkeypatch):
         fake_client = FakeAsyncClient(
             post_response=FakeResponse(

@@ -265,6 +265,12 @@ class TestReconcileBams:
         )
         assert result == "reconcile_bams"
 
+    def test_reconcile_the_bams_phrase_routes_skill(self):
+        result = _auto_detect_skill_switch(
+            "I want to reconcile the bams of C2C12r1 and C2C12r3", "run_dogme_rna"
+        )
+        assert result == "reconcile_bams"
+
     def test_already_on_reconcile_skill_no_switch(self):
         result = _auto_detect_skill_switch(
             "reconcile bams from prior workflows", "reconcile_bams"

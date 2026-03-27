@@ -366,7 +366,7 @@ cmd_start() {
     echo ""
     log "Structured logs:  $LOGS_DIR/*.jsonl"
     log "Unified log:      $LOGS_DIR/agoutic.jsonl"
-    log "Start the UI separately:  streamlit run ui/app.py --server.port $UI_PORT"
+    log "Start the UI separately:  streamlit run ui/appUI.py --server.port $UI_PORT"
 }
 
 cmd_stop() {

@@ -21,6 +21,7 @@ Nine plan templates:
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -41,7 +42,7 @@ logger = get_logger(__name__)
 # Patterns that signal a MULTI_STEP request
 _MULTI_STEP_PATTERNS: list[re.Pattern] = [
     # Reconcile annotated BAMs
-    re.compile(r"(?:reconcile|merge|combine)\s+(?:annotated\s+)?bams?", re.I),
+    re.compile(r"(?:reconcile|merge|combine)\s+(?:the\s+)?(?:annotated\s+)?bams?", re.I),
     re.compile(r"cross[-\s]?workflow\s+bam\s+reconcil", re.I),
     # Remote stage-only flows
     re.compile(r"stage\s+.+\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)[a-zA-Z0-9_-]+(?:\s+profile)?(?:[?.!,]|$)|on\s+slurm|using\s+slurm|remotely|on\s+the\s+cluster|(?:using|via)\s+(?:the\s+)?[a-zA-Z0-9_-]+\s+profile)", re.I),
@@ -321,6 +322,17 @@ def _finalize_plan(plan: dict[str, Any], conv_state: "ConversationState") -> dic
 
     plan.setdefault("project_id", conv_state.active_project)
     plan.setdefault("plan_instance_id", _plan_instance_id())
+    plan.setdefault(
+        "planner_metadata",
+        {
+            "planning_mode": "deterministic",
+            "hybrid_attempted": False,
+            "hybrid_succeeded": False,
+            "hybrid_failed": False,
+            "deterministic_fallback_used": False,
+            "reason_code": "",
+        },
+    )
 
     try:
         validate_plan(
@@ -747,7 +759,7 @@ _RUN_WORKFLOW_PATTERNS = [
 ]
 
 _RECONCILE_BAMS_PATTERNS = [
-    re.compile(r"(?:reconcile|merge|combine)\s+(?:annotated\s+)?bams?", re.I),
+    re.compile(r"(?:reconcile|merge|combine)\s+(?:the\s+)?(?:annotated\s+)?bams?", re.I),
     re.compile(r"cross[-\s]?workflow\s+bam\s+reconcil", re.I),
 ]
 
@@ -898,25 +910,86 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         if m:
             params["output_prefix"] = m.group(1)
 
-        m = re.search(r"(?:output\s+(?:dir|directory)|into|to)\s+(\S+)", message, re.I)
+        m = re.search(r"(?:output\s+(?:dir|directory))\s+(\S+)", message, re.I)
         if m:
             params["output_directory"] = m.group(1).rstrip(".,;:!?")
+        else:
+            m = re.search(r"into\s+(\S+)", message, re.I)
+            if m:
+                params["output_directory"] = m.group(1).rstrip(".,;:!?")
+            else:
+                m = re.search(r"\bto\s+((?:/|~|\.|[A-Za-z0-9._-]+/)\S*)", message, re.I)
+                if m:
+                    params["output_directory"] = m.group(1).rstrip(".,;:!?")
 
         m = re.search(r"(?:annotation\s+gtf|gtf\s+(?:path|file)|use\s+gtf)\s*[=:]?\s*(\S+\.(?:gtf|gtf\.gz))", message, re.I)
         if m:
             params["annotation_gtf"] = m.group(1).rstrip(".,;:!?")
 
         workflow_dirs: list[str] = []
-        if getattr(conv_state, "workflows", None):
-            for wf in conv_state.workflows:
-                if isinstance(wf, dict):
-                    wf_dir = wf.get("work_dir")
-                    if isinstance(wf_dir, str) and wf_dir and wf_dir not in workflow_dirs:
-                        workflow_dirs.append(wf_dir)
+        selected_names: list[str] = []
+        selected_workflow_tokens = {
+            match.strip().lower()
+            for match in re.findall(r"\b(workflow[\w.-]+)\b", message, re.I)
+        }
 
+        workflow_qualified_mentions = re.findall(
+            r"([a-zA-Z0-9_.-]+)\s+in\s+(workflow[\w.-]+)",
+            message,
+            re.I,
+        )
+        if workflow_qualified_mentions:
+            selected_names = [sample for sample, _wf in workflow_qualified_mentions]
+            selected_workflow_tokens.update(wf.lower() for _sample, wf in workflow_qualified_mentions)
+
+        named_pair_patterns = [
+            r"(?:bams?|workflows?)\s+(?:of|from|between)\s+([a-zA-Z0-9_.-]+)\s+(?:and|vs?\.?|versus)\s+([a-zA-Z0-9_.-]+)",
+            r"([a-zA-Z0-9_.-]+)\s+(?:and|vs?\.?|versus)\s+([a-zA-Z0-9_.-]+)",
+        ]
+        if not selected_names:
+            for pattern in named_pair_patterns:
+                match = re.search(pattern, message, re.I)
+                if not match:
+                    continue
+                selected_names = [match.group(1), match.group(2)]
+                break
+
+        if getattr(conv_state, "workflows", None):
+            normalized_targets = {name.lower() for name in selected_names}
+            for wf in conv_state.workflows:
+                if not isinstance(wf, dict):
+                    continue
+                wf_dir = wf.get("work_dir")
+                if not isinstance(wf_dir, str) or not wf_dir:
+                    continue
+                work_dir_name = wf_dir.rstrip("/").split("/")[-1].lower()
+
+                if selected_workflow_tokens and work_dir_name not in selected_workflow_tokens:
+                    continue
+
+                if normalized_targets:
+                    sample_name = str(wf.get("sample_name") or "").strip().lower()
+                    if sample_name not in normalized_targets and work_dir_name not in normalized_targets:
+                        continue
+
+                if wf_dir not in workflow_dirs:
+                    workflow_dirs.append(wf_dir)
+
+            if not workflow_dirs:
+                for wf in conv_state.workflows:
+                    if isinstance(wf, dict):
+                        wf_dir = wf.get("work_dir")
+                        if isinstance(wf_dir, str) and wf_dir and wf_dir not in workflow_dirs:
+                            workflow_dirs.append(wf_dir)
+
+        known_workflow_basenames = {
+            wf_dir.rstrip("/").split("/")[-1].lower()
+            for wf_dir in workflow_dirs
+            if isinstance(wf_dir, str) and wf_dir
+        }
         for match in re.findall(r"(workflow[\w.-]+)", message, re.I):
             normalized = match.strip()
-            if normalized and normalized not in workflow_dirs:
+            if normalized and normalized.lower() not in known_workflow_basenames and normalized not in workflow_dirs:
                 workflow_dirs.append(normalized)
 
         if workflow_dirs:
@@ -1166,59 +1239,57 @@ def _template_parse_plot_interpret(params: dict) -> dict:
 def _template_reconcile_bams(params: dict) -> dict:
     """
     Deterministic plan for reconciling annotated BAMs across workflows.
-    Steps: locate inputs -> check references -> approval -> run reconcile script -> summarize
+    Steps: locate inputs -> preflight validate -> approval -> run reconcile script -> summarize
     """
     output_prefix = params.get("output_prefix", "reconciled")
     output_directory = params.get("output_directory", "")
     annotation_gtf = params.get("annotation_gtf", "")
     work_dir = params.get("work_dir", "")
     workflow_dirs = [str(item) for item in params.get("workflow_dirs", []) if isinstance(item, str) and item]
+    if not output_directory:
+        if workflow_dirs:
+            workflow_roots = [os.path.dirname(path.rstrip("/")) or "/" for path in workflow_dirs]
+            output_directory = os.path.commonpath(workflow_roots)
+        elif work_dir:
+            output_directory = work_dir
 
     steps = []
     idx = 0
+
+    locate_tool_calls = []
+    if workflow_dirs:
+        for workflow_dir in workflow_dirs:
+            locate_tool_calls.append(
+                {
+                    "source_key": "analyzer",
+                    "tool": "list_job_files",
+                    "params": {
+                        "work_dir": f"{workflow_dir.rstrip('/')}/annot",
+                        "extensions": ".bam",
+                        "max_depth": 1,
+                    },
+                }
+            )
+    elif work_dir:
+        locate_tool_calls.append(
+            {
+                "source_key": "analyzer",
+                "tool": "list_job_files",
+                "params": {
+                    "work_dir": f"{work_dir.rstrip('/')}/annot",
+                    "extensions": ".bam",
+                    "max_depth": 1,
+                },
+            }
+        )
 
     s_locate = _make_step(
         "LOCATE_DATA",
         "Locate annotated BAM candidates across workflow annot directories",
         idx,
-        tool_calls=[
-            {
-                "source_key": "analyzer",
-                "tool": "find_file",
-                "params": {
-                    "work_dir": work_dir,
-                    "file_name": "annotated.bam",
-                },
-            }
-        ] if work_dir else [],
+        tool_calls=locate_tool_calls,
     )
     steps.append(s_locate)
-    idx += 1
-
-    helper_args = ["--json"]
-    if workflow_dirs:
-        for workflow_dir in workflow_dirs:
-            helper_args.extend(["--workflow-dir", workflow_dir])
-    elif work_dir:
-        helper_args.extend(["--project-dir", work_dir])
-
-    s_ref_check = _make_step(
-        "CHECK_EXISTING",
-        "Check workflow Nextflow configs for a shared reference",
-        idx,
-        depends_on=[s_locate["id"]],
-        tool_calls=[
-            {
-                "source_key": "launchpad",
-                "tool": "run_allowlisted_script",
-                "params": {
-                    "script_id": "reconcile_bams/check_workflow_references",
-                    "script_args": helper_args,
-                },
-            }
-        ],
-    )
-    steps.append(s_ref_check)
     idx += 1
 
     preflight_args = ["--json", "--preflight-only", "--output-prefix", output_prefix]
@@ -1234,9 +1305,9 @@ def _template_reconcile_bams(params: dict) -> dict:
 
     s_preflight = _make_step(
         "CHECK_EXISTING",
-        "Run reconcile preflight and resolve annotation GTF before approval",
+        "Run reconcile preflight and validate shared reference before approval",
         idx,
-        depends_on=[s_ref_check["id"]],
+        depends_on=[s_locate["id"]],
         tool_calls=[
             {
                 "source_key": "launchpad",
@@ -1548,6 +1619,14 @@ def _generate_hybrid_first_scoped_plan(
         fallback_plan = _deterministic_template_for_plan_type(requested_plan_type, params)
         if not fallback_plan:
             return None
+        fallback_plan["planner_metadata"] = {
+            "planning_mode": "deterministic",
+            "hybrid_attempted": True,
+            "hybrid_succeeded": False,
+            "hybrid_failed": True,
+            "deterministic_fallback_used": True,
+            "reason_code": reason_code,
+        }
         return _finalize_plan(fallback_plan, conv_state)
 
     try:
@@ -1612,6 +1691,15 @@ def _generate_hybrid_first_scoped_plan(
     finalized = _finalize_plan(llm_plan, conv_state)
     if finalized is None:
         return _fallback("finalize_validation_failed")
+
+    finalized["planner_metadata"] = {
+        "planning_mode": "hybrid",
+        "hybrid_attempted": True,
+        "hybrid_succeeded": True,
+        "hybrid_failed": False,
+        "deterministic_fallback_used": False,
+        "reason_code": "",
+    }
 
     logger.info(
         "Hybrid bridge succeeded",
@@ -1726,6 +1814,17 @@ def generate_plan(
                     step.setdefault("completed_at", None)
                 if llm_plan.get("steps"):
                     llm_plan.setdefault("current_step_id", llm_plan["steps"][0]["id"])
+                llm_plan.setdefault(
+                    "planner_metadata",
+                    {
+                        "planning_mode": "llm",
+                        "hybrid_attempted": False,
+                        "hybrid_succeeded": False,
+                        "hybrid_failed": False,
+                        "deterministic_fallback_used": False,
+                        "reason_code": "",
+                    },
+                )
                 logger.info("Generated plan from LLM", steps=len(llm_plan.get("steps", [])))
                 return _finalize_plan(llm_plan, conv_state)
     except Exception as e:

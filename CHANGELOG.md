@@ -2,6 +2,29 @@
 
 ### Fixes
 
+- **Reconcile workflow approvals now use plan-aware script review instead of
+  generic Dogme job forms** — `cortex/app.py` now builds
+  `gate_action=reconcile_bams` approval payloads directly from reconcile
+  preflight output, including validated BAM inputs, resolved shared reference,
+  annotation GTF provenance, and output destination, while `ui/app.py` renders
+  a dedicated reconcile approval summary instead of unrelated
+  sample/mode/input-type fields.
+
+- **Plan-owned reconcile script execution now advances cleanly after
+  approval** — approving a reconcile gate now marks the plan’s
+  `REQUEST_APPROVAL` step complete, advances the workflow pointer to the
+  `RUN_SCRIPT` step, submits the allowlisted reconcile script through the
+  script-backed job path, and avoids falling back into the generic
+  workflow-plan resume behavior that previously left reconcile stuck or
+  misrouted.
+
+- **Script-backed workflow plans now persist and complete their run step
+  correctly** — `cortex/workflow_submission.py` now stores `run_type` on the
+  execution job payload and maps launched script jobs onto `RUN_SCRIPT` plan
+  steps, while `cortex/job_polling.py` now completes/fails that step on job
+  status updates and resumes the remaining plan without incorrectly triggering
+  post-Dogme auto-analysis.
+
 - **Approval-time SLURM safety checks now block mode/path drift** —
   `cortex/remote_orchestration.py` now rejects approvals when requested vs
   extracted execution mode diverge, requested absolute input path differs from
@@ -35,6 +58,12 @@
   override stale SLURM context from prior approvals.
 
 ### Tests
+
+- Added focused reconcile approval lifecycle regressions in
+  `tests/cortex/test_background_tasks.py` covering:
+  reconcile-specific approval-gate payload generation from preflight output,
+  script submission updating the `RUN_SCRIPT` plan step, and job-polling
+  completion that closes the reconcile run step and resumes the plan.
 
 - Added/extended focused remote orchestration and submission regressions in
   `tests/cortex/test_background_tasks.py` for:
@@ -196,7 +225,7 @@
   trapped inside step expanders.
 
 - **Nextflow live status refresh restored without reintroducing full-page
-  flicker everywhere** — `ui/app.py` now uses fragment refresh for normal
+  flicker everywhere** — `ui/appUI.py` now uses fragment refresh for normal
   chat/workflow updates, restores whole-page reruns only for active
   `EXECUTION_JOB` and `DOWNLOAD_TASK` cards, and bootstraps that heavier
   refresh path automatically when a fragment first discovers an active job.
@@ -1287,7 +1316,7 @@
 - `skills/ENCODE_Search.md` — added `## Plan Chains` section with three
   chains: `search_and_visualize`, `visualize_existing`,
   `search_filter_visualize`
-- `ui/app.py` — `[[PLOT:…]]` rendering now supports literal colors and a
+- `ui/appUI.py` — `[[PLOT:…]]` rendering now supports literal colors and a
   separate `palette` override without breaking existing `color=red`
   prompts
 - `tests/ui/test_app_source_helpers.py` — added regression tests for
@@ -1539,7 +1568,7 @@
 - Updated the main README with the persistent task-list overview, bootstrap
   instructions for existing servers, and the focused task validation command.
 - Clarified the supported startup flow: use `agoutic_servers.sh` for the backend
-  stack and start the UI with `streamlit run ui/app.py` rather than running the
+  stack and start the UI with `streamlit run ui/appUI.py` rather than running the
   Streamlit script directly with Python.
 
 ### Tests
@@ -2138,15 +2167,15 @@ which were silently skipped.
 
 ### Changed — Centralised Version Number
 
-Version was hardcoded in 5 separate places (`agoutic_servers.sh`, `ui/app.py` ×2,
+Version was hardcoded in 5 separate places (`agoutic_servers.sh`, `ui/appUI.py` ×2,
 `cortex/app.py` health endpoint, `README.md`) and frequently fell out of sync.
 
 - **Single source of truth**: New `VERSION` file at repo root contains the version string.
-- `ui/app.py` reads `VERSION` via `pathlib` and uses it in the page title and sidebar caption.
+- `ui/appUI.py` reads `VERSION` via `pathlib` and uses it in the page title and sidebar caption.
 - `cortex/app.py` reads `VERSION` the same way; the `/health` endpoint now returns the live value.
 - `agoutic_servers.sh` reads `VERSION` via `cat` instead of a hardcoded variable.
 - `README.md` updated to 3.0.3.
-- Files changed: `VERSION` (new), `ui/app.py`, `cortex/app.py`, `agoutic_servers.sh`, `README.md`
+- Files changed: `VERSION` (new), `ui/appUI.py`, `cortex/app.py`, `agoutic_servers.sh`, `README.md`
 
 ### Fixed — Chat Messages Disappearing from UI
 
@@ -2168,7 +2197,7 @@ transient fetch failure (timeout, server busy) wiped the displayed conversation.
 - **Longer timeout**: Block fetch timeout 5 s → 10 s to reduce transient failures.
 - **Error logging**: Failures are now logged with status code / exception detail
   instead of being silently swallowed.
-- Files changed: `ui/app.py` (`get_sanitized_blocks`, `_render_chat`),
+- Files changed: `ui/appUI.py` (`get_sanitized_blocks`, `_render_chat`),
   `cortex/app.py` (`get_blocks` endpoint)
 
 ## [3.0.2] - 2026-02-25
@@ -2295,7 +2324,7 @@ Users can now control the maximum number of simultaneous GPU tasks (dorado basec
 - Applies Nextflow `maxForks` directive to `doradoTask`, `openChromatinTaskBg`, `openChromatinTaskBed`
 - Default: 1 (safe for single-GPU machines), configurable via `DEFAULT_MAX_GPU_TASKS` env var
 - Natural language extraction: "limit dorado to 3 concurrent tasks" → `max_gpu_tasks: 3`
-- Files changed: `launchpad/config.py`, `launchpad/schemas.py`, `launchpad/nextflow_executor.py`, `launchpad/app.py`, `launchpad/mcp_server.py`, `launchpad/mcp_tools.py`, `cortex/app.py`, `ui/app.py`, `skills/Local_Sample_Intake.md`
+- Files changed: `launchpad/config.py`, `launchpad/schemas.py`, `launchpad/nextflow_executor.py`, `launchpad/app.py`, `launchpad/mcp_server.py`, `launchpad/mcp_tools.py`, `cortex/app.py`, `ui/appUI.py`, `skills/Local_Sample_Intake.md`
 
 ## [2.8] - 2026-02-22
 
@@ -2538,11 +2567,11 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 
 - **Download-specific approval gate (not Dogme job params)**
   - When `gate_action == "download"`, the approval gate shows the file list with sizes and target directory instead of calling `extract_job_parameters_from_conversation` (which always extracted Dogme DNA/RNA params). UI renders a dedicated download approval form with Approve/Cancel buttons.
-  - Applied to: [cortex/app.py](cortex/app.py), [ui/app.py](ui/app.py)
+  - Applied to: [cortex/app.py](cortex/app.py), [ui/appUI.py](ui/appUI.py)
 
 - **Per-file byte-level download progress**
   - `_download_files_background()` now tracks `expected_total_bytes`, `current_file_bytes`, `current_file_expected` from `size_bytes` metadata or `Content-Length` header. Progress updates are throttled to every 0.5s to avoid DB spam. UI shows a Streamlit progress bar with MB downloaded/expected for the current file, with fallback to overall byte progress or file-count progress.
-  - Applied to: [cortex/app.py](cortex/app.py), [ui/app.py](ui/app.py)
+  - Applied to: [cortex/app.py](cortex/app.py), [ui/appUI.py](ui/appUI.py)
 
 - **`_auto_detect_skill_switch` detects download intent**
   - "download" + ENCFF or URL now triggers a skill switch to `download_files` regardless of current skill.
@@ -2852,7 +2881,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 - **UI — slugified project name default**
   - New project default name changed from `"Project YYYY-MM-DD HH:MM"` to `"project-YYYY-MM-DD"` (slug-friendly).
   - New Project button replaced with an expander form; project name is pre-filled with the slug default and run through `_slugify_project_name()` before creation.
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 ### Fixed — Agent Forgets Parameters During `analyze_local_sample` Multi-Turn Conversations
 
@@ -2882,11 +2911,11 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 
 - **Block metadata header shows project name instead of UUID**
   - `render_block()` in the UI now resolves the project name from the cached projects list for the `📌 Proj:` header. Falls back to a truncated UUID (`c7f75875…`) if the project isn't in the cache. Previously displayed the raw UUID (`c7f75875-b7f8-4835-8f94-28fd4f8090bf`).
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **EXECUTION_JOB block shows `workflowN` folder name alongside run UUID**
   - Cortex now stores the `work_directory` path (returned by Launchpad's `submit_dogme_job`) in the EXECUTION_JOB block payload. The UI extracts the folder name (e.g. `workflow2`) from the path and displays it as `📁 workflow2 | Run UUID: 3862fd86...`. Previously only the opaque run UUID was shown, with no visible connection to the actual directory on disk.
-  - Applied to: [cortex/app.py](cortex/app.py), [ui/app.py](ui/app.py)
+  - Applied to: [cortex/app.py](cortex/app.py), [ui/appUI.py](ui/appUI.py)
 
 ### Fixed — `submit_dogme_job` MCP Wrapper Missing `username` / `project_slug`
 
@@ -2950,11 +2979,11 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 
 - **Per-message token caption in chat UI**
   - Each `AGENT_PLAN` block renders a caption under the message content: `🪙 1,234 tokens  (↑ 890 prompt · ↓ 344 completion)  ·  llama3.2`. Reads from the `tokens` key in block payload. Pre-migration messages silently show nothing.
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Live token counter in sidebar**
   - `🪙 Tokens: 12,345` expander updates on every page rerun (API call moved outside the expander widget so it fetches unconditionally). Expander label shows the live total. Inside: Total + Completion metrics, daily line chart (when >1 day of data), and tracking-since date.
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Lifetime tokens metric in Projects dashboard**
   - Summary row alongside Disk Usage now shows "Lifetime Tokens Used". Per-project table gains a "🪙 Tokens" column populated from `/projects/{id}/stats`.
@@ -2992,11 +3021,11 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 
 - **Sidebar quota progress bar**
   - When a `token_limit` is set, the expander label changes to `🪙 X / Y tokens (Z%)`. Inside: `st.progress()` bar showing consumption ratio. At ≥ 90% a `st.warning("⚠️ Approaching token limit — contact an admin.")` is displayed. Token metrics/chart still shown below.
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Chat UI — friendly 429 quota-exceeded message**
   - When the server returns HTTP 429, the chat input shows `st.warning()` with the used/limit figures extracted from the error JSON instead of a generic error.
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Admin tab2 (Active Users) — per-user limit editor**
   - Layout changed to 4-column. Fourth column is an expander `🪙 Limit: X` containing a `st.form` with a number input (step 50,000) and Save button that calls `PATCH /admin/users/{id}/token-limit`.
@@ -3025,7 +3054,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 - **`AGENT_PLOT` block rendering in UI**
   - New block type dispatched in `render_block()`. Renders inside a `st.chat_message("assistant", avatar="📊")` bubble. Calls `_render_plot_block()` which groups specs by `(df_id, type)` for multi-trace overlays and falls back to single-chart rendering via `_build_plotly_figure()`. Shows `st.warning()` if the referenced DF is not found.
   - Helper functions added: `_resolve_df_by_id()`, `_build_plotly_figure()`, `_render_plot_block()`
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Plotting instructions in LLM system prompt**
   - Large PLOTTING section injected into the system prompt (after `{data_call_block}`). Explicitly forbids Python code (❌ markers), shows correct `[[PLOT:...]]` syntax, lists all 6 chart types with required/optional params, and includes working examples.
@@ -3077,18 +3106,18 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 - **`px.histogram` on a categorical x column counts rows (each = 1) instead of reading the value column**
   - `_build_plotly_figure()` called `px.histogram(df, x="Category")` which bins raw values — since each Category appears exactly once, every bar rendered at height 1 regardless of the actual Count column.
   - Fix: When `chart_type == "histogram"` and the resolved `x_col` is non-numeric (categorical), the code now switches to `px.bar` automatically. It prefers a companion numeric column whose name matches common count/value names (`count`, `value`, `n`, `total`, `freq`, etc.); if none match by name it takes the first numeric column; if there is no numeric column it falls back to `value_counts()`.
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 ### Fixed — Bar/histogram plot of DF shows bars at height 1 due to missing column names and wrong aggregation
 
 - **`_resolve_df_by_id` constructed DataFrame without column names**
   - `pd.DataFrame(rows)` was called without passing `columns=`, so the DataFrame had integer column names `[0, 1]` instead of `["Category", "Count"]`. All `x_col`/`y_col` lookups failed (case-insensitive match returned nothing), the bar branch fell through to `value_counts()`, and every bar rendered at height 1.
   - Fix: now passes `columns=fdata.get("columns") or None` to the DataFrame constructor.
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Bar branch fell back to `value_counts()` even for pre-aggregated tables**
   - When `y_col=None` and `agg` is not `"count"`, the bar branch now checks if `x_col` is categorical and a numeric companion column exists. If so, it selects that column as `y` (preferring names like `count`, `value`, `n`, `total`, `freq`) instead of counting rows. This mirrors the same logic added to the histogram branch.
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Auto-fallback spec incorrectly set `agg="count"` for bar charts**
   - The code-fallback path that auto-generates a `[[PLOT:...]]` spec was adding `agg="count"` to every bar chart, which bypasses the pre-aggregated column detection and always counts rows. Removed; `_build_plotly_figure` now infers `y` automatically.
@@ -3120,11 +3149,11 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 
 - **Debug toggle in sidebar**
   - New 🐛 Debug toggle in the sidebar enables per-response debug info display without needing server logs.
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Debug info section per AGENT_PLAN block**
   - When debug mode is on, each assistant response shows a collapsed "🐛 Debug Info" expander with JSON diagnostic data including: target_df_id, detected filters (assay, output_type, file_type), injected DF names/row counts, suppressed API calls, LLM raw response preview, auto-generated calls, and more.
-  - Applied to: [cortex/app.py](cortex/app.py), [ui/app.py](ui/app.py)
+  - Applied to: [cortex/app.py](cortex/app.py), [ui/appUI.py](ui/appUI.py)
 
 - **`_inject_job_context` returns 3-tuple**
   - Now returns `(augmented_message, injected_dataframes, debug_info)` to pass diagnostic data from the injection logic through to the UI payload.
@@ -3149,7 +3178,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 
 - **DF IDs shown in UI expander headers**
   - Dataframe expanders now display their ID: `📊 DF3: ENCSR160HKZ bam files (12) — 12 rows × 5 columns` so users know which ID to reference.
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 ### Fixed — ENCODE File Query & Follow-up Filter Accuracy
 
@@ -3185,7 +3214,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 - **Only show relevant file-type tables in the UI**
   - Problem: "How many BAM files for ENCSR160HKZ?" showed all three file-type tables (tar, bam, bed) prominently, even though the user only asked about BAM.
   - Fix: When storing per-file-type dataframes, the server detects which file type(s) the user asked about and tags matching dataframes with `metadata.visible = True`. The UI checks for this flag: if any dataframe is marked visible, only those are rendered; otherwise all are shown. Non-visible dataframes are still stored for follow-up queries.
-  - Applied to: [cortex/app.py](cortex/app.py), [ui/app.py](ui/app.py)
+  - Applied to: [cortex/app.py](cortex/app.py), [ui/appUI.py](ui/appUI.py)
 
 - **Follow-up filter queries now show interactive dataframe of matching rows**
   - Problem: "Which of them are methylated reads?" correctly filtered to 2 rows but only showed the LLM's text answer — no interactive table. The user had no way to verify the accessions.
@@ -3208,7 +3237,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
     - `_inject_job_context` reads `_dataframes` directly from the most recent AGENT_PLAN block payload instead of extracting from `<details>` text (which was capped at 4000–6000 chars)
     - Server-side assay-type row filtering using `_ENCODE_ASSAY_ALIASES` (module-level map) so "how many long read RNA-seq?" after a K562 search injects only matching rows
     - `_auto_generate_data_calls` uses `_ENCODE_ASSAY_ALIASES` to re-query with `assay_title=` when the dataset is too large to filter in-memory
-  - Applied to: [cortex/app.py](cortex/app.py), [cortex/agent_engine.py](cortex/agent_engine.py), [atlas/result_formatter.py](atlas/result_formatter.py), [ui/app.py](ui/app.py), [skills/ENCODE_Search.md](skills/ENCODE_Search.md)
+  - Applied to: [cortex/app.py](cortex/app.py), [cortex/agent_engine.py](cortex/agent_engine.py), [atlas/result_formatter.py](atlas/result_formatter.py), [ui/appUI.py](ui/appUI.py), [skills/ENCODE_Search.md](skills/ENCODE_Search.md)
 
 ---
 
@@ -3228,7 +3257,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
 
 - **Improved project creation timeout**
   - Raised `POST /projects` timeout in the UI from 5 s to 10 s to reduce the likelihood of the fallback UUID path being taken on slow startup
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 ---
 
@@ -3259,13 +3288,13 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
   - Search/filter box when >4 projects
   - Archive button per project (inline, non-current projects)
   - Current project shown in bold with pin icon
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Project Name in Chat Title**
   - Title shows `🧬 Project Name` instead of raw UUID
   - Falls back to truncated UUID if name lookup fails
   - Projects cached in session state for instant title display
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Results Page Auto-Lists Jobs**
   - Job dropdown auto-populated from current project's jobs (via `/projects/{id}/stats`)
@@ -3281,7 +3310,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
   - Solution: Complete rewrite using `@st.fragment(run_every=timedelta(seconds=2))` — Streamlit's native partial-rerun that only re-executes the chat rendering function while sidebar, title, and input stay stable
   - Removed: `st.empty()` container, JS `window.parent.location.reload()` hack, `import streamlit.components.v1`, blocking `time.sleep() + st.rerun()` loop
   - Added: Bootstrap logic for one-time full rerun when running job first detected (to register fragment), 30-second grace window after job completion
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 ### Fixed — Disk Usage Reporting
 
@@ -3308,7 +3337,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
   - `GET /projects` — lists user's projects (owned + shared), supports `include_archived` param
   - `PATCH /projects/{project_id}` — rename or archive (owner role required)
   - UI updated to call server endpoints instead of generating UUIDs client-side
-  - Applied to: [cortex/app.py](cortex/app.py), [ui/app.py](ui/app.py)
+  - Applied to: [cortex/app.py](cortex/app.py), [ui/appUI.py](ui/appUI.py)
 
 - **Job Ownership Binding (`user_id` on `dogme_jobs`)**
   - Added `user_id` column to DogmeJob in both Launchpad and Analyzer models (nullable for legacy jobs)
@@ -3351,13 +3380,13 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
     1. Replaced `locals().get()` with `st.session_state["_has_running_job"]` for reliable flag persistence across Streamlit reruns
     2. Track EXECUTION_JOB blocks with RUNNING status + APPROVAL_GATE blocks just approved (async submission in-flight) to force auto-refresh
     3. Clear flag when job finishes (DONE/FAILED) to stop unnecessary polling
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 ### Added
 - **Job Duration & Last Update Timestamps in Nextflow Progress Display**
   - Shows elapsed runtime ("Running for 2m 34s") calculated from block creation time
   - Shows recency of last status poll ("Updated 3s ago") from a `last_updated` timestamp stored in the EXECUTION_JOB payload on each poll cycle
-  - Applied to: [ui/app.py](ui/app.py), [cortex/app.py](cortex/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py), [cortex/app.py](cortex/app.py)
 
 ## [Unreleased] - 2026-02-16
 
@@ -3378,7 +3407,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
   - Only triggers on strong unambiguous signals to avoid false positives
   - Applied to: [cortex/app.py](cortex/app.py)
   - Cleanup: stale progress entries auto-purged after 5 minutes
-  - Applied to: [cortex/app.py](cortex/app.py), [ui/app.py](ui/app.py)
+  - Applied to: [cortex/app.py](cortex/app.py), [ui/appUI.py](ui/appUI.py)
 
 ### Fixed
 - **Post-Job Analysis Summary Showing "Total files: 0"**
@@ -3471,7 +3500,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
   - Added cleanup of stale widget keys (form keys, checkbox keys, rejection state) on new project creation
   - Clears all keys with prefixes: `params_form_`, `logs_`, `rejecting_`, `rejection_reason_`, `submit_reject_`, `cancel_reject_`
   - Prevents form widget state from previous projects leaking into new projects
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 - **Improved UI Render Defense Against Ghost Messages**
   - Modified `render_block()` to accept `expected_project_id` parameter
@@ -3479,7 +3508,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
   - Wrapped chat rendering in `st.empty()` container which is fully replaced on every rerun (no DOM reuse)
   - Added `_suppress_auto_refresh` counter (3 cycles) after project switch to allow frontend to settle
   - Prevents Streamlit DOM-reuse artifacts where old messages briefly appear after project switch
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 ### Fixed
 - **UI Project Switching Race Condition**
@@ -3490,7 +3519,7 @@ Five cross-cutting improvements to reduce LLM hallucinations, enforce determinis
     - Added `_welcome_sent_for` to cleanup list on new project creation and all project-switch paths
     - Added defensive render-time filter to drop any block whose `project_id` doesn't match active project
   - Result: New projects now show only their own messages with no ghost messages from previous projects
-  - Applied to: [ui/app.py](ui/app.py)
+  - Applied to: [ui/appUI.py](ui/appUI.py)
 
 ### Changed
 - **Enhanced Analyzer Analysis File Discovery**

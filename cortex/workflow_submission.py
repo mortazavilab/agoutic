@@ -607,6 +607,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     "work_directory": _work_directory,
                     "sample_name": job_data["sample_name"],
                     "mode": job_data["mode"],
+                    "run_type": run_type,
                     "workflow_plan_block_id": workflow_block.id if workflow_block is not None else None,
                     "model": _gate_model,
                     "status": "SUBMITTED",
@@ -626,13 +627,19 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             )
 
             if workflow_block is not None:
-                _set_workflow_step_status(
-                    session,
-                    workflow_block,
+                run_step_id = _resolve_workflow_step_id(
+                    get_block_payload(workflow_block),
                     "run_dogme",
-                    "RUNNING",
-                    extra={"run_uuid": run_uuid, "block_id": job_block.id},
+                    kinds=("RUN_SCRIPT",),
                 )
+                if run_step_id:
+                    _set_workflow_step_status(
+                        session,
+                        workflow_block,
+                        run_step_id,
+                        "RUNNING",
+                        extra={"run_uuid": run_uuid, "block_id": job_block.id},
+                    )
 
             logger.info("Job submitted", run_uuid=run_uuid, project_id=project_id)
 

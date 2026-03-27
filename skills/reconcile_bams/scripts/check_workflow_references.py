@@ -43,6 +43,7 @@ ASSIGNMENT_PATTERNS = [
 
 INCLUDE_PATTERN = re.compile(r"includeConfig\s+['\"](?P<path>[^'\"]+)['\"]")
 TOKEN_PATTERN = re.compile(r"\b(GRCh38|hg38|grch38|mm39|mm10|human|mouse)\b", re.IGNORECASE)
+ANNOTATED_BAM_PATTERN = re.compile(r"^(?P<sample>.+)\.(?P<reference>[^.]+)\.annotated\.bam$")
 
 
 def _normalize_reference(raw: str) -> str | None:
@@ -112,12 +113,73 @@ def _parse_config_file(config_path: Path) -> tuple[list[dict], list[Path]]:
     return findings, includes
 
 
+def _extract_references_from_config_tokens(config_paths: list[Path]) -> tuple[list[str], list[dict]]:
+    references: set[str] = set()
+    evidence: list[dict] = []
+
+    for config_path in config_paths:
+        try:
+            lines = config_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+
+        for index, raw_line in enumerate(lines, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("//"):
+                continue
+
+            refs = _extract_reference_tokens(raw_line)
+            if not refs:
+                continue
+
+            for ref in refs:
+                references.add(ref)
+            evidence.append(
+                {
+                    "file": str(config_path),
+                    "line": index,
+                    "content": line,
+                    "references": sorted(set(refs)),
+                    "source": "config_token_fallback",
+                }
+            )
+
+    return sorted(references), evidence
+
+
 def _collect_configs(workflow_dir: Path) -> list[Path]:
     candidates = [workflow_dir / "nextflow.config"]
     conf_dir = workflow_dir / "conf"
     if conf_dir.is_dir():
         candidates.extend(sorted(conf_dir.glob("*.config")))
     return [path.resolve() for path in candidates if path.is_file()]
+
+
+def _extract_references_from_annotated_bams(workflow_dir: Path) -> tuple[list[str], list[dict]]:
+    annot_dir = workflow_dir / "annot"
+    if not annot_dir.is_dir():
+        return [], []
+
+    references: set[str] = set()
+    evidence: list[dict] = []
+    for bam_path in sorted(annot_dir.glob("*.annotated.bam")):
+        match = ANNOTATED_BAM_PATTERN.match(bam_path.name)
+        if not match:
+            continue
+        normalized = _normalize_reference(match.group("reference"))
+        if not normalized:
+            continue
+        references.add(normalized)
+        evidence.append(
+            {
+                "file": str(bam_path.resolve()),
+                "sample": match.group("sample"),
+                "reference": normalized,
+                "source": "annotated_bam_filename",
+            }
+        )
+
+    return sorted(references), evidence
 
 
 def _resolve_workflow_references(workflow_dir: Path) -> dict:
@@ -142,7 +204,20 @@ def _resolve_workflow_references(workflow_dir: Path) -> dict:
         for ref in finding.get("references", []):
             resolved_refs.add(ref)
 
+    config_token_refs: list[str] = []
+    config_token_evidence: list[dict] = []
+    if len(resolved_refs) == 0 and visited:
+        config_token_refs, config_token_evidence = _extract_references_from_config_tokens(sorted(visited))
+        resolved_refs.update(config_token_refs)
+
+    fallback_refs: list[str] = []
+    fallback_evidence: list[dict] = []
+    if not findings and len(resolved_refs) == 0:
+        fallback_refs, fallback_evidence = _extract_references_from_annotated_bams(workflow_dir)
+        resolved_refs.update(fallback_refs)
+
     status = "ok"
+    resolution_source = "config"
     if not findings:
         status = "missing"
     elif len(resolved_refs) == 0:
@@ -150,11 +225,27 @@ def _resolve_workflow_references(workflow_dir: Path) -> dict:
     elif len(resolved_refs) > 1:
         status = "ambiguous"
 
+    if fallback_refs:
+        if len(fallback_refs) == 1:
+            status = "ok"
+        elif len(fallback_refs) > 1:
+            status = "ambiguous"
+        resolution_source = "annotated_bam_filename"
+    elif config_token_refs:
+        if len(config_token_refs) == 1:
+            status = "ok"
+        elif len(config_token_refs) > 1:
+            status = "ambiguous"
+        resolution_source = "config_token_fallback"
+
     return {
         "workflow": str(workflow_dir.resolve()),
         "status": status,
         "references": sorted(resolved_refs),
         "findings": findings,
+        "resolution_source": resolution_source,
+        "config_token_evidence": config_token_evidence,
+        "fallback_evidence": fallback_evidence,
     }
 
 

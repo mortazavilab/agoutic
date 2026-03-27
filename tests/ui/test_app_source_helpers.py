@@ -1,4 +1,4 @@
-"""Tests for helper functions extracted directly from ui/app.py source."""
+"""Tests for helper functions extracted directly from ui/appUI.py source."""
 
 import ast
 import datetime as dt
@@ -11,11 +11,11 @@ import plotly.express as px
 import pytest
 
 
-UI_APP_PATH = Path(__file__).resolve().parents[2] / "ui" / "app.py"
+UI_APP_PATH = Path(__file__).resolve().parents[2] / "ui" / "appUI.py"
 
 
 def _load_function(name: str, extra_globals: dict | None = None):
-    """Compile a single function from ui/app.py without importing Streamlit."""
+    """Compile a single function from ui/appUI.py without importing Streamlit."""
     source = UI_APP_PATH.read_text()
     tree = ast.parse(source, filename=str(UI_APP_PATH))
     fn_node = next(

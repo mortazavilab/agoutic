@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Ensure repository-local packages (e.g., launchpad) are importable when this
@@ -114,13 +115,36 @@ def _manual_gtf_matches_reference(manual_gtf: Path, reference: str) -> bool:
 
 
 def _ensure_reconcile_workflow_dir(output_root: Path) -> Path:
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     workflow_dir = output_root / f"workflow_reconcile_{stamp}"
     input_dir = workflow_dir / "input"
     output_dir = workflow_dir / "output"
     input_dir.mkdir(parents=True, exist_ok=False)
     output_dir.mkdir(parents=True, exist_ok=True)
     return workflow_dir
+
+
+def _resolve_output_root(project_dir: Path, workflow_dirs: list[Path], requested_output_dir: str) -> Path:
+    requested = (requested_output_dir or ".").strip()
+    if requested and requested != ".":
+        return Path(requested).expanduser().resolve()
+
+    if workflow_dirs:
+        workflow_parents = [str(path.parent) for path in workflow_dirs]
+        return Path(os.path.commonpath(workflow_parents)).expanduser().resolve()
+
+    script_dir = Path(__file__).resolve().parent
+    if project_dir.is_dir() and project_dir != script_dir:
+        return project_dir
+
+    cwd = Path.cwd().resolve()
+    if cwd != script_dir:
+        return cwd
+
+    raise ReconcileInputError(
+        "Unable to determine a writable reconcile output directory automatically. "
+        "Provide --output-dir explicitly."
+    )
 
 
 def _create_symlinks(workflow_dir: Path, bam_paths: list[Path]) -> list[dict]:
@@ -282,10 +306,9 @@ def main() -> int:
 
     try:
         project_dir = Path(args.project_dir).expanduser().resolve()
-        output_root = Path(args.output_dir).expanduser().resolve()
-        output_root.mkdir(parents=True, exist_ok=True)
-
         workflow_dirs = _discover_workflow_dirs(project_dir, list(args.workflow_dir or []))
+        output_root = _resolve_output_root(project_dir, workflow_dirs, args.output_dir)
+        output_root.mkdir(parents=True, exist_ok=True)
 
         input_bams: list[Path] = []
         for item in args.input_bam:

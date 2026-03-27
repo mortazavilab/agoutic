@@ -55,6 +55,21 @@ def _extract_script_dataframe(stdout_text: str) -> dict | None:
         "metadata": parsed.get("metadata") or {},
     }
 
+
+def _extract_script_error_payload(stdout_text: str) -> dict | None:
+    """Parse structured JSON stdout from utility scripts into an error payload."""
+    if not stdout_text.strip():
+        return None
+
+    try:
+        parsed = json.loads(stdout_text)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
 class LaunchpadMCPTools:
     """MCP tools for Launchpad job management."""
     
@@ -140,7 +155,19 @@ class LaunchpadMCPTools:
         if dataframe is not None:
             result["dataframe"] = dataframe
         if not success:
-            result["error"] = f"Script exited with code {process.returncode}"
+            error_payload = _extract_script_error_payload(stdout_text)
+            if error_payload is not None:
+                result["script_output"] = error_payload
+                payload_error = error_payload.get("error") or error_payload.get("message")
+                payload_errors = error_payload.get("errors")
+                if isinstance(payload_errors, list) and payload_errors:
+                    payload_error = payload_error or "; ".join(str(item) for item in payload_errors)
+                if payload_error:
+                    result["error"] = f"Script exited with code {process.returncode}: {payload_error}"
+                else:
+                    result["error"] = f"Script exited with code {process.returncode}"
+            else:
+                result["error"] = f"Script exited with code {process.returncode}"
         return result
     
     async def submit_dogme_job(

@@ -35,11 +35,12 @@ Optional:
 ## Plan Logic
 
 1. Locate candidate annotated BAM inputs from workflow outputs.
-2. Run `reconcile_bams/check_workflow_references` to inspect workflow Nextflow config files.
-3. Block if references are mixed, missing, or ambiguous.
-4. Request explicit approval.
-5. Run `reconcile_bams/reconcile_bams` after approval.
-6. Summarize reconcile outputs.
+2. Run `reconcile_bams/reconcile_bams --preflight-only` to validate that all selected BAMs resolve to one reference and that annotation/GTF inputs are usable.
+3. Surface reference provenance from workflow config artifacts when available, but do not block solely because config parsing is unavailable.
+4. Block if references are mixed, missing, or ambiguous.
+5. Request explicit approval.
+6. Run `reconcile_bams/reconcile_bams` after approval.
+7. Summarize reconcile outputs.
 
 ## Approval Gates
 
