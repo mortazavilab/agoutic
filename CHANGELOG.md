@@ -2,11 +2,38 @@
 
 ### Fixes
 
+- **Reconcile execution now runs the immutable `reconcileBams.py` workflow in a
+  standard `workflowN` directory** —
+  `skills/reconcile_bams/scripts/reconcile_bams.py` no longer performs its own
+  fallback merge path as the final algorithm. It now resolves the shared
+  annotation GTF from workflow config artifacts when possible, requires manual
+  override when provenance is missing or ambiguous, stages symlinked BAM inputs
+  under `workflowN/input`, and invokes `reconcileBams.py` with the native
+  `--bams`, `--annotation`, `--out_prefix`, `--outdir`, and optional tuning
+  arguments, writing outputs directly under `workflowN`.
+
+- **Reconcile approval editing now lives on the active Streamlit UI entrypoint**
+  — `ui/appUI.py` now renders the reconcile-specific approval form that lets
+  users edit annotation path, output root/prefix, ID/tag prefixes, thread and
+  filtering controls, and review annotation provenance before approval, while
+  the legacy `ui/app.py` is no longer used for this flow.
+
+- **Reconcile approvals now preserve the real script contract through
+  submission** — `cortex/app.py` now carries execution defaults and annotation
+  evidence from preflight into the approval payload, and
+  `cortex/workflow_submission.py` rebuilds wrapper arguments from approved BAM
+  inputs and edited reconcile parameters so the submitted script-backed run
+  stays aligned with the underlying `reconcileBams.py` CLI.
+
+- **Shared environment metadata now declares the reconcile runtime dependency**
+  — `environment.yml` now lists `pysam`, matching the existing dependency of
+  `skills/reconcile_bams/scripts/reconcileBams.py`.
+
 - **Reconcile workflow approvals now use plan-aware script review instead of
   generic Dogme job forms** — `cortex/app.py` now builds
   `gate_action=reconcile_bams` approval payloads directly from reconcile
   preflight output, including validated BAM inputs, resolved shared reference,
-  annotation GTF provenance, and output destination, while `ui/app.py` renders
+  annotation GTF provenance, and output destination, while `ui/appUI.py` renders
   a dedicated reconcile approval summary instead of unrelated
   sample/mode/input-type fields.
 
@@ -58,6 +85,17 @@
   override stale SLURM context from prior approvals.
 
 ### Tests
+
+- Updated reconcile script regressions in
+  `tests/skills/test_reconcile_bams_scripts.py` to cover workflow-config GTF
+  resolution, `workflowN` root-output layout, and the real `reconcileBams.py`
+  execution path when `pysam` is available, while skipping BAM-construction
+  fixtures cleanly in environments where that compiled dependency is missing.
+
+- Updated reconcile submission regressions in
+  `tests/cortex/test_background_tasks.py` to assert that approval-time edits are
+  converted into the expected wrapper/script argument set before Launchpad
+  submission.
 
 - Added focused reconcile approval lifecycle regressions in
   `tests/cortex/test_background_tasks.py` covering:
@@ -712,7 +750,7 @@
   staging and run directories from a single `remote_base_path` instead of a
   bundle of per-path fields or invented `/scratch` fallbacks. References stage
   under `ref/`, sample data under `data/`, and each remote run under
-  `{project_slug}/workflowN/output`.
+  `{project_slug}/workflowN`.
 
 - **Stage-only remote sample intake** — added a dedicated remote staging flow
   that stages references and sample inputs without submitting a scheduler job.

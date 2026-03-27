@@ -55,7 +55,7 @@ The active remote roots are:
 | `{remote_base_path}/ref` | Reference cache root |
 | `{remote_base_path}/data` | Input-data cache root |
 | `{remote_base_path}/{project_slug}/workflowN` | Per-workflow remote working directory |
-| `{remote_base_path}/{project_slug}/workflowN/output` | Per-workflow output directory |
+| `{remote_base_path}/{project_slug}/workflowN` | Per-workflow reconcile output root (with staged inputs under `workflowN/input`) |
 
 This replaces the older architecture that treated remote input/work/output
 paths as independent primary configuration.

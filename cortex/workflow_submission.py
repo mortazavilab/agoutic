@@ -42,6 +42,47 @@ REMOTE_STAGE_MCP_TIMEOUT = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
 logger = get_logger(__name__)
 
 
+def _build_reconcile_script_args(job_params: dict) -> list[str]:
+    bam_inputs = job_params.get("bam_inputs") or []
+    bam_paths = [
+        item.get("path")
+        for item in bam_inputs
+        if isinstance(item, dict) and item.get("path")
+    ]
+    if not bam_paths:
+        raise ValueError("Reconcile approval is missing BAM inputs.")
+
+    annotation_gtf = (job_params.get("annotation_gtf") or "").strip()
+    if not annotation_gtf:
+        raise ValueError("Reconcile approval is missing the annotation GTF path.")
+
+    output_prefix = (job_params.get("output_prefix") or job_params.get("sample_name") or "reconciled").strip()
+    output_dir = (job_params.get("output_directory") or job_params.get("input_directory") or ".").strip()
+    script_args: list[str] = ["--json", "--output-prefix", output_prefix, "--output-dir", output_dir, "--annotation-gtf", annotation_gtf]
+    for bam_path in bam_paths:
+        script_args.extend(["--input-bam", bam_path])
+
+    scalar_flags = [
+        ("gene_prefix", "--gene_prefix"),
+        ("tx_prefix", "--tx_prefix"),
+        ("id_tag", "--id_tag"),
+        ("gene_tag", "--gene_tag"),
+        ("threads", "--threads"),
+        ("exon_merge_distance", "--exon_merge_distance"),
+        ("min_tpm", "--min_tpm"),
+        ("min_samples", "--min_samples"),
+    ]
+    for field, flag in scalar_flags:
+        value = job_params.get(field)
+        if value is None or value == "":
+            continue
+        script_args.extend([flag, str(value)])
+
+    if job_params.get("filter_known"):
+        script_args.append("--filter_known")
+    return script_args
+
+
 async def submit_job_after_approval(project_id: str, gate_block_id: str):
     """
     Background task to submit a job to Launchpad after approval.
@@ -95,6 +136,12 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         if run_type not in {"dogme", "script"}:
             run_type = "dogme"
 
+        gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
+        if run_type == "script" and gate_action == "reconcile_bams":
+            job_params = dict(job_params)
+            job_params["script_id"] = "reconcile_bams/reconcile_bams"
+            job_params["script_args"] = _build_reconcile_script_args(job_params)
+
         # Normalize remote execution parameters for Dogme jobs only.
         if run_type != "script":
             job_params = await _prepare_remote_execution_params(session, project_id, owner_id, job_params)
@@ -118,7 +165,6 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
         _username = owner_user.username if owner_user else None
         _project_slug = project_obj.slug if project_obj else None
-        gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
         remote_action = (job_params.get("remote_action") or "").strip().lower()
         remote_intent = run_type != "script" and _has_remote_stage_intent(job_params, gate_payload)
         execution_mode = (job_params.get("execution_mode") or "local").strip().lower()

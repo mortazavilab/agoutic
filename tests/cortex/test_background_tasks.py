@@ -833,10 +833,26 @@ class TestSubmitJobAfterApproval:
                     "sample_name": "reconciled",
                     "mode": "RNA",
                     "input_directory": "/proj/reconcile",
+                    "output_directory": "/proj/reconcile",
+                    "output_prefix": "reconciled",
                     "run_type": "script",
                     "script_id": "reconcile_bams/reconcile_bams",
-                    "script_args": ["--workflow-dir", "/proj/workflow2", "--json"],
+                    "annotation_gtf": "/refs/GRCh38.annotation.gtf",
+                    "bam_inputs": [
+                        {"path": "/proj/workflow2/annot/sample1.GRCh38.annotated.bam", "sample": "sample1", "reference": "GRCh38"},
+                        {"path": "/proj/workflow3/annot/sample2.GRCh38.annotated.bam", "sample": "sample2", "reference": "GRCh38"},
+                    ],
+                    "gene_prefix": "CONSG",
+                    "tx_prefix": "CONST",
+                    "id_tag": "TX",
+                    "gene_tag": "GX",
+                    "threads": 8,
+                    "exon_merge_distance": 5,
+                    "min_tpm": 2.5,
+                    "min_samples": 3,
+                    "filter_known": True,
                     "workflow_block_id": workflow_block.id,
+                    "gate_action": "reconcile_bams",
                 },
                 "model": "default",
             },
@@ -865,6 +881,19 @@ class TestSubmitJobAfterApproval:
         run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_reconcile")
         assert run_step["status"] == "RUNNING"
         assert run_step["run_uuid"] == "script-run-1"
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["script_id"] == "reconcile_bams/reconcile_bams"
+        assert submitted["script_args"][:7] == [
+            "--json",
+            "--output-prefix",
+            "reconciled",
+            "--output-dir",
+            "/proj/reconcile",
+            "--annotation-gtf",
+            "/refs/GRCh38.annotation.gtf",
+        ]
+        assert submitted["script_args"].count("--input-bam") == 2
+        assert "--filter_known" in submitted["script_args"]
         job_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
         assert any(get_block_payload(block).get("run_type") == "script" for block in job_blocks)
         sess.close()

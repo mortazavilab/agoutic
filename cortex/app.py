@@ -1609,6 +1609,8 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
     reference = None
     annotation_gtf = None
     annotation_gtf_source = None
+    execution_defaults = {}
+    annotation_evidence = []
     bam_inputs = []
     if isinstance(preflight_payload, dict):
         reference = preflight_payload.get("reference")
@@ -1616,9 +1618,13 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
         if isinstance(gtf_info, dict):
             annotation_gtf = gtf_info.get("path")
             annotation_gtf_source = gtf_info.get("source")
+        annotation_evidence = preflight_payload.get("annotation_evidence") or []
         inputs_info = preflight_payload.get("inputs") or {}
         if isinstance(inputs_info, dict):
             bam_inputs = inputs_info.get("bams") or []
+        execution_info = preflight_payload.get("execution_defaults") or {}
+        if isinstance(execution_info, dict):
+            execution_defaults = execution_info
         outputs_info = preflight_payload.get("outputs") or {}
         if isinstance(outputs_info, dict):
             output_root = outputs_info.get("output_root") or output_root
@@ -1642,8 +1648,19 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
         "reference": reference,
         "annotation_gtf": annotation_gtf,
         "annotation_gtf_source": annotation_gtf_source,
+        "annotation_evidence": annotation_evidence,
         "bam_inputs": bam_inputs,
         "bam_count": len(bam_inputs),
+        "gene_prefix": execution_defaults.get("gene_prefix") or "CONSG",
+        "tx_prefix": execution_defaults.get("tx_prefix") or "CONST",
+        "id_tag": execution_defaults.get("id_tag") or "TX",
+        "gene_tag": execution_defaults.get("gene_tag") or "GX",
+        "threads": execution_defaults.get("threads"),
+        "exon_merge_distance": execution_defaults.get("exon_merge_distance") or 5,
+        "min_tpm": execution_defaults.get("min_tpm") if execution_defaults.get("min_tpm") is not None else 1.0,
+        "min_samples": execution_defaults.get("min_samples") or 2,
+        "filter_known": bool(execution_defaults.get("filter_known")),
+        "underlying_script_id": execution_defaults.get("underlying_script_id") or "reconcile_bams/reconcileBams",
         "preflight_summary": preflight_payload,
         "gate_action": "reconcile_bams",
     }

@@ -2000,6 +2000,119 @@ def render_block(block, expected_project_id: str = ""):
                             )
                             st.rerun()
 
+                elif _gate_action == "reconcile_bams" and extracted_params:
+                    preflight_summary = extracted_params.get("preflight_summary") or {}
+                    bam_inputs = extracted_params.get("bam_inputs") or []
+                    reference = extracted_params.get("reference") or "unknown"
+                    annotation_gtf = extracted_params.get("annotation_gtf") or "not resolved"
+                    annotation_gtf_source = extracted_params.get("annotation_gtf_source") or "unknown"
+                    annotation_evidence = extracted_params.get("annotation_evidence") or []
+                    output_directory = extracted_params.get("output_directory") or extracted_params.get("input_directory") or ""
+                    output_prefix = extracted_params.get("output_prefix") or extracted_params.get("sample_name") or "reconciled"
+                    gene_prefix_default = extracted_params.get("gene_prefix") or "CONSG"
+                    tx_prefix_default = extracted_params.get("tx_prefix") or "CONST"
+                    id_tag_default = extracted_params.get("id_tag") or "TX"
+                    gene_tag_default = extracted_params.get("gene_tag") or "GX"
+                    threads_default = int(extracted_params.get("threads") or (os.cpu_count() or 1))
+                    exon_merge_distance_default = int(extracted_params.get("exon_merge_distance") or 5)
+                    min_tpm_default = float(extracted_params.get("min_tpm") if extracted_params.get("min_tpm") is not None else 1.0)
+                    min_samples_default = int(extracted_params.get("min_samples") or 2)
+                    filter_known_default = bool(extracted_params.get("filter_known"))
+                    underlying_script_id = extracted_params.get("underlying_script_id") or "reconcile_bams/reconcileBams"
+
+                    with st.form(key=f"reconcile_form_{block_id}"):
+                        grouped_section("Reconcile Summary")
+                        st.write(f"**Reference**: `{reference}`")
+                        st.write(f"**Execution Script**: `{underlying_script_id}`")
+
+                        grouped_section("Reconcile Settings")
+                        output_directory = st.text_input("Workflow Root", value=output_directory, help="Parent project directory where the next workflowN folder will be created.")
+                        output_prefix = st.text_input("Output Prefix", value=output_prefix)
+                        annotation_gtf = st.text_input("Annotation GTF", value=annotation_gtf)
+                        st.caption(f"GTF source: `{annotation_gtf_source}`")
+                        col1, col2 = st.columns(2)
+                        gene_prefix = col1.text_input("Gene Prefix", value=gene_prefix_default)
+                        tx_prefix = col2.text_input("Transcript Prefix", value=tx_prefix_default)
+                        col3, col4 = st.columns(2)
+                        id_tag = col3.text_input("Transcript ID Tag", value=id_tag_default)
+                        gene_tag = col4.text_input("Gene ID Tag", value=gene_tag_default)
+                        col5, col6 = st.columns(2)
+                        threads = col5.number_input("Threads", min_value=1, value=threads_default, step=1)
+                        exon_merge_distance = col6.number_input("Exon Merge Distance", min_value=0, value=exon_merge_distance_default, step=1)
+                        col7, col8 = st.columns(2)
+                        min_tpm = col7.number_input("Min TPM", min_value=0.0, value=min_tpm_default, step=0.1, format="%.3f")
+                        min_samples = col8.number_input("Min Samples", min_value=1, value=min_samples_default, step=1)
+                        filter_known = st.checkbox("Filter Known Transcripts", value=filter_known_default)
+
+                        grouped_section("Validated Inputs")
+                        st.write(f"{len(bam_inputs)} annotated BAM(s) passed preflight validation.")
+                        for bam in bam_inputs:
+                            if not isinstance(bam, dict):
+                                continue
+                            sample_label = bam.get("sample") or "sample"
+                            bam_path = bam.get("path") or ""
+                            st.caption(f"{sample_label}: `{bam_path}`")
+
+                        if annotation_evidence:
+                            grouped_section("Annotation Provenance")
+                            for item in annotation_evidence:
+                                if not isinstance(item, dict):
+                                    continue
+                                evidence_file = item.get("file") or "config"
+                                evidence_line = item.get("line")
+                                evidence_gtf = item.get("annotation_gtf") or ""
+                                st.caption(f"{evidence_file}:{evidence_line} -> `{evidence_gtf}`")
+
+                        message = preflight_summary.get("message") if isinstance(preflight_summary, dict) else None
+                        if message:
+                            st.info(message)
+
+                        st.divider()
+                        col1, col2 = st.columns(2)
+                        submit_approve = col1.form_submit_button("✅ Approve Reconcile", width="stretch")
+                        submit_reject = col2.form_submit_button("❌ Reject", width="stretch")
+
+                        if submit_approve:
+                            edited_params = dict(extracted_params)
+                            edited_params.update(
+                                {
+                                    "output_directory": output_directory,
+                                    "input_directory": output_directory,
+                                    "output_prefix": output_prefix,
+                                    "sample_name": output_prefix,
+                                    "annotation_gtf": annotation_gtf,
+                                    "gene_prefix": gene_prefix,
+                                    "tx_prefix": tx_prefix,
+                                    "id_tag": id_tag,
+                                    "gene_tag": gene_tag,
+                                    "threads": int(threads),
+                                    "exon_merge_distance": int(exon_merge_distance),
+                                    "min_tpm": float(min_tpm),
+                                    "min_samples": int(min_samples),
+                                    "filter_known": bool(filter_known),
+                                    "script_id": "reconcile_bams/reconcile_bams",
+                                }
+                            )
+                            payload_update = dict(content)
+                            payload_update["edited_params"] = edited_params
+                            resp = make_authenticated_request(
+                                "PATCH",
+                                f"{API_URL}/block/{block_id}",
+                                json={"status": "APPROVED", "payload": payload_update}
+                            )
+                            if resp.status_code == 200:
+                                st.rerun()
+                            else:
+                                try:
+                                    error_detail = resp.json().get("detail") or resp.text
+                                except Exception:
+                                    error_detail = resp.text
+                                st.error(f"Approval failed: {error_detail}")
+
+                        if submit_reject:
+                            st.session_state[f"rejecting_{block_id}"] = True
+                            st.rerun()
+
                 elif extracted_params:
                     st.write("**📋 Extracted Parameters** (edit if needed):")
                     
@@ -2697,6 +2810,8 @@ def render_block(block, expected_project_id: str = ""):
                 completed_at = job_status.get("completed_at") or content.get("completed_at")
                 workflow_label = _workflow_label_from_path(work_directory)
                 run_stage = (job_status.get("run_stage") or "").strip().lower()
+                current_step = (job_status.get("current_step") or "").strip()
+                current_step_detail = (job_status.get("current_step_detail") or "").strip()
                 transfer_state = (job_status.get("transfer_state") or "").strip().lower()
                 result_destination = (job_status.get("result_destination") or "").strip().lower()
                 try:
@@ -2719,6 +2834,12 @@ def render_block(block, expected_project_id: str = ""):
                 if duration_label:
                     run_meta["Duration"] = duration_label
                 metadata_row(run_meta)
+
+                if current_step:
+                    current_step_message = current_step
+                    if current_step_detail and current_step_detail != current_step:
+                        current_step_message = f"{current_step}: {current_step_detail}"
+                    info_callout(current_step_message, kind="info", icon="🧭")
 
                 is_running = status_str == "RUNNING"
                 is_failed = status_str in ("FAILED", "CANCELLED")

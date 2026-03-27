@@ -330,5 +330,5 @@ squeue -u $USER
 sacct -j <slurm_job_id> --format=JobID,State,ExitCode,Elapsed
 
 # Manually retrieve results
-scp -r user@login.cluster.example.edu:/scratch/$USER/agoutic/<project_slug>/workflowN/output/ ./local_results/
+scp -r user@login.cluster.example.edu:/scratch/$USER/agoutic/<project_slug>/workflowN/ ./local_results/
 ```

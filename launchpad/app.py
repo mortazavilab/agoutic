@@ -188,6 +188,126 @@ def _read_log_tail(path: str, *, max_chars: int = 4000) -> str:
     return text[-max_chars:]
 
 
+def _tail_log_lines(path: str | None, *, max_lines: int = 40, max_chars: int = 12000) -> list[str]:
+    if not path:
+        return []
+    text = _read_log_tail(path, max_chars=max_chars)
+    if not text:
+        return []
+    return [line for line in text.splitlines() if line.strip()][-max_lines:]
+
+
+def _parse_job_report(job) -> dict:
+    raw = getattr(job, "report_json", None)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _is_reconcile_script_job(job, report: dict | None = None) -> bool:
+    report = report or _parse_job_report(job)
+    script_id = (report.get("script_id") or "").strip()
+    script_path = Path(report.get("script_path") or "") if report.get("script_path") else None
+    if script_id in {"reconcile_bams/reconcile_bams", "reconcile_bams/reconcileBams"}:
+        return True
+    if script_path is None:
+        return False
+    return script_path.name in {"reconcile_bams.py", "reconcileBams.py"}
+
+
+def _infer_reconcile_progress(stdout_lines: list[str], stderr_lines: list[str]) -> dict[str, str | int | None]:
+    markers = [
+        ("=== Parsing reference annotation", "Parsing reference annotation", 10),
+        ("=== Step 1: Collecting structures and assigning IDs", "Collecting transcript structures", 30),
+        ("=== Step 1.5: Consolidating KNOWN/ISM variants", "Consolidating transcript variants", 45),
+        ("=== Summary of Findings ===", "Summarizing reconcile findings", 55),
+        ("Wrote per-sample novelty counts to:", "Writing novelty summaries", 60),
+        ("=== Step 2: Rewriting BAM files", "Rewriting BAM files", 75),
+        ("Finished rewriting ", "Rewriting BAM files", 82),
+        ("=== Step 3: Generating DOGME annotation files", "Generating annotation outputs", 90),
+        ("Writing ", "Writing reconcile output files", 94),
+        ("=== ✅ All tasks complete! ===", "Reconcile complete", 100),
+    ]
+
+    current_step = None
+    current_detail = None
+    progress_percent = 5
+    for line in [*stdout_lines, *stderr_lines]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        for marker, label, progress in markers:
+            if marker in stripped:
+                current_step = label
+                current_detail = stripped
+                progress_percent = progress
+
+    if current_step is None:
+        latest_line = next((line.strip() for line in reversed(stdout_lines) if line.strip()), "")
+        latest_err = next((line.strip() for line in reversed(stderr_lines) if line.strip()), "")
+        if latest_line:
+            current_step = "Running reconcile script"
+            current_detail = latest_line
+            progress_percent = 50
+        elif latest_err:
+            current_step = "Running reconcile script"
+            current_detail = latest_err
+            progress_percent = 50
+        else:
+            current_step = "Preparing reconcile workflow"
+            current_detail = "Launching reconcileBams.py"
+            progress_percent = 5
+
+    return {
+        "current_step": current_step,
+        "current_step_detail": current_detail,
+        "progress_percent": progress_percent,
+        "message": current_detail or current_step,
+    }
+
+
+def _build_live_script_status(job) -> dict[str, str | int | None]:
+    stdout_lines = _tail_log_lines(getattr(job, "log_file", None), max_lines=80)
+    stderr_lines = _tail_log_lines(getattr(job, "stderr_log", None), max_lines=40)
+    report = _parse_job_report(job)
+
+    if _is_reconcile_script_job(job, report=report):
+        return _infer_reconcile_progress(stdout_lines, stderr_lines)
+
+    latest_stdout = next((line.strip() for line in reversed(stdout_lines) if line.strip()), "")
+    latest_stderr = next((line.strip() for line in reversed(stderr_lines) if line.strip()), "")
+    message = latest_stderr or latest_stdout or "Script job running."
+    return {
+        "current_step": "Running script",
+        "current_step_detail": message,
+        "progress_percent": 50,
+        "message": message,
+    }
+
+
+def _build_live_script_logs(job, *, limit: int) -> list[dict[str, str]]:
+    timestamp = datetime.utcnow().isoformat()
+    live_logs: list[dict[str, str]] = []
+    for source, level, path in (
+        ("script-stdout-live", "INFO", getattr(job, "log_file", None)),
+        ("script-stderr-live", "ERROR", getattr(job, "stderr_log", None)),
+    ):
+        for line in _tail_log_lines(path, max_lines=max(1, limit)):
+            live_logs.append(
+                {
+                    "timestamp": timestamp,
+                    "level": level,
+                    "message": line,
+                    "source": source,
+                }
+            )
+    return live_logs[-limit:]
+
+
 async def _monitor_script_job(
     run_uuid: str,
     process: asyncio.subprocess.Process,
@@ -767,14 +887,17 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             raise HTTPException(status_code=404, detail="Job not found")
 
         if (job.run_stage or "").startswith("SCRIPT_"):
+            live_status = _build_live_script_status(job)
             return {
                 "run_uuid": run_uuid,
                 "status": job.status,
-                "progress_percent": 100 if job.status == JobStatus.COMPLETED else (50 if job.status == JobStatus.RUNNING else 0),
-                "message": job.error_message or f"Script job {str(job.status).lower()}.",
+                "progress_percent": 100 if job.status == JobStatus.COMPLETED else (int(live_status.get("progress_percent") or job.progress_percent or 50) if job.status == JobStatus.RUNNING else 0),
+                "message": job.error_message or str(live_status.get("message") or f"Script job {str(job.status).lower()}."),
                 "tasks": {},
                 "execution_mode": "local",
                 "run_stage": job.run_stage,
+                "current_step": live_status.get("current_step"),
+                "current_step_detail": live_status.get("current_step_detail"),
                 "work_directory": job.nextflow_work_dir,
                 **_job_timing_payload(job),
             }
@@ -879,8 +1002,12 @@ async def get_job_logs_endpoint(
                     for log in logs
                 ],
             }
-        
+
         logs = await get_job_logs(session, run_uuid, limit=limit)
+        if (job.run_stage or "").startswith("SCRIPT_") and job.status == JobStatus.RUNNING:
+            live_logs = _build_live_script_logs(job, limit=limit)
+            if live_logs:
+                logs = [*logs, *live_logs][-limit:]
         
         return {
             "run_uuid": run_uuid,

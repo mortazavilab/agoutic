@@ -258,6 +258,8 @@ class JobStatusExtendedResponse(JobStatusResponse):
     """Extended job status with remote execution fields."""
     execution_mode: str = "local"
     run_stage: Optional[str] = None
+    current_step: Optional[str] = None
+    current_step_detail: Optional[str] = None
     slurm_job_id: Optional[str] = None
     slurm_state: Optional[str] = None
     transfer_state: Optional[str] = None

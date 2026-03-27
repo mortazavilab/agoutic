@@ -48,6 +48,9 @@ dependencies:
     # --- Differential Expression ---
     - edgepython[all]          # edgeR-style DE analysis (bulk + single-cell)
 
+    # --- Reconcile BAMs ---
+    - pysam                    # Required by skills/reconcile_bams/scripts/reconcileBams.py
+
     # --- Testing ---
     - pytest>=7.0
     - pytest-asyncio>=0.21.0   # Async test support

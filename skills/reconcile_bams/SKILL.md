@@ -3,15 +3,15 @@
 ## Description
 
 This skill orchestrates reconciliation of annotated BAM outputs across multiple workflows.
-It validates that source workflows use the same reference genome before running the
-reconcile script.
+It validates that source workflows use the same reference genome and annotation GTF
+before running the immutable `reconcileBams.py` implementation.
 
 ## Skill Scope & Routing
 
 ### ✅ This Skill Handles:
 - Reconciling multiple `*.annotated.bam` files
 - Cross-workflow BAM merge/reconcile requests
-- Preflight reference checks from workflow Nextflow config artifacts
+- Preflight reference and annotation checks from workflow Nextflow config artifacts
 - Approval-gated reconcile execution
 
 ### ❌ This Skill Does NOT Handle:
@@ -24,23 +24,31 @@ reconcile script.
 Required before execution approval:
 - Source annotated BAM set (auto-discovered or user-provided)
 - Shared reference validation from source workflow Nextflow config files
+- Annotation GTF used to annotate the source BAMs
 - Output prefix
 - Output directory
 
 Optional:
+- `gene_prefix`
+- `tx_prefix`
+- `id_tag`
+- `gene_tag`
+- `threads`
+- `exon_merge_distance`
 - `min_tpm`
 - `min_samples`
-- known-only filter toggle
+- `filter_known`
 
 ## Plan Logic
 
 1. Locate candidate annotated BAM inputs from workflow outputs.
 2. Run `reconcile_bams/reconcile_bams --preflight-only` to validate that all selected BAMs resolve to one reference and that annotation/GTF inputs are usable.
-3. Surface reference provenance from workflow config artifacts when available, but do not block solely because config parsing is unavailable.
-4. Block if references are mixed, missing, or ambiguous.
-5. Request explicit approval.
-6. Run `reconcile_bams/reconcile_bams` after approval.
-7. Summarize reconcile outputs.
+3. Resolve the exact annotation GTF from workflow config artifacts when possible; otherwise require an explicit annotation path before approval.
+4. Block if references or annotation GTFs are mixed, missing, or ambiguous.
+5. Request explicit approval and allow the user to edit the final `reconcileBams.py` arguments.
+6. Run `reconcile_bams/reconcile_bams`, which stages symlinked inputs into a standard `workflowN` directory and then invokes `reconcile_bams/reconcileBams`.
+7. Summarize reconcile outputs from the staged `workflowN` directory. Input
+	symlinks remain under `workflowN/input`.
 
 ## Approval Gates
 
@@ -51,4 +59,6 @@ No `RUN_SCRIPT` execution is allowed before approval.
 
 - Enforce BAM filename convention: `<sample>.<reference>.annotated.bam`.
 - Require all selected BAMs to resolve to one reference.
-- Surface reference provenance in approval context when available.
+- Require one shared annotation GTF, preferring the exact workflow-config value over a generic default.
+- Surface reference and annotation provenance in approval context when available.
+- Do not modify `reconcileBams.py` as part of this skill.
