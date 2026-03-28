@@ -203,9 +203,17 @@ class CrossProjectSearchResponse(BaseModel):
     limit: int
 
 
+class LogicalFileReference(BaseModel):
+    project_name: Optional[str] = None
+    workflow_name: Optional[str] = None
+    sample_name: Optional[str] = None
+    file_type: Optional[str] = None
+
+
 class SelectedFileInput(BaseModel):
     source_project_id: str = Field(..., min_length=1)
-    relative_path: str = Field(..., min_length=1)
+    relative_path: Optional[str] = Field(default=None, min_length=1)
+    logical_reference: Optional[LogicalFileReference] = None
 
 
 class StageRequest(BaseModel):

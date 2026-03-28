@@ -53,10 +53,15 @@ def _user_file_to_out(session, uf: UserFile) -> dict:
         proj = session.execute(
             select(Project).where(Project.id == lnk.project_id)
         ).scalar_one_or_none()
+        rel_link_path = f"data/{uf.filename}"
+        if proj and proj.slug and lnk.symlink_path:
+            marker = f"/{proj.slug}/"
+            if marker in lnk.symlink_path:
+                rel_link_path = lnk.symlink_path.split(marker, 1)[1]
         projects.append({
             "project_id": lnk.project_id,
             "project_name": proj.name if proj else None,
-            "symlink_path": lnk.symlink_path,
+            "symlink_path": rel_link_path,
             "linked_at": str(lnk.linked_at) if lnk.linked_at else None,
         })
 
@@ -79,7 +84,7 @@ def _user_file_to_out(session, uf: UserFile) -> dict:
         "organism": uf.organism,
         "tissue": uf.tissue,
         "tags": tags,
-        "disk_path": uf.disk_path,
+        "disk_path": f"data/{uf.filename}",
         "created_at": str(uf.created_at) if uf.created_at else None,
         "updated_at": str(uf.updated_at) if uf.updated_at else None,
         "projects": projects,
@@ -105,6 +110,12 @@ async def list_user_files(
             .order_by(UserFile.filename)
         ).scalars().all()
 
+        tracked_paths = {
+            str(Path(uf.disk_path).resolve(strict=False))
+            for uf in rows
+            if uf.disk_path
+        }
+
         files = [_user_file_to_out(session, uf) for uf in rows]
         for item in files:
             item["tracked"] = True
@@ -113,11 +124,6 @@ async def list_user_files(
             username = getattr(user, "username", None)
             if username:
                 central_dir = get_user_data_dir(username)
-                tracked_paths = {
-                    str(Path(item.get("disk_path", "")).resolve(strict=False))
-                    for item in files
-                    if item.get("disk_path")
-                }
 
                 for path in sorted(central_dir.rglob("*")):
                     if not path.is_file():
@@ -141,7 +147,7 @@ async def list_user_files(
                             "organism": None,
                             "tissue": None,
                             "tags": None,
-                            "disk_path": str(path),
+                            "disk_path": str(path.relative_to(central_dir)),
                             "created_at": ts,
                             "updated_at": ts,
                             "projects": [],
@@ -249,7 +255,12 @@ async def link_file_to_project(file_id: str, body: UserFileLinkRequest, request:
             symlink_path=sym,
         )
 
-        return {"status": "linked", "file_id": uf.id, "project_id": body.project_id, "symlink": str(sym)}
+        return {
+            "status": "linked",
+            "file_id": uf.id,
+            "project_id": body.project_id,
+            "symlink": f"data/{uf.filename}",
+        }
     finally:
         session.close()
 
@@ -331,7 +342,7 @@ async def delete_user_file(file_id: str, request: Request):
         return {
             "status": "deleted",
             "file_id": file_id,
-            "removed_symlinks": removed_symlinks,
+            "removed_symlinks": [Path(s).name for s in removed_symlinks],
         }
     finally:
         session.close()

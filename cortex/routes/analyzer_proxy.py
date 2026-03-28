@@ -7,6 +7,7 @@ Also includes the Launchpad proxy endpoints.
 """
 
 import sys
+import re
 from typing import Optional
 
 import httpx
@@ -21,6 +22,23 @@ from common.logging_config import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def _safe_relative_file_path(file_path: str) -> str:
+    """Validate analyzer file_path input as a safe relative path."""
+    if not file_path:
+        raise HTTPException(status_code=400, detail="file_path is required")
+    if file_path.startswith("/") or file_path.startswith("\\"):
+        raise HTTPException(status_code=400, detail="Absolute paths are not allowed")
+    if re.match(r'^[a-zA-Z]:', file_path):
+        raise HTTPException(status_code=400, detail="Absolute paths are not allowed")
+    if ".." in file_path:
+        raise HTTPException(status_code=400, detail="Path traversal is not allowed")
+    if "\x00" in file_path:
+        raise HTTPException(status_code=400, detail="Invalid characters in path")
+    if any(tok in file_path for tok in ["*", "?", "|", "<", ">"]):
+        raise HTTPException(status_code=400, detail="Invalid path tokens")
+    return file_path
 
 
 def _require_run_uuid_access(run_uuid: str, user) -> None:
@@ -133,10 +151,11 @@ async def read_file_content(
     """
     user = request.state.user
     _require_run_uuid_access(run_uuid, user)
+    safe_file_path = _safe_relative_file_path(file_path)
     return await _call_analyzer_tool(
         "read_file_content",
         run_uuid=run_uuid,
-        file_path=file_path,
+        file_path=safe_file_path,
         preview_lines=preview_lines,
     )
 
@@ -154,10 +173,11 @@ async def parse_csv_file(
     """
     user = request.state.user
     _require_run_uuid_access(run_uuid, user)
+    safe_file_path = _safe_relative_file_path(file_path)
     return await _call_analyzer_tool(
         "parse_csv_file",
         run_uuid=run_uuid,
-        file_path=file_path,
+        file_path=safe_file_path,
         max_rows=max_rows,
     )
 
@@ -174,10 +194,11 @@ async def parse_bed_file(
     """
     user = request.state.user
     _require_run_uuid_access(run_uuid, user)
+    safe_file_path = _safe_relative_file_path(file_path)
     return await _call_analyzer_tool(
         "parse_bed_file",
         run_uuid=run_uuid,
-        file_path=file_path,
+        file_path=safe_file_path,
         max_records=max_records,
     )
 
@@ -194,12 +215,13 @@ async def proxy_download_file(
     """
     user = request.state.user
     _require_run_uuid_access(run_uuid, user)
+    safe_file_path = _safe_relative_file_path(file_path)
     try:
         analyzer_rest = _cfg.SERVICE_REGISTRY["analyzer"]["rest_url"]
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.get(
                 f"{analyzer_rest}/analysis/files/download",
-                params={"run_uuid": run_uuid, "file_path": file_path},
+                params={"run_uuid": run_uuid, "file_path": safe_file_path},
             )
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail=resp.text)

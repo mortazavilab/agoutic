@@ -184,16 +184,30 @@ class TestReadFileContent:
             "lines": 1,
         }
         resp = client.get("/analysis/files/content",
-                         params={"run_uuid": "abc-123", "file_path": "/path/to/file.bed"})
+                         params={"run_uuid": "abc-123", "file_path": "data/file.bed"})
         assert resp.status_code == 200
         assert resp.json()["content"] == "chr1\t100\t200\n"
 
     def test_with_preview_lines(self, client, mock_mcp):
         mock_mcp.call_tool.return_value = {"success": True, "content": "row1\n"}
         resp = client.get("/analysis/files/content",
-                         params={"run_uuid": "abc-123", "file_path": "/x",
+                         params={"run_uuid": "abc-123", "file_path": "x",
                                 "preview_lines": 10})
         assert resp.status_code == 200
+
+    def test_rejects_absolute_path(self, client, mock_mcp):
+        resp = client.get(
+            "/analysis/files/content",
+            params={"run_uuid": "abc-123", "file_path": "/etc/passwd"},
+        )
+        assert resp.status_code == 400
+
+    def test_rejects_traversal_path(self, client, mock_mcp):
+        resp = client.get(
+            "/analysis/files/content",
+            params={"run_uuid": "abc-123", "file_path": "../secrets.txt"},
+        )
+        assert resp.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -207,14 +221,14 @@ class TestParseCsv:
             "rows": [{"score": 0.9, "name": "gene1"}],
         }
         resp = client.get("/analysis/files/parse/csv",
-                         params={"run_uuid": "abc-123", "file_path": "/data.csv"})
+                         params={"run_uuid": "abc-123", "file_path": "data.csv"})
         assert resp.status_code == 200
         assert resp.json()["columns"] == ["score", "name"]
 
     def test_parse_csv_max_rows(self, client, mock_mcp):
         mock_mcp.call_tool.return_value = {"success": True, "rows": []}
         resp = client.get("/analysis/files/parse/csv",
-                         params={"run_uuid": "abc-123", "file_path": "/d.csv",
+                    params={"run_uuid": "abc-123", "file_path": "d.csv",
                                 "max_rows": 5})
         assert resp.status_code == 200
 
@@ -229,7 +243,7 @@ class TestParseBed:
             "records": [{"chrom": "chr1", "start": 100, "end": 200}],
         }
         resp = client.get("/analysis/files/parse/bed",
-                         params={"run_uuid": "abc-123", "file_path": "/f.bed"})
+                         params={"run_uuid": "abc-123", "file_path": "f.bed"})
         assert resp.status_code == 200
         assert resp.json()["records"][0]["chrom"] == "chr1"
 

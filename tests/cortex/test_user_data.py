@@ -274,6 +274,23 @@ class TestListUserFiles:
         assert data["files"][0]["filename"] == "sample.bam"
         assert data["files"][0]["encode_accession"] == "ENCFF001ABC"
 
+    def test_list_response_has_no_absolute_paths(self, client, seeded_file, tmp_path):
+        resp = client.get("/user/data")
+        assert resp.status_code == 200
+
+        payload = json.dumps(resp.json())
+        assert str(tmp_path) not in payload
+        assert resp.json()["files"][0]["disk_path"].startswith("data/")
+
+    def test_untracked_list_has_no_absolute_paths(self, client, tmp_path):
+        untracked = tmp_path / "users" / "uduser" / "data" / "extra.txt"
+        untracked.write_text("x")
+
+        resp = client.get("/user/data", params={"include_untracked": "true"})
+        assert resp.status_code == 200
+        payload = json.dumps(resp.json())
+        assert str(tmp_path) not in payload
+
 
 class TestGetUserFile:
     def test_get_existing_file(self, client, seeded_file):
@@ -282,6 +299,7 @@ class TestGetUserFile:
         data = resp.json()
         assert data["id"] == seeded_file
         assert data["filename"] == "sample.bam"
+        assert data["disk_path"].startswith("data/")
 
     def test_get_nonexistent(self, client):
         resp = client.get("/user/data/nonexistent-id")
@@ -323,6 +341,8 @@ class TestLinkUnlink:
             })
         assert resp.status_code == 200
         assert resp.json()["status"] == "linked"
+        assert resp.json()["symlink"].startswith("data/")
+        assert str(tmp_path) not in json.dumps(resp.json())
 
     def test_link_already_linked(self, client, seeded_file, session_factory, tmp_path):
         # First, link manually

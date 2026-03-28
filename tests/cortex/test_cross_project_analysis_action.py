@@ -51,6 +51,7 @@ def test_cross_project_schemas_import_cleanly():
         CrossProjectFileOut,
         CrossProjectBrowseResponse,
         CrossProjectSearchResponse,
+        LogicalFileReference,
         SelectedFileInput,
         StageRequest,
         StageResponse,
@@ -444,7 +445,76 @@ class TestPathEscapeRejection:
 
         resp = client.post("/cross-project/stage", json=payload)
         assert resp.status_code == 400
-        assert "traversal" in resp.json()["detail"].lower()
+
+
+# ===========================================================================
+# Test: Logical file reference resolution
+# ===========================================================================
+
+class TestLogicalReferences:
+    def test_logical_reference_unique_match_succeeds(self, setup):
+        """Logical references can resolve to one file without relative_path."""
+        engine, SL, data, client, tmp_data = setup
+
+        payload = {
+            "selected_files": [
+                {
+                    "source_project_id": data["source_project_id"],
+                    "logical_reference": {
+                        "workflow_name": "workflow1",
+                        "file_type": "tabular",
+                    },
+                }
+            ],
+            "action_type": "stage_workspace",
+            "destination_project_id": data["dest_project_id"],
+        }
+
+        resp = client.post("/cross-project/stage", json=payload)
+        assert resp.status_code == 200
+
+    def test_logical_reference_ambiguous_returns_422(self, setup):
+        """Ambiguous logical references return 422 with details."""
+        engine, SL, data, client, tmp_data = setup
+
+        payload = {
+            "selected_files": [
+                {
+                    "source_project_id": data["source_project_id"],
+                    "logical_reference": {
+                        "file_type": "alignment",
+                    },
+                }
+            ],
+            "action_type": "stage_workspace",
+            "destination_project_id": data["dest_project_id"],
+        }
+
+        resp = client.post("/cross-project/stage", json=payload)
+        assert resp.status_code == 422
+        assert "ambiguous" in resp.json()["detail"].lower()
+
+    def test_logical_reference_project_name_mismatch_returns_422(self, setup):
+        """logical_reference.project_name must match selected source project."""
+        engine, SL, data, client, tmp_data = setup
+
+        payload = {
+            "selected_files": [
+                {
+                    "source_project_id": data["source_project_id"],
+                    "logical_reference": {
+                        "project_name": "Wrong Project Name",
+                        "file_type": "alignment",
+                    },
+                }
+            ],
+            "action_type": "stage_workspace",
+            "destination_project_id": data["dest_project_id"],
+        }
+
+        resp = client.post("/cross-project/stage", json=payload)
+        assert resp.status_code == 422
+        assert "does not match source project" in resp.json()["detail"].lower()
 
     def test_absolute_path_in_selection_rejected(self, setup):
         """Absolute path in selected file path is rejected."""

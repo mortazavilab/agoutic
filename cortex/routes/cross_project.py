@@ -36,6 +36,7 @@ from cortex.schemas import (
     CrossProjectFileOut,
     CrossProjectBrowseResponse,
     CrossProjectSearchResponse,
+    LogicalFileReference,
     SelectedFileInput,
     StageRequest,
     StageResponse,
@@ -146,6 +147,20 @@ def _safe_relative_path(subpath: str) -> str:
             detail="Path traversal not allowed"
         )
 
+    # Reject invalid path tokens for user-controlled references
+    if any(tok in subpath for tok in ["*", "?", "|", "<", ">"]):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid path tokens"
+        )
+
+    # Reject Windows drive-style absolute paths (e.g., C:\\foo)
+    if re.match(r'^[a-zA-Z]:', subpath):
+        raise HTTPException(
+            status_code=400,
+            detail="Absolute paths not allowed in subpath"
+        )
+
     # Reject null bytes
     if "\x00" in subpath:
         raise HTTPException(
@@ -164,6 +179,60 @@ def _safe_relative_path(subpath: str) -> str:
         )
 
     return normalized
+
+
+def _resolve_relative_path_from_logical_reference(
+    project_dir: Path,
+    logical_reference: LogicalFileReference,
+) -> str:
+    """Resolve a logical file reference to exactly one project-relative file path."""
+    if logical_reference is None:
+        raise HTTPException(status_code=400, detail="Missing logical reference")
+
+    if not any([
+        logical_reference.workflow_name,
+        logical_reference.sample_name,
+        logical_reference.file_type,
+    ]):
+        raise HTTPException(
+            status_code=400,
+            detail="Logical reference must include at least one of workflow_name, sample_name, or file_type",
+        )
+
+    matches: list[str] = []
+    workflow_name = (logical_reference.workflow_name or "").strip().lower()
+    sample_name = (logical_reference.sample_name or "").strip().lower()
+    file_type = (logical_reference.file_type or "").strip().lower()
+
+    for path in project_dir.rglob("*"):
+        if not path.is_file():
+            continue
+
+        rel_path = str(path.relative_to(project_dir))
+        rel_parts = [p.lower() for p in Path(rel_path).parts]
+        name_lower = path.name.lower()
+        derived_type = _classify_file_type(path.name).lower()
+
+        if workflow_name and workflow_name not in rel_parts:
+            continue
+        if sample_name and sample_name not in name_lower:
+            continue
+        if file_type and file_type not in {derived_type, path.suffix.lower().lstrip('.')}:
+            continue
+
+        matches.append(rel_path)
+
+    if not matches:
+        raise HTTPException(status_code=422, detail="No files matched logical reference")
+
+    if len(matches) > 1:
+        preview = ", ".join(matches[:5])
+        raise HTTPException(
+            status_code=422,
+            detail=f"Logical reference is ambiguous ({len(matches)} matches): {preview}",
+        )
+
+    return _safe_relative_path(matches[0])
 
 
 # ---------------------------------------------------------------------------
@@ -534,14 +603,6 @@ def _validate_file_selection(
             detail=f"No access to project {selected_file.source_project_id}"
         )
 
-    # Validate relative path
-    safe_path = _safe_relative_path(selected_file.relative_path)
-    if not safe_path:
-        raise HTTPException(
-            status_code=400,
-            detail="Empty relative path not allowed"
-        )
-
     # Get project info
     project = session.execute(
         select(Project).where(Project.id == selected_file.source_project_id)
@@ -551,6 +612,34 @@ def _validate_file_selection(
         raise HTTPException(
             status_code=404,
             detail=f"Project {selected_file.source_project_id} not found"
+        )
+
+    if selected_file.logical_reference and selected_file.logical_reference.project_name:
+        if selected_file.logical_reference.project_name != project.name:
+            raise HTTPException(
+                status_code=422,
+                detail="logical_reference.project_name does not match source project",
+            )
+
+    # Validate/resolve relative path
+    if selected_file.relative_path:
+        safe_path = _safe_relative_path(selected_file.relative_path)
+    elif selected_file.logical_reference:
+        project_dir = _resolve_project_dir(session, user, selected_file.source_project_id)
+        safe_path = _resolve_relative_path_from_logical_reference(
+            project_dir,
+            selected_file.logical_reference,
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Must provide either relative_path or logical_reference"
+        )
+
+    if not safe_path:
+        raise HTTPException(
+            status_code=400,
+            detail="Empty relative path not allowed"
         )
 
     # Resolve absolute path (server-side)
