@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 from dataclasses import dataclass, field, asdict
 import json as _json
 
@@ -157,3 +157,81 @@ class UserFileLinkRequest(BaseModel):
 class UserFileRedownloadRequest(BaseModel):
     """Request to force re-download a file from its original source."""
     force: bool = True
+
+
+# ==================== Cross-Project Schemas ====================
+
+class CrossProjectProjectOut(BaseModel):
+    project_id: str
+    project_name: str
+    slug: Optional[str] = None
+    role: str = "viewer"
+    is_archived: bool = False
+    is_public: bool = False
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class CrossProjectFileOut(BaseModel):
+    project_id: str
+    project_name: str
+    relative_path: str
+    name: str
+    is_dir: bool
+    category: str
+    workflow_folder: Optional[str] = None
+    file_type: str
+    size: Optional[int] = None
+    modified_time: Optional[str] = None
+
+
+class CrossProjectBrowseResponse(BaseModel):
+    project_id: str
+    project_name: str
+    subpath: str
+    items: list[CrossProjectFileOut] = Field(default_factory=list)
+    total_count: int = 0
+    truncated: bool = False
+    limit: int
+
+
+class CrossProjectSearchResponse(BaseModel):
+    query: str
+    items: list[CrossProjectFileOut] = Field(default_factory=list)
+    total_count: int = 0
+    truncated: bool = False
+    limit: int
+
+
+class SelectedFileInput(BaseModel):
+    source_project_id: str = Field(..., min_length=1)
+    relative_path: str = Field(..., min_length=1)
+
+
+class StageRequest(BaseModel):
+    selected_files: list[SelectedFileInput] = Field(..., min_length=1)
+    action_type: Literal["stage_workspace", "analyze_together", "compare_together"]
+    destination_project_id: Optional[str] = None
+    destination_project_name: Optional[str] = None
+
+
+class StageResponse(BaseModel):
+    stage_id: str
+    destination_project_id: str
+    destination_project_name: str
+    created_at: str
+    action_type: str
+    staging_mode: str
+    item_count: int
+    manifest_path: str
+
+
+class StageStatusResponse(BaseModel):
+    stage_id: str
+    destination_project_id: str
+    destination_project_name: str
+    created_at: str
+    action_type: str
+    staging_mode: str
+    item_count: int
+    manifest_relative_path: str

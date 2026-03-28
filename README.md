@@ -1,9 +1,23 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.8
+**Version:** 3.4.10
 **Status:** Active Prototype 
 
-## Latest Updates (2026-03-26)
+## Latest Updates (2026-03-28)
+
+- **Cross-project API is now merge-ready and routed through Cortex** —
+  `/cross-project/*` endpoints are now registered on the main app router, and
+  missing cross-project schema contracts were added so imports resolve cleanly.
+
+- **Cross-project recursive scans are now bounded by default** —
+  recursive browse/search stop scanning when `limit` is reached by default,
+  while still returning `truncated=true`; callers can request full counting
+  with `total_count_full_scan=true`.
+
+- **Unrelated project-stats regression was fixed at test-fixture scope only** —
+  the in-memory SQLite fixture used by project-management tests now creates
+  `dogme_jobs`, avoiding missing-table failures without changing production
+  project-stats behavior.
 
 - **New `reconcile_bams` skill and routing support** — added a dedicated skill
   for cross-workflow annotated BAM reconciliation, registered in Cortex skill

@@ -1,3 +1,40 @@
+## [3.4.10] - 2026-03-28
+
+### Improvements
+
+- **Cross-project routes are now wired into Cortex app routing** —
+  `cortex/app.py` now includes the cross-project router so
+  `/cross-project/*` endpoints are reachable through the main API.
+
+- **Cross-project API schema contracts are now explicitly defined** —
+  `cortex/schemas.py` now includes the missing cross-project request/response
+  models required by route imports and endpoint response models.
+
+- **Default cross-project scan behavior is now bounded for large trees** —
+  `cortex/routes/cross_project.py` now stops recursive browse/search scans once
+  the response limit is reached by default, while preserving
+  `truncated=true`; callers can opt into full counting via
+  `total_count_full_scan=true`.
+
+### Fixes
+
+- **Project-stats regression in test-only SQLite fixtures is quarantined at the
+  fixture layer** — `tests/cortex/test_project_management.py` now creates the
+  `dogme_jobs` table in its in-memory test database so
+  `TestProjectStats.test_stats_basic` does not fail on missing-table errors.
+
+### Tests
+
+- Added focused cross-project coverage for router reachability, schema import
+  validity, and default early-stop behavior in browse/search with correct
+  truncation semantics.
+
+- Verified targeted regression set:
+  `tests/cortex/test_cross_project_browser.py`,
+  `tests/cortex/test_cross_project_analysis_action.py`,
+  `tests/cortex/test_project_management.py::TestProjectStats::test_stats_basic`,
+  and `tests/cortex/test_project_endpoints.py`.
+
 ## [3.4.9] - 2026-03-26
 
 ### Fixes

@@ -109,6 +109,7 @@ from cortex.routes.analyzer_proxy import (
     _call_analyzer_tool, _call_launchpad_tool,
 )
 from cortex.routes.user_data import router as user_data_router
+from cortex.routes.cross_project import router as cross_project_router
 from cortex.task_service import sync_project_tasks, clear_project_tasks
 from cortex.remote_orchestration import (
     _WORKFLOW_PLAN_TYPE,
@@ -197,6 +198,7 @@ app.include_router(conversations_router)
 app.include_router(files_router)
 app.include_router(analyzer_proxy_router)
 app.include_router(user_data_router)
+app.include_router(cross_project_router)
 
 # Initialize database on startup
 @app.on_event("startup")

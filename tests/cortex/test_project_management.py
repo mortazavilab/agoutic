@@ -93,6 +93,26 @@ def setup():
 
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
+    # Project stats endpoint reads dogme_jobs via raw SQL; create the table in test DB.
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS dogme_jobs (
+                run_uuid TEXT,
+                sample_name TEXT,
+                mode TEXT,
+                status TEXT,
+                submitted_at DATETIME,
+                started_at DATETIME,
+                completed_at DATETIME,
+                nextflow_work_dir TEXT,
+                remote_work_dir TEXT,
+                execution_mode TEXT,
+                user_id TEXT,
+                project_id TEXT
+            )
+            """
+        ))
     SL = sessionmaker(bind=engine)
     session = SL()
     data = _seed(session)
