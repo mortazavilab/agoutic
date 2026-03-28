@@ -1,3 +1,61 @@
+## [3.4.12] - 2026-03-28
+
+### Fixes
+
+- **BAM-detail requests now use supported Analyzer tool flow instead of
+  unknown-tool failures** — BAM-detail intent in `analyze_job_results` now
+  auto-generates `list_job_files` first, so file triage starts with an
+  explicit run/workflow file listing and proceeds through supported tools only.
+
+- **`show_bam_details` compatibility path now routes safely to file listing**
+  — hallucinated `show_bam_details` calls are now mapped to
+  `list_job_files` instead of unsupported execution paths.
+
+- **Analyze-job-results guidance now explicitly enforces supported BAM
+  fallback behavior** — skill instructions now require list-first triage and
+  explicitly prohibit unsupported BAM-inspection tool calls.
+
+### Tests
+
+- Added focused regression coverage for BAM-detail fallback auto-generation in
+  `tests/cortex/test_auto_generate_data.py`.
+
+- Verified focused suites passing:
+  `tests/cortex/test_auto_generate_data.py` and
+  `tests/cortex/test_validation.py`.
+
+## [3.4.11] - 2026-03-28
+
+### Security
+
+- **User-controlled file references are now strictly relative-only across
+  cross-project and analyzer proxy endpoints** — path validation now rejects
+  absolute paths, Windows drive-style absolute paths, traversal (`..`), null
+  bytes, and unsafe wildcard/shell-like tokens before any downstream file
+  handling.
+
+- **Cross-project staging now supports additive logical file references with
+  strict ambiguity handling** — `SelectedFileInput` now accepts either
+  `relative_path` or `logical_reference`, and staging returns `422` when a
+  logical selector resolves to zero or multiple matches (including source
+  project-name mismatches).
+
+- **User-data responses no longer leak absolute filesystem paths** — user file
+  payloads and link responses now expose stable relative paths (for example,
+  `data/<filename>`) instead of host-absolute path values.
+
+### Tests
+
+- Added focused regressions for analyzer proxy path rejection,
+  cross-project logical-reference resolution and ambiguity semantics, and
+  user-data no-absolute-path response guarantees.
+
+- Verified focused suites passing:
+  `tests/cortex/test_cross_project_browser.py`,
+  `tests/cortex/test_cross_project_analysis_action.py`,
+  `tests/cortex/test_analyzer_proxy.py`, and
+  `tests/cortex/test_user_data.py`.
+
 ## [3.4.10] - 2026-03-28
 
 ### Improvements

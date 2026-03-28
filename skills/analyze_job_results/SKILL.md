@@ -15,6 +15,9 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 - File discovery and categorization for any completed job
 - Initial QC overview before detailed interpretation
 - Counting BED regions per chromosome via the bundled allowlisted script when the user explicitly asks for chromosome counts from a BED file
+- BAM-adjacent result triage using supported Analyzer tools only (`list_job_files`,
+  `find_file`, `read_file_content`, `parse_csv_file`, `parse_bed_file`) when
+  direct BAM inspection tools are unavailable
 
 **Example questions:**
 - "Analyze job results for UUID xyz"
@@ -25,6 +28,17 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 ### ❌ This Skill Does NOT Handle:
 
 - **Detailed mode-specific interpretation** → Routes to mode-specific skills
+  ### BAM Detail Fallback (Supported Tools Only)
+
+  If the user asks for BAM details (header, mapped/unmapped, alignment summary):
+
+  1. **First call `list_job_files`** for the run/workflow.
+  2. Locate the BAM and nearby alignment/QC files from the listing.
+  3. Use only supported Analyzer tools (`find_file`, `read_file_content`,
+     `parse_csv_file`, `parse_bed_file`) to inspect summary outputs.
+
+  **Never call unsupported tools such as `show_bam_details`.**
+
   - DNA results → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
   - RNA results → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
   - cDNA results → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`

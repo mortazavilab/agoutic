@@ -427,3 +427,21 @@ class TestAnalyzeJobResultsCatchAll:
         assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
         assert calls[0]["params"]["extensions"] == ".bed"
         assert calls[0]["params"]["max_depth"] == 1
+
+    def test_bam_details_fallback_lists_files_first(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "aaaa-bbbb",
+                "sample_name": "ENCFF032XPV",
+                "mode": "DNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "show details for ENCFF032XPV.bam",
+            "analyze_job_results",
+            history_blocks=blocks,
+        )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1"

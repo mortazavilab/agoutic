@@ -1,9 +1,36 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.10
+**Version:** 3.4.12
 **Status:** Active Prototype 
 
 ## Latest Updates (2026-03-28)
+
+- **3.4.12 BAM-detail fallback now uses supported Analyzer tools only** —
+  BAM-detail requests under `analyze_job_results` now start by listing run
+  files (`list_job_files`) and avoid unsupported direct BAM-inspection tool
+  calls.
+
+- **Compatibility mapping for `show_bam_details` now routes to safe file
+  listing** — when this hallucinated tool appears, routing falls back to
+  `list_job_files` first instead of producing unknown-tool failures.
+
+- **Prompt/skill contract now explicitly enforces list-first BAM triage** —
+  skill guidance now states to use `list_job_files`, then `find_file` plus
+  supported read/parse tools to inspect alignment/QC-adjacent outputs.
+
+- **3.4.11 security hardening for file references** — user-controlled file
+  path inputs for cross-project and analyzer proxy routes are now validated as
+  relative-only and reject absolute paths, drive-style absolutes, traversal,
+  null bytes, and unsafe wildcard/shell-like tokens.
+
+- **Cross-project staging now supports logical file references safely** —
+  selected files may now be provided via `logical_reference` (additive to
+  `relative_path`), with deterministic `422` responses for ambiguous/no-match
+  resolution outcomes.
+
+- **User-data API responses now avoid absolute path leakage** — file and link
+  payloads return safe relative path forms (for example `data/<filename>`) in
+  API response bodies.
 
 - **Cross-project API is now merge-ready and routed through Cortex** —
   `/cross-project/*` endpoints are now registered on the main app router, and

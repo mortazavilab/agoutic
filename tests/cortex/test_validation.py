@@ -97,6 +97,12 @@ class TestUnknownTools:
         cleaned, violations = _validate_llm_output(response, "ENCODE_Search")
         assert not any("Unknown tool" in v for v in violations)
 
+    def test_show_bam_details_alias_not_flagged(self):
+        """show_bam_details is a compatibility alias resolved downstream."""
+        response = "[[DATA_CALL: service=analyzer, tool=show_bam_details, file_path=ENCFF032XPV.bam]]"
+        cleaned, violations = _validate_llm_output(response, "analyze_job_results")
+        assert not any("Unknown tool" in v for v in violations)
+
     def test_remote_launchpad_tool_not_flagged(self):
         response = "[[DATA_CALL: service=launchpad, tool=list_ssh_profiles, user_id=<user_id>]]"
         cleaned, violations = _validate_llm_output(response, "remote_execution")

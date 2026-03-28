@@ -184,6 +184,9 @@ _BASE_TOOL_ALIASES: dict[str, str] = {
     "parse_bed": "parse_bed_file",
     "analysis_summary": "get_analysis_summary",
     "job_summary": "get_analysis_summary",
+    # Compatibility fallback for hallucinated BAM-detail request tool.
+    # Analyzer does not expose show_bam_details, so route to list_job_files first.
+    "show_bam_details": "list_job_files",
     # edgePython tool aliases (hallucinated gene lookup names)
     "get_gene_info": "lookup_gene",
     "gene_info": "lookup_gene",
@@ -193,6 +196,11 @@ _BASE_TOOL_ALIASES: dict[str, str] = {
 }
 
 _BASE_PARAM_ALIASES: dict[str, dict[str, str]] = {
+    # Analyzer param aliases
+    "find_file": {
+        "file_path": "file_name",
+        "filename": "file_name",
+    },
     # edgePython param aliases (hallucinated parameter names for lookup_gene)
     "lookup_gene": {
         "gene_name": "gene_symbols",

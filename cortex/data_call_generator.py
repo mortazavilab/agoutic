@@ -37,6 +37,11 @@ _MODIFICATION_COUNT_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_BAM_DETAILS_INTENT_RE = re.compile(
+    r'\b(?:bam\s*(?:details?|info|information|stats|statistics|summary)|alignment\s+summary|mapped\s*/\s*unmapped)\b',
+    re.IGNORECASE,
+)
+
 
 def _extract_modification_name(user_message: str) -> str | None:
     match = _MODIFICATION_COUNT_INTENT_RE.search(user_message)
@@ -577,6 +582,29 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
         if not calls and skill_key == "analyze_job_results" and (work_dir or run_uuid):
             _bed_count_intent = bool(_BED_COUNT_INTENT_RE.search(msg_lower))
             _modification_name = _extract_modification_name(user_message)
+            _bam_details_intent = bool(_BAM_DETAILS_INTENT_RE.search(user_message)) or \
+                bool(re.search(r'\b\S+\.bam\b', user_message, re.IGNORECASE))
+
+            # BAM details fallback: list files first, then downstream logic can
+            # pick nearby summaries using supported analyzer tools only.
+            if _bam_details_intent:
+                _params: dict = {}
+                if work_dir:
+                    _params["work_dir"] = work_dir
+                elif run_uuid:
+                    _params["run_uuid"] = run_uuid
+                calls.append({
+                    "source_type": "service", "source_key": "analyzer",
+                    "tool": "list_job_files",
+                    "params": _params,
+                })
+                logger.warning(
+                    "Auto-generated list_job_files for analyze_job_results BAM-detail fallback",
+                    work_dir=_params.get("work_dir"),
+                    run_uuid=_params.get("run_uuid"),
+                )
+                return calls
+
             if _bed_count_intent:
                 _bed_match = re.search(r'(\S+\.bed)\b', user_message, re.IGNORECASE)
                 if _bed_match:

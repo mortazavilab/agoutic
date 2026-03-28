@@ -141,6 +141,8 @@ def _validate_llm_output(
         "list_job_files", "find_file", "read_file_content",
         "parse_csv_file", "parse_bed_file", "get_analysis_summary",
         "categorize_job_files",
+        # Compatibility alias corrected downstream to find_file.
+        "show_bam_details",
         # edgePython (Differential Expression)
         "load_data", "load_data_auto", "filter_genes", "normalize",
         "normalize_chip", "set_design", "set_design_matrix",
