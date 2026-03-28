@@ -442,6 +442,49 @@ class TestAnalyzeJobResultsCatchAll:
             "analyze_job_results",
             history_blocks=blocks,
         )
-        assert len(calls) == 1
+        assert len(calls) == 2
         assert calls[0]["tool"] == "list_job_files"
         assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1"
+        assert "run_uuid" not in calls[0]["params"]
+        assert calls[1]["tool"] == "find_file"
+        assert calls[1]["params"]["file_name"] == "ENCFF032XPV.bam"
+        assert calls[1]["params"]["work_dir"] == "/tmp/proj/workflow1"
+
+    def test_bam_detail_explicit_workflow_request(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "aaaa-bbbb",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "for workflow1, find ENCFF032XPV.bam and show details",
+            "analyze_job_results",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+        assert len(calls) == 2
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1"
+        assert calls[1]["tool"] == "find_file"
+
+    def test_bam_detail_with_multiple_workflows_lists_workflows_first(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "aaaa-bbbb",
+            }},
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow2",
+                "run_uuid": "bbbb-cccc",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "show details for ENCFF032XPV.bam",
+            "analyze_job_results",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"].get("name_pattern") == "workflow*"

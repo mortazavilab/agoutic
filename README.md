@@ -1,9 +1,22 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.12
+**Version:** 3.4.13
 **Status:** Active Prototype 
 
 ## Latest Updates (2026-03-28)
+
+- **3.4.13 BAM-detail resolution now prefers workflow discovery and explicit
+  workflow context** — BAM-detail requests now prioritize workflow/work_dir
+  listing and file lookup before any run-UUID-based analyzer call path.
+
+- **Non-job UUIDs are now blocked from analyzer BAM-detail dispatch** —
+  project/block UUID values are no longer forwarded as analyzer `run_uuid`
+  for BAM-detail calls; unresolved contexts return a controlled fallback.
+
+- **BAM fallback now allows safe workflow-discovery listing calls** —
+  project-root workflow discovery (`list_job_files` with shallow depth) is
+  permitted during BAM-detail resolution so the assistant can choose the
+  correct workflow containing the requested BAM.
 
 - **3.4.12 BAM-detail fallback now uses supported Analyzer tools only** —
   BAM-detail requests under `analyze_job_results` now start by listing run

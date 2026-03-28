@@ -282,6 +282,105 @@ class TestValidateAnalyzerParams:
         )
         assert result["work_dir"] == "/proj/workflow1/results"
 
+    def test_bam_detail_list_prefers_run_uuid_over_context_work_dir(self):
+        """BAM-detail list requests should keep run_uuid and not force context work_dir."""
+        import json
+        blk = self._make_block(
+            "EXECUTION_JOB",
+            json.dumps({
+                "work_directory": "/media/backup_disk/agoutic_root/users/elnaz-a/project-2026-03-28",
+                "run_uuid": "5cad067e-0877-4657-a99a-1a2ef3d79ba1",
+            }),
+        )
+        result = _validate_analyzer_params(
+            tool="list_job_files",
+            params={"run_uuid": "5cad067e-0877-4657-a99a-1a2ef3d79ba1"},
+            user_message="show details for ENCFF032XPV.bam",
+            history_blocks=[blk],
+        )
+        assert result["run_uuid"] == "5cad067e-0877-4657-a99a-1a2ef3d79ba1"
+        assert "work_dir" not in result
+
+    def test_bam_detail_invalid_block_uuid_not_forwarded_as_run_uuid(self):
+        """A project/block UUID must not be forwarded as analyzer run_uuid."""
+        import json
+        blocks = [
+            self._make_block(
+                "EXECUTION_JOB",
+                json.dumps({
+                    "work_directory": "/proj/workflow1",
+                    "run_uuid": "11111111-1111-1111-1111-111111111111",
+                }),
+            ),
+            self._make_block(
+                "EXECUTION_JOB",
+                json.dumps({
+                    "work_directory": "/proj",
+                    "run_uuid": "22222222-2222-2222-2222-222222222222",
+                }),
+            ),
+        ]
+        result = _validate_analyzer_params(
+            tool="list_job_files",
+            params={"run_uuid": "22222222-2222-2222-2222-222222222222"},
+            user_message="show details for ENCFF032XPV.bam",
+            history_blocks=blocks,
+        )
+        assert result.get("run_uuid") == "11111111-1111-1111-1111-111111111111"
+        assert "work_dir" not in result
+
+    def test_bam_detail_with_only_project_context_returns_controlled_fallback(self):
+        """When no workflow run can be resolved, return routing fallback instead of analyzer call."""
+        import json
+        blk = self._make_block(
+            "EXECUTION_JOB",
+            json.dumps({
+                "work_directory": "/proj",
+                "run_uuid": "33333333-3333-3333-3333-333333333333",
+            }),
+        )
+        result = _validate_analyzer_params(
+            tool="list_job_files",
+            params={"run_uuid": "33333333-3333-3333-3333-333333333333"},
+            user_message="show details for ENCFF032XPV.bam",
+            history_blocks=[blk],
+        )
+        assert "run_uuid" in result
+        assert result["run_uuid"] == "33333333-3333-3333-3333-333333333333"
+        assert "__routing_error__" in result
+
+    def test_bam_detail_valid_resolved_run_uuid_proceeds(self):
+        """A workflow-associated run UUID should proceed for list_job_files."""
+        import json
+        blk = self._make_block(
+            "EXECUTION_JOB",
+            json.dumps({
+                "work_directory": "/proj/workflow9",
+                "run_uuid": "44444444-4444-4444-4444-444444444444",
+            }),
+        )
+        result = _validate_analyzer_params(
+            tool="list_job_files",
+            params={"run_uuid": "44444444-4444-4444-4444-444444444444"},
+            user_message="show details for ENCFF032XPV.bam",
+            history_blocks=[blk],
+        )
+        assert result["run_uuid"] == "44444444-4444-4444-4444-444444444444"
+        assert "__routing_error__" not in result
+
+    def test_bam_detail_allows_workflow_discovery_listing(self):
+        """BAM fallback should allow project-root workflow discovery listing."""
+        result = _validate_analyzer_params(
+            tool="list_job_files",
+            params={"work_dir": "/proj", "max_depth": 1, "name_pattern": "workflow*"},
+            user_message="show details for ENCFF032XPV.bam",
+            history_blocks=[],
+            project_dir="/proj",
+        )
+        assert result["work_dir"] == "/proj"
+        assert result["max_depth"] == 1
+        assert "__routing_error__" not in result
+
 
 # ======================================================================
 # _build_auto_analysis_context

@@ -1,3 +1,34 @@
+## [3.4.13] - 2026-03-28
+
+### Fixes
+
+- **BAM-detail fallback now prefers workflow/work_dir discovery over blind
+  run UUID dispatch** — BAM-detail auto-calls now prioritize explicit
+  workflow context and use safe `list_job_files(work_dir=...)` +
+  `find_file(...)` flow when available.
+
+- **Analyzer param resolution now blocks non-run UUID forwarding for BAM
+  detail requests** — project/block UUID values are no longer sent as
+  analyzer `run_uuid`; resolution now requires workflow-associated context
+  and returns a controlled fallback when no completed run can be resolved.
+
+- **Workflow discovery calls are now explicitly allowed during BAM fallback**
+  — safe project-root workflow discovery listing for BAM requests is no longer
+  blocked by the BAM guardrail.
+
+### Tests
+
+- Added and updated focused regressions in
+  `tests/cortex/test_auto_generate_data.py` and
+  `tests/cortex/test_pure_helpers2.py` to cover:
+  explicit-workflow BAM requests, invalid UUID rejection, controlled fallback,
+  and workflow-discovery pass-through behavior.
+
+- Verified focused suites passing:
+  `tests/cortex/test_auto_generate_data.py`,
+  `tests/cortex/test_pure_helpers2.py`, and
+  `tests/cortex/test_validation.py`.
+
 ## [3.4.12] - 2026-03-28
 
 ### Fixes

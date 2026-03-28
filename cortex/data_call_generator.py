@@ -189,7 +189,10 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
         _project_dir = project_dir
 
     # --- "list workflows" command ---
-    if re.search(r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b', msg_lower):
+    if (
+        re.search(r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b', msg_lower)
+        and not _BAM_DETAILS_INTENT_RE.search(user_message)
+    ):
         if _project_dir:
             calls.append({
                 "source_type": "service", "source_key": "analyzer",
@@ -588,20 +591,74 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
             # BAM details fallback: list files first, then downstream logic can
             # pick nearby summaries using supported analyzer tools only.
             if _bam_details_intent:
-                _params: dict = {}
-                if work_dir:
-                    _params["work_dir"] = work_dir
-                elif run_uuid:
-                    _params["run_uuid"] = run_uuid
-                calls.append({
-                    "source_type": "service", "source_key": "analyzer",
-                    "tool": "list_job_files",
-                    "params": _params,
-                })
+                _bam_match = re.search(r'(\S+\.bam)\b', user_message, re.IGNORECASE)
+                _bam_ref = _bam_match.group(1).rstrip('.,;:!?') if _bam_match else None
+
+                _workflow_entries = [
+                    wf for wf in workflows
+                    if (wf.get("work_dir") or "") and re.search(r'/workflow\d+/?$', wf.get("work_dir") or "")
+                ]
+                _requested_wf_m = re.search(r'\b(workflow\d+)\b', user_message, re.IGNORECASE)
+                _requested_wf = _requested_wf_m.group(1) if _requested_wf_m else ""
+
+                # Prefer explicit workflow requests from the user.
+                if _requested_wf:
+                    _base = work_dir or _project_dir
+                    _target_wd = _resolve_workflow_path(_requested_wf, _base, workflows) if _base else ""
+                    if _target_wd:
+                        calls.append({
+                            "source_type": "service", "source_key": "analyzer",
+                            "tool": "list_job_files",
+                            "params": {"work_dir": _target_wd},
+                        })
+                        if _bam_ref:
+                            calls.append({
+                                "source_type": "service", "source_key": "analyzer",
+                                "tool": "find_file",
+                                "params": {"file_name": _bam_ref, "work_dir": _target_wd},
+                            })
+                        logger.warning(
+                            "Auto-generated BAM-detail calls for explicit workflow",
+                            workflow=_requested_wf,
+                            work_dir=_target_wd,
+                        )
+                        return calls
+
+                # If one workflow is known, use it directly via work_dir (not run_uuid).
+                if len(_workflow_entries) == 1:
+                    _target_wd = _workflow_entries[0].get("work_dir")
+                    calls.append({
+                        "source_type": "service", "source_key": "analyzer",
+                        "tool": "list_job_files",
+                        "params": {"work_dir": _target_wd},
+                    })
+                    if _bam_ref:
+                        calls.append({
+                            "source_type": "service", "source_key": "analyzer",
+                            "tool": "find_file",
+                            "params": {"file_name": _bam_ref, "work_dir": _target_wd},
+                        })
+                    logger.warning(
+                        "Auto-generated BAM-detail calls using single resolved workflow",
+                        work_dir=_target_wd,
+                    )
+                    return calls
+
+                # If multiple or unknown workflows, list workflows first.
+                if _project_dir:
+                    calls.append({
+                        "source_type": "service", "source_key": "analyzer",
+                        "tool": "list_job_files",
+                        "params": {"work_dir": _project_dir, "max_depth": 1, "name_pattern": "workflow*"},
+                    })
+                    logger.warning(
+                        "Auto-generated list workflows before BAM-detail inspection",
+                        project_dir=_project_dir,
+                    )
+                    return calls
+
                 logger.warning(
-                    "Auto-generated list_job_files for analyze_job_results BAM-detail fallback",
-                    work_dir=_params.get("work_dir"),
-                    run_uuid=_params.get("run_uuid"),
+                    "Unable to resolve workflow/project context for BAM-detail request",
                 )
                 return calls
 
@@ -728,6 +785,80 @@ def _validate_analyzer_params(
     )
     real_wd = ctx.get("work_dir", "")
     ctx_run_uuid = ctx.get("run_uuid", "")
+    _is_bam_detail_list = bool(
+        tool == "list_job_files"
+        and re.search(
+            r'\b(?:bam\s*(?:details?|info|information|stats|statistics|summary)|alignment\s+summary|mapped\s*/\s*unmapped|\S+\.bam)\b',
+            user_message,
+            re.IGNORECASE,
+        )
+    )
+
+    if _is_bam_detail_list:
+        # Allow explicit safe discovery/listing calls that do not rely on run_uuid.
+        # This supports the BAM fallback flow: list workflows first, then choose
+        # the workflow that actually contains the BAM.
+        _param_wd = (params.get("work_dir") or "").strip()
+        if _param_wd:
+            _is_workflow_discovery = params.get("name_pattern") == "workflow*" or params.get("max_depth") == 1
+            _is_workflow_path = bool(re.search(r'/workflow\d+/?$', _param_wd))
+            if _is_workflow_discovery or _is_workflow_path:
+                params.pop("run_uuid", None)
+                return params
+
+        # Only treat workflow-like directories as analyzable runs; avoid
+        # project-root/job-block UUID confusion.
+        _workflow_entries = []
+        for wf in (ctx.get("workflows") or []):
+            _wd = (wf.get("work_dir") or "").strip()
+            _rid = (wf.get("run_uuid") or "").strip()
+            if _wd and re.search(r'/workflow\d+/?$', _wd):
+                _workflow_entries.append({"work_dir": _wd, "run_uuid": _rid})
+
+        _requested_run_uuid = (params.get("run_uuid") or "").strip()
+        if _requested_run_uuid:
+            _matches_requested = [
+                wf for wf in _workflow_entries if wf.get("run_uuid") == _requested_run_uuid
+            ]
+            if _matches_requested:
+                params.pop("work_dir", None)
+                params["run_uuid"] = _requested_run_uuid
+                return params
+
+            # If the requested UUID is not tied to a workflow entry, do not
+            # dispatch blindly. Prefer a resolvable workflow run from context.
+            _workflow_with_uuid = [wf for wf in _workflow_entries if wf.get("run_uuid")]
+            if _workflow_with_uuid:
+                params.pop("work_dir", None)
+                params["run_uuid"] = _workflow_with_uuid[-1]["run_uuid"]
+                return params
+            if _workflow_entries:
+                params.pop("run_uuid", None)
+                params["work_dir"] = _workflow_entries[-1]["work_dir"]
+                return params
+
+            params.pop("work_dir", None)
+            params["__routing_error__"] = (
+                "I could not resolve a completed run for this project. "
+                "Here are the available runs/jobs to choose from."
+            )
+            return params
+
+        # No run_uuid provided: resolve from workflow entries if available.
+        _workflow_with_uuid = [wf for wf in _workflow_entries if wf.get("run_uuid")]
+        if _workflow_with_uuid:
+            params.pop("work_dir", None)
+            params["run_uuid"] = _workflow_with_uuid[-1]["run_uuid"]
+            return params
+        if _workflow_entries:
+            params["work_dir"] = _workflow_entries[-1]["work_dir"]
+            return params
+
+        params["__routing_error__"] = (
+            "I could not resolve a completed run for this project. "
+            "Here are the available runs/jobs to choose from."
+        )
+        return params
 
     # If multiple workflows, pick the matching one by filename/sample
     if not real_wd and ctx.get("workflows"):
