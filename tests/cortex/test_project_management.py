@@ -665,6 +665,21 @@ class TestUserLastProject:
         body = resp.json()
         assert body["last_project_id"] == data["project_id"]
 
+    def test_set_last_project(self, setup):
+        engine, SL, data, client = setup
+        resp = client.put("/user/last-project", json={"project_id": data["project_id"]})
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+        # Verify the value was persisted
+        resp2 = client.get("/user/last-project")
+        assert resp2.json()["last_project_id"] == data["project_id"]
+
+    def test_set_last_project_missing_id(self, setup):
+        engine, SL, data, client = setup
+        resp = client.put("/user/last-project", json={})
+        assert resp.status_code == 400
+
 
 # ===========================================================================
 # Analyzer proxy endpoints (via TestClient)

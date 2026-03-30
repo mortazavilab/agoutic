@@ -2,6 +2,29 @@
 
 ### Fixes
 
+- **Chat queries on old projects no longer redirect to the latest project** —
+  The sidebar Project ID text_input used a value-comparison sync on every
+  rerun that could silently revert `active_project_id` when Streamlit's
+  widget state lagged behind programmatic updates during rapid reruns
+  (welcome auto-send, bootstrap rerun, auto-refresh).  Replaced the fragile
+  grace-counter approach with an `on_change` callback that fires **only** on
+  explicit user edits.  `st.chat_input` is also now captured before bootstrap
+  reruns so the one-shot prompt value is persisted before any `st.rerun()`
+  can discard it.
+
+- **Sidebar project switch now updates server-side last-project** — Clicking
+  a project in the sidebar now calls `PUT /user/last-project` so that session
+  recovery (e.g. WebSocket reconnect) lands on the correct project instead
+  of the last project that received a `/chat` call.
+
+- **"List workflows" now uses the correct project directory** — The auto-call
+  generator and parameter validator both extracted `work_dir` from
+  conversation history (most recent job), which could point to an unrelated
+  skill scripts directory instead of the project root.  Both
+  `_auto_generate_data_calls()` and `_validate_analyzer_params()` now prefer
+  the explicitly-passed `project_dir` (resolved from the DB) for
+  project-level browsing commands like "list workflows".
+
 - **BAM-detail fallback now prefers workflow/work_dir discovery over blind
   run UUID dispatch** — BAM-detail auto-calls now prioritize explicit
   workflow context and use safe `list_job_files(work_dir=...)` +

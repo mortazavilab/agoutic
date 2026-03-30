@@ -297,6 +297,31 @@ async def get_last_project(request: Request):
         session.close()
 
 
+@router.put("/user/last-project")
+async def set_last_project(request: Request):
+    """Update user's last active project (called on sidebar switch)."""
+    user = request.state.user
+    body = await request.json()
+    project_id = body.get("project_id")
+    if not project_id:
+        raise HTTPException(status_code=400, detail="project_id required")
+
+    session = _db.SessionLocal()
+    try:
+        user_obj = session.execute(
+            select(User).where(User.id == user.id)
+        ).scalar_one_or_none()
+        if user_obj:
+            user_obj.last_project_id = project_id
+            session.commit()
+        return {"status": "ok"}
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 @router.get("/user/projects")
 async def get_user_projects(request: Request):
     """Get all projects the user has accessed."""

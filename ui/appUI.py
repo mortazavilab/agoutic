@@ -40,72 +40,31 @@ TASK_SECTION_ORDER = [
     ("completed", "✅ Completed"),
 ]
 TASK_DOCK_HEIGHT_PX = 320
-TASK_DOCK_BOTTOM_REM = 5.5
-TASK_DOCK_SIDE_OFFSET_DESKTOP = "23rem"
-TASK_DOCK_SIDE_OFFSET_MOBILE = "1rem"
 
 st.markdown(
-    f"""
+    """
     <style>
-    div[data-testid="stElementContainer"]:has(.st-key-task_dock) {{
-        position: fixed;
-        left: {TASK_DOCK_SIDE_OFFSET_DESKTOP};
-        right: 2rem;
-        bottom: calc({TASK_DOCK_BOTTOM_REM}rem + env(safe-area-inset-bottom));
-        z-index: 100;
-        margin: 0;
-    }}
-
-    .st-key-task_dock {{
-        position: relative;
-    }}
-
-    .st-key-task_dock [data-testid="stVerticalBlockBorderWrapper"] {{
+    .st-key-task_dock [data-testid="stVerticalBlockBorderWrapper"] {
         background: color-mix(in srgb, var(--background-color) 90%, var(--secondary-background-color) 10%);
-        backdrop-filter: blur(10px);
         border-radius: 0.9rem;
         box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
         overflow: hidden;
-    }}
+    }
 
-    .st-key-task_dock [data-testid="stMetric"] {{
+    .st-key-task_dock [data-testid="stMetric"] {
         background: color-mix(in srgb, var(--secondary-background-color) 82%, transparent);
         border-radius: 0.65rem;
         padding: 0.35rem 0.5rem;
-    }}
+    }
 
-    .st-key-task_dock [data-testid="stExpander"] {{
+    .st-key-task_dock [data-testid="stExpander"] {
         border-radius: 0.65rem;
         overflow: hidden;
-    }}
+    }
 
-    .st-key-task_dock [data-testid="stVerticalBlock"] > div {{
+    .st-key-task_dock [data-testid="stVerticalBlock"] > div {
         gap: 0.6rem;
-    }}
-
-    @media (max-width: 1100px) {{
-        div[data-testid="stElementContainer"]:has(.st-key-task_dock) {{
-            left: {TASK_DOCK_SIDE_OFFSET_MOBILE};
-            right: {TASK_DOCK_SIDE_OFFSET_MOBILE};
-        }}
-    }}
-
-    @supports not selector(:has(*)) {{
-        .st-key-task_dock {{
-        position: fixed;
-        left: {TASK_DOCK_SIDE_OFFSET_DESKTOP};
-        right: 2rem;
-        bottom: calc({TASK_DOCK_BOTTOM_REM}rem + env(safe-area-inset-bottom));
-        z-index: 100;
-        }}
-
-        @media (max-width: 1100px) {{
-        .st-key-task_dock {{
-                left: {TASK_DOCK_SIDE_OFFSET_MOBILE};
-                right: {TASK_DOCK_SIDE_OFFSET_MOBILE};
-            }}
-        }}
-    }}
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -348,10 +307,6 @@ if st.session_state.get("_create_new_project", False):
             del st.session_state[key]
     # Reset the project ID text input widget so it doesn't hold the old value
     st.session_state["_project_id_input"] = new_id
-    # Guard: prevent text_input comparison from reverting the ID on this rerun.
-    # Use a counter (not a bool) so the guard survives multiple rerun cycles
-    # while Streamlit's text_input widget syncs to the new value.
-    st.session_state["_switch_grace_reruns"] = 3
     # Clear the flag
     del st.session_state["_create_new_project"]
 
@@ -432,24 +387,26 @@ with st.sidebar:
     # Initialize the widget key if not set
     if "_project_id_input" not in st.session_state:
         st.session_state["_project_id_input"] = st.session_state.active_project_id
-    
-    user_input = st.text_input(
-        "Project ID", 
+
+    def _on_project_id_change():
+        """Fires ONLY when the user explicitly edits the text field.
+
+        Programmatic updates via st.session_state["_project_id_input"] = X
+        (e.g. from the sidebar button handler) do NOT trigger this callback,
+        which eliminates the stale-widget-value revert bug entirely.
+        """
+        new_val = st.session_state.get("_project_id_input", "")
+        if new_val and new_val != st.session_state.get("active_project_id"):
+            st.session_state.active_project_id = new_val
+            st.session_state.blocks = []
+            st.session_state._last_rendered_project = new_val
+            st.session_state.pop("_welcome_sent_for", None)
+
+    st.text_input(
+        "Project ID",
         key="_project_id_input",
+        on_change=_on_project_id_change,
     )
-    
-    # Sync: if user manually edited the field, update active project.
-    # Skip while the grace counter is active (prevents the text_input's stale
-    # old value from silently reverting active_project_id back).
-    grace = st.session_state.get("_switch_grace_reruns", 0)
-    if grace > 0:
-        st.session_state["_switch_grace_reruns"] = grace - 1
-    elif user_input and user_input != st.session_state.active_project_id:
-        st.session_state.active_project_id = user_input
-        st.session_state.blocks = []
-        st.session_state._last_rendered_project = user_input
-        st.session_state.pop("_welcome_sent_for", None)
-        st.rerun()
 
     st.divider()
     
@@ -532,8 +489,16 @@ with st.sidebar:
                                 st.session_state.blocks = []
                                 st.session_state._last_rendered_project = proj_id
                                 st.session_state["_project_id_input"] = proj_id
-                                st.session_state["_switch_grace_reruns"] = 3
                                 st.session_state.pop("_welcome_sent_for", None)
+                                # Update server-side last project so session
+                                # recovery lands on the correct project.
+                                try:
+                                    make_authenticated_request(
+                                        "PUT", f"{API_URL}/user/last-project",
+                                        json={"project_id": proj_id}, timeout=3,
+                                    )
+                                except Exception:
+                                    pass
                                 st.rerun()
                         with col_archive:
                             if archive_confirm_id == proj_id:
@@ -3481,11 +3446,10 @@ def _render_chat():
     max_visible = st.session_state.get("_max_visible_blocks", 30)
     if len(blocks) > max_visible:
         hidden_count = len(blocks) - max_visible
-        if st.button(f"⬆️ Load {min(hidden_count, 30)} older messages ({hidden_count} hidden)"):
-            st.session_state["_max_visible_blocks"] = max_visible + 30
-            st.rerun()
+        st.session_state["_hidden_block_count"] = hidden_count
         visible_blocks = blocks[-max_visible:]
     else:
+        st.session_state.pop("_hidden_block_count", None)
         visible_blocks = blocks
 
     # 3. Scan ALL blocks for running jobs
@@ -3546,22 +3510,37 @@ _render_chat()
 
 @st.fragment(run_every=_refresh_interval)
 def _render_task_dock():
-    """Render a bottom-docked task pane only when the project has tasks."""
+    """Render an inline task pane only when the project has tasks."""
     _active_id = st.session_state.active_project_id
     sections = get_project_tasks(_active_id)
     total_tasks = _count_project_tasks(sections)
     st.session_state["_show_task_dock"] = total_tasks > 0
-    dock_padding = f"calc({TASK_DOCK_HEIGHT_PX}px + 8rem)" if total_tasks > 0 else "6rem"
-    st.markdown(
-        f"<style>.main .block-container {{ padding-bottom: {dock_padding}; }}</style>",
-        unsafe_allow_html=True,
-    )
     if total_tasks == 0:
         return
 
     with st.container(border=True, height=TASK_DOCK_HEIGHT_PX, key="task_dock"):
         render_project_tasks(_active_id, sections=sections, docked=True)
 
+
+# Pagination button — rendered outside the fragment to avoid duplicate-key
+# errors when the fragment's run_every timer overlaps with a full page rerun.
+_hbc = st.session_state.get("_hidden_block_count", 0)
+if _hbc > 0:
+    if st.button(f"⬆️ Load {min(_hbc, 30)} older messages ({_hbc} hidden)"):
+        st.session_state["_max_visible_blocks"] = st.session_state.get("_max_visible_blocks", 30) + 30
+        st.rerun()
+
+# --- Capture chat input EARLY ---
+# st.chat_input is one-shot: its value is only available during the single
+# script run triggered by the submit event.  Several code paths below
+# (bootstrap rerun, active-chat handler) can call st.rerun() which would
+# discard the value before it is processed.  Capture it here — before any
+# of those paths — and persist immediately so neither a bootstrap rerun nor
+# an active-chat rerun can lose the user's prompt.
+_queued_help_prompt = st.session_state.pop("_help_prompt", None)
+_captured_prompt = _queued_help_prompt or st.chat_input("Ask Agoutic to do something...")
+if _captured_prompt and not st.session_state.get("_pending_prompt"):
+    st.session_state["_pending_prompt"] = _captured_prompt
 
 _render_task_dock()
 
@@ -3695,13 +3674,20 @@ if _active_chat is not None:
             st.rerun()
 
 # 3. Chat Input
-_queued_help_prompt = st.session_state.pop("_help_prompt", None)
-prompt = _queued_help_prompt or st.chat_input("Ask Agoutic to do something...")
+# The prompt was captured earlier (before bootstrap/active-chat reruns).
+# Recover it from the captured variable or from session state if a rerun
+# discarded the variable before we got here.
+prompt = _captured_prompt
+if not prompt and st.session_state.get("_pending_prompt") and "_active_chat" not in st.session_state:
+    prompt = st.session_state.get("_pending_prompt")
+
 if prompt:
+
     with st.chat_message("user"):
         st.write(prompt)
 
     if _is_help_intent(prompt):
+        st.session_state.pop("_pending_prompt", None)
         with st.chat_message("assistant"):
             _render_local_help_response()
         st.stop()
@@ -3731,6 +3717,9 @@ if prompt:
 
     thread = threading.Thread(target=_send_chat_request, daemon=True)
     thread.start()
+
+    # Clear the pending prompt now that the request is launched.
+    st.session_state.pop("_pending_prompt", None)
 
     st.session_state["_active_chat"] = {
         "thread": thread,

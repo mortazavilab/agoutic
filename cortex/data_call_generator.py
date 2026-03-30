@@ -176,17 +176,18 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     work_dir = job_context.get("work_dir", "")
     run_uuid = job_context.get("run_uuid", "")
     workflows = job_context.get("workflows", [])
-    # Derive the project directory — prefer parent-of-work_dir (when
-    # work_dir is a workflow directory like .../test16/workflow1); fall back
-    # to the explicitly-passed project_dir (from the chat endpoint).
+    # Derive the project directory — prefer the explicitly-passed project_dir
+    # (from the chat endpoint / DB) because the job-history work_dir may
+    # point to an unrelated skill scripts directory.  Fall back to
+    # parent-of-work_dir only when project_dir is unavailable.
     _project_dir = ""
-    if work_dir:
+    if project_dir:
+        _project_dir = project_dir
+    elif work_dir:
         if re.search(r'/workflow\d+/?$', work_dir):
             _project_dir = work_dir.rstrip("/").rsplit("/", 1)[0]
         else:
-            _project_dir = work_dir  # already project-level
-    if not _project_dir and project_dir:
-        _project_dir = project_dir
+            _project_dir = work_dir
 
     # --- "list workflows" command ---
     if (
@@ -905,11 +906,13 @@ def _validate_analyzer_params(
             r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',
             user_message, re.IGNORECASE,
         ):
-            # If real_wd came from a workflow (has /workflow\d+/ suffix),
-            # strip to the parent project directory.
-            if re.search(r'/workflow\d+/?$', real_wd):
+            # Prefer the explicitly-passed project_dir (from the DB) —
+            # the history work_dir may point to an unrelated skill
+            # scripts directory instead of the actual project root.
+            if project_dir:
+                real_wd = project_dir
+            elif re.search(r'/workflow\d+/?$', real_wd):
                 real_wd = real_wd.rstrip("/").rsplit("/", 1)[0]
-            # Otherwise real_wd is already the project dir (from project_dir fallback)
             params["max_depth"] = 1  # only top-level dirs
             params["name_pattern"] = "workflow*"  # filter to workflow dirs only
 
