@@ -305,6 +305,83 @@ async def test_copy_selected_results_accepts_verified_local_artifacts_after_rsyn
 
 
 @pytest.mark.asyncio
+async def test_sync_results_to_local_returns_not_applicable_for_remote_only_destination(monkeypatch):
+    backend = SlurmBackend()
+    job = SimpleNamespace(
+        result_destination="remote",
+        remote_work_dir="/remote/workflow1",
+        nextflow_work_dir="/local/workflow1",
+        transfer_state="",
+    )
+
+    async def fake_get_job(_run_uuid):
+        return job
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+
+    result = await backend.sync_results_to_local(run_uuid="run-1")
+
+    assert result["success"] is False
+    assert result["status"] == "not_applicable"
+
+
+@pytest.mark.asyncio
+async def test_sync_results_to_local_retries_copy_when_force_enabled(monkeypatch):
+    backend = SlurmBackend()
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    job = SimpleNamespace(
+        result_destination="local",
+        remote_work_dir="/remote/workflow1",
+        nextflow_work_dir="/local/workflow1",
+        transfer_state="outputs_downloaded",
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+    )
+    refreshed = SimpleNamespace(transfer_state="outputs_downloaded")
+
+    calls = {"count": 0}
+
+    async def fake_get_job(_run_uuid):
+        calls["count"] += 1
+        return job if calls["count"] == 1 else refreshed
+
+    async def fake_load_profile(_profile_id, _user_id):
+        return profile
+
+    async def fake_copy(*, run_uuid, job, profile):
+        return {
+            "success": True,
+            "status": "outputs_downloaded",
+            "message": "ok",
+            "run_uuid": run_uuid,
+            "remote_work_dir": job.remote_work_dir,
+            "local_work_dir": job.nextflow_work_dir,
+        }
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr(backend, "_load_profile", fake_load_profile)
+    monkeypatch.setattr(backend, "_copy_selected_results_to_local", fake_copy)
+
+    result = await backend.sync_results_to_local(run_uuid="run-1", force=True)
+
+    assert result["success"] is True
+    assert result["status"] == "outputs_downloaded"
+    assert result["transfer_state"] == "outputs_downloaded"
+
+
+@pytest.mark.asyncio
 async def test_write_remote_nextflow_config_uses_profile_cpu_defaults_separately_from_gpu(monkeypatch):
     backend = SlurmBackend()
     params = SubmitParams(

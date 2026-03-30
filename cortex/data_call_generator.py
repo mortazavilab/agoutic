@@ -176,6 +176,58 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     work_dir = job_context.get("work_dir", "")
     run_uuid = job_context.get("run_uuid", "")
     workflows = job_context.get("workflows", [])
+
+    # --- "sync results back to local" command ---
+    # Supports natural-language retries when SLURM copy-back missed files.
+    _sync_results_intent = bool(
+        re.search(
+            r"\b(?:sync|re\s*sync|resync|copy|retry)\b.*\b(?:results?|outputs?)\b.*\b(?:back|local|download)\b",
+            msg_lower,
+        )
+    )
+    if not _sync_results_intent:
+        _sync_results_intent = bool(
+            re.search(r"\b(?:sync|re\s*sync|resync)\b.*\b(?:workflow\d+|run\b|job\b)\b", msg_lower)
+        )
+
+    if _sync_results_intent:
+        _force_sync = bool(re.search(r"\b(force|retry|again|re\s*try)\b", msg_lower))
+        _requested_uuid_match = re.search(
+            r"\b([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b",
+            user_message,
+            re.IGNORECASE,
+        )
+        _requested_run_uuid = _requested_uuid_match.group(1) if _requested_uuid_match else ""
+
+        _requested_workflow_match = re.search(r"\b(workflow\d+)\b", user_message, re.IGNORECASE)
+        _requested_workflow = _requested_workflow_match.group(1).lower() if _requested_workflow_match else ""
+
+        _target_run_uuid = _requested_run_uuid or ""
+        if not _target_run_uuid and _requested_workflow and workflows:
+            for _wf in reversed(workflows):
+                _wf_dir = (_wf.get("work_dir") or "").rstrip("/").lower()
+                _wf_uuid = _wf.get("run_uuid") or ""
+                if _wf_uuid and _wf_dir.endswith(f"/{_requested_workflow}"):
+                    _target_run_uuid = _wf_uuid
+                    break
+
+        if not _target_run_uuid:
+            _target_run_uuid = run_uuid
+
+        if _target_run_uuid:
+            _params = {"run_uuid": _target_run_uuid}
+            if _force_sync:
+                _params["force"] = True
+            calls.append(
+                {
+                    "source_type": "service",
+                    "source_key": "launchpad",
+                    "tool": "sync_job_results",
+                    "params": _params,
+                }
+            )
+        return calls
+
     # Derive the project directory — prefer the explicitly-passed project_dir
     # (from the chat endpoint / DB) because the job-history work_dir may
     # point to an unrelated skill scripts directory.  Fall back to

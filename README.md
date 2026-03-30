@@ -235,6 +235,7 @@ The system is composed of:
 - **Launchpad**: Execution Engine - Dogme/Nextflow pipeline management (local + remote SLURM)
 - **Analyzer**: Analysis Engine - Results analysis and QC reporting
 - **edgePython**: Differential Expression — Bulk/single-cell RNA-seq DE via edgePython
+- **XgenePy MCP**: Cis/trans regulatory modeling — local XgenePy execution with canonical artifacts
 - **UI**: Web interface for monitoring and control
 
 Current status: database infrastructure centralized in `common/database.py`

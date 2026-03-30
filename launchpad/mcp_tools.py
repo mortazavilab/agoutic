@@ -447,6 +447,36 @@ class LaunchpadMCPTools:
                 return response.json()
         except Exception as e:
             raise RuntimeError(f"Failed to check status: {str(e)}")
+
+    async def sync_job_results(self, run_uuid: str, force: bool = False) -> dict:
+        """Trigger manual remote-to-local result synchronization for a SLURM run."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.server_url}/jobs/{run_uuid}/sync-results",
+                    params={"force": str(bool(force)).lower()},
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                )
+                if response.status_code == 404:
+                    raise RuntimeError(f"Job {run_uuid} not found")
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = e.response.text
+            except Exception:
+                detail = ""
+            if detail:
+                raise RuntimeError(
+                    f"Failed to sync job results: HTTP {e.response.status_code} from {e.request.url} - {detail}"
+                )
+            raise RuntimeError(
+                f"Failed to sync job results: HTTP {e.response.status_code} from {e.request.url}"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to sync job results: {_describe_exception(e)}")
     
     async def get_dogme_report(self, run_uuid: str) -> dict:
         """
@@ -846,6 +876,18 @@ TOOL_REGISTRY = {
             },
             "required": ["run_uuid"],
         }
+    },
+    "sync_job_results": {
+        "description": "Manually retry remote-to-local result synchronization for a completed SLURM run.",
+        "tool_function": "sync_job_results",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_uuid": {"type": "string", "description": "Job UUID"},
+                "force": {"type": "boolean", "description": "Force a retry even if already synced or currently syncing", "default": False},
+            },
+            "required": ["run_uuid"],
+        },
     },
     "get_dogme_report": {
         "description": "Get the final analysis results and report for a completed job",

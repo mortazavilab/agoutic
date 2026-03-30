@@ -358,3 +358,19 @@ class TestDifferentialExpression:
             "plot this by assay", "ENCODE_Search"
         )
         assert result is None
+
+
+class TestXgenePyRouting:
+    """Tests for routing to xgenepy_analysis skill."""
+
+    def test_xgenepy_keyword_routes_skill(self):
+        result = _auto_detect_skill_switch(
+            "run xgenepy analysis on my count matrix", "welcome"
+        )
+        assert result == "xgenepy_analysis"
+
+    def test_cis_trans_phrase_routes_skill(self):
+        result = _auto_detect_skill_switch(
+            "perform cis trans analysis with allele-specific metadata", "welcome"
+        )
+        assert result == "xgenepy_analysis"

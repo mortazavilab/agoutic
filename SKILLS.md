@@ -300,6 +300,7 @@ live in one place and be included by multiple skills.
 | `analyze_job_results` | analyze_job_results/SKILL.md | Completed job router |
 | `download_files` | download_files/SKILL.md | File download manager |
 | `differential_expression` | differential_expression/SKILL.md | DE analysis via edgePython |
+| `xgenepy_analysis` | xgenepy_analysis/SKILL.md | Local XgenePy cis/trans analysis |
 | `enrichment_analysis` | enrichment_analysis/SKILL.md | GO/pathway enrichment |
 | `remote_execution` | remote_execution/SKILL.md | Remote SLURM execution |
 

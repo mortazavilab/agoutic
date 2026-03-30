@@ -48,6 +48,7 @@ from launchpad.schemas import (
     StageRemoteSampleResponse,
     JobStatusResponse,
     JobStatusExtendedResponse,
+    JobResultSyncResponse,
     JobDetailsResponse,
     JobSubmitResponse,
     JobListResponse,
@@ -970,6 +971,45 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             **_job_timing_payload(job),
         }
     
+    finally:
+        await session.close()
+
+
+@app.post("/jobs/{run_uuid}/sync-results", response_model=JobResultSyncResponse)
+async def sync_job_results_to_local(
+    run_uuid: str = FastAPIPath(..., min_length=1),
+    force: bool = Query(False),
+):
+    """Manually trigger remote->local copy-back for a SLURM run."""
+    session = SessionLocal()
+    try:
+        job = await get_job(session, run_uuid)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        if (job.execution_mode or "local").strip().lower() != "slurm":
+            return {
+                "success": False,
+                "status": "not_applicable",
+                "message": "Manual result sync is only available for SLURM jobs.",
+                "run_uuid": run_uuid,
+                "remote_work_dir": getattr(job, "remote_work_dir", None),
+                "local_work_dir": getattr(job, "nextflow_work_dir", None),
+                "transfer_state": getattr(job, "transfer_state", None),
+            }
+
+        backend = get_backend("slurm")
+        result = await backend.sync_results_to_local(run_uuid=run_uuid, force=force)
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_describe_exception(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+    except Exception as exc:
+        logger.exception("Manual result sync failed", run_uuid=run_uuid)
+        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
     finally:
         await session.close()
 

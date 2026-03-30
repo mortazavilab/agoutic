@@ -178,6 +178,13 @@ async def check_nextflow_status(run_uuid: str) -> str:
     result = await tools.check_nextflow_status(run_uuid=run_uuid)
     return json.dumps(result, indent=2)
 
+
+@mcp.tool()
+async def sync_job_results(run_uuid: str, force: bool = False) -> str:
+    """Manually retry remote-to-local result synchronization for a SLURM run."""
+    result = await tools.sync_job_results(run_uuid=run_uuid, force=force)
+    return json.dumps(result, indent=2)
+
 @mcp.tool()
 async def get_dogme_report(run_uuid: str) -> str:
     """Get the DOGME report for a completed job."""

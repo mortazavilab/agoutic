@@ -1,5 +1,23 @@
 ## [3.4.13] - 2026-03-28
 
+### Features
+
+- **Phase 1 XgenePy service integration** — added a first-class local
+  `xgenepy_mcp` service with strict relative-path validation, metadata contract
+  checks (`sample_id`, `strain`, `allele` required), canonical output
+  enforcement (`fit_summary.json`, `assignments.tsv`, `proportion_cis.tsv`,
+  `model_metadata.json`, `run_manifest.json`, `plots/`), and clear dependency
+  failure messaging when XgenePy is not installed.
+
+- **Planner, skill, and approval wiring for XgenePy** — added dedicated
+  `xgenepy_analysis` skill routing, deterministic plan support for
+  `run_xgenepy_analysis`, and approval-before-run gating via
+  `RUN_XGENEPY` step classification.
+
+- **Analyzer parser support for XgenePy canonical outputs** — added
+  `parse_xgenepy_outputs` in analyzer engine/MCP/REST with secure path checks
+  and structured parsing of manifest, summaries, tabular artifacts, and plots.
+
 ### Fixes
 
 - **Chat queries on old projects no longer redirect to the latest project** —

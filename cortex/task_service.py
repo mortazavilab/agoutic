@@ -146,7 +146,7 @@ def _workflow_action_for_step(step: dict) -> tuple[str | None, str | None]:
     if kind in ("LOCATE_DATA", "VALIDATE_INPUTS", "SEARCH_ENCODE",
                 "PARSE_OUTPUT_FILE", "SUMMARIZE_QC", "GENERATE_PLOT", "WRITE_SUMMARY",
                 "CHECK_EXISTING", "GENERATE_DE_PLOT", "INTERPRET_RESULTS", "RECOMMEND_NEXT",
-                "ANNOTATE_RESULTS"):
+            "ANNOTATE_RESULTS", "PARSE_XGENEPY_OUTPUT"):
         return _action_for_status(status, pending_label="Waiting", completed_label="Done"), None
     if kind == "REQUEST_APPROVAL":
         _gate_target = _build_target("block", block_id=step["gate_block_id"]) if step.get("gate_block_id") else None
@@ -167,7 +167,7 @@ def _workflow_action_for_step(step: dict) -> tuple[str | None, str | None]:
     if kind in ("complete_stage_only", "COMPLETE_STAGE_ONLY"):
         return _action_for_status(status, pending_label="Finishing", completed_label="Staged"), None
     if kind in ("DOWNLOAD_DATA", "SUBMIT_WORKFLOW", "MONITOR_WORKFLOW",
-            "RUN_DE_ANALYSIS", "COMPARE_SAMPLES", "RUN_DE_PIPELINE", "RUN_SCRIPT"):
+            "RUN_DE_ANALYSIS", "COMPARE_SAMPLES", "RUN_DE_PIPELINE", "RUN_SCRIPT", "RUN_XGENEPY"):
         _step_target = _build_target("block", block_id=step["block_id"], run_uuid=step.get("run_uuid")) if step.get("block_id") else None
         return _action_for_status(status, pending_label="Running", completed_label="View results"), _step_target
     # --- Legacy step kinds ---

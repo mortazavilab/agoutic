@@ -18,6 +18,7 @@ from analyzer.analysis_engine import (
     categorize_files,
     read_file_content,
     parse_csv_file,
+    parse_xgenepy_outputs,
     resolve_work_dir,
 )
 
@@ -220,3 +221,57 @@ class TestParseCsvFile:
     def test_missing_csv_raises(self, job_dir):
         with pytest.raises(FileNotFoundError):
             parse_csv_file(work_dir_path=str(job_dir), file_path="missing.csv")
+
+
+class TestParseXgenePyOutputs:
+    def _write_canonical_outputs(self, root: Path) -> None:
+        run_dir = root / "xgenepy_runs" / "workflow1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "plots").mkdir(parents=True)
+
+        (run_dir / "fit_summary.json").write_text('{"row_count": 2}', encoding="utf-8")
+        (run_dir / "model_metadata.json").write_text('{"trans_model": "log_additive"}', encoding="utf-8")
+        (run_dir / "run_manifest.json").write_text('{"schema_version": "1.0"}', encoding="utf-8")
+        (run_dir / "assignments.tsv").write_text(
+            "gene\treg_assignment\tcis_prop\nG1\tcis\t0.9\nG2\ttrans\t0.1\n",
+            encoding="utf-8",
+        )
+        (run_dir / "proportion_cis.tsv").write_text(
+            "gene\tcis_prop\nG1\t0.9\nG2\t0.1\n",
+            encoding="utf-8",
+        )
+        (run_dir / "plots" / "assignments.png").write_bytes(b"fakepng")
+
+    def test_parse_xgenepy_outputs_success(self, tmp_path):
+        self._write_canonical_outputs(tmp_path)
+        parsed = parse_xgenepy_outputs(
+            work_dir_path=str(tmp_path),
+            output_dir="xgenepy_runs/workflow1",
+            max_rows=1,
+        )
+
+        assert parsed.required_outputs_present is True
+        assert parsed.missing_outputs == []
+        assert parsed.fit_summary["row_count"] == 2
+        assert len(parsed.assignments) == 1
+        assert len(parsed.proportion_cis) == 1
+        assert len(parsed.plots) == 1
+
+    def test_parse_xgenepy_outputs_missing_artifact(self, tmp_path):
+        self._write_canonical_outputs(tmp_path)
+        (tmp_path / "xgenepy_runs" / "workflow1" / "model_metadata.json").unlink()
+
+        parsed = parse_xgenepy_outputs(
+            work_dir_path=str(tmp_path),
+            output_dir="xgenepy_runs/workflow1",
+        )
+
+        assert parsed.required_outputs_present is False
+        assert "model_metadata.json" in parsed.missing_outputs
+
+    def test_parse_xgenepy_outputs_rejects_traversal(self, tmp_path):
+        with pytest.raises(ValueError, match="Invalid output_dir path"):
+            parse_xgenepy_outputs(
+                work_dir_path=str(tmp_path),
+                output_dir="../../outside",
+            )

@@ -100,6 +100,50 @@ class TestBrowsingCommands:
         assert len(calls) == 1
         assert calls[0]["tool"] == "list_job_files"
 
+
+class TestManualResultSyncCommand:
+    def _blocks_with_runs(self):
+        return _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "11111111-1111-1111-1111-111111111111",
+                "sample_name": "s1",
+                "mode": "DNA",
+            }},
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow2",
+                "run_uuid": "22222222-2222-2222-2222-222222222222",
+                "sample_name": "s2",
+                "mode": "DNA",
+            }},
+        ])
+
+    def test_sync_results_uses_requested_workflow_run_uuid(self):
+        calls = _auto_generate_data_calls(
+            "sync results back to local for workflow1",
+            "analyze_job_results",
+            history_blocks=self._blocks_with_runs(),
+            project_dir="/tmp/proj",
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["source_key"] == "launchpad"
+        assert calls[0]["tool"] == "sync_job_results"
+        assert calls[0]["params"]["run_uuid"] == "11111111-1111-1111-1111-111111111111"
+
+    def test_sync_results_force_retry_sets_force_param(self):
+        calls = _auto_generate_data_calls(
+            "retry sync outputs to local for workflow2",
+            "analyze_job_results",
+            history_blocks=self._blocks_with_runs(),
+            project_dir="/tmp/proj",
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "sync_job_results"
+        assert calls[0]["params"]["run_uuid"] == "22222222-2222-2222-2222-222222222222"
+        assert calls[0]["params"]["force"] is True
+
     def test_show_files(self):
         blocks = self._blocks_with_job("/tmp/proj/workflow1")
         calls = _auto_generate_data_calls(

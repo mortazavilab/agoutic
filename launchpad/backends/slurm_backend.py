@@ -544,11 +544,85 @@ class SlurmBackend:
                     transfer_message=transfer.get("message"),
                 )
             await self._update_job_transfer_state(run_uuid, "outputs_downloaded")
+            return {
+                "success": True,
+                "status": "outputs_downloaded",
+                "message": "Remote outputs synchronized to local workflow directory.",
+                "run_uuid": run_uuid,
+                "remote_work_dir": remote_work_dir,
+                "local_work_dir": local_work_dir,
+            }
         except Exception as exc:
             await self._update_job_transfer_state(run_uuid, "transfer_failed")
             logger.error("Selective result copy-back failed", run_uuid=run_uuid, error=str(exc))
+            return {
+                "success": False,
+                "status": "transfer_failed",
+                "message": str(exc),
+                "run_uuid": run_uuid,
+                "remote_work_dir": remote_work_dir,
+                "local_work_dir": local_work_dir,
+            }
         finally:
             self._result_sync_tasks.pop(run_uuid, None)
+
+    async def sync_results_to_local(self, *, run_uuid: str, force: bool = False) -> dict:
+        """Manually trigger remote->local result synchronization for a SLURM run."""
+        from launchpad.db import get_job_by_uuid as get_job
+
+        job = await get_job(run_uuid)
+        if not job:
+            raise ValueError(f"Job not found: {run_uuid}")
+
+        if not self._needs_local_result_copy(job):
+            return {
+                "success": False,
+                "status": "not_applicable",
+                "message": "This job is not configured for local/both result copy-back.",
+                "run_uuid": run_uuid,
+                "remote_work_dir": getattr(job, "remote_work_dir", None),
+                "local_work_dir": getattr(job, "nextflow_work_dir", None),
+                "transfer_state": getattr(job, "transfer_state", None),
+            }
+
+        transfer_state = (getattr(job, "transfer_state", "") or "").strip().lower()
+        if transfer_state == "outputs_downloaded" and not force:
+            return {
+                "success": True,
+                "status": "already_synced",
+                "message": "Results are already synced locally. Use force=true to retry copy-back.",
+                "run_uuid": run_uuid,
+                "remote_work_dir": getattr(job, "remote_work_dir", None),
+                "local_work_dir": getattr(job, "nextflow_work_dir", None),
+                "transfer_state": transfer_state,
+            }
+
+        running_task = self._result_sync_tasks.get(run_uuid)
+        if running_task and not running_task.done() and not force:
+            return {
+                "success": False,
+                "status": "sync_in_progress",
+                "message": "A result synchronization task is already in progress for this run.",
+                "run_uuid": run_uuid,
+                "remote_work_dir": getattr(job, "remote_work_dir", None),
+                "local_work_dir": getattr(job, "nextflow_work_dir", None),
+                "transfer_state": transfer_state,
+            }
+
+        if running_task and not running_task.done() and force:
+            running_task.cancel()
+
+        profile = await self._load_profile(job.ssh_profile_id, job.user_id)
+        sync_result = await self._copy_selected_results_to_local(
+            run_uuid=run_uuid,
+            job=job,
+            profile=profile,
+        )
+
+        refreshed_job = await get_job(run_uuid)
+        if refreshed_job:
+            sync_result["transfer_state"] = getattr(refreshed_job, "transfer_state", None)
+        return sync_result
 
     async def _discover_remote_result_artifacts(self, *, profile: SSHProfileData, remote_work_dir: str) -> dict[str, list[str]]:
         conn = await self._ssh_manager.connect(profile)

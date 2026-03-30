@@ -262,6 +262,46 @@ def test_extract_plan_params_reconcile_does_not_treat_to_reconcile_as_output_dir
     assert "output_directory" not in params
 
 
+def test_extract_plan_params_reconcile_cross_project_workflow_refs_resolve_from_known_base():
+    params = _extract_plan_params(
+        (
+            "reconcile bams from C2C12r1 in project-2026-03-27:workflow1, "
+            "C2C12r2 in project-2026-03-27-1:workflow1 and "
+            "C2C12r3 in project-2026-03-27-2:workflow1"
+        ),
+        ConversationState(
+            active_skill="reconcile_bams",
+            active_project="proj-1",
+            workflows=[
+                {
+                    "sample_name": "anchor",
+                    "work_dir": "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-30/workflow1",
+                }
+            ],
+        ),
+        "reconcile_bams",
+    )
+
+    assert params["workflow_dirs"] == [
+        "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-27/workflow1",
+        "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-27-1/workflow1",
+        "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-27-2/workflow1",
+    ]
+
+
+def test_extract_plan_params_reconcile_cross_project_workflow_refs_keep_relative_without_base():
+    params = _extract_plan_params(
+        "reconcile bams from A in projectX:workflow2 and B in projectY:workflow7",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+    )
+
+    assert params["workflow_dirs"] == [
+        "projectX/workflow2",
+        "projectY/workflow7",
+    ]
+
+
 def test_compose_plan_fragments_remaps_ids_and_dependencies():
     plan = compose_plan_fragments(
         [

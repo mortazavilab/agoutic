@@ -101,6 +101,22 @@ def _summary_payload():
     }
 
 
+def _xgenepy_payload():
+    return {
+        "run_uuid": "run-1",
+        "output_dir": "xgenepy_runs/workflow1",
+        "required_outputs_present": True,
+        "missing_outputs": [],
+        "fit_summary": {"row_count": 2},
+        "model_metadata": {"trans_model": "log_additive"},
+        "run_manifest": {"schema_version": "1.0"},
+        "assignments": [{"gene": "G1", "cis_prop": 0.9}],
+        "proportion_cis": [{"gene": "G1", "cis_prop": 0.9}],
+        "plots": ["xgenepy_runs/workflow1/plots/assignments.png"],
+        "metadata": {"preview_rows": 100},
+    }
+
+
 class TestAnalyzerApp:
     def test_root_and_health_endpoints(self):
         client = TestClient(app, raise_server_exceptions=False)
@@ -227,3 +243,21 @@ class TestAnalyzerApp:
         assert missing.json()["detail"] == "job missing"
         assert ok.status_code == 200
         assert ok.json()["sample_name"] == "sample-a"
+
+    def test_parse_xgenepy_endpoint_maps_errors_and_success(self):
+        client = TestClient(app, raise_server_exceptions=False)
+
+        with patch("analyzer.app.parse_xgenepy_outputs", side_effect=FileNotFoundError("missing run")):
+            missing = client.get("/analysis/files/parse/xgenepy?work_dir=/tmp/project&output_dir=xgenepy_runs/workflow1")
+
+        with patch("analyzer.app.parse_xgenepy_outputs", side_effect=ValueError("invalid path")):
+            invalid = client.get("/analysis/files/parse/xgenepy?work_dir=/tmp/project&output_dir=../../outside")
+
+        with patch("analyzer.app.parse_xgenepy_outputs", return_value=_xgenepy_payload()) as parse_xgenepy_outputs:
+            ok = client.get("/analysis/files/parse/xgenepy?work_dir=/tmp/project&output_dir=xgenepy_runs/workflow1&max_rows=1")
+
+        assert missing.status_code == 404
+        assert invalid.status_code == 400
+        assert ok.status_code == 200
+        assert ok.json()["required_outputs_present"] is True
+        parse_xgenepy_outputs.assert_called_once()

@@ -159,6 +159,17 @@ class JobLogsResponse(BaseModel):
     run_uuid: str
     logs: list[LogEntry]
 
+
+class JobResultSyncResponse(BaseModel):
+    """Response for manual remote->local result synchronization."""
+    success: bool
+    status: str
+    message: str
+    run_uuid: str
+    remote_work_dir: Optional[str] = None
+    local_work_dir: Optional[str] = None
+    transfer_state: Optional[str] = None
+
 class HealthCheckResponse(BaseModel):
     """Health check response."""
     status: str

@@ -15,6 +15,7 @@ from analyzer.analysis_engine import (
     read_file_content,
     parse_csv_file,
     parse_bed_file,
+    parse_xgenepy_outputs,
     generate_analysis_summary,
     get_job_work_dir,
     resolve_work_dir,
@@ -415,6 +416,56 @@ async def parse_bed_file_tool(
         }
 
 
+async def parse_xgenepy_outputs_tool(
+    output_dir: str,
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
+    max_rows: Optional[int] = 200,
+) -> Dict[str, Any]:
+    """Parse canonical XgenePy output artifacts and return structured content."""
+    try:
+        parsed_data = parse_xgenepy_outputs(
+            run_uuid=run_uuid,
+            output_dir=output_dir,
+            max_rows=max_rows,
+            work_dir_path=work_dir,
+        )
+
+        return {
+            "success": True,
+            "work_dir": work_dir or "",
+            "output_dir": parsed_data.output_dir,
+            "required_outputs_present": parsed_data.required_outputs_present,
+            "missing_outputs": parsed_data.missing_outputs,
+            "fit_summary": parsed_data.fit_summary,
+            "model_metadata": parsed_data.model_metadata,
+            "run_manifest": parsed_data.run_manifest,
+            "assignments": parsed_data.assignments,
+            "proportion_cis": parsed_data.proportion_cis,
+            "plots": parsed_data.plots,
+            "metadata": parsed_data.metadata,
+        }
+
+    except FileNotFoundError as e:
+        return {
+            "success": False,
+            "error": "XgenePy output directory not found",
+            "detail": str(e)
+        }
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Invalid XgenePy output path or parse error",
+            "detail": str(e)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "Failed to parse XgenePy outputs",
+            "detail": str(e)
+        }
+
+
 async def get_analysis_summary_tool(
     run_uuid: Optional[str] = None,
     work_dir: Optional[str] = None,
@@ -572,6 +623,7 @@ TOOL_REGISTRY = {
     "read_file_content": read_file_content_tool,
     "parse_csv_file": parse_csv_file_tool,
     "parse_bed_file": parse_bed_file_tool,
+    "parse_xgenepy_outputs": parse_xgenepy_outputs_tool,
     "get_analysis_summary": get_analysis_summary_tool,
     "categorize_job_files": categorize_job_files_tool,
     # Gene annotation tools (moved from edgePython)
@@ -712,6 +764,31 @@ TOOL_SCHEMAS = {
                 }
             },
             "required": ["file_path"]
+        }
+    },
+    "parse_xgenepy_outputs": {
+        "description": "Parse canonical XgenePy output artifacts (JSON/TSV plus plots directory).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "output_dir": {
+                    "type": "string",
+                    "description": "Relative path from work_dir to XgenePy run output directory"
+                },
+                "work_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the workflow/project directory (preferred)"
+                },
+                "run_uuid": {
+                    "type": "string",
+                    "description": "Job UUID (legacy fallback — prefer work_dir)"
+                },
+                "max_rows": {
+                    "type": "integer",
+                    "description": "Maximum rows to return for assignments/proportion previews (default: 200)"
+                }
+            },
+            "required": ["output_dir"]
         }
     },
     "get_analysis_summary": {

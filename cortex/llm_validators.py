@@ -306,6 +306,16 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
         if any(w in msg_lower for w in _enrichment_words):
             return "enrichment_analysis"
 
+    # --- Signals for XgenePy cis/trans analysis ---
+    _xgenepy_words = [
+        "xgenepy", "xgeneopy", "cis/trans", "cis trans",
+        "allele-specific", "allele specific", "proportion cis",
+        "regulatory assignment", "fit_summary.json", "assignments.tsv",
+    ]
+    if current_skill != "xgenepy_analysis":
+        if any(w in msg_lower for w in _xgenepy_words):
+            return "xgenepy_analysis"
+
     # --- Signals for gene lookup (routes to differential_expression / edgePython) ---
     _gene_words = [
         "ensembl", "ensembl id", "gene id", "gene symbol",

@@ -6,13 +6,14 @@ Three request classes:
   - SINGLE_TOOL: One tool call, no plan needed (existing flow)
   - MULTI_STEP: Requires a structured plan (new flow)
 
-Nine plan templates:
+Ten plan templates:
   - run_workflow: Analyze a local sample (stage → run → analyze)
     - remote_stage_workflow: Stage a sample on a remote SLURM target for later reuse
   - compare_samples: Compare two or more samples
   - download_analyze: Download from ENCODE/URL, then analyze
   - summarize_results: Summarize existing completed job results
   - run_de_pipeline: Full differential expression analysis
+    - run_xgenepy_analysis: Local cis/trans analysis with XgenePy
   - parse_plot_interpret: Parse data, plot, and explain
   - compare_workflows: Compare outputs from two workflow runs
   - search_compare_to_local: Search ENCODE, download, compare to local data
@@ -72,6 +73,9 @@ _MULTI_STEP_PATTERNS: list[re.Pattern] = [
     re.compile(r"(?:run|do|perform)\s+(?:a\s+)?(?:GO|gene\s+ontology|enrichment|pathway)\s+(?:analysis|enrichment)", re.I),
     re.compile(r"(?:KEGG|Reactome)\s+(?:enrichment|analysis|pathway)", re.I),
     re.compile(r"(?:what|which)\s+(?:GO\s+terms?|pathways?|biological\s+processes?)\s+(?:are\s+)?enriched", re.I),
+    # XgenePy analysis
+    re.compile(r"(?:run|do|perform)\s+(?:xgenepy|xgeneopy)\s+(?:analysis)?", re.I),
+    re.compile(r"(?:cis/trans|cis\s+trans|allele[-\s]?specific)\s+(?:analysis|model|assignment)", re.I),
 ]
 
 # Patterns that signal an INFORMATIONAL request
@@ -147,6 +151,7 @@ _PLANNER_SAFE_STEP_KINDS = frozenset({
     "RUN_PATHWAY_ENRICHMENT",
     "PLOT_ENRICHMENT",
     "SUMMARIZE_ENRICHMENT",
+    "PARSE_XGENEPY_OUTPUT",
 })
 
 
@@ -155,6 +160,7 @@ _PLANNER_APPROVAL_STEP_KINDS = frozenset({
     "DOWNLOAD_DATA",
     "RUN_DE_ANALYSIS",
     "RUN_DE_PIPELINE",
+    "RUN_XGENEPY",
     "RUN_SCRIPT",
     "REQUEST_APPROVAL",
 })
@@ -176,6 +182,8 @@ _PLANNER_ALLOWED_STEP_KINDS = frozenset({
     "REQUEST_APPROVAL",
     "CHECK_EXISTING",
     "RUN_DE_PIPELINE",
+    "RUN_XGENEPY",
+    "PARSE_XGENEPY_OUTPUT",
     "GENERATE_DE_PLOT",
     "INTERPRET_RESULTS",
     "RECOMMEND_NEXT",
@@ -775,6 +783,12 @@ _ENRICHMENT_PATTERNS = [
     re.compile(r"(?:enrichment|GO)\s+(?:on|for)\s+(?:the\s+)?(?:up|down|significant|DE)", re.I),
 ]
 
+_XGENEPY_PATTERNS = [
+    re.compile(r"(?:run|do|perform)\s+(?:xgenepy|xgeneopy)\s+(?:analysis)?", re.I),
+    re.compile(r"(?:xgenepy|xgeneopy)\s+(?:cis|trans|assignment|model)", re.I),
+    re.compile(r"(?:cis/trans|cis\s+trans|allele[-\s]?specific)\s+(?:analysis|model|assignment)", re.I),
+]
+
 
 def _detect_plan_type(message: str) -> str | None:
     """Return plan type string or None.
@@ -794,6 +808,10 @@ def _detect_plan_type(message: str) -> str | None:
     for pat in _ENRICHMENT_PATTERNS:
         if pat.search(message):
             return "run_enrichment"
+    # 2b. XgenePy cis/trans analysis
+    for pat in _XGENEPY_PATTERNS:
+        if pat.search(message):
+            return "run_xgenepy_analysis"
     # 3. Search + compare to local
     for pat in _SEARCH_COMPARE_LOCAL_PATTERNS:
         if pat.search(message):
@@ -905,6 +923,26 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             params["database"] = "REAC"
         return params
 
+    if plan_type == "run_xgenepy_analysis":
+        m = re.search(r"counts?\s+(?:at|in|from|path)?\s*[=:]?\s*(\S+\.(?:csv|tsv|txt))", message, re.I)
+        if m:
+            params["counts_path"] = m.group(1).rstrip(".,;:!?")
+        m = re.search(r"(?:metadata|sample[_ ]?meta(?:data)?)\s+(?:at|in|from|path)?\s*[=:]?\s*(\S+\.(?:csv|tsv|txt))", message, re.I)
+        if m:
+            params["metadata_path"] = m.group(1).rstrip(".,;:!?")
+        m = re.search(r"(?:output\s+(?:subdir|dir|directory)|save\s+to)\s*[=:]?\s*(\S+)", message, re.I)
+        if m:
+            params["output_subdir"] = m.group(1).rstrip(".,;:!?")
+        m = re.search(r"trans[_\s-]?model\s*[=:]?\s*([A-Za-z0-9_\-]+)", message, re.I)
+        if m:
+            params["trans_model"] = m.group(1)
+        m = re.search(r"alpha\s*[=:]?\s*([0-9]*\.?[0-9]+)", message, re.I)
+        if m:
+            try:
+                params["alpha"] = float(m.group(1))
+            except ValueError:
+                pass
+
     if plan_type == "reconcile_bams":
         m = re.search(r"(?:output\s+(?:prefix|name)|prefix)\s*[=:]?\s*([a-zA-Z0-9._-]+)", message, re.I)
         if m:
@@ -932,6 +970,30 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             match.strip().lower()
             for match in re.findall(r"\b(workflow[\w.-]+)\b", message, re.I)
         }
+        project_workflow_refs: list[tuple[str, str]] = []
+
+        # Cross-project explicit mentions:
+        # "sampleA in projectX:workflow2"
+        # "projectX:workflow2"
+        project_workflow_mentions = re.findall(
+            r"([a-zA-Z0-9_.-]+)\s+in\s+([a-zA-Z0-9_.-]+)\s*:\s*(workflow[\w.-]+)",
+            message,
+            re.I,
+        )
+        if project_workflow_mentions:
+            selected_names = [sample for sample, _project, _wf in project_workflow_mentions]
+            for _sample, project_name, workflow_name in project_workflow_mentions:
+                selected_workflow_tokens.add(workflow_name.lower())
+                project_workflow_refs.append((project_name.strip(), workflow_name.strip()))
+
+        for project_name, workflow_name in re.findall(
+            r"\b([a-zA-Z0-9_.-]+)\s*:\s*(workflow[\w.-]+)\b",
+            message,
+            re.I,
+        ):
+            ref = (project_name.strip(), workflow_name.strip())
+            if ref not in project_workflow_refs:
+                project_workflow_refs.append(ref)
 
         workflow_qualified_mentions = re.findall(
             r"([a-zA-Z0-9_.-]+)\s+in\s+(workflow[\w.-]+)",
@@ -954,7 +1016,73 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
                 selected_names = [match.group(1), match.group(2)]
                 break
 
+        def _add_candidate_base_dir(base_dirs: list[str], value: str | None) -> None:
+            if not isinstance(value, str):
+                return
+            candidate = value.strip().rstrip("/.,;:!?")
+            if not candidate or not candidate.startswith("/"):
+                return
+            if candidate not in base_dirs:
+                base_dirs.append(candidate)
+
+        def _derive_base_dir_from_work_dir(work_dir_value: str | None) -> str | None:
+            if not isinstance(work_dir_value, str):
+                return None
+            wd = work_dir_value.strip().rstrip("/")
+            if not wd or not wd.startswith("/"):
+                return None
+            wf_match = re.search(r"/workflow[\w.-]+$", wd, re.I)
+            if wf_match:
+                project_dir = wd[: wf_match.start()]
+            else:
+                project_dir = wd
+            base_dir = os.path.dirname(project_dir.rstrip("/"))
+            return base_dir or "/"
+
+        candidate_base_dirs: list[str] = []
+        base_match = re.search(
+            r"(?:base\s+(?:dir(?:ectory)?|path)|remote\s+base\s+path)\s*[=:]?\s*(/\S+)",
+            message,
+            re.I,
+        )
+        if base_match:
+            _add_candidate_base_dir(candidate_base_dirs, base_match.group(1))
+
         if getattr(conv_state, "workflows", None):
+            for wf in conv_state.workflows:
+                if not isinstance(wf, dict):
+                    continue
+                _add_candidate_base_dir(
+                    candidate_base_dirs,
+                    _derive_base_dir_from_work_dir(wf.get("work_dir")),
+                )
+
+        _add_candidate_base_dir(
+            candidate_base_dirs,
+            _derive_base_dir_from_work_dir(getattr(conv_state, "work_dir", None)),
+        )
+
+        remote_paths = getattr(conv_state, "remote_paths", None)
+        if isinstance(remote_paths, dict):
+            _add_candidate_base_dir(candidate_base_dirs, remote_paths.get("remote_base_path"))
+            for key in ("remote_work_path", "remote_output_path", "remote_input_path"):
+                _add_candidate_base_dir(
+                    candidate_base_dirs,
+                    _derive_base_dir_from_work_dir(remote_paths.get(key)),
+                )
+
+        if project_workflow_refs:
+            selected_workflow_tokens.clear()
+            for project_name, workflow_name in project_workflow_refs:
+                selected_workflow_tokens.add(workflow_name.lower())
+                if candidate_base_dirs:
+                    resolved = f"{candidate_base_dirs[0].rstrip('/')}/{project_name}/{workflow_name}"
+                else:
+                    resolved = f"{project_name}/{workflow_name}"
+                if resolved not in workflow_dirs:
+                    workflow_dirs.append(resolved)
+
+        if not project_workflow_refs and getattr(conv_state, "workflows", None):
             normalized_targets = {name.lower() for name in selected_names}
             for wf in conv_state.workflows:
                 if not isinstance(wf, dict):
@@ -987,10 +1115,11 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             for wf_dir in workflow_dirs
             if isinstance(wf_dir, str) and wf_dir
         }
-        for match in re.findall(r"(workflow[\w.-]+)", message, re.I):
-            normalized = match.strip()
-            if normalized and normalized.lower() not in known_workflow_basenames and normalized not in workflow_dirs:
-                workflow_dirs.append(normalized)
+        if not project_workflow_refs:
+            for match in re.findall(r"(workflow[\w.-]+)", message, re.I):
+                normalized = match.strip()
+                if normalized and normalized.lower() not in known_workflow_basenames and normalized not in workflow_dirs:
+                    workflow_dirs.append(normalized)
 
         if workflow_dirs:
             params["workflow_dirs"] = workflow_dirs
@@ -1178,6 +1307,116 @@ def _template_run_enrichment(params: dict) -> dict:
         "title": f"Enrichment analysis ({direction})",
         "goal": params.get("goal", f"Run enrichment analysis ({direction})"),
         "workflow_type": "enrichment_analysis",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
+# ---- Template: run_xgenepy_analysis --------------------------------------
+
+def _template_run_xgenepy_analysis(params: dict) -> dict:
+    """
+    Deterministic plan for local XgenePy cis/trans analysis.
+    Steps: CHECK_EXISTING -> REQUEST_APPROVAL -> RUN_XGENEPY -> PARSE_XGENEPY_OUTPUT -> WRITE_SUMMARY
+    """
+    project_dir = params.get("project_dir") or params.get("work_dir") or ""
+    counts_path = params.get("counts_path", "counts.csv")
+    metadata_path = params.get("metadata_path", "metadata.csv")
+    output_subdir = params.get("output_subdir", "xgenepy_runs")
+    trans_model = params.get("trans_model", "log_additive")
+    alpha = float(params.get("alpha", 0.05))
+
+    steps = []
+    idx = 0
+
+    s_check = _make_step(
+        "CHECK_EXISTING",
+        "Check for existing XgenePy manifest",
+        idx,
+        tool_calls=[
+            {
+                "source_key": "analyzer",
+                "tool": "find_file",
+                "params": {
+                    "work_dir": project_dir,
+                    "file_name": "run_manifest.json",
+                },
+            }
+        ],
+    )
+    steps.append(s_check)
+    idx += 1
+
+    s_approve = _make_step(
+        "REQUEST_APPROVAL",
+        "Approve local XgenePy execution",
+        idx,
+        requires_approval=True,
+        depends_on=[s_check["id"]],
+    )
+    steps.append(s_approve)
+    idx += 1
+
+    s_run = _make_step(
+        "RUN_XGENEPY",
+        "Run local XgenePy cis/trans analysis",
+        idx,
+        requires_approval=False,
+        depends_on=[s_approve["id"]],
+        tool_calls=[
+            {
+                "source_key": "xgenepy",
+                "tool": "run_xgenepy_analysis",
+                "params": {
+                    "project_dir": project_dir,
+                    "counts_path": counts_path,
+                    "metadata_path": metadata_path,
+                    "output_subdir": output_subdir,
+                    "trans_model": trans_model,
+                    "alpha": alpha,
+                    "execution_mode": "local",
+                },
+            }
+        ],
+    )
+    steps.append(s_run)
+    idx += 1
+
+    s_parse = _make_step(
+        "PARSE_XGENEPY_OUTPUT",
+        "Parse canonical XgenePy outputs",
+        idx,
+        depends_on=[s_run["id"]],
+        tool_calls=[
+            {
+                "source_key": "analyzer",
+                "tool": "parse_xgenepy_outputs",
+                "params": {
+                    "work_dir": project_dir,
+                    "output_dir": output_subdir,
+                },
+            }
+        ],
+    )
+    steps.append(s_parse)
+    idx += 1
+
+    s_summary = _make_step(
+        "WRITE_SUMMARY",
+        "Summarize XgenePy analysis results",
+        idx,
+        depends_on=[s_parse["id"]],
+    )
+    steps.append(s_summary)
+
+    return {
+        "plan_type": "run_xgenepy_analysis",
+        "title": "Run XgenePy cis/trans analysis",
+        "goal": params.get("goal", "Run XgenePy analysis"),
+        "workflow_type": "xgenepy_analysis",
         "auto_execute_safe_steps": True,
         "status": "PENDING",
         "current_step_id": steps[0]["id"],
@@ -1590,6 +1829,8 @@ def _deterministic_template_for_plan_type(plan_type: str, params: dict) -> dict 
         return _template_run_de_pipeline(params)
     if plan_type == "run_enrichment":
         return _template_run_enrichment(params)
+    if plan_type == "run_xgenepy_analysis":
+        return _template_run_xgenepy_analysis(params)
     if plan_type == "remote_stage_workflow":
         return _template_remote_stage_workflow(params)
     if plan_type == "reconcile_bams":
@@ -1759,6 +2000,10 @@ def generate_plan(
         return _finalize_plan(plan, conv_state)
     if plan_type == "run_enrichment":
         plan = _template_run_enrichment(params)
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return _finalize_plan(plan, conv_state)
+    if plan_type == "run_xgenepy_analysis":
+        plan = _template_run_xgenepy_analysis(params)
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
     if plan_type == "remote_stage_workflow":

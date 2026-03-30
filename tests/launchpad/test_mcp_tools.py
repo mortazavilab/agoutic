@@ -378,6 +378,42 @@ class TestStatusAndReport:
         assert fake_client.get_calls[0][1]["timeout"] == 120.0
 
     @pytest.mark.asyncio
+    async def test_sync_job_results_posts_expected_payload(self):
+        fake_client = FakeAsyncClient(
+            post_response=FakeResponse(
+                json_data={"success": True, "status": "outputs_downloaded", "run_uuid": "run-1"}
+            )
+        )
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            result = await tools.sync_job_results("run-1", force=True)
+
+        assert result["success"] is True
+        assert len(fake_client.post_calls) == 1
+        url, kwargs = fake_client.post_calls[0]
+        assert url == "http://launchpad.local/jobs/run-1/sync-results"
+        assert kwargs["params"] == {"force": "true"}
+
+    @pytest.mark.asyncio
+    async def test_sync_job_results_wraps_not_found(self):
+        fake_client = FakeAsyncClient(post_response=FakeResponse(status_code=404))
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            with pytest.raises(RuntimeError, match="Failed to sync job results: Job run-404 not found"):
+                await tools.sync_job_results("run-404")
+
+    @pytest.mark.asyncio
+    async def test_sync_job_results_uses_describe_exception_for_empty_errors(self):
+        fake_client = FakeAsyncClient(post_error=Exception())
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            with pytest.raises(RuntimeError, match=r"Failed to sync job results: Exception: Exception\(\)"):
+                await tools.sync_job_results("run-err")
+
+    @pytest.mark.asyncio
     async def test_check_nextflow_status_wraps_not_found(self):
         fake_client = FakeAsyncClient(get_responses=[FakeResponse(status_code=404)])
 

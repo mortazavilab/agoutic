@@ -112,6 +112,18 @@ SERVICE_REGISTRY = {
         ],
         "fallback_patterns": {},
     },
+    "xgenepy": {
+        "url": os.getenv("XGENEPY_MCP_URL", "http://localhost:8008"),
+        "display_name": "Cis/Trans Analysis (XgenePy)",
+        "emoji": "\U0001f9ec",
+        "table_columns": [],
+        "count_field": None,
+        "count_label": None,
+        "skills": [
+            "xgenepy_analysis",
+        ],
+        "fallback_patterns": {},
+    },
 }
 
 
@@ -188,6 +200,9 @@ SKILLS_REGISTRY = {
 
     # GO & Pathway Enrichment (edgePython)
     "enrichment_analysis": "enrichment_analysis/SKILL.md",
+
+    # XgenePy cis/trans analysis
+    "xgenepy_analysis": "xgenepy_analysis/SKILL.md",
 
     # Remote Execution (HPC3/SLURM)
     "remote_execution": "remote_execution/SKILL.md",

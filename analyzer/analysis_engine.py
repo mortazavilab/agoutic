@@ -27,6 +27,7 @@ from analyzer.schemas import (
     ParsedTableData,
     BedRecord,
     ParsedBedData,
+    ParsedXgenePyOutputs,
     JobFileSummary,
     AnalysisSummary
 )
@@ -516,6 +517,101 @@ def parse_bed_file(
         records=records,
         preview_records=len(records),
         metadata=metadata
+    )
+
+
+def parse_xgenepy_outputs(
+    run_uuid: Optional[str] = None,
+    output_dir: str = "",
+    max_rows: Optional[int] = 200,
+    *,
+    work_dir_path: Optional[str] = None,
+) -> ParsedXgenePyOutputs:
+    """Parse canonical XgenePy output artifacts from a workflow/project directory."""
+    work_dir = resolve_work_dir(work_dir=work_dir_path, run_uuid=run_uuid)
+    _id = work_dir_path or run_uuid or "?"
+    if not work_dir:
+        raise FileNotFoundError(f"Work directory not found for {_id}")
+
+    run_dir = (work_dir / output_dir).resolve() if output_dir else work_dir.resolve()
+    if not str(run_dir).startswith(str(work_dir.resolve())):
+        raise ValueError(f"Invalid output_dir path: {output_dir}")
+    if not run_dir.exists() or not run_dir.is_dir():
+        raise FileNotFoundError(f"XgenePy output directory not found: {output_dir or str(work_dir)}")
+
+    required = [
+        "fit_summary.json",
+        "assignments.tsv",
+        "proportion_cis.tsv",
+        "model_metadata.json",
+        "run_manifest.json",
+        "plots",
+    ]
+    missing: list[str] = []
+    for name in required:
+        target = run_dir / name
+        if name == "plots":
+            if not target.exists() or not target.is_dir():
+                missing.append("plots/")
+        else:
+            if not target.exists() or not target.is_file():
+                missing.append(name)
+
+    def _load_json(name: str) -> Dict[str, Any]:
+        path = run_dir / name
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError(f"Failed to parse {name}: {exc}") from exc
+
+    def _load_table(name: str) -> List[Dict[str, Any]]:
+        path = run_dir / name
+        if not path.exists():
+            return []
+        try:
+            df = pd.read_csv(path, sep="\t", low_memory=False)
+            if max_rows is not None:
+                df = df.head(max_rows)
+            return json.loads(df.to_json(orient="records", default_handler=str))
+        except Exception as exc:
+            raise ValueError(f"Failed to parse {name}: {exc}") from exc
+
+    plots: List[str] = []
+    plots_dir = run_dir / "plots"
+    if plots_dir.exists() and plots_dir.is_dir():
+        for item in sorted(plots_dir.iterdir()):
+            if item.is_file():
+                plots.append(str(item.relative_to(work_dir.resolve())))
+
+    fit_summary = _load_json("fit_summary.json")
+    model_metadata = _load_json("model_metadata.json")
+    run_manifest = _load_json("run_manifest.json")
+    assignments = _load_table("assignments.tsv")
+    proportion_cis = _load_table("proportion_cis.tsv")
+
+    metadata = {
+        "work_dir": str(work_dir),
+        "resolved_output_dir": str(run_dir),
+        "preview_rows": max_rows,
+        "plot_count": len(plots),
+    }
+
+    resolved_output_ref = str(run_dir.relative_to(work_dir.resolve())) if run_dir != work_dir.resolve() else "."
+
+    return ParsedXgenePyOutputs(
+        run_uuid=run_uuid or "",
+        output_dir=resolved_output_ref,
+        required_outputs_present=not missing,
+        missing_outputs=missing,
+        fit_summary=fit_summary,
+        model_metadata=model_metadata,
+        run_manifest=run_manifest,
+        assignments=assignments,
+        proportion_cis=proportion_cis,
+        plots=plots,
+        metadata=metadata,
     )
 
 

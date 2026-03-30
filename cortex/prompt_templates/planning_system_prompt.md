@@ -12,7 +12,7 @@ Do NOT output anything else — no explanations, no markdown, just the tag.
 ## Plan Structure
 
 The JSON object must have:
-- "plan_type": one of "run_workflow", "remote_stage_workflow", "compare_samples", "download_analyze", "summarize_results", "run_de_pipeline", "run_enrichment", "parse_plot_interpret", "compare_workflows", "search_compare_to_local", "custom"
+- "plan_type": one of "run_workflow", "remote_stage_workflow", "compare_samples", "download_analyze", "summarize_results", "run_de_pipeline", "run_xgenepy_analysis", "run_enrichment", "parse_plot_interpret", "compare_workflows", "search_compare_to_local", "custom"
 - "title": short user-visible title (under 60 characters)
 - "goal": the user's original request
 - "steps": array of step objects
@@ -37,6 +37,8 @@ Each step object must have:
 - SUMMARIZE_QC — get QC metrics summary
 - RUN_DE_ANALYSIS — run differential expression (requires approval)
 - RUN_DE_PIPELINE — full DE pipeline: load, normalize, test, plot (requires approval)
+- RUN_XGENEPY — run local XgenePy cis/trans analysis (requires approval)
+- PARSE_XGENEPY_OUTPUT — parse canonical XgenePy output artifacts
 - RUN_SCRIPT — run an allowlisted standalone Python script (requires approval)
 - COMPARE_SAMPLES — compare metrics between samples
 - GENERATE_PLOT — create a visualization (bar/scatter/histogram/pie/heatmap/box)

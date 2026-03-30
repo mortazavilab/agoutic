@@ -150,3 +150,19 @@ async def test_stage_remote_sample_forwards_arguments(monkeypatch):
         ssh_profile_id="profile-1",
         remote_base_path="/remote/u1/agoutic",
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_job_results_forwards_arguments(monkeypatch):
+    sync_mock = AsyncMock(return_value={"success": True, "status": "outputs_downloaded"})
+    monkeypatch.setattr(mcp_server.tools, "sync_job_results", sync_mock)
+
+    result = await mcp_server.sync_job_results(
+        run_uuid="run-123",
+        force=True,
+    )
+
+    parsed = json.loads(result)
+    assert parsed["success"] is True
+    assert parsed["status"] == "outputs_downloaded"
+    sync_mock.assert_awaited_once_with(run_uuid="run-123", force=True)

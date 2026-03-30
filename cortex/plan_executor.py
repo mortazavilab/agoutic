@@ -60,6 +60,7 @@ _SAFE_STEP_KINDS = frozenset({
     "RUN_PATHWAY_ENRICHMENT",
     "PLOT_ENRICHMENT",
     "SUMMARIZE_ENRICHMENT",
+    "PARSE_XGENEPY_OUTPUT",
 })
 
 # Expensive steps require explicit approval
@@ -68,6 +69,7 @@ _APPROVAL_STEP_KINDS = frozenset({
     "DOWNLOAD_DATA",
     "RUN_DE_ANALYSIS",
     "RUN_DE_PIPELINE",
+    "RUN_XGENEPY",
     "RUN_SCRIPT",
     "REQUEST_APPROVAL",
 })
@@ -490,6 +492,8 @@ STEP_TOOL_DEFAULTS: dict[str, list[dict] | None] = {
     # New plan step kinds
     "CHECK_EXISTING": [{"source_key": "analyzer", "tool": "find_file"}],
     "RUN_DE_PIPELINE": None,        # multi-call edgepython sequence (special handling)
+    "RUN_XGENEPY": [{"source_key": "xgenepy", "tool": "run_xgenepy_analysis"}],
+    "PARSE_XGENEPY_OUTPUT": [{"source_key": "analyzer", "tool": "parse_xgenepy_outputs"}],
     "GENERATE_DE_PLOT": [{"source_key": "edgepython", "tool": "generate_plot"}],
     "INTERPRET_RESULTS": None,      # LLM call (special handling)
     "RECOMMEND_NEXT": None,         # LLM call (special handling)

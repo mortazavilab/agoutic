@@ -59,6 +59,11 @@ async def parse_bed_file(file_path: str, work_dir: str | None = None, run_uuid: 
     return await TOOL_REGISTRY["parse_bed_file"](file_path=file_path, work_dir=work_dir, run_uuid=run_uuid, max_records=max_records)
 
 @mcp.tool()
+async def parse_xgenepy_outputs(output_dir: str, work_dir: str | None = None, run_uuid: str | None = None, max_rows: int | None = 200) -> Dict[str, Any]:
+    """Parse canonical XgenePy output artifacts and return structured result payloads."""
+    return await TOOL_REGISTRY["parse_xgenepy_outputs"](output_dir=output_dir, work_dir=work_dir, run_uuid=run_uuid, max_rows=max_rows)
+
+@mcp.tool()
 async def get_analysis_summary(run_uuid: str | None = None, work_dir: str | None = None) -> Dict[str, Any]:
     """Get comprehensive analysis summary for a completed job including file categorization and parsed reports."""
     return await TOOL_REGISTRY["get_analysis_summary"](run_uuid=run_uuid, work_dir=work_dir)
