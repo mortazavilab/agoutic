@@ -2,6 +2,17 @@
 
 ### Features
 
+- **Cross-project reconcile syntax support (`project:workflow`)** —
+  `reconcile_bams` parameter extraction now supports prompts like
+  `sample in projectX:workflowN`, resolves to absolute workflow directories
+  when base path context is available, and otherwise keeps deterministic
+  relative `project/workflow` references.
+
+- **Manual SLURM result copy-back retry command** — added end-to-end manual
+  synchronization support for remote-to-local outputs through Launchpad
+  (`POST /jobs/{run_uuid}/sync-results`), MCP exposure (`sync_job_results`),
+  and Cortex natural-language auto-routing for sync/retry phrasing.
+
 - **Phase 1 XgenePy service integration** — added a first-class local
   `xgenepy_mcp` service with strict relative-path validation, metadata contract
   checks (`sample_id`, `strain`, `allele` required), canonical output
@@ -19,6 +30,14 @@
   and structured parsing of manifest, summaries, tabular artifacts, and plots.
 
 ### Fixes
+
+- **Manual sync behavior now returns structured non-SLURM responses** —
+  sync requests on non-SLURM runs now return `status=not_applicable` payloads
+  instead of hard API failures.
+
+- **Manual sync failure messages now include actionable details** —
+  Launchpad MCP sync error handling now preserves HTTP status/detail context
+  and avoids empty opaque exception text.
 
 - **Chat queries on old projects no longer redirect to the latest project** —
   The sidebar Project ID text_input used a value-comparison sync on every
@@ -58,6 +77,14 @@
   blocked by the BAM guardrail.
 
 ### Tests
+
+- Added focused coverage for cross-project reconcile extraction and manual sync
+  routing/transport behavior in:
+  `tests/cortex/test_planner_cache_steps.py`,
+  `tests/cortex/test_auto_generate_data.py`,
+  `tests/launchpad/test_slurm_backend.py`,
+  `tests/launchpad/test_mcp_server.py`, and
+  `tests/launchpad/test_mcp_tools.py`.
 
 - Added and updated focused regressions in
   `tests/cortex/test_auto_generate_data.py` and

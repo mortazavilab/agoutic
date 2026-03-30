@@ -5,6 +5,24 @@
 
 ## Latest Updates (2026-03-28)
 
+- **Cross-project reconcile prompts now support `project:workflow` syntax** —
+  `reconcile_bams` planning now parses references like
+  `sampleA in project-2026-03-27:workflow1`, resolves them to absolute
+  workflow directories when a base path is known, and falls back to stable
+  relative `project/workflow` references when no base path is available.
+
+- **Manual remote-to-local result sync command added for SLURM runs** — users
+  can now trigger a copy-back retry with natural language (for example,
+  "sync results back to local for workflow1"). Routing resolves the target run,
+  calls Launchpad `sync_job_results`, and returns structured statuses such as
+  `outputs_downloaded`, `already_synced`, `sync_in_progress`, and
+  `not_applicable`.
+
+- **Sync command error handling is now explicit and non-opaque** — non-SLURM
+  runs return a structured `not_applicable` response instead of failing with a
+  generic tool error, and HTTP/transport failures now surface actionable
+  status/detail context.
+
 - **3.4.13 BAM-detail resolution now prefers workflow discovery and explicit
   workflow context** — BAM-detail requests now prioritize workflow/work_dir
   listing and file lookup before any run-UUID-based analyzer call path.
