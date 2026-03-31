@@ -910,7 +910,28 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             and (job.result_destination or "").strip().lower() in {"local", "both"}
             and (job.transfer_state or "") != "outputs_downloaded"
         )
-        if job.status in terminal_statuses and not pending_local_result_sync:
+        if pending_local_result_sync:
+            # Fast path: job already COMPLETED on the cluster — skip the
+            # SSH sacct round-trip and return the in-memory transfer detail
+            # immediately so the UI sees per-folder progress without delay.
+            backend = get_backend("slurm")
+            return {
+                "run_uuid": run_uuid,
+                "status": "RUNNING",
+                "progress_percent": 99,
+                "message": "Copying results back to the local workflow...",
+                "tasks": {},
+                "execution_mode": "slurm",
+                "run_stage": job.run_stage,
+                "slurm_job_id": job.slurm_job_id,
+                "slurm_state": job.slurm_state,
+                "transfer_state": job.transfer_state,
+                "transfer_detail": backend.get_transfer_detail(run_uuid),
+                "result_destination": job.result_destination,
+                "work_directory": _effective_job_work_directory(job),
+                **_job_timing_payload(job),
+            }
+        if job.status in terminal_statuses:
             work_directory = _effective_job_work_directory(job)
             base_payload = {
                 "run_uuid": run_uuid,

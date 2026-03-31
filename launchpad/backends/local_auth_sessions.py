@@ -380,7 +380,7 @@ class LocalAuthSessionManager:
             if session.helper_pid:
                 try:
                     os.kill(session.helper_pid, signal.SIGTERM)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass
 
         for path in (session.port_file, session.pid_file, session.log_file):

@@ -267,6 +267,7 @@ async def test_copy_selected_results_fails_fast_on_rsync_error(monkeypatch, tmp_
     job = SimpleNamespace(
         nextflow_work_dir=str(tmp_path / "workflow1"),
         remote_work_dir="/remote/workflow1",
+        input_directory=str(tmp_path / "input"),
     )
     profile = SSHProfileData(
         id="profile-1",
@@ -291,8 +292,12 @@ async def test_copy_selected_results_fails_fast_on_rsync_error(monkeypatch, tmp_
     async def fake_discover(**kwargs):
         return {"directories": ["annot"], "files": ["Jamshid4_trace.txt"]}
 
+    download_call_count = 0
+
     async def fake_download_outputs(**kwargs):
-        # Artifacts present locally, but rsync itself reported failure
+        nonlocal download_call_count
+        download_call_count += 1
+        # First call is for the annot directory — report failure
         (local_root / "annot").mkdir(parents=True, exist_ok=True)
         (local_root / "Jamshid4_trace.txt").write_text("trace")
         return {"ok": False, "message": "download failed: rsync exited 23", "bytes_transferred": 123}
@@ -518,3 +523,81 @@ async def test_stage_sample_inputs_refreshes_remote_cache_when_top_level_symlink
         }
     ]
     assert (f"rm -rf {data_cache_path}", True) in fake_conn.run_calls
+
+
+def test_resolve_local_symlinks_replaces_broken_with_local_match(tmp_path):
+    """Broken remote symlinks should be replaced with links to matching local input files."""
+    # Setup: local input directory with the actual file
+    input_dir = tmp_path / "input" / "44b4ae3bfee1a768"
+    input_dir.mkdir(parents=True)
+    real_bam = input_dir / "ENCFF921XAH.bam"
+    real_bam.write_text("BAM_DATA")
+
+    # Setup: workflow dir with a broken symlink (as rsync would deliver)
+    workflow_dir = tmp_path / "workflow1"
+    bams_dir = workflow_dir / "bams"
+    bams_dir.mkdir(parents=True)
+    broken_link = bams_dir / "ENCFF921XAH.bam"
+    broken_link.symlink_to("/share/crsp/lab/seyedam/share/agoutic/data/ENCFF921XAH.bam")
+    assert not broken_link.exists()  # target doesn't exist → broken
+
+    # Also place a valid regular file — should be left alone
+    (bams_dir / "sample.bam").write_text("REAL")
+
+    SlurmBackend._resolve_local_symlinks(
+        local_work_dir=str(workflow_dir),
+        input_directory=str(input_dir),
+        directories=["bams"],
+    )
+
+    # Broken link should now point to the local input file
+    assert broken_link.is_symlink()
+    assert broken_link.exists()
+    assert broken_link.resolve() == real_bam.resolve()
+    # Regular file untouched
+    assert (bams_dir / "sample.bam").read_text() == "REAL"
+
+
+def test_resolve_local_symlinks_removes_broken_with_no_match(tmp_path):
+    """Broken symlinks with no matching local file should be removed."""
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+
+    workflow_dir = tmp_path / "workflow1"
+    annot_dir = workflow_dir / "annot"
+    annot_dir.mkdir(parents=True)
+    broken_link = annot_dir / "mystery.bam"
+    broken_link.symlink_to("/nonexistent/path/mystery.bam")
+
+    SlurmBackend._resolve_local_symlinks(
+        local_work_dir=str(workflow_dir),
+        input_directory=str(input_dir),
+        directories=["annot"],
+    )
+
+    assert not broken_link.exists()
+    assert not broken_link.is_symlink()
+
+
+def test_resolve_local_symlinks_skips_valid_symlinks(tmp_path):
+    """Symlinks that resolve correctly should be left untouched."""
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+
+    workflow_dir = tmp_path / "workflow1"
+    bams_dir = workflow_dir / "bams"
+    bams_dir.mkdir(parents=True)
+    target = bams_dir / "real_target.bam"
+    target.write_text("DATA")
+    good_link = bams_dir / "alias.bam"
+    good_link.symlink_to(target)
+
+    SlurmBackend._resolve_local_symlinks(
+        local_work_dir=str(workflow_dir),
+        input_directory=str(input_dir),
+        directories=["bams"],
+    )
+
+    assert good_link.is_symlink()
+    assert good_link.exists()
+    assert good_link.read_text() == "DATA"

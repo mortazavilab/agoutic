@@ -50,6 +50,7 @@ class FileTransferManager:
         exclude_patterns: list[str] | None,
         direction: str,
         copy_links: bool,
+        copy_dirlinks: bool = False,
         on_progress: Callable[[dict], None] | None = None,
     ) -> dict | None:
         """Use a local auth broker session when one is active for the profile."""
@@ -77,6 +78,7 @@ class FileTransferManager:
                 "include_patterns": include_patterns or [],
                 "exclude_patterns": exclude_patterns or [],
                 "copy_links": copy_links,
+                "copy_dirlinks": copy_dirlinks,
                 "timeout_seconds": LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
             },
         )
@@ -156,10 +158,14 @@ class FileTransferManager:
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             direction="download",
-            # Remote workflows often contain symlinked artifacts (for example,
-            # bams/annot links back to shared storage). For local copy-back,
-            # materialize link targets so files exist under local workflow dirs.
-            copy_links=True,
+            # Use --copy-dirlinks (not --copy-links) so only symlinked
+            # *directories* are dereferenced.  File-level symlinks (e.g.
+            # bams/sample.unmapped.bam -> /shared/input/data/...) are input
+            # references that point outside the workflow tree.  Dereferencing
+            # them copies multi-GB input files from potentially slow shared
+            # storage, stalling the entire transfer.
+            copy_links=False,
+            copy_dirlinks=True,
             on_progress=on_progress,
         )
 
@@ -172,6 +178,7 @@ class FileTransferManager:
         exclude_patterns: list[str] | None,
         direction: str,
         copy_links: bool,
+        copy_dirlinks: bool = False,
         on_progress: Callable[[dict], None] | None = None,
     ) -> dict:
         """Execute rsync transfer."""
@@ -182,6 +189,8 @@ class FileTransferManager:
 
         if copy_links:
             cmd.append("--copy-links")
+        elif copy_dirlinks:
+            cmd.append("--copy-dirlinks")
 
         if include_patterns:
             for pat in include_patterns:
@@ -204,6 +213,7 @@ class FileTransferManager:
                 exclude_patterns=exclude_patterns,
                 direction=direction,
                 copy_links=copy_links,
+                copy_dirlinks=copy_dirlinks,
                 on_progress=on_progress,
             )
             if broker_result is not None:

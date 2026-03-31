@@ -156,6 +156,7 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
         exclude_patterns = request.get("exclude_patterns") or []
         timeout_seconds = request.get("timeout_seconds")
         copy_links = bool(request.get("copy_links"))
+        copy_dirlinks = bool(request.get("copy_dirlinks"))
 
         cmd = [
             "rsync", "-avz", "--omit-dir-times", "--no-perms", "--partial", "--progress",
@@ -163,6 +164,8 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
         ]
         if copy_links:
             cmd.append("--copy-links")
+        elif copy_dirlinks:
+            cmd.append("--copy-dirlinks")
         for pattern in include_patterns:
             cmd.extend(["--include", pattern])
         for pattern in exclude_patterns:

@@ -570,6 +570,15 @@ class SlurmBackend:
         if not info:
             return None
         parts: list[str] = []
+        # Folder context: "bams/ (2/5 folders)"
+        current_folder = info.get("current_folder", "")
+        folder_done = info.get("folders_done", 0)
+        folder_total = info.get("folders_total", 0)
+        if current_folder:
+            folder_label = f"{current_folder}/"
+            if folder_total:
+                folder_label += f" ({folder_done + 1}/{folder_total} folders)"
+            parts.append(folder_label)
         if info.get("current_file"):
             parts.append(info["current_file"])
         xfr = info.get("files_transferred")
@@ -578,19 +587,31 @@ class SlurmBackend:
             parts.append(f"{xfr}/{total} files")
         if info.get("speed"):
             parts.append(info["speed"])
+        # Completed folders log
+        done_folders = info.get("done_folders", [])
+        if done_folders:
+            parts.append("✓ " + ", ".join(done_folders))
         return " — ".join(parts) if parts else None
 
     async def _copy_selected_results_to_local(self, *, run_uuid: str, job, profile: SSHProfileData) -> None:
         local_work_dir = getattr(job, "nextflow_work_dir", None)
         remote_work_dir = getattr(job, "remote_work_dir", None)
+        input_directory = getattr(job, "input_directory", None)
         try:
             if not local_work_dir or not remote_work_dir:
                 raise RuntimeError("Missing local or remote workflow directory for result copy-back")
 
             await self._update_job_transfer_state(run_uuid, "downloading_outputs")
+            self._transfer_progress[run_uuid] = {
+                "current_folder": "discovering artifacts",
+                "folders_done": 0,
+                "folders_total": 0,
+                "done_folders": [],
+                "current_file": "",
+            }
             artifacts = await self._discover_remote_result_artifacts(profile=profile, remote_work_dir=remote_work_dir)
             logger.info(
-                "Starting result sync",
+                "Starting result sync (per-directory)",
                 run_uuid=run_uuid,
                 remote_work_dir=remote_work_dir,
                 local_work_dir=local_work_dir,
@@ -608,25 +629,76 @@ class SlurmBackend:
                     current["speed"] = info["speed"]
                 self._transfer_progress[run_uuid] = current
 
-            transfer = await self._transfer_manager.download_outputs(
-                profile=profile,
-                remote_path=remote_work_dir,
-                local_path=local_work_dir,
-                include_patterns=self._build_result_sync_include_patterns(),
-                exclude_patterns=["*"],
-                on_progress=_on_rsync_progress,
-            )
-            logger.info(
-                "rsync transfer finished",
-                run_uuid=run_uuid,
-                ok=transfer.get("ok"),
-                bytes_transferred=transfer.get("bytes_transferred"),
-                message=transfer.get("message"),
-            )
-            if not transfer.get("ok"):
-                raise RuntimeError(
-                    f"rsync transfer failed: {transfer.get('message', 'unknown error')}"
+            total_bytes = 0
+            errors: list[str] = []
+            result_dirs = artifacts.get("directories", [])
+            done_folders: list[str] = []
+
+            # 1. Sync each subdirectory individually (no --copy-links so
+            #    remote symlinks are transferred as symlinks, not dereferenced).
+            for dir_idx, dirname in enumerate(result_dirs):
+                self._transfer_progress[run_uuid] = {
+                    "current_folder": dirname,
+                    "folders_done": dir_idx,
+                    "folders_total": len(result_dirs),
+                    "done_folders": list(done_folders),
+                    "current_file": "",
+                }
+                transfer = await self._transfer_manager.download_outputs(
+                    profile=profile,
+                    remote_path=str(PurePosixPath(remote_work_dir) / dirname),
+                    local_path=str(Path(local_work_dir) / dirname),
+                    on_progress=_on_rsync_progress,
                 )
+                logger.info(
+                    "rsync dir transfer finished",
+                    run_uuid=run_uuid,
+                    dirname=dirname,
+                    ok=transfer.get("ok"),
+                    bytes_transferred=transfer.get("bytes_transferred"),
+                )
+                if transfer.get("ok"):
+                    total_bytes += transfer.get("bytes_transferred", 0)
+                    done_folders.append(dirname)
+                else:
+                    errors.append(f"{dirname}: {transfer.get('message', 'unknown error')}")
+
+            # 2. Sync root-level result files (*.config, *.html, etc.)
+            root_files = artifacts.get("files", [])
+            if root_files:
+                self._transfer_progress[run_uuid] = {
+                    "current_folder": "root files",
+                    "folders_done": len(result_dirs),
+                    "folders_total": len(result_dirs) + 1,
+                    "done_folders": list(done_folders),
+                    "current_file": "",
+                }
+                transfer = await self._transfer_manager.download_outputs(
+                    profile=profile,
+                    remote_path=remote_work_dir,
+                    local_path=local_work_dir,
+                    include_patterns=list(self._RESULT_SYNC_FILE_PATTERNS),
+                    exclude_patterns=["*"],
+                    on_progress=_on_rsync_progress,
+                )
+                if transfer.get("ok"):
+                    total_bytes += transfer.get("bytes_transferred", 0)
+                else:
+                    errors.append(f"root files: {transfer.get('message', 'unknown error')}")
+
+            if errors:
+                raise RuntimeError(
+                    f"rsync transfer failed for: {'; '.join(errors)}"
+                )
+
+            # 3. Resolve symlinks: replace broken remote symlinks with
+            #    links pointing to matching files in the local input dir.
+            self._resolve_local_symlinks(
+                local_work_dir=local_work_dir,
+                input_directory=input_directory,
+                directories=artifacts.get("directories", []),
+            )
+
             self._verify_local_result_artifacts(local_work_dir=local_work_dir, artifacts=artifacts)
             await self._update_job_transfer_state(run_uuid, "outputs_downloaded")
             return {
@@ -750,6 +822,64 @@ class SlurmBackend:
                 missing.append(filename)
         if missing:
             raise RuntimeError(f"Local result copy-back is missing expected artifacts: {', '.join(sorted(missing))}")
+
+    @staticmethod
+    def _resolve_local_symlinks(
+        *,
+        local_work_dir: str,
+        input_directory: str | None,
+        directories: list[str],
+    ) -> None:
+        """Replace broken/remote symlinks with links to the local input dir.
+
+        After per-directory rsync (without --copy-links), symlinks from the
+        remote workflow (e.g. bams/sample.unmapped.bam -> /share/.../file.bam)
+        arrive as literal symlinks whose targets don't exist locally.
+
+        For each such symlink we look for a file with the **same name** inside
+        *input_directory* (recursively) and replace the symlink with one
+        pointing to the local copy.  If no match is found the symlink is
+        removed so it doesn't leave a broken link.
+        """
+        if not input_directory:
+            return
+        input_root = Path(input_directory)
+        if not input_root.is_dir():
+            return
+        # Build a name→path index of files in the input directory (one level
+        # deep is enough — input dirs are typically flat hash dirs).
+        input_index: dict[str, Path] = {}
+        for entry in input_root.rglob("*"):
+            if entry.is_file() and not entry.is_symlink():
+                input_index[entry.name] = entry
+
+        local_root = Path(local_work_dir)
+        for dirname in directories:
+            subdir = local_root / dirname
+            if not subdir.is_dir():
+                continue
+            for entry in subdir.iterdir():
+                if not entry.is_symlink():
+                    continue
+                # Symlink exists — check if target is reachable
+                if entry.exists():
+                    continue  # target resolves fine, nothing to do
+                # Broken symlink — try to resolve to local input file
+                local_match = input_index.get(entry.name)
+                if local_match:
+                    entry.unlink()
+                    entry.symlink_to(local_match)
+                    logger.info(
+                        "Resolved remote symlink to local input file",
+                        link=str(entry),
+                        target=str(local_match),
+                    )
+                else:
+                    entry.unlink()
+                    logger.info(
+                        "Removed broken remote symlink (no local match)",
+                        link=str(entry),
+                    )
 
     async def cancel(self, run_uuid: str) -> bool:
         """Cancel a SLURM job via scancel."""
