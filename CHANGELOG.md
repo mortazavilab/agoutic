@@ -37,6 +37,18 @@
 
 ### Fixes
 
+- **SLURM task completion now tracked correctly** — Remote Nextflow tasks
+  previously showed as "Running" but never "Completed" in the task dock.
+  Three root causes: (1) the remote trace file reader used a fragile
+  `find … -exec ls` shell pipeline that silently returned empty output —
+  replaced with a simple `cat *_trace.txt` glob; (2) the stdout line parser
+  took the first word after `]` as the task name, but SLURM Nextflow output
+  prefixes lines with `Submitted process >` — now strips everything before
+  `>` to extract the real task name; (3) stdout `✔` markers were only used
+  to exclude tasks from Running but never counted as Completed — now counted
+  as completed (with FAILED going to failed).  ANSI escape codes in
+  `slurm-*.out` are also stripped before parsing.
+
 - **SLURM result copy-back now works on external/mounted filesystems** —
   rsync downloads previously failed with "Operation not permitted" on
   filesystems that don't support `utime()` or `chmod()` (e.g. exFAT/NTFS

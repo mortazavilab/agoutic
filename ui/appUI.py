@@ -1462,6 +1462,8 @@ def render_block(block, expected_project_id: str = ""):
             return ""
         try:
             dt = datetime.datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+            if dt.tzinfo is not None:
+                dt = dt.astimezone()
             return dt.strftime("%b %d, %H:%M")
         except Exception:
             return ""
@@ -1471,8 +1473,13 @@ def render_block(block, expected_project_id: str = ""):
             return None
         try:
             if isinstance(raw_value, str):
-                return datetime.datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
-            return raw_value
+                dt = datetime.datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+            else:
+                dt = raw_value
+            # Convert to local time for display
+            if dt.tzinfo is not None:
+                dt = dt.astimezone()
+            return dt
         except Exception:
             return None
 
@@ -3019,7 +3026,7 @@ def render_block(block, expected_project_id: str = ""):
                             log_container = st.container(height=300)
                             with log_container:
                                 for log in reversed(logs[-50:]):
-                                    timestamp = log.get("timestamp", "")
+                                    timestamp = _format_timestamp(log.get("timestamp", "")) or log.get("timestamp", "")
                                     level = log.get("level", "INFO")
                                     msg = log.get("message", "")
                                     
@@ -3260,7 +3267,7 @@ def render_block(block, expected_project_id: str = ""):
                     log_container = st.container(height=300)
                     with log_container:
                         for log in reversed(logs[-30:]):  # Show last 30 in reverse chronological order
-                            timestamp = log.get("timestamp", "")
+                            timestamp = _format_timestamp(log.get("timestamp", "")) or log.get("timestamp", "")
                             level = log.get("level", "INFO")
                             msg = log.get("message", "")
                             

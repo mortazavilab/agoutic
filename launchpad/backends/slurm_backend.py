@@ -364,12 +364,13 @@ class SlurmBackend:
     ) -> tuple[int, dict | None, str | None]:
         """Read remote trace/stdout files and derive task-level progress."""
         quoted_remote_work = shlex.quote(remote_work)
-        trace_cmd = (
-            f"trace=$(find {quoted_remote_work} -maxdepth 1 -type f \\("
-            f"-name '*_trace.txt' -o -name 'trace.txt' \\) -exec ls -1t {{}} + 2>/dev/null | head -n 1); "
-            f"if [ -n \"$trace\" ]; then cat \"$trace\"; fi"
+        # Read the trace file directly by name, falling back to find.
+        # The config writes ${params.sample}_trace.txt in the work dir.
+        trace_result = await conn.run(
+            f"cat {quoted_remote_work}/*_trace.txt 2>/dev/null "
+            f"|| cat {quoted_remote_work}/trace.txt 2>/dev/null "
+            f"|| true"
         )
-        trace_result = await conn.run(f"{trace_cmd} 2>/dev/null || true")
         trace_content = trace_result.stdout or ""
 
         stdout_path = f"{remote_work}/slurm-{slurm_job_id}.out"
@@ -377,6 +378,14 @@ class SlurmBackend:
             f"tail -n 500 {shlex.quote(stdout_path)} 2>/dev/null || true"
         )
         stdout_content = stdout_result.stdout or ""
+
+        logger.info(
+            "Remote task status raw content",
+            trace_lines=len(trace_content.splitlines()) if trace_content else 0,
+            stdout_lines=len(stdout_content.splitlines()) if stdout_content else 0,
+            trace_preview=trace_content[:500] if trace_content else "(empty)",
+            stdout_tail=stdout_content[-300:] if stdout_content else "(empty)",
+        )
 
         return self._parse_task_status_texts(
             trace_content=trace_content,
@@ -413,8 +422,13 @@ class SlurmBackend:
                 elif task_status in {"FAILED", "ABORTED"} and task_name not in failed_tasks:
                     failed_tasks.append(task_name)
 
+        # Strip ANSI escape codes so cursor-control sequences from
+        # Nextflow's default ANSI log mode don't break line parsing.
+        _ansi_escape = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\x1b\[\?[0-9;]*[A-Za-z]|\r')
+        clean_stdout = _ansi_escape.sub('', stdout_content)
+
         task_events_by_hash: dict[str, tuple[str, bool]] = {}
-        for line in stdout_content.splitlines():
+        for line in clean_stdout.splitlines():
             if "executor >" in line and "(" in line:
                 try:
                     count_str = line.split("(", 1)[1].split(")", 1)[0]
@@ -428,19 +442,47 @@ class SlurmBackend:
             if "/" not in hash_part:
                 continue
             rest = line.split("]", 1)[1].strip()
+            # Handle "Submitted process > taskName" and "process > taskName"
+            if ">" in rest:
+                rest = rest.split(">", 1)[1].strip()
             task_name = rest.split()[0] if rest else ""
             match = re.search(r"(\(\d+\))", rest)
             if match and match.group(1) not in task_name:
                 task_name = f"{task_name} {match.group(1)}"
             if not task_name:
                 continue
-            is_terminal_stdout_event = "✔" in line or "FAILED" in line.upper()
-            task_events_by_hash[hash_part] = (task_name, is_terminal_stdout_event)
+            is_completed_stdout = "✔" in line
+            is_failed_stdout = not is_completed_stdout and "FAILED" in line.upper()
+            task_events_by_hash[hash_part] = (task_name, is_completed_stdout, is_failed_stdout)
 
-        for task_name, is_terminal_stdout_event in task_events_by_hash.values():
-            if is_terminal_stdout_event:
+        # Use trace file as authoritative source for completed/failed.
+        # Only fall back to stdout ✔/FAILED when trace has no results.
+        trace_has_results = bool(completed_tasks or failed_tasks)
+
+        # Build suffix set for cross-name matching (trace uses full pipeline
+        # prefix like "basecall:basecallWorkflow:doradoTask" while stdout uses
+        # short names like "mainWorkflow:doradoTask").
+        def _task_suffix(name: str) -> str:
+            """Return 'lastSegment (N)' for matching across naming schemes."""
+            parts = name.rsplit(":", 1)
+            return parts[-1] if parts else name
+
+        terminal_suffixes = {
+            _task_suffix(t) for t in completed_tasks + failed_tasks
+        }
+
+        for task_name, is_completed_stdout, is_failed_stdout in task_events_by_hash.values():
+            if is_completed_stdout:
+                if not trace_has_results and task_name not in completed_tasks:
+                    completed_tasks.append(task_name)
+                continue
+            if is_failed_stdout:
+                if not trace_has_results and task_name not in failed_tasks:
+                    failed_tasks.append(task_name)
                 continue
             if task_name in completed_tasks or task_name in failed_tasks:
+                continue
+            if _task_suffix(task_name) in terminal_suffixes:
                 continue
             if task_name not in running_tasks:
                 running_tasks.append(task_name)

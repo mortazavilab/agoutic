@@ -54,7 +54,7 @@ class _FakeStatusConn(_FakeConn):
             return SimpleNamespace(stdout=self.sacct_output, stderr="", exit_status=0)
         if "squeue -j" in command:
             return SimpleNamespace(stdout=self.squeue_output, stderr="", exit_status=0)
-        if "find " in command and "_trace.txt" in command:
+        if "_trace.txt" in command and ("cat " in command or "find " in command):
             return SimpleNamespace(stdout=self.trace_output, stderr="", exit_status=0)
         if "tail -n 500" in command and "slurm-" in command and ".out" in command:
             return SimpleNamespace(stdout=self.slurm_out_output, stderr="", exit_status=0)
@@ -708,6 +708,35 @@ def test_parse_task_status_texts_excludes_numbered_tasks_already_completed_in_tr
     assert message == "Pipeline: 4/5 completed"
 
 
+def test_parse_task_status_texts_no_double_count_across_naming_schemes():
+    """Trace uses 'basecall:basecallWorkflow:X' but stdout uses 'mainWorkflow:X'.
+    Tasks should not be double-counted."""
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content=(
+            "task_id\thash\tnative_id\tname\tstatus\texit\n"
+            "1\t86/1307f7\t50292868\tbasecall:basecallWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
+            "2\tf6/18f1aa\t50292869\tbasecall:basecallWorkflow:doradoTask (1)\tCOMPLETED\t0\n"
+            "5\t38/164ccd\t50292870\tbasecall:basecallWorkflow:softwareVTask\tCOMPLETED\t0\n"
+        ),
+        stdout_content=(
+            "executor >  slurm (5)\n"
+            "[86/1307f7] Submitted process > mainWorkflow:doradoDownloadTask\n"
+            "[86/1307f7] process > mainWorkflow:doradoDownloadTask [100%] 1 of 1 ✔\n"
+            "[f6/18f1aa] Submitted process > mainWorkflow:doradoTask (1)\n"
+            "[f6/18f1aa] process > mainWorkflow:doradoTask (1) [100%] 1 of 1 ✔\n"
+            "[38/164ccd] Submitted process > mainWorkflow:softwareVTask\n"
+            "[38/164ccd] process > mainWorkflow:softwareVTask [100%] 1 of 1 ✔\n"
+            "[7b/70cc3f] Submitted process > mainWorkflow:doradoTask (3)\n"
+            "[af/c0825c] Submitted process > mainWorkflow:doradoTask (2)\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert tasks["completed_count"] == 3
+    assert tasks["running"] == ["mainWorkflow:doradoTask (3)", "mainWorkflow:doradoTask (2)"]
+    assert tasks["total"] == 5
+
+
 def test_parse_task_status_texts_uses_latest_stdout_event_per_hash():
     progress, tasks, message = SlurmBackend._parse_task_status_texts(
         trace_content="",
@@ -720,11 +749,108 @@ def test_parse_task_status_texts_uses_latest_stdout_event_per_hash():
         scheduler_status="RUNNING",
     )
 
-    assert progress == 10
-    assert tasks["completed_count"] == 0
+    assert progress == 45
+    assert tasks["completed_count"] == 1
+    assert tasks["completed"] == ["mainWorkflow:doradoTask (1)"]
     assert tasks["total"] == 2
     assert tasks["running"] == ["mainWorkflow:softwareVTask"]
-    assert message == "Pipeline: 0/2 completed, 1 running"
+    assert message == "Pipeline: 1/2 completed, 1 running"
+
+
+def test_parse_task_status_texts_stdout_only_no_trace():
+    """When the trace file is missing/empty, stdout ✔ events drive completed counts."""
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content="",
+        stdout_content=(
+            "executor >  slurm (4)\n"
+            "[71/22d996] mainWorkflow:doradoDownloadTask | 1 of 1 ✔\n"
+            "[d0/606400] mainWorkflow:softwareVTask | 0 of 1\n"
+            "[46/b026bb] mainWorkflow:doradoTask (2) | 0 of 3\n"
+            "[79/ee1ac3] mainWorkflow:doradoTask (3) | 0 of 3\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert tasks["completed_count"] == 1
+    assert tasks["completed"] == ["mainWorkflow:doradoDownloadTask"]
+    assert len(tasks["running"]) == 3
+    assert tasks["failed_count"] == 0
+
+
+def test_parse_task_status_texts_slurm_submitted_process_format():
+    """SLURM Nextflow output prefixes 'Submitted process >' before task names."""
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content="",
+        stdout_content=(
+            "executor >  slurm (3)\n"
+            "[fe/89c0d3] Submitted process > mainWorkflow:doradoTask (2)\n"
+            "[5d/6607d2] Submitted process > mainWorkflow:softwareVTask\n"
+            "[48/13d7f7] Submitted process > mainWorkflow:doradoTask (3)\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert tasks["completed_count"] == 0
+    assert len(tasks["running"]) == 3
+    assert "mainWorkflow:doradoTask (2)" in tasks["running"]
+    assert "mainWorkflow:softwareVTask" in tasks["running"]
+    assert "mainWorkflow:doradoTask (3)" in tasks["running"]
+    assert message == "Pipeline: 0/3 completed, 3 running"
+
+
+def test_parse_task_status_texts_slurm_process_gt_completion():
+    """SLURM -ansi-log false writes 'process > taskName ... ✔' on completion."""
+    _, tasks, _ = SlurmBackend._parse_task_status_texts(
+        trace_content="",
+        stdout_content=(
+            "executor >  slurm (3)\n"
+            "[fe/89c0d3] Submitted process > mainWorkflow:doradoTask (2)\n"
+            "[fe/89c0d3] process > mainWorkflow:doradoTask (2) [100%] 1 of 1 ✔\n"
+            "[5d/6607d2] Submitted process > mainWorkflow:softwareVTask\n"
+            "[48/13d7f7] Submitted process > mainWorkflow:doradoTask (3)\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert tasks["completed_count"] == 1
+    assert tasks["completed"] == ["mainWorkflow:doradoTask (2)"]
+    assert len(tasks["running"]) == 2
+    assert "mainWorkflow:softwareVTask" in tasks["running"]
+    assert "mainWorkflow:doradoTask (3)" in tasks["running"]
+
+
+def test_parse_task_status_texts_stdout_failed_goes_to_failed():
+    """FAILED events from stdout should land in failed_tasks, not completed."""
+    _, tasks, _ = SlurmBackend._parse_task_status_texts(
+        trace_content="",
+        stdout_content=(
+            "[aa/bbccdd] process > mainWorkflow:doradoTask (1) FAILED\n"
+            "[ee/ff0011] process > mainWorkflow:softwareVTask ✔\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert tasks["completed_count"] == 1
+    assert tasks["failed_count"] == 1
+    assert "mainWorkflow:doradoTask (1)" not in tasks["completed"]
+    assert "mainWorkflow:softwareVTask" in tasks["completed"]
+
+
+def test_parse_task_status_texts_strips_ansi_escape_codes():
+    """ANSI cursor-control codes in SLURM stdout must be stripped before parsing."""
+    _, tasks, _ = SlurmBackend._parse_task_status_texts(
+        trace_content="",
+        stdout_content=(
+            "executor >  slurm (2)\n"
+            "\x1b[?1h\x1b[3A\x1b[K[fe/89c0d3] process > mainWorkflow:doradoTask (1) [100%] 1 of 1 ✔\n"
+            "\x1b[K[5d/6607d2] process > mainWorkflow:softwareVTask [  0%] 0 of 1\r\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert tasks["completed_count"] == 1
+    assert tasks["completed"] == ["mainWorkflow:doradoTask (1)"]
+    assert tasks["running"] == ["mainWorkflow:softwareVTask"]
 
 
 def test_controller_resources_prefer_cpu_defaults(profile):
