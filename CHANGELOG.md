@@ -29,7 +29,32 @@
   `parse_xgenepy_outputs` in analyzer engine/MCP/REST with secure path checks
   and structured parsing of manifest, summaries, tabular artifacts, and plots.
 
+- **Real-time rsync transfer progress** — rsync result sync now streams
+  stdout line-by-line, parsing current filename, file count
+  (`xfr#N, to-chk=X/Y`), and transfer speed.  Progress is surfaced via a
+  new `transfer_detail` field on `JobStatusExtendedResponse` and displayed
+  as a live info callout in the UI during active sync.
+
 ### Fixes
+
+- **SLURM result copy-back now works on external/mounted filesystems** —
+  rsync downloads previously failed with "Operation not permitted" on
+  filesystems that don't support `utime()` or `chmod()` (e.g. exFAT/NTFS
+  on `/media/`).  Added `--omit-dir-times` and `--no-perms` flags to both
+  the direct rsync path and the local auth broker rsync path.
+
+- **Broker rsync downloads no longer strip trailing slash from remote source** —
+  The local auth broker applied `_normalize_local_rsync_source()` to all
+  sources including remote `user@host:path/` strings.  `Path()` stripped the
+  trailing slash, causing rsync to copy the directory itself (creating a
+  nested subdirectory) instead of its contents.  The broker now only
+  normalizes local sources (`":"` detection).
+
+- **rsync transfer failures now surface the actual error** —
+  `_copy_selected_results_to_local()` previously ran `_verify_local_result_artifacts()`
+  before checking `transfer.get("ok")`, masking rsync errors behind generic
+  "missing artifacts" messages.  Now checks rsync success first and raises
+  with the actual rsync stderr on failure.
 
 - **Manual sync behavior now returns structured non-SLURM responses** —
   sync requests on non-SLURM runs now return `status=not_applicable` payloads
@@ -103,6 +128,17 @@
   `tests/launchpad/test_slurm_backend.py`,
   `tests/launchpad/test_mcp_server.py`, and
   `tests/launchpad/test_mcp_tools.py`.
+
+- Added `test_local_broker_rsync_download_preserves_remote_trailing_slash`
+  to verify the broker does not strip trailing slashes from remote rsync
+  sources.
+
+- Updated `test_copy_selected_results_accepts_verified_local_artifacts_after_rsync_warning`
+  → renamed to `test_copy_selected_results_fails_fast_on_rsync_error` to
+  reflect the new fail-fast behavior when rsync reports failure.
+
+- Added `transfer_detail` to fake backend in
+  `test_get_job_status_repolls_completed_slurm_job_while_local_copyback_pending`.
 
 - Added and updated focused regressions in
   `tests/cortex/test_auto_generate_data.py` and

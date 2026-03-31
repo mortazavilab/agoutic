@@ -2898,6 +2898,11 @@ def render_block(block, expected_project_id: str = ""):
                     {"name": "Run", "percentage": 55, "status": run_state},
                     {"name": "Sync", "percentage": 10, "status": sync_state},
                 ])
+
+                # Show rsync transfer detail during active sync
+                _transfer_detail = (job_status.get("transfer_detail") or "").strip()
+                if _transfer_detail and sync_state == "active":
+                    info_callout(f"📥 {_transfer_detail}", kind="info")
                 
                 # Status indicator
                 if status_str == "COMPLETED":

@@ -145,15 +145,20 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
 
     if op == "rsync_transfer":
         profile = request["profile"]
-        source = _normalize_local_rsync_source(request["source"])
+        source = request["source"]
         dest = request["dest"]
+        # Only normalize local sources (uploads).  Remote rsync sources
+        # (containing ":") must keep their trailing slash intact so rsync
+        # copies directory contents, not the directory itself.
+        if ":" not in source:
+            source = _normalize_local_rsync_source(source)
         include_patterns = request.get("include_patterns") or []
         exclude_patterns = request.get("exclude_patterns") or []
         timeout_seconds = request.get("timeout_seconds")
         copy_links = bool(request.get("copy_links"))
 
         cmd = [
-            "rsync", "-avz", "--partial", "--progress",
+            "rsync", "-avz", "--omit-dir-times", "--no-perms", "--partial", "--progress",
             "-e", " ".join(_build_ssh_transport(profile)),
         ]
         if copy_links:

@@ -274,6 +274,7 @@ class JobStatusExtendedResponse(JobStatusResponse):
     slurm_job_id: Optional[str] = None
     slurm_state: Optional[str] = None
     transfer_state: Optional[str] = None
+    transfer_detail: Optional[str] = None
     result_destination: Optional[str] = None
     ssh_profile_nickname: Optional[str] = None
     work_directory: Optional[str] = None

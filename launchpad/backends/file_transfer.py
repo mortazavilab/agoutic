@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 from pathlib import Path
+from typing import Callable
 
 from common.logging_config import get_logger
 from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
@@ -34,6 +36,11 @@ def _normalize_local_rsync_source(source: str) -> str:
 class FileTransferManager:
     """Handles file transfers between local and remote systems."""
 
+    # Regex for rsync --progress output parsing
+    _RE_PROGRESS_LINE = re.compile(r"^\s+[\d,]+\s+(\d+)%\s+([\d.]+\S+/s)")
+    _RE_OVERALL_PROGRESS = re.compile(r"\(xfr#(\d+),\s*(?:to|ir)-chk=(\d+)/(\d+)\)")
+    _RE_FILENAME = re.compile(r"^[^\s].*[/.]")  # non-indented line with path separators or extension
+
     async def _try_broker_transfer(
         self,
         profile: SSHProfileData,
@@ -43,6 +50,7 @@ class FileTransferManager:
         exclude_patterns: list[str] | None,
         direction: str,
         copy_links: bool,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> dict | None:
         """Use a local auth broker session when one is active for the profile."""
         if profile.auth_method != "key_file" or not profile.local_username or not profile.key_file_path:
@@ -73,6 +81,12 @@ class FileTransferManager:
             },
         )
         if response.get("ok"):
+            if on_progress and response.get("stdout"):
+                for line in response["stdout"].splitlines():
+                    for segment in line.split("\r"):
+                        info = self._parse_rsync_progress_line(segment)
+                        if info:
+                            on_progress(info)
             return {
                 "ok": True,
                 "message": f"{direction.title()} completed",
@@ -121,6 +135,7 @@ class FileTransferManager:
         local_path: str,
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> dict:
         """Download remote output files to local via rsync.
 
@@ -129,14 +144,20 @@ class FileTransferManager:
         # Ensure local destination exists
         Path(local_path).mkdir(parents=True, exist_ok=True)
 
+        # Trailing slash on the remote source so rsync copies the *contents*
+        # of the directory into local_path, not the directory itself (which
+        # would create a nested subdirectory).
+        _remote = remote_path.rstrip("/") + "/"
+
         return await self._rsync_transfer(
             profile=profile,
-            source=f"{profile.ssh_username}@{profile.ssh_host}:{remote_path}",
+            source=f"{profile.ssh_username}@{profile.ssh_host}:{_remote}",
             dest=local_path,
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             direction="download",
             copy_links=False,
+            on_progress=on_progress,
         )
 
     async def _rsync_transfer(
@@ -148,10 +169,11 @@ class FileTransferManager:
         exclude_patterns: list[str] | None,
         direction: str,
         copy_links: bool,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> dict:
         """Execute rsync transfer."""
         cmd = [
-            "rsync", "-avz", "--partial", "--progress",
+            "rsync", "-avz", "--omit-dir-times", "--no-perms", "--partial", "--progress",
             "-e", self._build_ssh_command(profile),
         ]
 
@@ -179,6 +201,7 @@ class FileTransferManager:
                 exclude_patterns=exclude_patterns,
                 direction=direction,
                 copy_links=copy_links,
+                on_progress=on_progress,
             )
             if broker_result is not None:
                 return broker_result
@@ -203,17 +226,36 @@ class FileTransferManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
+
+            if on_progress:
+                # Stream stdout line-by-line for real-time progress reporting
+                stdout_lines: list[str] = []
+                async for raw_line in proc.stdout:
+                    decoded = raw_line.decode(errors="replace")
+                    stdout_lines.append(decoded)
+                    # rsync may embed \r for in-place updates within a line
+                    for segment in decoded.rstrip("\n").split("\r"):
+                        info = self._parse_rsync_progress_line(segment)
+                        if info:
+                            on_progress(info)
+                stderr_bytes = await proc.stderr.read()
+                await proc.wait()
+                stdout_text = "".join(stdout_lines)
+                stderr_text = stderr_bytes.decode(errors="replace")
+            else:
+                stdout_bytes, stderr_bytes = await proc.communicate()
+                stdout_text = stdout_bytes.decode(errors="replace")
+                stderr_text = stderr_bytes.decode(errors="replace")
 
             if proc.returncode == 0:
                 logger.info(f"{direction.title()} completed successfully")
                 return {
                     "ok": True,
                     "message": f"{direction.title()} completed",
-                    "bytes_transferred": self._parse_rsync_bytes(stdout.decode()),
+                    "bytes_transferred": self._parse_rsync_bytes(stdout_text),
                 }
             else:
-                error_msg = stderr.decode().strip()
+                error_msg = stderr_text.strip()
                 logger.error(f"{direction.title()} failed: {error_msg}")
                 return {
                     "ok": False,
@@ -232,6 +274,39 @@ class FileTransferManager:
                 "message": f"{direction.title()} error: {e}",
                 "bytes_transferred": 0,
             }
+
+    @classmethod
+    def _parse_rsync_progress_line(cls, line: str) -> dict | None:
+        """Parse a single segment of rsync --progress output.
+
+        Returns a dict with keys like current_file, file_percent, speed,
+        files_transferred, files_remaining, files_total — or None if the
+        line contains no useful progress information.
+        """
+        stripped = line.strip()
+        if not stripped:
+            return None
+
+        # Progress line: "  32,768 100%  31.25MB/s  0:00:00 (xfr#1, to-chk=5/8)"
+        m_progress = cls._RE_PROGRESS_LINE.search(stripped)
+        if m_progress:
+            info: dict = {"file_percent": int(m_progress.group(1)), "speed": m_progress.group(2)}
+            m_overall = cls._RE_OVERALL_PROGRESS.search(stripped)
+            if m_overall:
+                info["files_transferred"] = int(m_overall.group(1))
+                info["files_remaining"] = int(m_overall.group(2))
+                info["files_total"] = int(m_overall.group(3))
+            return info
+
+        # Skip rsync header / summary lines
+        if stripped.startswith(("receiving ", "sending ", "created ", "total size", "sent ", "building ")):
+            return None
+
+        # Filename line: non-indented, contains path separator or extension
+        if cls._RE_FILENAME.match(stripped):
+            return {"current_file": stripped}
+
+        return None
 
     def _build_ssh_command(self, profile: SSHProfileData) -> str:
         """Build the ssh command string for rsync -e."""

@@ -948,6 +948,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "slurm_job_id": status_data.slurm_job_id,
                 "slurm_state": status_data.slurm_state,
                 "transfer_state": status_data.transfer_state,
+                "transfer_detail": status_data.transfer_detail,
                 "result_destination": status_data.result_destination,
                 "ssh_profile_nickname": status_data.ssh_profile_nickname,
                 "work_directory": status_data.work_directory,

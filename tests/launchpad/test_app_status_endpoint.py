@@ -93,6 +93,7 @@ async def test_get_job_status_repolls_completed_slurm_job_while_local_copyback_p
                 slurm_job_id="50052940",
                 slurm_state="COMPLETED",
                 transfer_state="downloading_outputs",
+                transfer_detail="bams/sample1.bam — 1/5 files — 12.3MB/s",
                 result_destination="local",
                 ssh_profile_nickname="hpc3",
                 work_directory="/local/project/workflow2",

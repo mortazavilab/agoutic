@@ -124,6 +124,43 @@ async def test_local_broker_rsync_transfer_keeps_single_file_source(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_local_broker_rsync_download_preserves_remote_trailing_slash(monkeypatch):
+    """Remote rsync sources (user@host:path/) must keep their trailing slash."""
+    captured = {}
+
+    async def fake_run_subprocess(cmd, timeout_seconds=None):
+        captured["cmd"] = cmd
+        return {"ok": True, "stdout": "total size is 42\n", "stderr": "", "exit_status": 0}
+
+    monkeypatch.setattr("launchpad.backends.local_user_broker._run_subprocess", fake_run_subprocess)
+
+    result = await _handle_request(
+        {
+            "auth_token": "token-123",
+            "op": "rsync_transfer",
+            "profile": {
+                "ssh_host": "hpc3.example.edu",
+                "ssh_port": 22,
+                "ssh_username": "seyedam",
+                "auth_method": "key_file",
+                "key_file_path": "~/.ssh/id_ed25519",
+            },
+            "source": "seyedam@hpc3.example.edu:/share/crsp/workflow1/",
+            "dest": "/local/path/workflow1",
+            "copy_links": False,
+            "timeout_seconds": 30,
+        },
+        shutdown_event=asyncio.Event(),
+        auth_token="token-123",
+    )
+
+    assert result["ok"] is True
+    # The trailing slash on the remote source must survive — without it rsync
+    # creates a nested directory instead of copying contents into dest.
+    assert "seyedam@hpc3.example.edu:/share/crsp/workflow1/" in captured["cmd"]
+
+
+@pytest.mark.asyncio
 async def test_close_session_ignores_permission_errors_on_runtime_files(monkeypatch, tmp_path):
     manager = LocalAuthSessionManager()
     now = datetime.now(timezone.utc)

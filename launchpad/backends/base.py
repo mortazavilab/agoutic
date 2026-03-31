@@ -72,6 +72,7 @@ class JobStatus:
     slurm_job_id: str | None = None
     slurm_state: str | None = None
     transfer_state: str | None = None
+    transfer_detail: str | None = None
     result_destination: str | None = None
     ssh_profile_nickname: str | None = None
     work_directory: str | None = None

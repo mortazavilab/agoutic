@@ -261,7 +261,8 @@ def test_needs_local_result_copy_only_for_local_or_both_destinations():
 
 
 @pytest.mark.asyncio
-async def test_copy_selected_results_accepts_verified_local_artifacts_after_rsync_warning(monkeypatch, tmp_path):
+async def test_copy_selected_results_fails_fast_on_rsync_error(monkeypatch, tmp_path):
+    """When rsync reports failure, copy-back should fail immediately with the rsync error."""
     backend = SlurmBackend()
     job = SimpleNamespace(
         nextflow_work_dir=str(tmp_path / "workflow1"),
@@ -291,6 +292,7 @@ async def test_copy_selected_results_accepts_verified_local_artifacts_after_rsyn
         return {"directories": ["annot"], "files": ["Jamshid4_trace.txt"]}
 
     async def fake_download_outputs(**kwargs):
+        # Artifacts present locally, but rsync itself reported failure
         (local_root / "annot").mkdir(parents=True, exist_ok=True)
         (local_root / "Jamshid4_trace.txt").write_text("trace")
         return {"ok": False, "message": "download failed: rsync exited 23", "bytes_transferred": 123}
@@ -299,9 +301,11 @@ async def test_copy_selected_results_accepts_verified_local_artifacts_after_rsyn
     monkeypatch.setattr(backend, "_discover_remote_result_artifacts", fake_discover)
     monkeypatch.setattr(backend._transfer_manager, "download_outputs", fake_download_outputs)
 
-    await backend._copy_selected_results_to_local(run_uuid="run-1", job=job, profile=profile)
+    result = await backend._copy_selected_results_to_local(run_uuid="run-1", job=job, profile=profile)
 
-    assert states == ["downloading_outputs", "outputs_downloaded"]
+    assert states == ["downloading_outputs", "transfer_failed"]
+    assert result["success"] is False
+    assert "rsync exited 23" in result["message"]
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ class SlurmBackend:
     """Remote execution via SSH + SLURM sbatch."""
 
     _result_sync_tasks: dict[str, asyncio.Task] = {}
+    _transfer_progress: dict[str, dict] = {}
     _RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "kallisto", "openChromatin", "stats")
     _RESULT_SYNC_FILE_PATTERNS = ("*.config", "*.html", "*.txt", "*.csv", "*.tsv")
 
@@ -330,6 +331,7 @@ class SlurmBackend:
                     slurm_job_id=job.slurm_job_id,
                     slurm_state=raw_state,
                     transfer_state=job.transfer_state,
+                    transfer_detail=self.get_transfer_detail(run_uuid),
                     result_destination=job.result_destination,
                     message=message,
                     ssh_profile_nickname=profile.nickname,
@@ -520,6 +522,22 @@ class SlurmBackend:
             )
         return "RUNNING", "Copying results back to the local workflow..."
 
+    def get_transfer_detail(self, run_uuid: str) -> str | None:
+        """Return a human-readable summary of in-flight transfer progress."""
+        info = self._transfer_progress.get(run_uuid)
+        if not info:
+            return None
+        parts: list[str] = []
+        if info.get("current_file"):
+            parts.append(info["current_file"])
+        xfr = info.get("files_transferred")
+        total = info.get("files_total")
+        if xfr is not None and total is not None:
+            parts.append(f"{xfr}/{total} files")
+        if info.get("speed"):
+            parts.append(info["speed"])
+        return " — ".join(parts) if parts else None
+
     async def _copy_selected_results_to_local(self, *, run_uuid: str, job, profile: SSHProfileData) -> None:
         local_work_dir = getattr(job, "nextflow_work_dir", None)
         remote_work_dir = getattr(job, "remote_work_dir", None)
@@ -529,20 +547,45 @@ class SlurmBackend:
 
             await self._update_job_transfer_state(run_uuid, "downloading_outputs")
             artifacts = await self._discover_remote_result_artifacts(profile=profile, remote_work_dir=remote_work_dir)
+            logger.info(
+                "Starting result sync",
+                run_uuid=run_uuid,
+                remote_work_dir=remote_work_dir,
+                local_work_dir=local_work_dir,
+                remote_artifacts=artifacts,
+            )
+
+            def _on_rsync_progress(info: dict) -> None:
+                current = self._transfer_progress.get(run_uuid, {})
+                if "current_file" in info:
+                    current["current_file"] = info["current_file"]
+                if "files_transferred" in info:
+                    current["files_transferred"] = info["files_transferred"]
+                    current["files_total"] = info.get("files_total", current.get("files_total"))
+                if "speed" in info:
+                    current["speed"] = info["speed"]
+                self._transfer_progress[run_uuid] = current
+
             transfer = await self._transfer_manager.download_outputs(
                 profile=profile,
                 remote_path=remote_work_dir,
                 local_path=local_work_dir,
                 include_patterns=self._build_result_sync_include_patterns(),
                 exclude_patterns=["*"],
+                on_progress=_on_rsync_progress,
             )
-            self._verify_local_result_artifacts(local_work_dir=local_work_dir, artifacts=artifacts)
+            logger.info(
+                "rsync transfer finished",
+                run_uuid=run_uuid,
+                ok=transfer.get("ok"),
+                bytes_transferred=transfer.get("bytes_transferred"),
+                message=transfer.get("message"),
+            )
             if not transfer.get("ok"):
-                logger.warning(
-                    "Selective result copy-back reported a transfer error but required artifacts are present locally",
-                    run_uuid=run_uuid,
-                    transfer_message=transfer.get("message"),
+                raise RuntimeError(
+                    f"rsync transfer failed: {transfer.get('message', 'unknown error')}"
                 )
+            self._verify_local_result_artifacts(local_work_dir=local_work_dir, artifacts=artifacts)
             await self._update_job_transfer_state(run_uuid, "outputs_downloaded")
             return {
                 "success": True,
@@ -564,6 +607,7 @@ class SlurmBackend:
                 "local_work_dir": local_work_dir,
             }
         finally:
+            self._transfer_progress.pop(run_uuid, None)
             self._result_sync_tasks.pop(run_uuid, None)
 
     async def sync_results_to_local(self, *, run_uuid: str, force: bool = False) -> dict:
