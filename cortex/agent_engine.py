@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 client = OpenAI(
     base_url=LLM_URL,
     api_key="ollama",  # Required by the library, but ignored by Ollama
-    timeout=240.0,  # Must finish before UI's 300s timeout
+    timeout=240.0,  # Must finish before UI's 900s timeout
 )
 logger.info("LLM connection configured", llm_url=LLM_URL, num_ctx=LLM_NUM_CTX)
 

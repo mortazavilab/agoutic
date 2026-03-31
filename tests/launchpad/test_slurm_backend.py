@@ -380,9 +380,10 @@ async def test_sync_results_to_local_retries_copy_when_force_enabled(monkeypatch
 
     result = await backend.sync_results_to_local(run_uuid="run-1", force=True)
 
+    # sync_results_to_local now fires a background task and returns immediately
     assert result["success"] is True
-    assert result["status"] == "outputs_downloaded"
-    assert result["transfer_state"] == "outputs_downloaded"
+    assert result["status"] == "sync_started"
+    assert result["transfer_state"] == "downloading_outputs"
 
 
 @pytest.mark.asyncio

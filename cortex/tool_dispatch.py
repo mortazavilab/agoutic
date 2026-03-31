@@ -10,6 +10,7 @@ accessions.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +42,8 @@ from cortex.remote_orchestration import (
 from cortex.tool_contracts import validate_against_schema
 
 logger = get_logger(__name__)
+
+REMOTE_STAGE_MCP_TIMEOUT = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
 
 _BED_COUNT_INTENT_RE = re.compile(
     r"\b(count|counts|summarize|summarise|tally|show)\b.*\bbed\b.*\b(chromosome|chromosomes|chr)\b"
@@ -561,7 +564,11 @@ async def execute_tool_calls(
             ]
             continue
 
-        mcp_client = MCPHttpClient(name=source_key, base_url=url)
+        # Launchpad calls (especially sync/submission) can take several
+        # minutes for large result sets.  Use a generous timeout to avoid
+        # killing transfers mid-stream.
+        _mcp_timeout = REMOTE_STAGE_MCP_TIMEOUT if source_key == "launchpad" else 120.0
+        mcp_client = MCPHttpClient(name=source_key, base_url=url, timeout=_mcp_timeout)
         source_results: list[dict] = []
 
         try:

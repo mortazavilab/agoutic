@@ -1107,7 +1107,19 @@ def _block_requires_full_refresh(block: dict) -> bool:
         payload = block.get("payload", {}) if isinstance(block.get("payload"), dict) else {}
         job_status = payload.get("job_status", {}) if isinstance(payload.get("job_status"), dict) else {}
         nested_status = str(job_status.get("status") or "").upper()
-        return bstatus == "RUNNING" or nested_status in {"RUNNING", "PENDING"}
+        transfer_state = str(job_status.get("transfer_state") or "").strip().lower()
+        return (
+            bstatus == "RUNNING"
+            or nested_status in {"RUNNING", "PENDING"}
+            or transfer_state in {"downloading_outputs"}
+        )
+    if btype == "AGENT_PLAN":
+        payload = block.get("payload", {}) if isinstance(block.get("payload"), dict) else {}
+        _sru = payload.get("_sync_run_uuid", "")
+        if _sru:
+            _cached = (st.session_state.get(f"_transfer_state_{_sru}") or "").strip().lower()
+            if _cached in {"downloading_outputs"}:
+                return True
     return False
 
 
@@ -1604,6 +1616,33 @@ def render_block(block, expected_project_id: str = ""):
                     _dfs = content.get("_dataframes")
                     if _dfs and isinstance(_dfs, dict):
                         _render_embedded_dataframes(_dfs, block_id)
+
+            # ── Inline sync progress (visible right in the agent response) ──
+            _sync_run_uuid = content.get("_sync_run_uuid", "")
+            if _sync_run_uuid:
+                _sync_ts = ""
+                _sync_detail = ""
+                _sync_state = "unknown"
+                try:
+                    _sync_resp = make_authenticated_request(
+                        "GET",
+                        f"{API_URL}/jobs/{_sync_run_uuid}/status",
+                        timeout=LIVE_JOB_STATUS_TIMEOUT_SECONDS,
+                    )
+                    if _sync_resp.status_code == 200:
+                        _sj = _sync_resp.json()
+                        _sync_state = (_sj.get("transfer_state") or "").strip().lower()
+                        _sync_detail = (_sj.get("transfer_detail") or "").strip()
+                        # Cache so auto-refresh keeps running
+                        st.session_state[f"_transfer_state_{_sync_run_uuid}"] = _sync_state
+                except Exception:
+                    pass
+                if _sync_state == "downloading_outputs":
+                    st.info(f"📥 **Sync in progress** — {_sync_detail or 'transferring files…'}", icon="⏳")
+                elif _sync_state == "outputs_downloaded":
+                    st.success("✅ Results synced successfully.")
+                elif _sync_state == "transfer_failed":
+                    st.error("❌ Sync failed. You can retry with **sync results locally with force**.")
 
             _all_blocks = st.session_state.get("blocks", [])
             _related_workflow = _find_related_workflow_plan(block, _all_blocks)
@@ -2755,11 +2794,20 @@ def render_block(block, expected_project_id: str = ""):
             if not run_uuid and block_status_str == "FAILED":
                 st.caption("Run UUID not assigned (submission failed before launch)")
             
-            # For RUNNING jobs, live-fetch status directly from Cortex
-            # (bypasses stale block payload — always fresh from Launchpad)
+            # Live-fetch status for RUNNING jobs and DONE jobs with an
+            # active transfer (manual sync on a completed job).
             job_status = content.get("job_status", {})
             live_status_poll_succeeded = False
-            if run_uuid and block_status_str == "RUNNING":
+            _persisted_transfer = (content.get("job_status", {}).get("transfer_state") or "").strip().lower()
+            # Also check session state — the block payload may be stale but a
+            # previous poll already saw the transfer become active.
+            _cached_transfer = (st.session_state.get(f"_transfer_state_{run_uuid}") or "").strip().lower()
+            _needs_live_poll = (
+                block_status_str == "RUNNING"
+                or _persisted_transfer in {"downloading_outputs"}
+                or _cached_transfer in {"downloading_outputs"}
+            )
+            if run_uuid and _needs_live_poll:
                 try:
                     live_resp = make_authenticated_request(
                         "GET",
@@ -2772,6 +2820,9 @@ def render_block(block, expected_project_id: str = ""):
                         st.session_state[f"_job_polled_at_{run_uuid}"] = (
                             datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                         )
+                        # Cache transfer_state so auto-refresh keeps polling
+                        _live_ts = (job_status.get("transfer_state") or "").strip().lower()
+                        st.session_state[f"_transfer_state_{run_uuid}"] = _live_ts
                 except Exception:
                     pass  # Fall back to block payload
             
@@ -3481,6 +3532,16 @@ def _render_chat():
             _has_running_job = True
         if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
             _has_finished_job = True
+        # Keep auto-refresh alive while a result transfer is in progress
+        # (manual sync on an already-completed job).
+        if btype == "EXECUTION_JOB" and bstatus == "DONE":
+            _blk_payload = blk.get("payload", {}) if isinstance(blk.get("payload"), dict) else {}
+            _blk_js = _blk_payload.get("job_status", {}) if isinstance(_blk_payload.get("job_status"), dict) else {}
+            _blk_run_uuid = _blk_payload.get("run_uuid", "")
+            _blk_ts = (_blk_js.get("transfer_state") or "").strip().lower()
+            _cached_ts = (st.session_state.get(f"_transfer_state_{_blk_run_uuid}") or "").strip().lower() if _blk_run_uuid else ""
+            if _blk_ts in {"downloading_outputs"} or _cached_ts in {"downloading_outputs"}:
+                _has_running_job = True
         if btype == "STAGING_TASK" and bstatus == "RUNNING":
             _has_running_job = True
         if btype == "STAGING_TASK" and bstatus in ("DONE", "FAILED"):
@@ -3747,7 +3808,7 @@ if prompt:
                     "request_id": request_id,
                 },
                 cookies=cookies,
-                timeout=300,
+                timeout=900,
             )
         except Exception as exc:
             _result_holder["error"] = exc

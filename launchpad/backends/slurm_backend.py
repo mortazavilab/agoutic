@@ -699,16 +699,25 @@ class SlurmBackend:
             running_task.cancel()
 
         profile = await self._load_profile(job.ssh_profile_id, job.user_id)
-        sync_result = await self._copy_selected_results_to_local(
-            run_uuid=run_uuid,
-            job=job,
-            profile=profile,
-        )
 
-        refreshed_job = await get_job(run_uuid)
-        if refreshed_job:
-            sync_result["transfer_state"] = getattr(refreshed_job, "transfer_state", None)
-        return sync_result
+        # Fire the sync as a background task and return immediately.
+        # Large result sets (e.g. BAM runs) can take many minutes; keeping
+        # the HTTP request open blocks the caller and risks MCP/httpx
+        # timeouts that kill rsync mid-transfer (leaving empty directories).
+        self._result_sync_tasks[run_uuid] = asyncio.create_task(
+            self._copy_selected_results_to_local(
+                run_uuid=run_uuid, job=job, profile=profile,
+            )
+        )
+        return {
+            "success": True,
+            "status": "sync_started",
+            "message": "Result synchronization started. Monitor progress via job status polling.",
+            "run_uuid": run_uuid,
+            "remote_work_dir": getattr(job, "remote_work_dir", None),
+            "local_work_dir": getattr(job, "nextflow_work_dir", None),
+            "transfer_state": "downloading_outputs",
+        }
 
     async def _discover_remote_result_artifacts(self, *, profile: SSHProfileData, remote_work_dir: str) -> dict[str, list[str]]:
         conn = await self._ssh_manager.connect(profile)

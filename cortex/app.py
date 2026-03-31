@@ -2506,7 +2506,37 @@ What would you like to do?
                     profile=_ssh_profile_nickname,
                 )
 
-        if not _is_user_data_override and not _is_browsing_override and not _is_remote_browsing_override and not has_any_tags and (not _injected_previous_data or _injected_was_capped):
+        # --- Sync-results override ---
+        # "sync workflow5 locally" etc. must route to launchpad sync, never
+        # to the dogme pipeline planner.  Must fire before the has_any_tags
+        # gate because the LLM may generate dogme run tags for sync requests.
+        _is_sync_override = False
+        if not _is_user_data_override and not _is_browsing_override and not _is_remote_browsing_override:
+            _sync_override_calls = _auto_generate_data_calls(
+                req.message, active_skill, conversation_history,
+                history_blocks=history_blocks,
+                project_dir=_project_dir_str,
+            )
+            if _sync_override_calls and any(
+                c.get("tool") == "sync_job_results" for c in _sync_override_calls
+            ):
+                auto_calls = _sync_override_calls
+                _is_sync_override = True
+                data_call_matches = []
+                legacy_encode_matches = []
+                legacy_analysis_matches = []
+                has_any_tags = False
+                clean_markdown = ""
+                needs_approval = False
+                plot_specs = []
+                _injected_dfs = {}
+                _injected_previous_data = False
+                logger.warning(
+                    "Sync-results override: replacing LLM tags with sync call",
+                    calls=len(auto_calls),
+                )
+
+        if not _is_user_data_override and not _is_browsing_override and not _is_remote_browsing_override and not _is_sync_override and not has_any_tags and (not _injected_previous_data or _injected_was_capped):
             # Case 1: LLM produced no tags at all — auto-generate
             auto_calls = _auto_generate_data_calls(req.message, active_skill, conversation_history,
                                                      history_blocks=history_blocks,
@@ -2798,6 +2828,8 @@ What would you like to do?
                     if _r.get("_chain") == "download":
                         _has_download_chain = True
             _is_browsing = bool(_all_tools_used) and _all_tools_used <= _browsing_tools
+            _is_sync = "sync_job_results" in _all_tools_used
+            _sync_run_uuid = ""  # populated by sync handler below
 
             # Also skip second-pass for download workflows — the metadata is
             # used to build the approval gate, not to summarise for the user.
@@ -2871,6 +2903,53 @@ What would you like to do?
                     "- **list files in workflow2/annot** — a specific workflow subfolder\n"
                     "- **list workflows** — all workflows in the project"
                 )
+
+            elif _is_sync:
+                # Sync fires a background task — show a brief acknowledgement
+                # and let the task dock handle progress display, like downloads.
+                _sync_data = {}
+                _sync_error = ""
+                for _src_results in all_results.values():
+                    for _r in _src_results:
+                        if _r.get("tool") == "sync_job_results":
+                            if "data" in _r:
+                                _sync_data = _r["data"] if isinstance(_r["data"], dict) else {}
+                            elif "error" in _r:
+                                _sync_error = str(_r["error"])
+                            break
+                if _sync_error:
+                    clean_markdown = f"⚠️ Sync failed: {_sync_error}"
+                else:
+                    _sync_status = _sync_data.get("status", "")
+                    _sync_msg = _sync_data.get("message", "")
+                    if _sync_status in ("sync_started", "sync_in_progress"):
+                        clean_markdown = f"📥 {_sync_msg or 'Result synchronization started.'} You can track progress in the task dock below."
+                        # Update the EXECUTION_JOB block payload so the UI's
+                        # auto-refresh picks up the active transfer immediately.
+                        _sync_run_uuid = _sync_data.get("run_uuid", "")
+                        if _sync_run_uuid:
+                            _job_block = (
+                                session.query(ProjectBlock)
+                                .filter(
+                                    ProjectBlock.project_id == req.project_id,
+                                    ProjectBlock.type == "EXECUTION_JOB",
+                                    ProjectBlock.payload_json.contains(_sync_run_uuid),
+                                )
+                                .order_by(ProjectBlock.created_at.desc())
+                                .first()
+                            )
+                            if _job_block:
+                                _update_project_block_payload(
+                                    session,
+                                    _job_block.id,
+                                    {"job_status": {**get_block_payload(_job_block).get("job_status", {}), "transfer_state": "downloading_outputs"}},
+                                )
+                    elif _sync_status == "already_synced":
+                        clean_markdown = f"✅ {_sync_msg or 'Results are already synced locally.'}"
+                    elif _sync_status == "not_applicable":
+                        clean_markdown = f"ℹ️ {_sync_msg or 'Manual sync is not applicable for this job.'}"
+                    else:
+                        clean_markdown = _sync_msg or "Sync request submitted."
 
             elif has_real_data and formatted_data.strip():
                 # Cap data size to avoid overwhelming the LLM context window.
@@ -3013,6 +3092,8 @@ What would you like to do?
             _plan_payload["_images"] = _embedded_images
         if _provenance:
             _plan_payload["_provenance"] = _provenance
+        if _sync_run_uuid:
+            _plan_payload["_sync_run_uuid"] = _sync_run_uuid
         # Attach debug info for the UI debug panel
         _debug_payload = dict(_inject_debug)  # copy the injection debug info
         _debug_payload["has_injected_dfs"] = bool(_injected_dfs)

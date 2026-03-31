@@ -38,6 +38,43 @@
   now catches `httpx.ReadTimeout` and surfaces explicit next steps (check job
   status/transfer state or increase `LAUNCHPAD_SYNC_TIMEOUT`).
 
+- **Sync commands no longer trigger dogme pipeline gate** — "sync workflow5
+  locally" was intercepted by the LLM which generated dogme run tags, bypassing
+  the sync auto-generator.  Added a sync-results override that fires before the
+  LLM tag gate, ensuring sync requests always route directly to the launchpad
+  `sync_job_results` endpoint.
+
+- **SLURM task completion now tracked correctly** — Remote Nextflow tasks
+  previously showed as "Running" but never "Completed" in the task dock.
+  Three root causes: (1) the remote trace file reader used a fragile
+  `find … -exec ls` shell pipeline that silently returned empty output —
+  replaced with a simple `cat *_trace.txt` glob; (2) the stdout line parser
+  took the first word after `]` as the task name, but SLURM Nextflow output
+  prefixes lines with `Submitted process >` — now strips everything before
+  `>` to extract the real task name; (3) stdout `✔` markers were only used
+  to exclude tasks from Running but never counted as Completed — now counted
+  as completed (with FAILED going to failed) when the trace file has no
+  results.  ANSI escape codes in `slurm-*.out` are also stripped before
+  parsing, and cross-naming scheme deduplication prevents double-counting
+  between trace (`basecall:basecallWorkflow:X`) and stdout
+  (`mainWorkflow:X`) task names.
+
+- **UI timestamps now display in local time** — All formatted timestamps
+  (job started/completed, plan steps, chat blocks, log entries) are converted
+  from UTC to the server's local timezone before rendering.
+
+- **Non-blocking result sync prevents empty-folder copy-back** — Manual
+  `sync_job_results` previously awaited the full rsync inline, so the cortex→
+  launchpad MCP client timeout (120 s) would kill the transfer mid-stream for
+  large BAM runs, leaving empty directories locally.  `sync_results_to_local`
+  now fires the rsync as a background task and returns immediately; the chat
+  shows a brief acknowledgement ("📥 sync started — track progress in the task
+  dock") while real-time rsync progress (current file, files transferred, speed)
+  is displayed in the task dock's Sync segment, matching the existing download
+  progress UX.  The cortex→launchpad MCP client timeout is also raised to
+  `LAUNCHPAD_STAGE_TIMEOUT` (default 3600 s) for all launchpad tool calls, and
+  the UI chat request timeout is raised from 300 s to 900 s.
+
 ### Tests
 
 - Expanded Cortex project rename coverage in
