@@ -843,7 +843,8 @@ def _detect_plan_type(message: str) -> str | None:
     return None
 
 
-def _extract_plan_params(message: str, conv_state: "ConversationState", plan_type: str) -> dict:
+def _extract_plan_params(message: str, conv_state: "ConversationState", plan_type: str,
+                         project_dir: str = "") -> dict:
     """Extract relevant parameters from the user message and conversation state."""
     params: dict = {"goal": message}
 
@@ -960,6 +961,11 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
                 if m:
                     params["output_directory"] = m.group(1).rstrip(".,;:!?")
 
+        # Default output to the current project directory so cross-project
+        # reconcile writes into the active project, not the source project.
+        if not params.get("output_directory") and project_dir:
+            params["output_directory"] = project_dir
+
         m = re.search(r"(?:annotation\s+gtf|gtf\s+(?:path|file)|use\s+gtf)\s*[=:]?\s*(\S+\.(?:gtf|gtf\.gz))", message, re.I)
         if m:
             params["annotation_gtf"] = m.group(1).rstrip(".,;:!?")
@@ -1070,6 +1076,13 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
                     candidate_base_dirs,
                     _derive_base_dir_from_work_dir(remote_paths.get(key)),
                 )
+
+        # Derive user root from project_dir (parent of the project slug dir)
+        # so cross-project references like "testc2c12local:workflow2" resolve
+        # to absolute paths even when the current project has no prior jobs.
+        if not candidate_base_dirs and project_dir:
+            _user_root = os.path.dirname(project_dir.rstrip("/"))
+            _add_candidate_base_dir(candidate_base_dirs, _user_root)
 
         if project_workflow_refs:
             selected_workflow_tokens.clear()
@@ -1964,6 +1977,7 @@ def generate_plan(
     conv_state: "ConversationState",
     engine: "AgentEngine",
     conversation_history: list | None = None,
+    project_dir: str = "",
 ) -> dict | None:
     """
     Generate a structured plan payload for a MULTI_STEP request.
@@ -1976,7 +1990,8 @@ def generate_plan(
     if not plan_type and _is_summarize_results_request(message, conv_state):
         plan_type = "summarize_results"
 
-    params = _extract_plan_params(message, conv_state, plan_type or "")
+    params = _extract_plan_params(message, conv_state, plan_type or "",
+                                    project_dir=project_dir)
 
     # Temporary bridge: hybrid-first for selected non-core flows.
     if plan_type in _HYBRID_FIRST_FLOWS:

@@ -62,6 +62,24 @@
   the explicitly-passed `project_dir` (resolved from the DB) for
   project-level browsing commands like "list workflows".
 
+- **Cross-project reconcile plans now resolve absolute workflow paths** —
+  When the current project has no prior jobs, the planner had no
+  `candidate_base_dirs` to resolve cross-project `project:workflow`
+  references, producing relative paths that the analyzer couldn't find.
+  The user root directory (parent of `project_dir`) is now seeded as a
+  fallback base directory so all workflow paths are absolute.
+
+- **Reconcile output directory defaults to the active project** — Previously
+  the output directory was derived from `os.path.commonpath()` of the source
+  workflow roots, which would write into the source project instead of the
+  current one.  Now defaults to `project_dir` (the active project) when no
+  explicit output directory is specified.
+
+- **"Try again" / "retry" command replays the last failed prompt** — Typing
+  `try again` or `retry` in the chat re-sends the last prompt that failed
+  (HTTP error or plan execution failure).  Works repeatedly and clears
+  automatically on success.
+
 - **BAM-detail fallback now prefers workflow/work_dir discovery over blind
   run UUID dispatch** — BAM-detail auto-calls now prioritize explicit
   workflow context and use safe `list_job_files(work_dir=...)` +

@@ -2484,6 +2484,9 @@ def render_block(block, expected_project_id: str = ""):
             st.divider()
 
             plan_status = str(content.get("status") or status or "PENDING")
+            # Mark plan failures so "try again" can replay the prompt.
+            if plan_status.strip().upper() == "FAILED":
+                st.session_state["_last_prompt_failed"] = True
             chip_kind, chip_label, chip_icon = _workflow_status_presentation(plan_status)
             status_chip(chip_kind, label=chip_label, icon=chip_icon)
 
@@ -3641,6 +3644,14 @@ if _active_chat is not None:
         elapsed = time.time() - _ac_start
         del st.session_state["_active_chat"]
 
+        # Detect whether the request failed so "try again" can replay it.
+        _chat_failed = bool(
+            _ac_result["error"]
+            or (_ac_result["response"] is not None and _ac_result["response"].status_code != 200)
+        )
+        if _chat_failed:
+            st.session_state["_last_prompt_failed"] = True
+
         with st.chat_message("assistant"):
             if _ac_result["error"]:
                 st.error(f"Failed to send message: {_ac_result['error']}")
@@ -3670,6 +3681,8 @@ if _active_chat is not None:
                     st.info("⏹️ Stopped by user.")
                 else:
                     st.empty()  # Agent block will be rendered by block loop
+                    # Clear failure flag — request succeeded.
+                    st.session_state.pop("_last_prompt_failed", None)
             time.sleep(0.3)
             st.rerun()
 
@@ -3680,6 +3693,18 @@ if _active_chat is not None:
 prompt = _captured_prompt
 if not prompt and st.session_state.get("_pending_prompt") and "_active_chat" not in st.session_state:
     prompt = st.session_state.get("_pending_prompt")
+
+# "try again" — replay the last prompt that failed.
+if prompt and prompt.strip().lower() in ("try again", "retry"):
+    _retry_prompt = st.session_state.get("_last_sent_prompt")
+    if _retry_prompt and st.session_state.get("_last_prompt_failed"):
+        prompt = _retry_prompt
+    else:
+        # Nothing to retry — show a helpful message and stop.
+        with st.chat_message("assistant"):
+            st.info("Nothing to retry — there is no recent failed prompt.")
+        st.session_state.pop("_pending_prompt", None)
+        st.stop()
 
 if prompt:
 
@@ -3717,6 +3742,10 @@ if prompt:
 
     thread = threading.Thread(target=_send_chat_request, daemon=True)
     thread.start()
+
+    # Track the last sent prompt so "try again" can replay it on failure.
+    st.session_state["_last_sent_prompt"] = prompt
+    st.session_state.pop("_last_prompt_failed", None)
 
     # Clear the pending prompt now that the request is launched.
     st.session_state.pop("_pending_prompt", None)

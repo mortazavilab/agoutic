@@ -2094,6 +2094,7 @@ What would you like to do?
             _plan_payload = await run_in_threadpool(
                 generate_plan, req.message, active_skill, _conv_state,
                 engine, conversation_history,
+                project_dir=_project_dir_str,
             )
             if _plan_payload:
                 _workflow_block = _create_block_internal(
