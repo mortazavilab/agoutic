@@ -156,7 +156,10 @@ class FileTransferManager:
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             direction="download",
-            copy_links=False,
+            # Remote workflows often contain symlinked artifacts (for example,
+            # bams/annot links back to shared storage). For local copy-back,
+            # materialize link targets so files exist under local workflow dirs.
+            copy_links=True,
             on_progress=on_progress,
         )
 

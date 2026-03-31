@@ -304,10 +304,26 @@ with act1:
                 timeout=5,
             )
             if r.status_code == 200:
-                st.toast(f"Renamed → {new_name}")
+                renamed = (r.json() or {}).get("name") or new_name
+                st.toast(f"Renamed -> {renamed}")
                 st.rerun()
+            elif r.status_code == 409:
+                detail = "Name already exists"
+                try:
+                    detail = (r.json() or {}).get("detail") or detail
+                except Exception:
+                    pass
+                st.error(f"Rename failed: {detail}")
+            elif r.status_code == 403:
+                st.error("Rename failed: owner access required")
             else:
-                st.error(f"Rename failed: {r.status_code}")
+                detail = ""
+                try:
+                    detail = (r.json() or {}).get("detail") or ""
+                except Exception:
+                    pass
+                suffix = f" ({detail})" if detail else ""
+                st.error(f"Rename failed: {r.status_code}{suffix}")
         except Exception as e:
             st.error(str(e))
 with act2:

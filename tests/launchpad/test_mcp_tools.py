@@ -396,6 +396,19 @@ class TestStatusAndReport:
         assert kwargs["params"] == {"force": "true"}
 
     @pytest.mark.asyncio
+    async def test_sync_job_results_uses_extended_sync_timeout(self, monkeypatch):
+        fake_client = FakeAsyncClient(
+            post_response=FakeResponse(json_data={"success": True, "status": "outputs_downloaded"})
+        )
+        monkeypatch.setenv("LAUNCHPAD_SYNC_TIMEOUT", "1800")
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            await tools.sync_job_results("run-1")
+
+        assert fake_client.post_calls[0][1]["timeout"] == 1800.0
+
+    @pytest.mark.asyncio
     async def test_sync_job_results_wraps_not_found(self):
         fake_client = FakeAsyncClient(post_response=FakeResponse(status_code=404))
 
@@ -412,6 +425,15 @@ class TestStatusAndReport:
             tools = LaunchpadMCPTools("http://launchpad.local")
             with pytest.raises(RuntimeError, match=r"Failed to sync job results: Exception: Exception\(\)"):
                 await tools.sync_job_results("run-err")
+
+    @pytest.mark.asyncio
+    async def test_sync_job_results_read_timeout_has_actionable_message(self):
+        fake_client = FakeAsyncClient(post_error=httpx.ReadTimeout("", request=None))
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            with pytest.raises(RuntimeError, match="check job status and transfer_state"):
+                await tools.sync_job_results("run-timeout")
 
     @pytest.mark.asyncio
     async def test_check_nextflow_status_wraps_not_found(self):

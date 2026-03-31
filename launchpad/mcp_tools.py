@@ -81,6 +81,7 @@ class LaunchpadMCPTools:
         self.status_timeout = float(os.getenv("LAUNCHPAD_STATUS_TIMEOUT", "120"))
         self.submit_timeout = float(os.getenv("LAUNCHPAD_SUBMIT_TIMEOUT", "900"))
         self.stage_timeout = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
+        self.sync_timeout = float(os.getenv("LAUNCHPAD_SYNC_TIMEOUT", "1800"))
         # Internal API secret for Launchpad authentication
         self._api_secret = os.getenv("INTERNAL_API_SECRET", "")
     
@@ -456,12 +457,19 @@ class LaunchpadMCPTools:
                     f"{self.server_url}/jobs/{run_uuid}/sync-results",
                     params={"force": str(bool(force)).lower()},
                     headers=self._headers(),
-                    timeout=self.timeout,
+                    timeout=self.sync_timeout,
                 )
                 if response.status_code == 404:
                     raise RuntimeError(f"Job {run_uuid} not found")
                 response.raise_for_status()
                 return response.json()
+        except httpx.ReadTimeout as e:
+            raise RuntimeError(
+                "Failed to sync job results: request timed out while waiting for remote-to-local copy. "
+                "The sync may still be running on the server; check job status and transfer_state, "
+                "or retry with a higher LAUNCHPAD_SYNC_TIMEOUT. "
+                f"Underlying error: {_describe_exception(e)}"
+            )
         except httpx.HTTPStatusError as e:
             detail = ""
             try:

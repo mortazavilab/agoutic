@@ -1,9 +1,47 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.13
+**Version:** 3.4.14
 **Status:** Active Prototype 
 
-## Latest Updates (2026-03-28)
+## Latest Updates (2026-03-31)
+
+- **Safe project rename now defaults to display-name updates** —
+  `PATCH /projects/{project_id}` now keeps project slug/folder unchanged for
+  name-only renames (unless an explicit slug change is provided), preserving
+  stable project IDs and minimizing path/reference risk.
+
+- **Rename conflicts are now rejected explicitly** — owner-scoped normalized
+  duplicate-name checks return `409` with a clear conflict message.
+
+- **Rename response payload now includes updated name** — project update
+  success responses now return `name` with `id` and `slug`, allowing immediate
+  canonical UI/API rendering.
+
+- **Projects UI rename flow now has targeted error handling** — the dashboard
+  now displays specific feedback for conflict (`409`) and permission (`403`)
+  errors and uses the server-returned canonical rename value on success.
+
+- **Project-access display-name sync improved** — rename updates now
+  synchronize denormalized `project_access.project_name` values for all users
+  with access to the project.
+
+- **Launchpad copy-back now materializes symlinked artifacts** — file transfer
+  download flow now uses `copy_links=True` so symlinked outputs are copied as
+  real files into local workflow directories.
+
+- **Manual sync now supports extended timeout tuning** — Launchpad MCP adds
+  `LAUNCHPAD_SYNC_TIMEOUT` (default `1800s`) specifically for
+  `sync_job_results` operations.
+
+- **Manual sync timeout errors are now actionable** — read timeout failures now
+  include guidance to check transfer status and retry with a higher
+  `LAUNCHPAD_SYNC_TIMEOUT`.
+
+- **Focused regressions added/updated** — expanded project rename tests in
+  `tests/cortex/test_project_endpoints.py` and
+  `tests/cortex/test_project_management.py`, plus Launchpad transfer/sync tests
+  in `tests/launchpad/test_file_transfer.py` and
+  `tests/launchpad/test_mcp_tools.py`.
 
 - **Cross-project reconcile prompts now support `project:workflow` syntax** —
   `reconcile_bams` planning now parses references like

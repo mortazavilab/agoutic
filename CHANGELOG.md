@@ -1,3 +1,66 @@
+## [3.4.14] - 2026-03-31
+
+### Features
+
+- **Safe project rename semantics (display-name first)** — `PATCH /projects/{project_id}`
+  now supports name-only renames without auto-changing slug/folder paths,
+  preserving stable `project_id` identity and on-disk project layout unless an
+  explicit slug change is requested.
+
+- **Project rename API response now returns canonical name** — successful
+  project updates now return `{status, id, name, slug}` so UI/API callers can
+  immediately render the authoritative updated project name.
+
+- **Extended timeout control for manual result sync** — Launchpad MCP adds
+  `LAUNCHPAD_SYNC_TIMEOUT` (default `1800s`) used specifically for
+  `/jobs/{run_uuid}/sync-results` requests, decoupling long sync operations
+  from shorter generic MCP request timeouts.
+
+### Fixes
+
+- **Owner-scoped duplicate project-name conflicts now rejected cleanly** —
+  project rename enforces a normalized, case-insensitive duplicate check within
+  the owner scope and returns `409` with a clear error message.
+
+- **Project access labels now stay consistent after rename** — all
+  `project_access.project_name` rows for the project are synchronized on rename
+  so shared/project member views reflect the updated name consistently.
+
+- **UI rename feedback is now actionable** — Projects dashboard rename flow now
+  surfaces specific error details for conflict (`409`) and authorization (`403`)
+  and displays the canonical server-returned name on success.
+
+- **Remote result copy-back now materializes symlink targets** — Launchpad file
+  transfer download path now uses `copy_links=True` so symlinked artifacts are
+  copied as concrete files into local workflow directories.
+
+- **Manual sync timeout failures now return actionable guidance** — MCP sync
+  now catches `httpx.ReadTimeout` and surfaces explicit next steps (check job
+  status/transfer state or increase `LAUNCHPAD_SYNC_TIMEOUT`).
+
+### Tests
+
+- Expanded Cortex project rename coverage in
+  `tests/cortex/test_project_endpoints.py` for:
+  successful rename with stable slug-by-default behavior,
+  duplicate-name rejection (`409`), unauthorized rename rejection (`403`),
+  project ID stability, and post-rename block accessibility.
+
+- Added project-files regression in
+  `tests/cortex/test_project_management.py` to verify files remain accessible by
+  existing `project_id` after rename.
+
+- Updated Launchpad transfer expectation in
+  `tests/launchpad/test_file_transfer.py` for `copy_links=True` download mode.
+
+- Added sync timeout/read-timeout behavior tests in
+  `tests/launchpad/test_mcp_tools.py` for `LAUNCHPAD_SYNC_TIMEOUT` and
+  actionable timeout messaging.
+
+- Verified focused suites passing:
+  `tests/cortex/test_project_endpoints.py` and
+  `tests/cortex/test_project_management.py`.
+
 ## [3.4.13] - 2026-03-28
 
 ### Features

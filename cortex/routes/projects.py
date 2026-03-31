@@ -44,6 +44,11 @@ class ProjectUpdateRequest(BaseModel):
     is_archived: Optional[bool] = None
 
 
+def _normalize_project_name(name: str) -> str:
+    """Normalize project name for duplicate checks."""
+    return " ".join(name.strip().split())
+
+
 # --- Slug helpers ---
 
 def _slugify(text: str, max_len: int = 40) -> str:
@@ -217,20 +222,27 @@ async def update_project(project_id: str, req: ProjectUpdateRequest, request: Re
         old_slug = project.slug
 
         if req.name is not None:
-            project.name = req.name
-            # Auto-update slug from name (unless an explicit slug was provided)
-            if req.slug is None:
-                new_slug = _slugify(req.name)
-                new_slug = _dedup_slug(session, user.id, new_slug, exclude_project_id=project_id)
-                project.slug = new_slug
-            # Also update name in project_access for consistency
-            access = session.execute(
-                select(ProjectAccess)
-                .where(ProjectAccess.project_id == project_id)
-                .where(ProjectAccess.user_id == user.id)
+            normalized_name = _normalize_project_name(req.name)
+            if not normalized_name:
+                raise HTTPException(status_code=422, detail="Project name cannot be empty")
+
+            duplicate = session.execute(
+                select(Project.id)
+                .where(Project.owner_id == project.owner_id)
+                .where(func.lower(func.trim(Project.name)) == normalized_name.lower())
+                .where(Project.id != project_id)
             ).scalar_one_or_none()
-            if access:
-                access.project_name = req.name
+            if duplicate:
+                raise HTTPException(status_code=409, detail="A project with this name already exists")
+
+            project.name = normalized_name
+
+            # Keep denormalized access rows in sync for all members.
+            access_rows = session.execute(
+                select(ProjectAccess).where(ProjectAccess.project_id == project_id)
+            ).scalars().all()
+            for access in access_rows:
+                access.project_name = normalized_name
 
         if req.slug is not None:
             # Explicit slug change
@@ -270,8 +282,8 @@ async def update_project(project_id: str, req: ProjectUpdateRequest, request: Re
 
         session.commit()
 
-        logger.info("Project updated", project_id=project_id, slug=new_slug, user=user.email)
-        return {"status": "ok", "id": project_id, "slug": new_slug}
+        logger.info("Project updated", project_id=project_id, name=project.name, slug=new_slug, user=user.email)
+        return {"status": "ok", "id": project_id, "name": project.name, "slug": new_slug}
     finally:
         session.close()
 

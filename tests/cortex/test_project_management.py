@@ -325,6 +325,27 @@ class TestProjectFiles:
         assert "nested.txt" in names
         assert body["total_size_bytes"] > 0
 
+    def test_files_still_accessible_after_rename(self, setup, tmp_path):
+        engine, SL, data, client = setup
+        pdir = tmp_path / "files_after_rename"
+        pdir.mkdir()
+        (pdir / "results.txt").write_text("ok")
+
+        rename_resp = client.patch(
+            f"/projects/{data['project_id']}",
+            json={"name": "PM Project Renamed"},
+        )
+        assert rename_resp.status_code == 200
+
+        with patch("cortex.app._resolve_project_dir", return_value=pdir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=pdir):
+            resp = client.get(f"/projects/{data['project_id']}/files")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        names = {f["name"] for f in body["files"]}
+        assert "results.txt" in names
+
 
 # ===========================================================================
 # Project stats (dashboard)

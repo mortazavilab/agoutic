@@ -132,7 +132,7 @@ async def test_download_passes_include_patterns_to_broker_session(monkeypatch, t
     _, payload = invoke_calls[0]
     assert payload["include_patterns"] == ["annot/***", "*.html"]
     assert payload["exclude_patterns"] == ["*"]
-    assert payload["copy_links"] is False
+    assert payload["copy_links"] is True
 
 
 @pytest.mark.asyncio

@@ -157,6 +157,7 @@ class TestListProjects:
 class TestUpdateProject:
     def test_rename_project(self, client):
         create_resp = client.post("/projects", json={"name": "Old Name"})
+        original = create_resp.json()
         project_id = create_resp.json()["id"]
         update_resp = client.patch(
             f"/projects/{project_id}",
@@ -166,8 +167,90 @@ class TestUpdateProject:
         data = update_resp.json()
         assert data["status"] == "ok"
         assert data["id"] == project_id
-        # Slug should reflect the new name
-        assert "new-name" in data["slug"]
+        assert data["name"] == "New Name"
+        # Name-only rename keeps slug stable for path safety.
+        assert data["slug"] == original["slug"]
+
+        list_resp = client.get("/projects")
+        assert list_resp.status_code == 200
+        projects = list_resp.json()["projects"]
+        renamed = next(p for p in projects if p["id"] == project_id)
+        assert renamed["name"] == "New Name"
+
+    def test_rename_duplicate_name_rejected(self, client):
+        first = client.post("/projects", json={"name": "Alpha Project"}).json()
+        second = client.post("/projects", json={"name": "Beta Project"}).json()
+
+        resp = client.patch(
+            f"/projects/{second['id']}",
+            json={"name": first["name"]},
+        )
+        assert resp.status_code == 409
+
+    def test_rename_unauthorized_rejected(self, client, test_session_factory):
+        project = client.post("/projects", json={"name": "Owner Project"}).json()
+
+        Session = test_session_factory
+        session = Session()
+        other_user = User(
+            id="other-uid",
+            email="other@example.com",
+            role="user",
+            username="otheruser",
+            is_active=True,
+        )
+        session.add(other_user)
+        other_sess = SessionModel(
+            id="other-session-token",
+            user_id=other_user.id,
+            is_valid=True,
+            expires_at=datetime.datetime(2099, 1, 1),
+        )
+        session.add(other_sess)
+        session.commit()
+        session.close()
+
+        client.cookies.set("session", "other-session-token")
+        resp = client.patch(
+            f"/projects/{project['id']}",
+            json={"name": "Hijack Name"},
+        )
+        assert resp.status_code == 403
+
+    def test_project_id_stable_after_rename(self, client):
+        created = client.post("/projects", json={"name": "Stable ID"}).json()
+        project_id = created["id"]
+
+        resp = client.patch(
+            f"/projects/{project_id}",
+            json={"name": "Stable ID Renamed"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["id"] == project_id
+
+    def test_blocks_accessible_after_rename(self, client):
+        created = client.post("/projects", json={"name": "Flow Project"}).json()
+        project_id = created["id"]
+
+        block_resp = client.post("/block", json={
+            "project_id": project_id,
+            "type": "USER_MESSAGE",
+            "payload": {"markdown": "Hello"},
+            "status": "DONE",
+        })
+        assert block_resp.status_code == 200
+        block_id = block_resp.json()["id"]
+
+        rename_resp = client.patch(
+            f"/projects/{project_id}",
+            json={"name": "Flow Project Renamed"},
+        )
+        assert rename_resp.status_code == 200
+
+        blocks_resp = client.get(f"/blocks?project_id={project_id}")
+        assert blocks_resp.status_code == 200
+        block_ids = {b["id"] for b in blocks_resp.json()["blocks"]}
+        assert block_id in block_ids
 
 
 # ---------------------------------------------------------------------------
