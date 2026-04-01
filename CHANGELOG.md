@@ -1,3 +1,33 @@
+## [3.4.15] - 2026-03-31
+
+### Features
+
+- **UI chat renderer modularization under strict file-size limits** — split
+  the Streamlit chat block rendering pipeline into focused modules
+  (`appui_block_part1.py`, `appui_block_part2.py`, `appui_sidebar.py`,
+  `appui_chat_runtime.py`, `appui_services.py`) so no active appui module
+  exceeds 1000 LOC while preserving prior behavior.
+
+- **AppUI consolidation cleanup** — removed intermediate compatibility shim
+  layers and consolidated service/workflow helpers into `appui_services.py`
+  to reduce file sprawl and simplify runtime imports.
+
+### Fixes
+
+- **Import-time session-state crash resolved in split block renderer** —
+  `appui_block_part2.py` no longer executes leaked top-level runtime code on
+  import, preventing `AttributeError: st.session_state has no attribute
+  active_project_id` before initialization.
+
+- **Missing renderer callback wiring fixed** — `_block_timestamp` is now
+  correctly passed into `render_block_part1`, resolving `NameError` during
+  `USER_MESSAGE` rendering.
+
+- **Raw fallback payload no longer shown for handled user blocks** — split
+  renderers now return handled flags and fallback rendering is centralized in
+  `appUI.py`, preventing duplicate raw lines such as
+  `[USER_MESSAGE] {'text': '...'}` from appearing in the GUI.
+
 ## [3.4.14] - 2026-03-31
 
 ### Features
