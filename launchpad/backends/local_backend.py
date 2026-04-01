@@ -109,3 +109,7 @@ class LocalBackend:
             return True
         except Exception:
             return False
+
+    def get_transfer_detail(self, run_uuid: str) -> str | None:
+        """Local jobs do not have remote result-transfer progress."""
+        return None

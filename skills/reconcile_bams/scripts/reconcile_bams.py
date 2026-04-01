@@ -367,7 +367,17 @@ def _build_reconcile_command(
     return command
 
 
-def _run_reconcile_command(command: list[str]) -> tuple[int, str, str]:
+def _run_reconcile_command(
+    command: list[str],
+    *,
+    stdout_sink=None,
+    stderr_sink=None,
+) -> tuple[int, str, str]:
+    if stdout_sink is None:
+        stdout_sink = sys.stdout
+    if stderr_sink is None:
+        stderr_sink = sys.stderr
+
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -385,19 +395,20 @@ def _run_reconcile_command(command: list[str]) -> tuple[int, str, str]:
         try:
             for line in iter(stream.readline, ""):
                 chunks.append(line)
-                sink.write(line)
-                sink.flush()
+                if sink is not None:
+                    sink.write(line)
+                    sink.flush()
         finally:
             stream.close()
 
     stdout_thread = threading.Thread(
         target=_forward_stream,
-        args=(process.stdout, sys.stdout, stdout_chunks),
+        args=(process.stdout, stdout_sink, stdout_chunks),
         daemon=True,
     )
     stderr_thread = threading.Thread(
         target=_forward_stream,
-        args=(process.stderr, sys.stderr, stderr_chunks),
+        args=(process.stderr, stderr_sink, stderr_chunks),
         daemon=True,
     )
     stdout_thread.start()
@@ -587,7 +598,11 @@ def main() -> int:
                 min_samples=int(args.min_samples),
                 filter_known=bool(args.filter_known),
             )
-            return_code, stdout_text, stderr_text = _run_reconcile_command(command)
+            return_code, stdout_text, stderr_text = _run_reconcile_command(
+                command,
+                stdout_sink=sys.stderr if args.json else sys.stdout,
+                stderr_sink=sys.stderr,
+            )
             if return_code != 0:
                 raise ReconcileExecutionError(
                     stderr_text.strip()

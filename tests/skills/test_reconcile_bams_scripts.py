@@ -346,3 +346,48 @@ def test_run_reconcile_command_streams_stdout_and_stderr(monkeypatch, capsys):
     assert "step one" in captured.out
     assert "step two" in captured.out
     assert "warning line" in captured.err
+
+
+def test_reconcile_script_json_mode_keeps_stdout_parseable(monkeypatch, tmp_path, capsys):
+    module = _load_reconcile_module()
+
+    bam = tmp_path / "sample1.GRCh38.annotated.bam"
+    bam.write_text("placeholder", encoding="utf-8")
+    manual_gtf = tmp_path / "manual.GRCh38.annotation.gtf"
+    _write_minimal_gtf(manual_gtf)
+
+    seen = {}
+
+    def fake_run_reconcile_command(command, *, stdout_sink=None, stderr_sink=None):
+        seen["stdout_sink"] = stdout_sink
+        seen["stderr_sink"] = stderr_sink
+        out_dir = Path(command[command.index("--outdir") + 1])
+        (out_dir / "reconciled.bam").write_text("bam", encoding="utf-8")
+        return 0, "child stdout\n", "child stderr\n"
+
+    monkeypatch.setattr(module, "_run_reconcile_command", fake_run_reconcile_command)
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [
+            str(RECONCILE),
+            "--input-bam",
+            str(bam),
+            "--annotation-gtf",
+            str(manual_gtf),
+            "--output-dir",
+            str(tmp_path),
+            "--json",
+        ],
+    )
+
+    return_code = module.main()
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert return_code == 0
+    assert seen["stdout_sink"] is module.sys.stderr
+    assert seen["stderr_sink"] is module.sys.stderr
+    assert payload["status"] == "completed"
+    assert payload["execution"]["stdout"] == "child stdout\n"
+    assert payload["execution"]["stderr"] == "child stderr\n"

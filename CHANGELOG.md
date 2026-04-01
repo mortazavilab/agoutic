@@ -14,6 +14,31 @@
 
 ### Fixes
 
+- **Manual result sync timeout raised for very large file copy-back** —
+  `LAUNCHPAD_SYNC_TIMEOUT` now defaults to `9600s`, giving
+  `sync_job_results` substantially more time to finish very large transfers
+  before timing out.
+
+- **Sync-result run UUID payload is now always safely bound** — the Cortex
+  chat execution path now initializes `_sync_run_uuid` before conditional tool
+  result handling, preventing `UnboundLocalError` when sync metadata is absent
+  but the final plan payload still checks for a sync run UUID.
+
+- **Post-split AppUI helper tests now resolve extracted functions correctly** —
+  the AST-based UI helper test loader now follows functions moved from
+  `appUI.py` into extracted modules and injects wrapper `_impl` call targets,
+  restoring focused helper coverage after the AppUI modularization.
+
+- **Launchpad status fast path now tolerates backends without transfer-detail
+  helpers** — pending local copy-back status responses now treat
+  `get_transfer_detail` as optional, avoiding `AttributeError` in lightweight
+  fake backends while preserving live transfer details when supported.
+
+- **Reconcile wrapper JSON output remains parseable during live child-process
+  streaming** — `reconcile_bams.py` now routes streamed child stdout away from
+  wrapper stdout in `--json` mode so machine-readable reconcile payloads are
+  not polluted by live execution output.
+
 - **Import-time session-state crash resolved in split block renderer** —
   `appui_block_part2.py` no longer executes leaked top-level runtime code on
   import, preventing `AttributeError: st.session_state has no attribute
@@ -42,7 +67,7 @@
   immediately render the authoritative updated project name.
 
 - **Extended timeout control for manual result sync** — Launchpad MCP adds
-  `LAUNCHPAD_SYNC_TIMEOUT` (default `1800s`) used specifically for
+  `LAUNCHPAD_SYNC_TIMEOUT` (default `9600s`) used specifically for
   `/jobs/{run_uuid}/sync-results` requests, decoupling long sync operations
   from shorter generic MCP request timeouts.
 

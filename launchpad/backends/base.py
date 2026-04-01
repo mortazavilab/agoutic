@@ -110,3 +110,7 @@ class ExecutionBackend(Protocol):
     async def cleanup(self, run_uuid: str) -> bool:
         """Clean up job artifacts. Returns True if successful."""
         ...
+
+    def get_transfer_detail(self, run_uuid: str) -> str | None:
+        """Return in-flight transfer progress details when supported."""
+        ...

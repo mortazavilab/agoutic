@@ -81,7 +81,7 @@ class LaunchpadMCPTools:
         self.status_timeout = float(os.getenv("LAUNCHPAD_STATUS_TIMEOUT", "120"))
         self.submit_timeout = float(os.getenv("LAUNCHPAD_SUBMIT_TIMEOUT", "900"))
         self.stage_timeout = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
-        self.sync_timeout = float(os.getenv("LAUNCHPAD_SYNC_TIMEOUT", "1800"))
+        self.sync_timeout = float(os.getenv("LAUNCHPAD_SYNC_TIMEOUT", "9600"))
         # Internal API secret for Launchpad authentication
         self._api_secret = os.getenv("INTERNAL_API_SECRET", "")
     

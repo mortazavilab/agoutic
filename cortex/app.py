@@ -2756,6 +2756,7 @@ What would you like to do?
                     pass  # not clean JSON — leave all_results empty, fall through normally
 
         remote_stage_approval_context = None
+        _sync_run_uuid = ""  # populated by sync handler below (hoisted so always bound)
 
         if all_results:
             # Check if all results are errors (skip second pass if so)
@@ -2829,7 +2830,6 @@ What would you like to do?
                         _has_download_chain = True
             _is_browsing = bool(_all_tools_used) and _all_tools_used <= _browsing_tools
             _is_sync = "sync_job_results" in _all_tools_used
-            _sync_run_uuid = ""  # populated by sync handler below
 
             # Also skip second-pass for download workflows — the metadata is
             # used to build the approval gate, not to summarise for the user.

@@ -2,30 +2,148 @@
 
 import ast
 import datetime as dt
+import re as _re_module
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import pytest
 
 
 UI_APP_PATH = Path(__file__).resolve().parents[2] / "ui" / "appUI.py"
+_UI_DIR = UI_APP_PATH.parent
+
+# Mapping from the extracted module filename to its path on disk.
+_EXTRACTED_MODULES = {
+    "appui_state": _UI_DIR / "appui_state.py",
+    "appui_services": _UI_DIR / "appui_services.py",
+    "appui_renderers": _UI_DIR / "appui_renderers.py",
+    "appui_tasks": _UI_DIR / "appui_tasks.py",
+}
+
+
+def _parse_appui_imports():
+    """Parse appUI.py imports to build two resolution maps.
+
+    Returns
+    -------
+    import_map : dict[str, tuple[Path, str]]
+        ``{local_name: (source_path, original_name)}``
+        for plain ``from appui_X import foo`` style imports (Group A).
+    alias_map : dict[str, tuple[Path, str]]
+        ``{alias: (source_path, original_name)}``
+        for ``from appui_X import foo as foo_impl`` style imports (Group B).
+    """
+    source = UI_APP_PATH.read_text()
+    tree = ast.parse(source, filename=str(UI_APP_PATH))
+    import_map: dict[str, tuple[Path, str]] = {}
+    alias_map: dict[str, tuple[Path, str]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        module_name = node.module or ""
+        if module_name not in _EXTRACTED_MODULES:
+            continue
+        src_path = _EXTRACTED_MODULES[module_name]
+        for alias in node.names:
+            original = alias.name
+            local = alias.asname or alias.name
+            if alias.asname:
+                # e.g.  _resolve_df_by_id as _resolve_df_by_id_impl
+                alias_map[local] = (src_path, original)
+            else:
+                import_map[local] = (src_path, original)
+    return import_map, alias_map
+
+
+def _ast_load_fn_from_file(fn_name: str, src_path: Path, namespace: dict):
+    """Parse *src_path* and compile ``fn_name`` into *namespace*."""
+    source = src_path.read_text()
+    tree = ast.parse(source, filename=str(src_path))
+    fn_node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == fn_name
+    )
+    mod = ast.Module(body=[fn_node], type_ignores=[])
+    exec(compile(mod, filename=str(src_path), mode="exec"), namespace)
+    return namespace[fn_name]
+
+
+# Build the import maps once at module load time.
+_IMPORT_MAP, _ALIAS_MAP = _parse_appui_imports()
+
+# Names of _impl aliases referenced inside wrapper bodies in appUI.py.
+_IMPL_CALL_RE = _re_module.compile(r'\b(\w+_impl)\b')
 
 
 def _load_function(name: str, extra_globals: dict | None = None):
-    """Compile a single function from ui/appUI.py without importing Streamlit."""
-    source = UI_APP_PATH.read_text()
-    tree = ast.parse(source, filename=str(UI_APP_PATH))
-    fn_node = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
-    )
-    module = ast.Module(body=[fn_node], type_ignores=[])
-    namespace = {"pd": pd, "px": px, "datetime": dt, "API_URL": "http://api.test", "PLOTLY_TEMPLATE": {}}
+    """Compile a single function from the UI source layer without importing Streamlit.
+
+    Handles three cases that arise after the appUI decomposition:
+
+    * **Group A** – function was moved to an extracted module and is only an
+      ``import`` in appUI.py (no FunctionDef).  Resolved via ``_IMPORT_MAP``.
+    * **Group B** – function is a thin wrapper in appUI.py that delegates to an
+      ``*_impl`` alias imported from an extracted module.  The ``*_impl``
+      callables are injected automatically into the execution namespace.
+    * **Legacy** – function is a self-contained FunctionDef in appUI.py with
+      no ``*_impl`` dependencies.  Compiled directly (original behaviour).
+    """
+    namespace: dict = {
+        "pd": pd,
+        "px": px,
+        "go": go,
+        "re": _re_module,
+        "datetime": dt,
+        "API_URL": "http://api.test",
+        "PLOTLY_TEMPLATE": {},
+    }
     if extra_globals:
         namespace.update(extra_globals)
-    exec(compile(module, filename=str(UI_APP_PATH), mode="exec"), namespace)
+
+    source = UI_APP_PATH.read_text()
+    tree = ast.parse(source, filename=str(UI_APP_PATH))
+
+    # Try to find a FunctionDef with this name in appUI.py.
+    fn_node = next(
+        (node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name),
+        None,
+    )
+
+    if fn_node is None:
+        # Group A: function lives in an extracted module; only imported here.
+            if name in _IMPORT_MAP:
+                src_path, original_name = _IMPORT_MAP[name]
+                return _ast_load_fn_from_file(original_name, src_path, namespace)
+
+            # Fallback: not imported into appUI.py either — scan all extracted
+            # modules directly (handles private helpers like
+            # _has_pending_destructive_confirmation that live in an extracted
+            # module but aren't re-exported by appUI.py).
+            for src_path in _EXTRACTED_MODULES.values():
+                try:
+                    return _ast_load_fn_from_file(name, src_path, namespace)
+                except StopIteration:
+                    continue
+            raise LookupError(
+                f"Function {name!r} not found as a FunctionDef in appUI.py "
+                f"or any extracted UI module"
+            )
+    # pre-populate the namespace with the real implementations.
+    fn_source = ast.unparse(fn_node)
+    for impl_alias in _IMPL_CALL_RE.findall(fn_source):
+        if impl_alias in namespace:
+            continue  # already supplied (e.g. by extra_globals)
+        if impl_alias in _ALIAS_MAP:
+            src_path, original_name = _ALIAS_MAP[impl_alias]
+            _ast_load_fn_from_file(original_name, src_path, namespace)
+            namespace[impl_alias] = namespace[original_name]
+
+    mod = ast.Module(body=[fn_node], type_ignores=[])
+    exec(compile(mod, filename=str(UI_APP_PATH), mode="exec"), namespace)
     return namespace[name]
 
 

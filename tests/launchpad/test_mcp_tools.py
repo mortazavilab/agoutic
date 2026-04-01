@@ -400,13 +400,13 @@ class TestStatusAndReport:
         fake_client = FakeAsyncClient(
             post_response=FakeResponse(json_data={"success": True, "status": "outputs_downloaded"})
         )
-        monkeypatch.setenv("LAUNCHPAD_SYNC_TIMEOUT", "1800")
+        monkeypatch.setenv("LAUNCHPAD_SYNC_TIMEOUT", "9600")
 
         with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
             tools = LaunchpadMCPTools("http://launchpad.local")
             await tools.sync_job_results("run-1")
 
-        assert fake_client.post_calls[0][1]["timeout"] == 1800.0
+        assert fake_client.post_calls[0][1]["timeout"] == 9600.0
 
     @pytest.mark.asyncio
     async def test_sync_job_results_wraps_not_found(self):

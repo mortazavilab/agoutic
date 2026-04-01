@@ -915,6 +915,8 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             # SSH sacct round-trip and return the in-memory transfer detail
             # immediately so the UI sees per-folder progress without delay.
             backend = get_backend("slurm")
+            get_transfer_detail = getattr(backend, "get_transfer_detail", None)
+            transfer_detail = get_transfer_detail(run_uuid) if callable(get_transfer_detail) else None
             return {
                 "run_uuid": run_uuid,
                 "status": "RUNNING",
@@ -926,7 +928,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "slurm_job_id": job.slurm_job_id,
                 "slurm_state": job.slurm_state,
                 "transfer_state": job.transfer_state,
-                "transfer_detail": backend.get_transfer_detail(run_uuid),
+                "transfer_detail": transfer_detail,
                 "result_destination": job.result_destination,
                 "work_directory": _effective_job_work_directory(job),
                 **_job_timing_payload(job),

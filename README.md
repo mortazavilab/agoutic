@@ -30,7 +30,7 @@
   real files into local workflow directories.
 
 - **Manual sync now supports extended timeout tuning** — Launchpad MCP adds
-  `LAUNCHPAD_SYNC_TIMEOUT` (default `1800s`) specifically for
+  `LAUNCHPAD_SYNC_TIMEOUT` (default `9600s`) specifically for
   `sync_job_results` operations.
 
 - **Manual sync timeout errors are now actionable** — read timeout failures now

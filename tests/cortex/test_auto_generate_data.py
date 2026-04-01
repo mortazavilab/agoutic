@@ -102,6 +102,16 @@ class TestBrowsingCommands:
 
 
 class TestManualResultSyncCommand:
+    def _blocks_with_job(self, work_dir="/tmp/proj/workflow1"):
+        return _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": work_dir,
+                "run_uuid": "11111111-1111-1111-1111-111111111111",
+                "sample_name": "s1",
+                "mode": "DNA",
+            }},
+        ])
+
     def _blocks_with_runs(self):
         return _make_blocks([
             {"type": "EXECUTION_JOB", "payload": {
