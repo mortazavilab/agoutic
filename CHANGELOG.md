@@ -39,6 +39,16 @@
   wrapper stdout in `--json` mode so machine-readable reconcile payloads are
   not polluted by live execution output.
 
+- **Script-backed reconcile runs are now labeled correctly in the UI** —
+  execution cards for allowlisted script jobs such as `reconcile_bams` now
+  render as `Skill Script` instead of `Nextflow Job`, while preserving the
+  existing live execution monitoring surface.
+
+- **UI execution timestamps now consistently render in local time** —
+  execution/job timestamps now treat naive API timestamps as UTC before
+  converting them for display, preventing UTC wall-clock values from leaking
+  into the Streamlit UI on local-time systems such as PDT.
+
 - **Import-time session-state crash resolved in split block renderer** —
   `appui_block_part2.py` no longer executes leaked top-level runtime code on
   import, preventing `AttributeError: st.session_state has no attribute

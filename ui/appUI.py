@@ -367,9 +367,10 @@ def render_block(block, expected_project_id: str = ""):
                 dt = datetime.datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
             else:
                 dt = raw_value
-            # Convert to local time for display
-            if dt.tzinfo is not None:
-                dt = dt.astimezone()
+            # Treat naive values from the API as UTC, then convert to local time.
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            dt = dt.astimezone()
             return dt
         except Exception:
             return None
@@ -384,7 +385,7 @@ def render_block(block, expected_project_id: str = ""):
         start_dt = _parse_timestamp(start_value)
         if start_dt is None:
             return ""
-        end_dt = _parse_timestamp(end_value) or datetime.datetime.now(datetime.timezone.utc)
+        end_dt = _parse_timestamp(end_value) or datetime.datetime.now().astimezone()
         try:
             total_seconds = max(int((end_dt - start_dt).total_seconds()), 0)
         except Exception:

@@ -287,7 +287,7 @@ def render_block_part2(
 
     elif btype == "EXECUTION_JOB":
         handled = True
-        # Job execution monitoring with Nextflow progress visualization
+        # Job execution monitoring with progress visualization
         with st.chat_message("assistant", avatar="⚙️"):
             run_uuid = content.get("run_uuid", "")
             sample_name = content.get("sample_name", "Unknown")
@@ -295,12 +295,6 @@ def render_block_part2(
             work_directory = content.get("work_directory", "")
             has_identity = bool(run_uuid) or bool(content.get("sample_name"))
             block_status_str = block.get("status", "")
-            
-            section_header(
-                f"Nextflow Job · {sample_name if has_identity else 'Submission'}",
-                "Live execution monitoring and controls",
-                icon="🧬",
-            )
 
             # Show human-readable folder name (e.g. "workflow2") when available
             if not run_uuid and block_status_str == "FAILED":
@@ -329,6 +323,8 @@ def render_block_part2(
                     if live_resp.status_code == 200:
                         job_status = live_resp.json()
                         live_status_poll_succeeded = True
+                        run_stage_hint = str(job_status.get("run_stage") or run_stage_hint).strip().upper()
+                        is_script_job = is_script_job or run_stage_hint.startswith("SCRIPT_")
                         st.session_state[f"_job_polled_at_{run_uuid}"] = (
                             datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                         )
@@ -337,6 +333,28 @@ def render_block_part2(
                         st.session_state[f"_transfer_state_{run_uuid}"] = _live_ts
                 except Exception:
                     pass  # Fall back to block payload
+
+            run_type = str(content.get("run_type") or "").strip().lower()
+            script_id = str(content.get("script_id") or "").strip()
+            run_stage_hint = str(
+                job_status.get("run_stage")
+                or content.get("run_stage")
+                or content.get("job_status", {}).get("run_stage")
+                or ""
+            ).strip().upper()
+            is_script_job = run_type == "script" or bool(script_id) or run_stage_hint.startswith("SCRIPT_")
+            job_title = "Skill Script" if is_script_job else "Nextflow Job"
+            job_subtitle = (
+                "Live script execution monitoring and controls"
+                if is_script_job
+                else "Live execution monitoring and controls"
+            )
+
+            section_header(
+                f"{job_title} · {sample_name if has_identity else 'Submission'}",
+                job_subtitle,
+                icon="🧬",
+            )
             
             if job_status:
                 status_str = job_status.get("status", content.get("status", "UNKNOWN"))
@@ -360,6 +378,8 @@ def render_block_part2(
                 status_chip(_chip, label=_status_label, icon=_status_icon)
 
                 run_meta = {"Mode": mode, "Run UUID": run_uuid}
+                if is_script_job and script_id:
+                    run_meta["Script"] = script_id
                 if workflow_label:
                     run_meta["Workflow"] = workflow_label
                 started_label = _format_timestamp(started_at or submitted_at)
@@ -681,7 +701,9 @@ def render_block_part2(
                     if _job_created:
                         try:
                             _start_dt = datetime.datetime.fromisoformat(_job_created.replace("Z", "+00:00"))
-                            _elapsed = datetime.datetime.now(datetime.timezone.utc) - _start_dt
+                            if _start_dt.tzinfo is None:
+                                _start_dt = _start_dt.replace(tzinfo=datetime.timezone.utc)
+                            _elapsed = datetime.datetime.now(datetime.timezone.utc) - _start_dt.astimezone(datetime.timezone.utc)
                             _mins, _secs = divmod(int(_elapsed.total_seconds()), 60)
                             _timing_parts.append(f"⏱️ Running for {_mins}m {_secs}s")
                         except (ValueError, TypeError):
@@ -689,7 +711,9 @@ def render_block_part2(
                     if _last_upd:
                         try:
                             _upd_dt = datetime.datetime.fromisoformat(_last_upd.replace("Z", "+00:00"))
-                            _ago = datetime.datetime.now(datetime.timezone.utc) - _upd_dt
+                            if _upd_dt.tzinfo is None:
+                                _upd_dt = _upd_dt.replace(tzinfo=datetime.timezone.utc)
+                            _ago = datetime.datetime.now(datetime.timezone.utc) - _upd_dt.astimezone(datetime.timezone.utc)
                             _ago_secs = int(_ago.total_seconds())
                             _timing_parts.append(f"🔄 Updated {_ago_secs}s ago")
                         except (ValueError, TypeError):

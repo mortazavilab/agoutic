@@ -9,7 +9,7 @@ import pandas as pd
 import sys
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -31,7 +31,10 @@ def _format_timestamp(raw_value: str | None) -> str:
     if not raw_value:
         return "—"
     try:
-        return datetime.fromisoformat(str(raw_value).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+        dt = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M")
     except Exception:
         return str(raw_value)[:16] or "—"
 
