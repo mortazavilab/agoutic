@@ -119,6 +119,47 @@ rotate_logs() {
     if [ "$rotated" -gt 0 ]; then
         log "Rotated $rotated log file(s) with timestamp $timestamp"
     fi
+
+    # Archive rotated logs older than 30 days into monthly folders
+    # e.g. logs/logs_202603/ for March 2026
+    local archived=0
+    for logfile in "$LOGS_DIR"/*.jsonl "$LOGS_DIR"/*.log; do
+        [ -e "$logfile" ] || continue
+
+        # Only consider already-rotated files (contain a dot-separated timestamp)
+        local base
+        base=$(basename "$logfile")
+        local ext="${base##*.}"
+        local name="${base%.*}"
+        # Rotated files have at least one dot in the name portion, e.g. "cortex.20260213_082438"
+        [[ "$name" == *.* ]] || continue
+
+        # Check if file is older than 30 days
+        if [[ "$(uname)" == "Darwin" ]]; then
+            local age_days
+            age_days=$(( ( $(date +%s) - $(stat -f %m "$logfile") ) / 86400 ))
+        else
+            local age_days
+            age_days=$(( ( $(date +%s) - $(stat -c %Y "$logfile") ) / 86400 ))
+        fi
+        [ "$age_days" -ge 30 ] || continue
+
+        # Determine the month folder from the file's modification time
+        local month_stamp
+        if [[ "$(uname)" == "Darwin" ]]; then
+            month_stamp=$(date -r "$(stat -f %m "$logfile")" +%Y%m)
+        else
+            month_stamp=$(date -d "@$(stat -c %Y "$logfile")" +%Y%m)
+        fi
+        local archive_dir="$LOGS_DIR/logs_${month_stamp}"
+        mkdir -p "$archive_dir"
+        mv "$logfile" "$archive_dir/"
+        archived=$((archived + 1))
+    done
+
+    if [ "$archived" -gt 0 ]; then
+        log "Archived $archived old log file(s) into monthly folders"
+    fi
 }
 
 # --- Process management ---

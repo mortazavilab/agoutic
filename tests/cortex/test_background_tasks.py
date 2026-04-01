@@ -262,7 +262,9 @@ def _patch_session(session_factory):
          patch("cortex.dependencies.SessionLocal", session_factory), \
          patch("cortex.middleware.SessionLocal", session_factory), \
          patch("cortex.admin.SessionLocal", session_factory), \
-         patch("cortex.auth.SessionLocal", session_factory):
+         patch("cortex.auth.SessionLocal", session_factory), \
+         patch("cortex.chat_approval.SessionLocal", session_factory), \
+         patch("cortex.chat_downloads.SessionLocal", session_factory):
         yield
 
 
@@ -332,8 +334,8 @@ class TestHandleRejection:
         mock_engine.think = MagicMock(return_value="Revised plan\n[[APPROVAL_NEEDED]]")
 
         with _patch_session(session_factory), \
-             patch("cortex.app.AgentEngine", return_value=mock_engine), \
-             patch("cortex.app.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.chat_approval.AgentEngine", return_value=mock_engine), \
+             patch("cortex.chat_approval.run_in_threadpool", _mock_run_in_threadpool), \
              patch("cortex.job_parameters.extract_job_parameters_from_conversation",
                    new_callable=AsyncMock, return_value={"sample_name": "test"}):
             await handle_rejection("proj-bg", gate.id)
@@ -399,8 +401,8 @@ class TestHandleRejection:
         )
 
         with _patch_session(session_factory), \
-             patch("cortex.app.AgentEngine", return_value=mock_engine), \
-             patch("cortex.app.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.chat_approval.AgentEngine", return_value=mock_engine), \
+             patch("cortex.chat_approval.run_in_threadpool", _mock_run_in_threadpool), \
              patch("cortex.job_parameters.extract_job_parameters_from_conversation",
                    new_callable=AsyncMock, return_value={"sample_name": "test"}):
             await handle_rejection("proj-bg", gate.id)
@@ -439,8 +441,8 @@ class TestHandleRejection:
         )
 
         with _patch_session(session_factory), \
-             patch("cortex.app.AgentEngine", return_value=mock_engine), \
-             patch("cortex.app.run_in_threadpool", _mock_run_in_threadpool):
+             patch("cortex.chat_approval.AgentEngine", return_value=mock_engine), \
+             patch("cortex.chat_approval.run_in_threadpool", _mock_run_in_threadpool):
             await handle_rejection("proj-bg", gate.id)
 
         sess = session_factory()
@@ -470,8 +472,8 @@ class TestHandleRejection:
         mock_engine.think = MagicMock(side_effect=RuntimeError("LLM timeout"))
 
         with _patch_session(session_factory), \
-             patch("cortex.app.AgentEngine", return_value=mock_engine), \
-             patch("cortex.app.run_in_threadpool", _mock_run_in_threadpool):
+             patch("cortex.chat_approval.AgentEngine", return_value=mock_engine), \
+             patch("cortex.chat_approval.run_in_threadpool", _mock_run_in_threadpool):
             await handle_rejection("proj-bg", gate.id)
 
         sess = session_factory()
@@ -512,7 +514,7 @@ class TestDownloadAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.chat_downloads.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await download_after_approval("proj-bg", gate.id)
 
@@ -542,8 +544,8 @@ class TestDownloadAfterApproval:
 
 
         with _patch_session(session_factory), \
-             patch("cortex.app.asyncio") as mock_aio, \
-               patch("cortex.app.AGOUTIC_DATA", str(tmp_path)):
+             patch("cortex.chat_downloads.asyncio") as mock_aio, \
+               patch("cortex.chat_downloads.AGOUTIC_DATA", str(tmp_path)):
             mock_aio.create_task = MagicMock()
             await download_after_approval("proj-bg", gate.id)
 
@@ -610,8 +612,8 @@ class TestDownloadAfterApproval:
         })
 
         with _patch_session(session_factory), \
-             patch("cortex.app.AGOUTIC_DATA", str(tmp_path)), \
-             patch("cortex.app.asyncio") as mock_aio:
+             patch("cortex.chat_downloads.AGOUTIC_DATA", str(tmp_path)), \
+             patch("cortex.chat_downloads.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await download_after_approval("proj-bg", gate.id)
 
@@ -1517,7 +1519,7 @@ async def test_auto_execute_plan_steps_creates_gate_for_waiting_remote_stage_pla
     user = type("UserStub", (), {"id": "u-bg"})()
 
     with _patch_session(session_factory), \
-         patch("cortex.app.AgentEngine") as mock_engine_cls, \
+         patch("cortex.chat_downloads.AgentEngine") as mock_engine_cls, \
          patch("cortex.plan_executor.execute_plan", new=AsyncMock(return_value=None)), \
          patch(
              "cortex.job_parameters.extract_job_parameters_from_conversation",
@@ -1569,7 +1571,7 @@ async def test_auto_execute_plan_steps_executes_remote_stage_plan_to_approval(se
     user = type("UserStub", (), {"id": "u-bg"})()
 
     with _patch_session(session_factory), \
-         patch("cortex.app.AgentEngine") as mock_engine_cls, \
+         patch("cortex.chat_downloads.AgentEngine") as mock_engine_cls, \
          patch(
              "cortex.plan_executor._call_mcp_tool",
              new=AsyncMock(return_value={"success": True, "file_count": 1, "files": [{"name": "read_001.pod5"}]}),
@@ -1585,15 +1587,15 @@ async def test_auto_execute_plan_steps_executes_remote_stage_plan_to_approval(se
                  "gate_action": "remote_stage",
              }),
          ), \
-         patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-         patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+         patch("cortex.chat_approval._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+         patch("cortex.chat_approval._list_user_ssh_profiles", new=AsyncMock(return_value=[{
              "id": "profile-123",
              "nickname": "hpc3",
              "ssh_host": "hpc3.example.edu",
              "auth_method": "key_file",
              "local_username": "alim",
          }])), \
-         patch("cortex.app._get_ssh_profile_auth_session", new=AsyncMock(return_value={"active": True})):
+         patch("cortex.chat_approval._get_ssh_profile_auth_session", new=AsyncMock(return_value={"active": True})):
         mock_engine = MagicMock()
         mock_engine.model_name = "test-model"
         mock_engine_cls.return_value = mock_engine
@@ -1653,7 +1655,7 @@ async def test_auto_execute_plan_steps_blocks_when_remote_profile_locked(session
     user = type("UserStub", (), {"id": "u-bg"})()
 
     with _patch_session(session_factory), \
-         patch("cortex.app.AgentEngine") as mock_engine_cls, \
+         patch("cortex.chat_downloads.AgentEngine") as mock_engine_cls, \
          patch("cortex.plan_executor.execute_plan", new=AsyncMock(return_value=None)), \
          patch(
              "cortex.job_parameters.extract_job_parameters_from_conversation",
@@ -1666,15 +1668,15 @@ async def test_auto_execute_plan_steps_blocks_when_remote_profile_locked(session
                  "gate_action": "remote_stage",
              }),
          ), \
-         patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-         patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+         patch("cortex.chat_approval._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+         patch("cortex.chat_approval._list_user_ssh_profiles", new=AsyncMock(return_value=[{
              "id": "profile-123",
              "nickname": "hpc3",
              "ssh_host": "hpc3.example.edu",
              "auth_method": "key_file",
              "local_username": "alim",
          }])), \
-         patch("cortex.app._get_ssh_profile_auth_session", new=AsyncMock(return_value={"active": False})):
+         patch("cortex.chat_approval._get_ssh_profile_auth_session", new=AsyncMock(return_value={"active": False})):
         mock_engine = MagicMock()
         mock_engine.model_name = "test-model"
         mock_engine_cls.return_value = mock_engine
@@ -1996,7 +1998,7 @@ class TestPollJobStatus:
              patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
              patch("cortex.job_polling._auto_trigger_analysis", new_callable=AsyncMock) as mock_auto, \
              patch("cortex.job_polling.asyncio.create_task") as mock_create_task, \
-             patch("cortex.app.AgentEngine") as mock_engine_cls, \
+             patch("cortex.chat_downloads.AgentEngine") as mock_engine_cls, \
              patch("cortex.plan_executor.execute_plan", new=AsyncMock(return_value=None)):
             mock_sleep.return_value = None
             mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]

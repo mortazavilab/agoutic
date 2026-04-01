@@ -1,3 +1,43 @@
+## [3.4.16] - 2026-04-01
+
+### Refactors
+
+- **Planner decomposition** — split `planner.py` (2,127 LOC) into four
+  focused modules: `plan_templates.py` (987 LOC, 12 template functions),
+  `plan_classifier.py` (238 LOC, classification patterns), `plan_params.py`
+  (366 LOC, parameter extraction), and a slim `planner.py` orchestration
+  layer (642 LOC). All public symbols are re-exported from `cortex.planner`
+  for backward compatibility.
+
+- **App chat-helper extraction** — extracted three helper modules from
+  `app.py` (3,303 → 2,340 LOC): `chat_sync_handler.py` (279 LOC, progress
+  tracking, DataFrame commands, plot style params), `chat_approval.py`
+  (553 LOC, plan approval flow, SSH auth), and `chat_downloads.py` (232 LOC,
+  download orchestration, auto-execute). All symbols re-exported from
+  `cortex.app` for backward compatibility.
+
+### Fixes
+
+- **Tool schema cache no longer permanently empty after startup** — if all
+  MCP servers are unreachable at startup, `fetch_all_tool_schemas` now leaves
+  `_CACHE_LOADED=False` so the next request retries the fetch instead of
+  permanently serving an empty cache. A pre-`think()` async retry in `app.py`
+  ensures tool contracts are available before the first LLM call.
+
+- **`search_data` tool alias added for ENCODE** — the LLM occasionally
+  confuses the `SEARCH_DATA` plan-chain label for a tool name; added
+  `"search_data" → "search_by_biosample"` alias in `atlas/config.py`.
+
+- **Log rotation now archives old logs into monthly folders** — rotated log
+  files older than 30 days are moved into `logs/logs_YYYYMM/` directories
+  (e.g. `logs/logs_202603/` for March 2026).
+
+- **Tool schema retry no longer shadows module-level imports** — the
+  pre-`think()` async retry of `fetch_all_tool_schemas` now uses module-level
+  aliases (`import cortex.config as _cfg`) instead of `from` imports, preventing
+  Python's scoping rules from shadowing the module-level `SERVICE_REGISTRY`
+  binding for the entire `chat_with_agent` function.
+
 ## [3.4.15] - 2026-03-31
 
 ### Features

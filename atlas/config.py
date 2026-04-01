@@ -71,6 +71,7 @@ CONSORTIUM_REGISTRY = {
             "search_experiments": "search_by_biosample",
             "search_experiment": "search_by_biosample",
             "search_encode": "search_by_biosample",
+            "search_data": "search_by_biosample",
             "encode_search": "search_by_biosample",
             "search": "search_by_biosample",
             "search_target": "search_by_target",
