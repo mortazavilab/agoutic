@@ -28,6 +28,28 @@
 - **Priority gap convention** — stages are spaced by 100 so new stages can be
   inserted without renumbering existing ones.
 
+### Features
+
+- **Project rename syncs local folder** — renaming a project now
+  auto-generates a new slug from the new name and renames the on-disk
+  directory (`AGOUTIC_DATA/users/{username}/{slug}/`) atomically so the UI
+  name, database slug, and filesystem folder stay in sync.
+
+- **Slug displayed in sidebar and toasts** — when a project's slug differs
+  from a plain-lowercased version of its display name (e.g. `project-2026-03-27-2`
+  vs `project-2026-03-27`), the sidebar now shows a `(slug)` hint next to the
+  project button; project creation and rename toasts also report the actual
+  folder name.
+
+- **Rename audit trail via memory** — each project rename automatically
+  creates two `finding` memories ("Project renamed from X to Y" and
+  "Project folder renamed from X to Y") so the history of name changes is
+  traceable from the Memories page.
+
+- **Project creation returns full slug** — `POST /projects` and the UI
+  wrapper now return `{id, slug, name}` instead of a bare string so callers
+  can display the actual on-disk folder name immediately.
+
 ### Bug Fixes
 
 - **`_suppress_all_tags` ordering** — fixed a bug in the overrides stage where

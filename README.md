@@ -1,44 +1,27 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.17
+**Version:** 3.5.0
 **Status:** Active Prototype 
 
-## Latest Updates (2026-04-01)
+## Latest Updates (2026-04-02)
+
+- **Chat pipeline decomposition** — replaced the monolithic `chat_with_agent`
+  function (1,637 lines) with a 15-stage registry-based pipeline.
+  `cortex/app.py` reduced from 2,348 → 805 lines.
+
+- **Project rename syncs local folder** — renaming a project auto-generates
+  a new slug and renames the on-disk directory so the UI name, database slug,
+  and filesystem folder always stay in sync. Each rename is recorded as a
+  `finding` memory for auditability.
+
+- **Slug hints in sidebar** — projects with suffixed slugs (e.g.
+  `project-2026-03-27-2`) now show a `(slug)` hint in the sidebar and in
+  creation/rename toasts so you always know the actual folder name.
 
 - **Dual-scope memory system** — persistent memory with user-global and
-  per-project scopes. Categories: `result`, `sample_annotation`,
-  `pipeline_step`, `preference`, `finding`, `custom`. Soft-delete with
-  recovery, pinning, and configurable token-budget context injection.
-
-- **Chat-line memory CRUD** — slash commands (`/remember`, `/forget`,
-  `/memories`, `/pin`, `/unpin`, `/restore`, `/annotate`,
-  `/search-memories`) plus natural language detection ("remember that...",
-  "sample X is an AD sample", "what do you remember about...?").
-
-- **Sample metadata annotation** — `/annotate sample1 condition=AD` and
-  natural language "sample X is a Y" dual-write to `tags_json` and the
-  memory table for auditable annotation trails.
-
-- **Auto-capture of pipeline steps and job results** — successful workflow
-  steps and completed jobs are automatically recorded as memories with
-  deduplication and auto-pinning.
-
-- **Memory-aware LLM context** — `[MEMORY]` block injected every turn with
-  pinned memories prioritized and dynamic token budget scaling.
-
-- **Memories UI page and sidebar widget** — Streamlit page with scope tabs,
-  category filters, and an always-visible sidebar summary.
-
-- **REST API for memories** — full CRUD at `/memories` with project/category
-  filtering, soft-delete/restore, and pin toggle.
-
-- **Planner decomposition** — split `planner.py` (2,127 LOC) into
-  `plan_templates.py`, `plan_classifier.py`, `plan_params.py`, and a slim
-  orchestration layer.
-
-- **App chat-helper extraction** — extracted `chat_sync_handler.py`,
-  `chat_approval.py`, `chat_downloads.py` from `app.py`
-  (3,303 → 2,340 LOC).
+  per-project scopes (`result`, `sample_annotation`, `pipeline_step`,
+  `preference`, `finding`, `custom`). Slash commands, NL detection,
+  soft-delete, pinning, token-budget context injection, and Memories UI.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
