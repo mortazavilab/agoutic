@@ -26,7 +26,9 @@ logger = get_logger(__name__)
 
 def _inject_job_context(user_message: str, active_skill: str,
                         conversation_history: list | None,
-                        history_blocks: list | None = None) -> tuple[str, dict, dict]:
+                        history_blocks: list | None = None,
+                        db=None, user_id: str | None = None,
+                        project_id: str | None = None) -> tuple[str, dict, dict]:
     """
     Inject relevant conversational context into the user message so the LLM
     can maintain continuity without having to parse conversation history itself.
@@ -43,6 +45,66 @@ def _inject_job_context(user_message: str, active_skill: str,
     """
     if not conversation_history:
         return user_message, {}, {}
+
+    # --- Remembered DF lookup helper -----------------------------------------
+    # Resolve a named DF reference (e.g. "c2c12DF") to its stored data dict.
+    _remembered_map: dict | None = None
+
+    def _get_remembered_map() -> dict:
+        nonlocal _remembered_map
+        if _remembered_map is None:
+            if db is not None and user_id is not None:
+                from cortex.memory_service import get_remembered_df_map
+                _remembered_map = get_remembered_df_map(db, user_id, project_id)
+            else:
+                _remembered_map = {}
+        return _remembered_map
+
+    def _find_named_df_ref(msg: str) -> tuple[str | None, dict | None]:
+        """Return ``(name, df_data_dict)`` if *msg* references a remembered named DF."""
+        rmap = _get_remembered_map()
+        if not rmap:
+            return None, None
+        for name in rmap:
+            if not isinstance(name, str):
+                continue
+            if re.search(r'\b' + re.escape(name) + r'\b', msg, re.IGNORECASE):
+                return name, rmap[name]
+        return None, None
+
+    def _build_remembered_df_injection(name: str, data: dict, context_prefix: str
+                                       ) -> tuple[str, dict, dict]:
+        """Build augmented message + injected_dfs for a remembered named DF."""
+        cols = data.get("columns", [])
+        rows = data.get("data", [])
+        count = data.get("row_count", len(rows))
+        label = data.get("label", name)
+        _MAX = 500
+        shown = rows[:_MAX]
+        hdr = "| " + " | ".join(cols) + " |"
+        sep = "|" + "|".join(["---"] * len(cols)) + "|"
+        body = [
+            "| " + " | ".join(
+                str(r.get(c, "") if isinstance(r, dict) else "") for c in cols
+            ) + " |"
+            for r in shown
+        ]
+        suffix = f"\n*({count} total rows)*" if count > _MAX else ""
+        table = (
+            f"**{name}: {label}** ({count} rows):\n"
+            + hdr + "\n" + sep + "\n" + "\n".join(body) + suffix
+        )
+        ctx = f"{context_prefix}\n[PREVIOUS QUERY DATA:]\n{table}"
+        inj = {
+            name: {
+                "columns": cols, "data": rows, "row_count": count,
+                "metadata": {"label": label, "visible": True},
+            }
+        }
+        return (
+            f"{ctx}\n\n{user_message}", inj,
+            {"source": "remembered_df_injection", "named_df": name},
+        )
 
     # --- Dogme skills: inject workflow directory paths ---
     dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
@@ -132,6 +194,21 @@ def _inject_job_context(user_message: str, active_skill: str,
                         break
                 if _df_note:
                     break
+
+        # Fallback: check for a named remembered DF (e.g. "plot c2c12DF by assay")
+        if not _df_note and not _df_ref_match:
+            _named_ref, _named_data = _find_named_df_ref(user_message)
+            if _named_ref and _named_data:
+                _cols = _named_data.get("columns", [])
+                _nrows = _named_data.get("row_count", len(_named_data.get("data", [])))
+                _label = _named_data.get("label", _named_ref)
+                _df_note = (
+                    f"\n[NOTE: {_named_ref} is a remembered in-memory DataFrame — "
+                    f"it is NOT a file or run result to look up. "
+                    f"Label: '{_label}'. Columns: {_cols}. Rows: {_nrows}. "
+                    f"To visualize it use [[PLOT:...]] tags. "
+                    f"Do NOT call find_file, list_job_files, or any analyzer tool for this.]"
+                )
 
         context_line = f"[CONTEXT: {', '.join(parts)}]" if parts else ""
         augmented = "\n".join(filter(None, [context_line, user_message])) + _df_note
@@ -338,7 +415,9 @@ def _inject_job_context(user_message: str, active_skill: str,
             r'\bamong\s+them\b',       # "among them"
             r'\bof\s+those\b',         # "of those"
         ]
-        _is_followup = any(re.search(p, msg_lower) for p in _followup_signals)
+        # Also treat a named remembered DF reference as a follow-up signal
+        _named_ref, _named_data = _find_named_df_ref(user_message)
+        _is_followup = any(re.search(p, msg_lower) for p in _followup_signals) or _named_ref is not None
         if _is_followup:
             _is_new_query = False  # override — referential language wins
 
@@ -644,6 +723,18 @@ def _inject_job_context(user_message: str, active_skill: str,
                         file_type_filter=_file_type_filter,
                     )
 
+            # Inject a remembered named DF if referenced and not yet injected
+            # from history blocks.  "plot c2c12DF by assay" hits this path
+            # when c2c12DF is a saved memory, not an in-conversation DF.
+            if _named_ref and _named_data:
+                return _build_remembered_df_injection(
+                    _named_ref, _named_data,
+                    "[CONTEXT: This is a follow-up question referencing a "
+                    "remembered DataFrame. READ THIS DATA FIRST and answer "
+                    "directly from it. Do NOT make a new DATA_CALL — the "
+                    "data is already provided.]",
+                )
+
             # FALLBACK: extract from <details> text in conversation history
             for hist_msg in reversed(conversation_history[-6:]):
                 content = hist_msg.get("content", "")
@@ -667,6 +758,18 @@ def _inject_job_context(user_message: str, active_skill: str,
                         f"{raw_data}"
                     )
                     return f"{context_line}\n{user_message}", {}, {"source": "fallback_details"}
+
+    # --- Catch-all: inject a remembered named DF regardless of skill ---
+    # Handles skills like remote_execution, welcome, etc. where the user
+    # references a remembered DF by name (e.g. "plot c2c12DF by assay").
+    _named_ref_any, _named_data_any = _find_named_df_ref(user_message)
+    if _named_ref_any and _named_data_any:
+        return _build_remembered_df_injection(
+            _named_ref_any, _named_data_any,
+            "[CONTEXT: The user is referencing a remembered DataFrame. "
+            "READ THIS DATA FIRST and answer directly from it. "
+            "Do NOT make a new DATA_CALL — the data is already provided.]",
+        )
 
     return user_message, {}, {}
 

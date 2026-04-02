@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 VALID_CATEGORIES = frozenset({
     "result", "sample_annotation", "pipeline_step",
-    "preference", "finding", "custom",
+    "preference", "finding", "custom", "dataframe",
 })
 VALID_SOURCES = frozenset({
     "user_manual", "auto_step", "auto_result", "system",
@@ -143,6 +143,91 @@ def pin_memory(db: Session, memory_id: str, user_id: str, pinned: bool = True) -
     return True
 
 
+def upgrade_to_global(db: Session, memory_id: str, user_id: str) -> Memory | None:
+    """Promote a project-scoped memory to global (set project_id to None).
+
+    Dataframe memories must have a user-given alias (stored in tags_json
+    under ``df_name``) before they can be promoted.
+    """
+    mem = db.execute(
+        select(Memory).where(
+            Memory.id == memory_id,
+            Memory.user_id == user_id,
+            Memory.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if not mem:
+        return None
+    if mem.project_id is None:
+        return mem  # Already global
+    # Dataframe memories require a user-given name to go global
+    if mem.category == "dataframe":
+        tags = {}
+        if mem.tags_json:
+            try:
+                tags = json.loads(mem.tags_json)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if not tags.get("df_name"):
+            return None  # Unnamed DF — cannot upgrade
+    mem.project_id = None
+    db.commit()
+    db.refresh(mem)
+    logger.info("Memory upgraded to global", memory_id=memory_id)
+    return mem
+
+
+def remember_dataframe(
+    db: Session,
+    *,
+    user_id: str,
+    project_id: str | None,
+    df_id: int,
+    df_data: dict,
+    df_name: str | None = None,
+) -> Memory:
+    """Create a dataframe memory from a conversation DF.
+
+    Parameters
+    ----------
+    df_data : dict
+        The raw DF dict with ``columns``, ``data``, ``row_count``, ``metadata``.
+    df_name : str | None
+        Optional user-given alias (e.g. "c2c12DF").
+    """
+    label = df_data.get("metadata", {}).get("label", f"DF{df_id}")
+    row_count = df_data.get("row_count", len(df_data.get("data", [])))
+    columns = df_data.get("columns", [])
+
+    # Build a human-readable content line
+    name_part = f" \"{df_name}\"" if df_name else ""
+    content = f"DF{df_id}{name_part} — {label} ({row_count} rows, {len(columns)} cols)"
+
+    # structured_data holds the full DF payload
+    structured = {
+        "df_id": df_id,
+        "label": label,
+        "columns": columns,
+        "data": df_data.get("data", []),
+        "row_count": row_count,
+    }
+
+    tags = {"df_id": df_id}
+    if df_name:
+        tags["df_name"] = df_name
+
+    return create_memory(
+        db,
+        user_id=user_id,
+        content=content,
+        category="dataframe",
+        project_id=project_id,
+        structured_data=structured,
+        source="user_manual",
+        tags=tags,
+    )
+
+
 def update_memory(
     db: Session,
     memory_id: str,
@@ -171,8 +256,67 @@ def update_memory(
 
 
 # ---------------------------------------------------------------------------
-# Querying
+# Remembered DataFrame helpers
 # ---------------------------------------------------------------------------
+
+_REMEMBERED_DF_ID_OFFSET = 900  # Fallback for unnamed remembered DFs
+
+
+def get_remembered_df_map(
+    db: Session,
+    user_id: str,
+    project_id: str | None,
+) -> dict[int | str, dict]:
+    """Return remembered dataframe memories as a df_map compatible with _collect_df_map.
+
+    Named DFs use their name as the key (e.g. ``"c2c12DF"``).  Unnamed ones
+    fall back to integer IDs starting at ``_REMEMBERED_DF_ID_OFFSET``.
+    """
+    mems = list_memories(
+        db, user_id,
+        project_id=project_id,
+        category="dataframe",
+        include_global=True,
+        limit=50,
+    )
+    df_map: dict[int | str, dict] = {}
+    slot = _REMEMBERED_DF_ID_OFFSET
+    for mem in mems:
+        structured = None
+        if mem.structured_data:
+            try:
+                structured = json.loads(mem.structured_data) if isinstance(mem.structured_data, str) else mem.structured_data
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if not structured or not isinstance(structured, dict):
+            continue
+
+        tags = {}
+        if mem.tags_json:
+            try:
+                tags = json.loads(mem.tags_json) if isinstance(mem.tags_json, str) else mem.tags_json
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        df_name = tags.get("df_name", "")
+        label = structured.get("label", "")
+        scope = "global" if mem.project_id is None else "project"
+        display_label = f"📌 {df_name or label} ({scope})"
+
+        entry = {
+            "columns": structured.get("columns", []),
+            "data": structured.get("data", []),
+            "row_count": structured.get("row_count", len(structured.get("data", []))),
+            "label": display_label,
+            "memory_id": mem.id,
+        }
+
+        if df_name:
+            df_map[df_name] = entry
+        else:
+            df_map[slot] = entry
+            slot += 1
+    return df_map
 
 
 def list_memories(

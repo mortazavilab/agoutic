@@ -979,14 +979,15 @@ What would you like to do?
         # deterministic responses from the conversation's embedded dataframes.
         _df_cmd = _detect_df_command(user_msg_lower)
         if _df_cmd is not None:
-            _df_map = _collect_df_map(history_blocks)
+            _df_map = _collect_df_map(history_blocks, db=session, user_id=user.id, project_id=req.project_id)
             if _df_cmd["action"] == "list":
                 _md = _render_list_dfs(_df_map)
             else:  # head
                 _target_id = _df_cmd.get("df_id")
                 if _target_id is None:
-                    # Default to latest (highest ID)
-                    _target_id = max(_df_map.keys()) if _df_map else None
+                    # Default to latest (highest numeric ID)
+                    _int_keys = [k for k in _df_map if isinstance(k, int)]
+                    _target_id = max(_int_keys) if _int_keys else None
                 _n_rows = _df_cmd.get("n", 10)
                 _md = _render_head_df(_df_map, _target_id, _n_rows)
             return await _create_prompt_response(
@@ -999,7 +1000,7 @@ What would you like to do?
         # /remember, /forget, /memories, /pin, /annotate etc. bypass the LLM.
         _mem_cmd = parse_memory_command(req.message)
         if _mem_cmd is not None:
-            _mem_response = execute_memory_command(session, _mem_cmd, user.id, req.project_id)
+            _mem_response = execute_memory_command(session, _mem_cmd, user.id, req.project_id, history_blocks=history_blocks)
             return await _create_prompt_response(
                 session, req, user_block, user.id,
                 active_skill, req.model or "default", _mem_response,
@@ -1096,7 +1097,8 @@ What would you like to do?
         # For ENCODE skills, inject full dataframe rows from the previous block.
         augmented_message, _injected_dfs, _inject_debug = _inject_job_context(
             req.message, active_skill, conversation_history,
-            history_blocks=history_blocks
+            history_blocks=history_blocks,
+            db=session, user_id=user.id, project_id=req.project_id,
         )
 
         # Inject memory context (project + global memories)
@@ -1108,6 +1110,8 @@ What would you like to do?
             active_skill, conversation_history,
             history_blocks=history_blocks,
             project_id=req.project_id,
+            db=session,
+            user_id=user.id,
         )
         _state_json = _conv_state.to_json()
         if _state_json and _state_json != "{}":
@@ -1311,7 +1315,8 @@ What would you like to do?
                 engine = AgentEngine(model_key=req.model)
                 augmented_message, _injected_dfs, _inject_debug = _inject_job_context(
                     req.message, new_skill, conversation_history,
-                    history_blocks=history_blocks
+                    history_blocks=history_blocks,
+                    db=session, user_id=user.id, project_id=req.project_id,
                 )
                 raw_response, _think_usage = await run_in_threadpool(
                     engine.think, 

@@ -29,12 +29,15 @@ class MemoryCommand:
     action: Literal[
         "remember", "remember_global", "forget", "list",
         "pin", "unpin", "restore", "annotate", "search",
+        "upgrade_global", "remember_df",
     ]
     text: str = ""
     memory_id: str = ""
     sample_name: str = ""
     annotations: dict[str, str] = field(default_factory=dict)
     global_only: bool = False
+    df_id: int | None = None
+    df_name: str | None = None
 
 
 @dataclass
@@ -58,6 +61,11 @@ _SLASH_PATTERNS = {
     "pin": re.compile(r"^/pin\s+#?(\S+)", re.IGNORECASE),
     "unpin": re.compile(r"^/unpin\s+#?(\S+)", re.IGNORECASE),
     "restore": re.compile(r"^/restore\s+#?(\S+)", re.IGNORECASE),
+    "upgrade_global": re.compile(r"^/(?:upgrade[_-](?:to[_-])?global|make[_-]global)\s+#?(\S+)", re.IGNORECASE),
+    "remember_df": re.compile(
+        r"^/remember[_-]df\s+(?:df\s*)?#?(\d+)(?:\s+(?:as\s+)?(\S+))?",
+        re.IGNORECASE,
+    ),
     "annotate": re.compile(
         r"^/annotate\s+(\S+)\s+(.+)", re.IGNORECASE | re.DOTALL
     ),
@@ -109,6 +117,18 @@ def parse_memory_command(message: str) -> MemoryCommand | None:
     m = _SLASH_PATTERNS["restore"].match(msg)
     if m:
         return MemoryCommand(action="restore", memory_id=m.group(1).strip())
+
+    # /remember-df DF5 [as name]
+    m = _SLASH_PATTERNS["remember_df"].match(msg)
+    if m:
+        df_id = int(m.group(1))
+        df_name = m.group(2).strip() if m.group(2) else None
+        return MemoryCommand(action="remember_df", df_id=df_id, df_name=df_name)
+
+    # /upgrade-to-global <id>
+    m = _SLASH_PATTERNS["upgrade_global"].match(msg)
+    if m:
+        return MemoryCommand(action="upgrade_global", memory_id=m.group(1).strip())
 
     # /annotate sample_name key=value [key2=value2 ...]
     m = _SLASH_PATTERNS["annotate"].match(msg)
@@ -228,6 +248,7 @@ def execute_memory_command(
     command: MemoryCommand,
     user_id: str,
     project_id: str | None,
+    history_blocks: list | None = None,
 ) -> str:
     """Execute a parsed memory command. Returns markdown response text."""
 
@@ -307,6 +328,18 @@ def execute_memory_command(
         )
         ann_str = ", ".join(f"{k}={v}" for k, v in command.annotations.items())
         return f"✅ Sample **{command.sample_name}** annotated: {ann_str}"
+
+    if command.action == "upgrade_global":
+        mem = _upgrade_global_by_id_prefix(db, command.memory_id, user_id)
+        if mem:
+            return f"🌐 Memory `{command.memory_id}` upgraded to global."
+        return (
+            f"❌ No memory found with ID starting with `{command.memory_id}`.\n"
+            "(Dataframe memories must be named before upgrading — use `/remember-df DFn as <name>`.)"
+        )
+
+    if command.action == "remember_df":
+        return _execute_remember_df(db, command, user_id, project_id, history_blocks)
 
     if command.action == "search":
         mems = memory_service.search_memories(
@@ -419,3 +452,64 @@ def _restore_by_id_prefix(db: Session, prefix: str, user_id: str) -> bool:
     if mem:
         return memory_service.restore_memory(db, mem.id, user_id)
     return False
+
+
+def _upgrade_global_by_id_prefix(db: Session, prefix: str, user_id: str) -> "Memory | None":
+    mem = _find_by_id_prefix(db, prefix, user_id)
+    if mem:
+        return memory_service.upgrade_to_global(db, mem.id, user_id)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Dataframe remember helper
+# ---------------------------------------------------------------------------
+
+
+def _execute_remember_df(
+    db: Session,
+    command: "MemoryCommand",
+    user_id: str,
+    project_id: str | None,
+    history_blocks: list | None,
+) -> str:
+    """Save a conversation dataframe as a memory.
+
+    Requires history_blocks to look up the DF data.
+    Syntax: /remember-df DF5 [as c2c12DF]
+    """
+    if history_blocks is None:
+        return "❌ Unable to access conversation history for dataframe lookup."
+
+    from cortex.chat_sync_handler import _collect_df_map
+
+    df_map = _collect_df_map(history_blocks)
+    df_id = command.df_id
+    if df_id not in df_map:
+        available = ", ".join(f"DF{k}" for k in sorted(df_map.keys())) if df_map else "none"
+        return f"❌ DF{df_id} not found in this conversation. Available: {available}"
+
+    df_data_raw = df_map[df_id]
+    # Reconstruct the shape expected by remember_dataframe
+    df_data = {
+        "columns": df_data_raw["columns"],
+        "data": df_data_raw["data"],
+        "row_count": df_data_raw["row_count"],
+        "metadata": {"df_id": df_id, "label": df_data_raw.get("label", f"DF{df_id}")},
+    }
+
+    mem = memory_service.remember_dataframe(
+        db,
+        user_id=user_id,
+        project_id=project_id,
+        df_id=df_id,
+        df_data=df_data,
+        df_name=command.df_name,
+    )
+
+    name_part = f" as **{command.df_name}**" if command.df_name else ""
+    return (
+        f"✅ Remembered DF{df_id}{name_part} "
+        f"({df_data_raw['row_count']} rows, {len(df_data_raw['columns'])} cols)\n\n"
+        f"*Memory ID: `{mem.id[:8]}`*"
+    )

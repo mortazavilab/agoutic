@@ -70,11 +70,19 @@ _LIST_DF_RE = re.compile(
 _HEAD_DF_RE = re.compile(
     r"^head\s+(?:df\s*(\d+)|df)\s*(\d+)?$"
 )
+# Named remembered DF: "head c2c12DF" / "head c2c12DF 20"
+_HEAD_NAMED_RE = re.compile(
+    r"^head\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+(\d+))?$"
+)
 
 
 def _detect_df_command(msg_lower: str) -> dict | None:
-    """Return ``{"action": "list"}`` or ``{"action": "head", "df_id": int|None, "n": int}``
-    if *msg_lower* is a DF inspection command, otherwise ``None``."""
+    """Return ``{"action": "list"}`` or ``{"action": "head", ...}``
+    if *msg_lower* is a DF inspection command, otherwise ``None``.
+
+    The ``"df_id"`` value is an ``int`` for numeric DFs or a ``str`` name
+    for remembered named DFs.
+    """
     msg = msg_lower.strip()
     if _LIST_DF_RE.match(msg):
         return {"action": "list"}
@@ -83,12 +91,21 @@ def _detect_df_command(msg_lower: str) -> dict | None:
         df_id = int(m.group(1)) if m.group(1) else None
         n = int(m.group(2)) if m.group(2) else 10
         return {"action": "head", "df_id": df_id, "n": n}
+    # Try named DF ("head myName 20") — skip bare "head df" already caught above
+    m = _HEAD_NAMED_RE.match(msg)
+    if m and m.group(1) not in ("df", "dfs", "dataframes"):
+        n = int(m.group(2)) if m.group(2) else 10
+        return {"action": "head", "df_id": m.group(1), "n": n}
     return None
 
 
-def _collect_df_map(history_blocks) -> dict:
-    """Build ``{df_id: {columns, data, row_count, label}}`` from all AGENT_PLAN blocks."""
-    df_map: dict[int, dict] = {}
+def _collect_df_map(history_blocks, *, db=None, user_id=None, project_id=None) -> dict:
+    """Build ``{key: {columns, data, row_count, label}}`` from all AGENT_PLAN blocks.
+
+    Keys are ``int`` for conversation DFs and ``str`` (the user-given name)
+    for remembered named DFs.  Unnamed remembered DFs use integer IDs 900+.
+    """
+    df_map: dict[int | str, dict] = {}
     for blk in history_blocks:
         if blk.type != "AGENT_PLAN":
             continue
@@ -106,6 +123,13 @@ def _collect_df_map(history_blocks) -> dict:
                 "row_count": _val.get("row_count", len(_val.get("data", []))),
                 "label": _meta.get("label", _key),
             }
+
+    # Merge remembered dataframe memories (IDs 900+)
+    if db is not None and user_id is not None:
+        from cortex.memory_service import get_remembered_df_map
+        remembered = get_remembered_df_map(db, user_id, project_id)
+        df_map.update(remembered)
+
     return df_map
 
 
@@ -114,33 +138,51 @@ def _render_list_dfs(df_map: dict) -> str:
     if not df_map:
         return "No dataframes in this conversation yet."
     lines = ["| DF | Label | Rows | Columns |", "| --- | --- | ---: | --- |"]
-    for df_id in sorted(df_map):
+    # Sort: numeric keys first (by value), then string keys alphabetically
+    int_keys = sorted(k for k in df_map if isinstance(k, int))
+    str_keys = sorted(k for k in df_map if isinstance(k, str))
+    for df_id in int_keys + str_keys:
         d = df_map[df_id]
         cols_str = ", ".join(d["columns"][:12])
         if len(d["columns"]) > 12:
             cols_str += f" … (+{len(d['columns']) - 12} more)"
+        # Named remembered DFs show the name; numeric DFs show DF<n>
+        id_label = f"**{df_id}**" if isinstance(df_id, str) else f"**DF{df_id}**"
         lines.append(
-            f"| **DF{df_id}** | {d['label']} | {d['row_count']} | {cols_str} |"
+            f"| {id_label} | {d['label']} | {d['row_count']} | {cols_str} |"
         )
     return "\n".join(lines)
 
 
-def _render_head_df(df_map: dict, df_id: int | None, n: int) -> str:
+def _render_head_df(df_map: dict, df_id: int | str | None, n: int) -> str:
     """Render the first *n* rows of a dataframe as a markdown table."""
     if not df_map:
         return "No dataframes in this conversation yet."
     if df_id is None:
         return "No dataframes in this conversation yet."
-    if df_id not in df_map:
-        available = ", ".join(f"DF{k}" for k in sorted(df_map))
-        return f"**DF{df_id}** not found. Available: {available}. Use `list dfs` to see details."
-    d = df_map[df_id]
+
+    # For string df_id, also try case-insensitive lookup
+    lookup_key = df_id
+    if isinstance(df_id, str) and df_id not in df_map:
+        for k in df_map:
+            if isinstance(k, str) and k.lower() == df_id.lower():
+                lookup_key = k
+                break
+
+    if lookup_key not in df_map:
+        int_labels = [f"DF{k}" for k in sorted(k2 for k2 in df_map if isinstance(k2, int))]
+        str_labels = sorted(k for k in df_map if isinstance(k, str))
+        available = ", ".join(int_labels + str_labels)
+        name = df_id if isinstance(df_id, str) else f"DF{df_id}"
+        return f"**{name}** not found. Available: {available}. Use `list dfs` to see details."
+    d = df_map[lookup_key]
     cols = d["columns"]
     rows = d["data"][:n]
     total = d["row_count"]
     showing = min(n, len(rows))
 
-    header = f"**DF{df_id}** — {d['label']} ({total} rows, showing first {showing})\n\n"
+    name = lookup_key if isinstance(lookup_key, str) else f"DF{lookup_key}"
+    header = f"**{name}** — {d['label']} ({total} rows, showing first {showing})\n\n"
     if not rows:
         return header + "_No data rows._"
 

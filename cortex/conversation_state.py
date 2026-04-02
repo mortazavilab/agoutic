@@ -20,6 +20,8 @@ def _build_conversation_state(
     conversation_history: list | None,
     history_blocks: list | None = None,
     project_id: str | None = None,
+    db=None,
+    user_id: str | None = None,
 ) -> "ConversationState":
     """
     Build a structured ConversationState from blocks and conversation history.
@@ -173,6 +175,18 @@ def _build_conversation_state(
         # The latest DF is the highest-numbered one
         if state.known_dataframes:
             state.latest_dataframe = state.known_dataframes[-1].split(" ")[0]  # e.g. "DF8"
+
+    # --- Append remembered dataframe memories ---
+    if db is not None and user_id is not None:
+        from cortex.memory_service import get_remembered_df_map
+        _remembered = get_remembered_df_map(db, user_id, project_id)
+        for _r_key in sorted(_remembered, key=lambda k: (isinstance(k, int), k)):
+            _rd = _remembered[_r_key]
+            # Named DFs use their name; unnamed ones use DF<n>
+            _key_label = _r_key if isinstance(_r_key, str) else f"DF{_r_key}"
+            state.known_dataframes.append(
+                f"{_key_label} ({_rd['label']}, {_rd['row_count']} rows)"
+            )
 
     # --- Extract collected parameters (for analyze_local_sample) ---
     # Iterate in REVERSE so the most-recent user message wins when multiple

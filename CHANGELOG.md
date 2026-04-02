@@ -48,6 +48,42 @@
 - **Sidebar memory widget** — sidebar expander showing pinned count, recent
   memories, and a link to the full memories page.
 
+- **Dataframe memory** — users can save any conversation dataframe into
+  project or global memory with `/remember-df DF5 as c2c12DF`. Named saved
+  DFs are usable like regular conversation DFs: they appear in `list dfs`,
+  respond to `head c2c12DF`, and the LLM receives their full row data for
+  `plot c2c12DF by assay` commands.
+
+- **Named-DF keying** — remembered named DFs use their user-given name (e.g.
+  `"c2c12DF"`) as the key in `df_map` rather than a synthetic `DF900+`
+  integer, so the name is consistently shown in `list dfs` output and
+  referenced in head/plot commands.
+
+- **Upgrade project memory to global** — any project-scoped memory can be
+  promoted to global scope via `/upgrade-to-global <id>` (chat) or the 🌐
+  button in the Memories UI. Unnamed DF memories are blocked at the service,
+  API, and UI layers with a descriptive error.
+
+- **Memories UI overhaul** — the memories page now shows the project slug
+  next to each project-scoped memory (📁 slug) or a global badge (🌐 Global);
+  includes an expandable ➕ Add Memory form; delete 🗑️ / restore ♻️ buttons
+  per card; upgrade-to-global 🌐 button (disabled with tooltip for unnamed
+  DFs); and a DF preview showing column list and name/unnamed warning.
+
+- **Context injection for remembered DFs** — `_inject_job_context` now
+  accepts `db`/`user_id`/`project_id` and detects named DF references in the
+  user message. The full table data is injected as `[PREVIOUS QUERY DATA:]`
+  for all skill types (ENCODE, Dogme, and others) so the LLM can plot or
+  analyse saved DFs without making a new DATA_CALL.
+
+- **`head <name>` command** — `head c2c12DF` and `head c2c12DF 20` work for
+  named remembered DFs via a new `_HEAD_NAMED_RE` detection pattern with
+  case-insensitive lookup.
+
+- **`/remember-df` slash command** — `/remember-df DF5` saves unnamed,
+  `/remember-df DF5 as c2c12DF` saves with alias; `"dataframe"` added to
+  `VALID_CATEGORIES`; `/upgrade-to-global` and `/make-global` aliases added.
+
 ### Database
 
 - **Alembic migration `a1b2c3d4e5f6`** — creates `memories` table with
@@ -56,11 +92,18 @@
 
 ### Tests
 
-- **57 new tests** — `test_memory_service.py` (32 tests covering CRUD,
-  soft-delete/restore, pinning, search, context budget, auto-capture
-  deduplication, result auto-pinning, annotation dual-write) and
-  `test_memory_commands.py` (25 tests covering slash command parsing, NL
-  intent detection).
+- **73 tests** in `tests/test_memory.py` — covers memory service CRUD
+  (create, dedup, soft-delete, restore, pin/unpin, update, wrong-user,
+  invalid category), listing (project+global, deleted, pinned, by-category),
+  search, `upgrade_to_global` (normal, named DF, unnamed DF blocked,
+  wrong-user), `remember_dataframe` (named/unnamed, `get_remembered_df_map`
+  including global merge, numeric key for unnamed DFs), all slash command
+  parsing (`/remember`, `/remember-global`, `/forget`, `/memories`, `/pin`,
+  `/unpin`, `/restore`, `/search-memories`, `/annotate`, `/upgrade-to-global`,
+  `/make-global`, `/remember-df` variants), command execution, DF integration
+  (`_collect_df_map`, `_render_list_dfs`, `_render_head_df` with named keys
+  and case-insensitive lookup, `head <name>` detection), and context injection
+  (named DF injection for all skill types, no injection without db params).
 
 ## [3.4.16] - 2026-04-01
 

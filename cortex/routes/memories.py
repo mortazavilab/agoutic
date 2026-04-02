@@ -16,6 +16,7 @@ from cortex.memory_service import (
     restore_memory,
     pin_memory,
     update_memory,
+    upgrade_to_global,
     list_memories,
     search_memories,
     get_memory_context,
@@ -153,6 +154,26 @@ async def restore_memory_endpoint(
         if not ok:
             raise HTTPException(status_code=404, detail="Memory not found")
         return {"status": "restored", "id": memory_id}
+    finally:
+        session.close()
+
+
+@router.post("/{memory_id}/upgrade-to-global")
+async def upgrade_to_global_endpoint(
+    request: Request,
+    memory_id: str,
+):
+    """Promote a project-scoped memory to global."""
+    user = request.state.user
+    session = SessionLocal()
+    try:
+        mem = upgrade_to_global(session, memory_id, user.id)
+        if not mem:
+            raise HTTPException(
+                status_code=400,
+                detail="Memory not found, already global, or is an unnamed dataframe (name it first with /remember-df DFn as <name>)",
+            )
+        return MemoryOut(**memory_to_dict(mem))
     finally:
         session.close()
 
