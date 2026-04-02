@@ -83,31 +83,37 @@ def seed_user(session_factory, tmp_path):
 
 def _make_client(session_factory, seed_user, tmp_path, think_fn):
     """Build a TestClient with a custom AgentEngine.think mock."""
-    patches = [
-        patch("cortex.db.SessionLocal", session_factory),
-        patch("cortex.app.SessionLocal", session_factory),
-        patch("cortex.dependencies.SessionLocal", session_factory),
-        patch("cortex.middleware.SessionLocal", session_factory),
-        patch("cortex.config.AGOUTIC_DATA", tmp_path),
-        patch("cortex.user_jail.AGOUTIC_DATA", tmp_path),
-        patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"),
-    ]
-    engine_patch = patch("cortex.app.AgentEngine")
-
-    for p in patches:
-        p.start()
-    mock_engine_cls = engine_patch.start()
+    mock_engine_cls = MagicMock()
     inst = mock_engine_cls.return_value
     inst.model_name = "test-model"
     inst.think = think_fn
     # Default analyze_results so second-pass LLM calls don't crash
     inst.analyze_results = lambda *a, **kw: ("Analysis complete.", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
 
+    patches = [
+        patch("cortex.db.SessionLocal", session_factory),
+        patch("cortex.app.SessionLocal", session_factory),
+        patch("cortex.chat_stages.setup.SessionLocal", session_factory),
+        patch("cortex.chat_stages.overrides.SessionLocal", session_factory),
+        patch("cortex.dependencies.SessionLocal", session_factory),
+        patch("cortex.middleware.SessionLocal", session_factory),
+        patch("cortex.config.AGOUTIC_DATA", tmp_path),
+        patch("cortex.user_jail.AGOUTIC_DATA", tmp_path),
+        patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"),
+        patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path / "proj"),
+        patch("cortex.app.AgentEngine", mock_engine_cls),
+        patch("cortex.agent_engine.AgentEngine", mock_engine_cls),
+        patch("cortex.chat_stages.context_prep.AgentEngine", mock_engine_cls),
+        patch("cortex.chat_stages.llm_first_pass.AgentEngine", mock_engine_cls),
+    ]
+
+    for p in patches:
+        p.start()
+
     c = TestClient(app, raise_server_exceptions=False)
     c.cookies.set("session", "flow-session")
     yield c
 
-    engine_patch.stop()
     for p in reversed(patches):
         p.stop()
 
@@ -233,9 +239,9 @@ class TestApprovalGateCreation:
             }
         )
 
-        with patch("cortex.app.asyncio.create_task", side_effect=_capture_task_without_running), \
+        with patch("cortex.chat_stages.plan_detection.asyncio.create_task", side_effect=_capture_task_without_running), \
              patch("cortex.planner.classify_request", return_value="MULTI_STEP"), \
-             patch("cortex.app.run_in_threadpool", new=AsyncMock(return_value=expected_plan)):
+             patch("cortex.chat_stages.plan_detection.run_in_threadpool", new=AsyncMock(return_value=expected_plan)):
             resp = plain_client.post(
                 "/chat",
                 json={

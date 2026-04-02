@@ -1,3 +1,45 @@
+## [3.5.0] - 2026-04-02
+
+### Refactors
+
+- **Chat pipeline decomposition** — replaced the monolithic 1,637-line
+  `chat_with_agent` function with a registry-based dispatch pipeline.
+  `cortex/app.py` reduced from 2,348 → 805 lines; the endpoint itself is now
+  56 lines.
+
+- **ChatContext dataclass** (`cortex/chat_context.py`) — all per-request
+  mutable state extracted into a single `@dataclass` with ~68 fields and a
+  `short_circuit()` helper for early exit.
+
+- **ChatStage protocol** (`cortex/chat_stages/__init__.py`) — each stage
+  implements `name`, `priority`, `should_run(ctx)`, and `run(ctx)`. Stages
+  self-register at import time and execute in priority order.
+
+- **15 stages across 11 modules** under `cortex/chat_stages/`:
+  Setup (100), Capabilities (200), Prompt Inspection (210),
+  DataFrame Command (220), Memory Command (230), Memory Intent (240),
+  History (300), Context Preparation (400), Plan Detection (500),
+  First-Pass LLM (600), Tag Parsing (700), Overrides (800),
+  Tool Execution (900), Second-Pass LLM (1000), Response Assembly (1100).
+
+- **Pipeline runner** (`cortex/chat_pipeline.py`) — iterates stages, respects
+  `should_run()` guards, and returns on the first `ctx.response` short-circuit.
+
+- **Priority gap convention** — stages are spaced by 100 so new stages can be
+  inserted without renumbering existing ones.
+
+### Bug Fixes
+
+- **`_suppress_all_tags` ordering** — fixed a bug in the overrides stage where
+  `ctx.auto_calls` was wiped by `_suppress_all_tags()` when called after
+  assignment; suppress is now called first.
+
+### Docs
+
+- **`docs/CHAT_PIPELINE.md` created** — full architecture reference covering
+  the pipeline flow, ChatContext fields, ChatStage protocol, stage registry,
+  all 15 stages with descriptions, and a guide for adding new stages.
+
 ## [3.4.17] - 2026-04-01
 
 ### Features

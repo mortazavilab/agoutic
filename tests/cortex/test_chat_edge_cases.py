@@ -77,24 +77,7 @@ def seed(SL, tmp_path):
 
 def _make_client(SL, seed, tmp_path, think_fn, extra_patches=None):
     """Build a TestClient with a custom AgentEngine.think mock."""
-    patches = [
-        patch("cortex.db.SessionLocal", SL),
-        patch("cortex.app.SessionLocal", SL),
-        patch("cortex.dependencies.SessionLocal", SL),
-        patch("cortex.middleware.SessionLocal", SL),
-        patch("cortex.admin.SessionLocal", SL),
-        patch("cortex.auth.SessionLocal", SL),
-        patch("cortex.config.AGOUTIC_DATA", tmp_path),
-        patch("cortex.user_jail.AGOUTIC_DATA", tmp_path),
-        patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"),
-    ]
-    if extra_patches:
-        patches.extend(extra_patches)
-
-    engine_patch = patch("cortex.app.AgentEngine")
-    for p in patches:
-        p.start()
-    mock_engine_cls = engine_patch.start()
+    mock_engine_cls = MagicMock()
     inst = mock_engine_cls.return_value
     inst.model_name = "test-model"
     inst.think = think_fn
@@ -103,11 +86,34 @@ def _make_client(SL, seed, tmp_path, think_fn, extra_patches=None):
         {"prompt_tokens": 15, "completion_tokens": 15, "total_tokens": 30},
     )
 
+    patches = [
+        patch("cortex.db.SessionLocal", SL),
+        patch("cortex.app.SessionLocal", SL),
+        patch("cortex.chat_stages.setup.SessionLocal", SL),
+        patch("cortex.chat_stages.overrides.SessionLocal", SL),
+        patch("cortex.dependencies.SessionLocal", SL),
+        patch("cortex.middleware.SessionLocal", SL),
+        patch("cortex.admin.SessionLocal", SL),
+        patch("cortex.auth.SessionLocal", SL),
+        patch("cortex.config.AGOUTIC_DATA", tmp_path),
+        patch("cortex.user_jail.AGOUTIC_DATA", tmp_path),
+        patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"),
+        patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path / "proj"),
+        patch("cortex.app.AgentEngine", mock_engine_cls),
+        patch("cortex.agent_engine.AgentEngine", mock_engine_cls),
+        patch("cortex.chat_stages.context_prep.AgentEngine", mock_engine_cls),
+        patch("cortex.chat_stages.llm_first_pass.AgentEngine", mock_engine_cls),
+    ]
+    if extra_patches:
+        patches.extend(extra_patches)
+
+    for p in patches:
+        p.start()
+
     c = TestClient(app, raise_server_exceptions=False)
     c.cookies.set("session", "edge-session")
     yield c
 
-    engine_patch.stop()
     for p in reversed(patches):
         p.stop()
 
@@ -126,6 +132,8 @@ def _patch_session(SL, tmp_path):
     patches = [
         patch("cortex.db.SessionLocal", SL),
         patch("cortex.app.SessionLocal", SL),
+        patch("cortex.chat_stages.setup.SessionLocal", SL),
+        patch("cortex.chat_stages.overrides.SessionLocal", SL),
         patch("cortex.dependencies.SessionLocal", SL),
         patch("cortex.middleware.SessionLocal", SL),
         patch("cortex.admin.SessionLocal", SL),

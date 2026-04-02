@@ -113,19 +113,28 @@ def _mock_think(message, skill, history):
 @pytest.fixture()
 def client(session_factory, seed_user, tmp_path):
     """TestClient patched with in-memory DB and mocked AgentEngine.think."""
+    mock_engine_cls = MagicMock()
+    inst = mock_engine_cls.return_value
+    inst.model_name = "test-model"
+    inst.think = MagicMock(side_effect=_mock_think)
+    inst.render_system_prompt = MagicMock(
+        side_effect=lambda skill_key, prompt_type: f"Rendered {prompt_type} prompt for {skill_key}"
+    )
+
     with patch("cortex.db.SessionLocal", session_factory), \
          patch("cortex.app.SessionLocal", session_factory), \
+         patch("cortex.chat_stages.setup.SessionLocal", session_factory), \
+         patch("cortex.chat_stages.overrides.SessionLocal", session_factory), \
          patch("cortex.dependencies.SessionLocal", session_factory), \
          patch("cortex.middleware.SessionLocal", session_factory), \
          patch("cortex.config.AGOUTIC_DATA", tmp_path), \
          patch("cortex.user_jail.AGOUTIC_DATA", tmp_path), \
-         patch("cortex.app.AgentEngine") as MockEngine:
-        inst = MockEngine.return_value
-        inst.model_name = "test-model"
-        inst.think = MagicMock(side_effect=_mock_think)
-        inst.render_system_prompt = MagicMock(
-            side_effect=lambda skill_key, prompt_type: f"Rendered {prompt_type} prompt for {skill_key}"
-        )
+         patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"), \
+         patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path / "proj"), \
+         patch("cortex.app.AgentEngine", mock_engine_cls), \
+         patch("cortex.agent_engine.AgentEngine", mock_engine_cls), \
+         patch("cortex.chat_stages.context_prep.AgentEngine", mock_engine_cls), \
+         patch("cortex.chat_stages.llm_first_pass.AgentEngine", mock_engine_cls):
         c = TestClient(app, raise_server_exceptions=False)
         c.cookies.set("session", "chat-session")
         c.mock_engine = inst
@@ -135,19 +144,28 @@ def client(session_factory, seed_user, tmp_path):
 @pytest.fixture()
 def admin_client(session_factory, seed_admin, tmp_path):
     """TestClient logged in as admin."""
+    mock_engine_cls = MagicMock()
+    inst = mock_engine_cls.return_value
+    inst.model_name = "test-model"
+    inst.think = MagicMock(side_effect=_mock_think)
+    inst.render_system_prompt = MagicMock(
+        side_effect=lambda skill_key, prompt_type: f"Rendered {prompt_type} prompt for {skill_key}"
+    )
+
     with patch("cortex.db.SessionLocal", session_factory), \
          patch("cortex.app.SessionLocal", session_factory), \
+         patch("cortex.chat_stages.setup.SessionLocal", session_factory), \
+         patch("cortex.chat_stages.overrides.SessionLocal", session_factory), \
          patch("cortex.dependencies.SessionLocal", session_factory), \
          patch("cortex.middleware.SessionLocal", session_factory), \
          patch("cortex.config.AGOUTIC_DATA", tmp_path), \
          patch("cortex.user_jail.AGOUTIC_DATA", tmp_path), \
-         patch("cortex.app.AgentEngine") as MockEngine:
-        inst = MockEngine.return_value
-        inst.model_name = "test-model"
-        inst.think = MagicMock(side_effect=_mock_think)
-        inst.render_system_prompt = MagicMock(
-            side_effect=lambda skill_key, prompt_type: f"Rendered {prompt_type} prompt for {skill_key}"
-        )
+         patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"), \
+         patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path / "proj"), \
+         patch("cortex.app.AgentEngine", mock_engine_cls), \
+         patch("cortex.agent_engine.AgentEngine", mock_engine_cls), \
+         patch("cortex.chat_stages.context_prep.AgentEngine", mock_engine_cls), \
+         patch("cortex.chat_stages.llm_first_pass.AgentEngine", mock_engine_cls):
         c = TestClient(app, raise_server_exceptions=False)
         c.cookies.set("session", "admin-session")
         c.mock_engine = inst

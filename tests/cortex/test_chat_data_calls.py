@@ -72,24 +72,7 @@ def seed(SL, tmp_path):
 
 def _make_client(SL, seed, tmp_path, think_fn, extra_patches=None):
     """Build a TestClient with a custom AgentEngine.think mock."""
-    patches = [
-        patch("cortex.db.SessionLocal", SL),
-        patch("cortex.app.SessionLocal", SL),
-        patch("cortex.dependencies.SessionLocal", SL),
-        patch("cortex.middleware.SessionLocal", SL),
-        patch("cortex.admin.SessionLocal", SL),
-        patch("cortex.auth.SessionLocal", SL),
-        patch("cortex.config.AGOUTIC_DATA", tmp_path),
-        patch("cortex.user_jail.AGOUTIC_DATA", tmp_path),
-        patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"),
-    ]
-    if extra_patches:
-        patches.extend(extra_patches)
-
-    engine_patch = patch("cortex.app.AgentEngine")
-    for p in patches:
-        p.start()
-    mock_engine_cls = engine_patch.start()
+    mock_engine_cls = MagicMock()
     inst = mock_engine_cls.return_value
     inst.model_name = "test-model"
     inst.think = think_fn
@@ -99,11 +82,36 @@ def _make_client(SL, seed, tmp_path, think_fn, extra_patches=None):
         {"prompt_tokens": 15, "completion_tokens": 15, "total_tokens": 30},
     )
 
+    patches = [
+        patch("cortex.db.SessionLocal", SL),
+        patch("cortex.app.SessionLocal", SL),
+        patch("cortex.chat_stages.setup.SessionLocal", SL),
+        patch("cortex.chat_stages.overrides.SessionLocal", SL),
+        patch("cortex.dependencies.SessionLocal", SL),
+        patch("cortex.middleware.SessionLocal", SL),
+        patch("cortex.admin.SessionLocal", SL),
+        patch("cortex.auth.SessionLocal", SL),
+        patch("cortex.config.AGOUTIC_DATA", tmp_path),
+        patch("cortex.user_jail.AGOUTIC_DATA", tmp_path),
+        patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"),
+        patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path / "proj"),
+        patch("cortex.app.AgentEngine", mock_engine_cls),
+        patch("cortex.agent_engine.AgentEngine", mock_engine_cls),
+        patch("cortex.chat_stages.context_prep.AgentEngine", mock_engine_cls),
+        patch("cortex.chat_stages.llm_first_pass.AgentEngine", mock_engine_cls),
+    ]
+    if extra_patches:
+        patches.extend(extra_patches)
+
+    for p in patches:
+        p.start()
+
     c = TestClient(app, raise_server_exceptions=False)
     c.cookies.set("session", "plot-session")
     yield c
 
-    engine_patch.stop()
+    for p in reversed(patches):
+        p.stop()
     for p in reversed(patches):
         p.stop()
 
@@ -1090,7 +1098,7 @@ class TestBrowsingToolBypass:
         extra = [
             patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
-            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1127,7 +1135,7 @@ class TestBrowsingToolBypass:
         extra = [
             patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
-            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1158,7 +1166,7 @@ class TestBrowsingToolBypass:
         extra = [
             patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
-            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
         client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
@@ -1219,7 +1227,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
             patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
-            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
             patch(
                 "cortex.app._list_user_ssh_profiles",
                 new=AsyncMock(
@@ -1375,7 +1383,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
             patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
-            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
             patch(
                 "cortex.app._list_user_ssh_profiles",
                 new=AsyncMock(
@@ -1479,7 +1487,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
             patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
-            patch("cortex.app._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
             patch(
                 "cortex.app._list_user_ssh_profiles",
                 new=AsyncMock(
