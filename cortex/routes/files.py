@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import uuid
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -303,6 +304,10 @@ async def _download_files_background(
     _last_progress_write = 0.0
     import time as _time
 
+    # Organise downloads into a date-based subfolder (YYYY-MM-DD)
+    download_subdir = target_dir / date.today().isoformat()
+    download_subdir.mkdir(parents=True, exist_ok=True)
+
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(600.0)) as client:
             for i, file_spec in enumerate(files):
@@ -320,7 +325,7 @@ async def _download_files_background(
 
                 url = file_spec["url"]
                 filename = file_spec.get("filename") or url.rsplit("/", 1)[-1].split("?")[0] or f"file_{i}"
-                dest = target_dir / filename
+                dest = download_subdir / filename
                 file_expected = file_spec.get("size_bytes") or 0
 
                 # --- Dedup check ---------------------------------------------------
@@ -614,6 +619,10 @@ async def upload_file(project_id: str, request: Request):
             central_dir = project_dir / "data"
         central_dir.mkdir(parents=True, exist_ok=True)
 
+        # Organise uploads into a date-based subfolder (YYYY-MM-DD)
+        upload_subdir = central_dir / date.today().isoformat()
+        upload_subdir.mkdir(parents=True, exist_ok=True)
+
         project_data_dir = project_dir / "data"
         project_data_dir.mkdir(parents=True, exist_ok=True)
     finally:
@@ -629,7 +638,7 @@ async def upload_file(project_id: str, request: Request):
         filename = getattr(file, "filename", key)
         # Sanitize filename
         safe_name = re.sub(r"[^\w.\-]", "_", filename)
-        dest = central_dir / safe_name
+        dest = upload_subdir / safe_name
 
         content = await file.read()
 

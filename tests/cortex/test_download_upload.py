@@ -284,7 +284,8 @@ class TestUploadFile:
             files={"f": ("test.txt", content, "text/plain")},
         )
         assert resp.status_code == 200
-        # File should be written to central data dir
-        central = tmp_path / "users" / "dluser" / "data" / "test.txt"
+        # File should be written to central data dir in a date subfolder
+        from datetime import date
+        central = tmp_path / "users" / "dluser" / "data" / date.today().isoformat() / "test.txt"
         assert central.exists()
         assert central.read_bytes() == content

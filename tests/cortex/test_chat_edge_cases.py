@@ -679,8 +679,9 @@ class TestDownloadBackgroundTask:
                         owner_id="u-edge",
                     )
 
-        # Verify the download wrote the file
-        assert (target_dir / "test.txt").exists()
+        # Verify the download wrote the file in a date subfolder
+        from datetime import date
+        assert (target_dir / date.today().isoformat() / "test.txt").exists()
 
         # Cleanup
         _active_downloads.pop(download_id, None)
