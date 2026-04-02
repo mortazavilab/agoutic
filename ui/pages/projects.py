@@ -307,8 +307,13 @@ with act1:
                 timeout=5,
             )
             if r.status_code == 200:
-                renamed = (r.json() or {}).get("name") or new_name
-                st.toast(f"Renamed -> {renamed}")
+                result = r.json() or {}
+                renamed = result.get("name") or new_name
+                new_slug = result.get("slug", "")
+                toast_msg = f"Renamed -> {renamed}"
+                if new_slug:
+                    toast_msg += f" (folder: {new_slug})"
+                st.toast(toast_msg)
                 st.rerun()
             elif r.status_code == 409:
                 detail = "Name already exists"

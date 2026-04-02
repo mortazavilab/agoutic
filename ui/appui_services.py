@@ -3,8 +3,8 @@ import datetime
 import streamlit as st
 
 
-def create_project_server_side(name: str | None, api_url: str, request_fn) -> str:
-    """Create a project via POST /projects and return the server-generated UUID."""
+def create_project_server_side(name: str | None, api_url: str, request_fn) -> dict:
+    """Create a project via POST /projects and return {id, slug, name}."""
     project_name = name or f"project-{datetime.datetime.now().strftime('%Y-%m-%d')}"
     try:
         resp = request_fn(
@@ -14,13 +14,18 @@ def create_project_server_side(name: str | None, api_url: str, request_fn) -> st
             timeout=10,
         )
         if resp.status_code == 200:
-            return resp.json()["id"]
+            data = resp.json()
+            return {
+                "id": data["id"],
+                "slug": data.get("slug", ""),
+                "name": data.get("name", project_name),
+            }
     except Exception:
         pass
 
     import uuid as _uuid
 
-    return str(_uuid.uuid4())
+    return {"id": str(_uuid.uuid4()), "slug": "", "name": project_name}
 
 
 def launchpad_headers(internal_api_secret: str | None) -> dict:

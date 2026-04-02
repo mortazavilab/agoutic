@@ -151,14 +151,16 @@ class TestCreateProjectServerSide:
     def test_returns_server_project_id_on_success(self):
         response = SimpleNamespace(
             status_code=200,
-            json=lambda: {"id": "project-123"},
+            json=lambda: {"id": "project-123", "slug": "named-project", "name": "named-project"},
         )
         request = MagicMock(return_value=response)
         fn = _load_function("_create_project_server_side", {"make_authenticated_request": request})
 
-        project_id = fn("named-project")
+        result = fn("named-project")
 
-        assert project_id == "project-123"
+        assert isinstance(result, dict)
+        assert result["id"] == "project-123"
+        assert result["slug"] == "named-project"
         request.assert_called_once_with(
             "POST",
             "http://api.test/projects",
@@ -168,18 +170,18 @@ class TestCreateProjectServerSide:
 
     def test_falls_back_to_uuid_when_request_fails(self):
         request = MagicMock(side_effect=RuntimeError("network down"))
-        fake_uuid = SimpleNamespace(__str__=lambda self: "uuid-fallback")
         fn = _load_function("_create_project_server_side", {"make_authenticated_request": request})
 
         import uuid
         original_uuid4 = uuid.uuid4
         uuid.uuid4 = lambda: "uuid-fallback"
         try:
-            project_id = fn("named-project")
+            result = fn("named-project")
         finally:
             uuid.uuid4 = original_uuid4
 
-        assert project_id == "uuid-fallback"
+        assert isinstance(result, dict)
+        assert result["id"] == "uuid-fallback"
 
 
 class TestJobStatusUpdatedAt:

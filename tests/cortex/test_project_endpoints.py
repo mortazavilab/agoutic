@@ -168,8 +168,8 @@ class TestUpdateProject:
         assert data["status"] == "ok"
         assert data["id"] == project_id
         assert data["name"] == "New Name"
-        # Name-only rename keeps slug stable for path safety.
-        assert data["slug"] == original["slug"]
+        # Slug syncs with name so the local folder matches.
+        assert data["slug"] == "new-name"
 
         list_resp = client.get("/projects")
         assert list_resp.status_code == 200

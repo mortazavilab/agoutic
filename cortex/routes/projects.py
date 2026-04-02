@@ -220,6 +220,7 @@ async def update_project(project_id: str, req: ProjectUpdateRequest, request: Re
             raise HTTPException(status_code=404, detail="Project not found")
 
         old_slug = project.slug
+        old_name = project.name
 
         if req.name is not None:
             normalized_name = _normalize_project_name(req.name)
@@ -243,6 +244,12 @@ async def update_project(project_id: str, req: ProjectUpdateRequest, request: Re
             ).scalars().all()
             for access in access_rows:
                 access.project_name = normalized_name
+
+            # Auto-sync slug from new name (unless explicit slug provided)
+            if req.slug is None and normalized_name != old_name:
+                new_auto_slug = _slugify(normalized_name)
+                new_auto_slug = _dedup_slug(session, user.id, new_auto_slug, exclude_project_id=project_id)
+                project.slug = new_auto_slug
 
         if req.slug is not None:
             # Explicit slug change
@@ -279,6 +286,30 @@ async def update_project(project_id: str, req: ProjectUpdateRequest, request: Re
                     pass  # dogme_jobs may not be in this DB
             except PermissionError as e:
                 raise HTTPException(status_code=409, detail=str(e))
+
+        # Record rename in memory system for audit trail
+        if old_name and project.name != old_name:
+            try:
+                from cortex.memory_service import create_memory
+                create_memory(
+                    session,
+                    user_id=user.id,
+                    project_id=project_id,
+                    content=f"Project renamed from \"{old_name}\" to \"{project.name}\"",
+                    category="finding",
+                    source="system",
+                )
+                if old_slug and new_slug != old_slug:
+                    create_memory(
+                        session,
+                        user_id=user.id,
+                        project_id=project_id,
+                        content=f"Project folder renamed from \"{old_slug}\" to \"{new_slug}\"",
+                        category="finding",
+                        source="system",
+                    )
+            except Exception:
+                pass  # memory system failure should not block rename
 
         session.commit()
 

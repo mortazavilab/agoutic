@@ -148,7 +148,7 @@ if not user.get("username"):
     st.stop()  # Don't render the rest of the UI until username is set
 
 # --- 1. STATE MANAGEMENT ---
-def _create_project_server_side(name: str = None) -> str:
+def _create_project_server_side(name: str = None) -> dict:
     return _create_project_server_side_impl(name, API_URL, make_authenticated_request)
 
 
@@ -169,7 +169,8 @@ def _active_project_slug() -> str:
     active_id = st.session_state.get("active_project_id", "")
     for project in st.session_state.get("_cached_projects", []):
         if project.get("id") == active_id:
-            return _slugify_project_name(project.get("name") or active_id)
+            # Prefer the real slug from the server; fall back to slugifying name
+            return project.get("slug") or _slugify_project_name(project.get("name") or active_id)
     return _slugify_project_name(active_id)
 
 
@@ -204,7 +205,9 @@ if st.session_state.get("_create_new_project", False):
     # Create project via server-side endpoint (server generates UUID)
     _pending_name = st.session_state["_create_new_project"]
     _pending_name = _pending_name if isinstance(_pending_name, str) else None
-    new_id = _create_project_server_side(name=_pending_name)
+    _new_proj = _create_project_server_side(name=_pending_name)
+    new_id = _new_proj["id"] if isinstance(_new_proj, dict) else _new_proj
+    _new_slug = _new_proj.get("slug", "") if isinstance(_new_proj, dict) else ""
     st.session_state.active_project_id = new_id
     st.session_state.blocks = []
     # Clear project-related data
@@ -222,6 +225,8 @@ if st.session_state.get("_create_new_project", False):
             del st.session_state[key]
     # Reset the project ID text input widget so it doesn't hold the old value
     st.session_state["_project_id_input"] = new_id
+    if _new_slug and _new_slug != _slugify_project_name(_pending_name or ""):
+        st.toast(f"Created project — folder: {_new_slug}")
     # Clear the flag
     del st.session_state["_create_new_project"]
 
@@ -236,11 +241,14 @@ if "active_project_id" not in st.session_state:
                 st.session_state.active_project_id = last_project
             else:
                 # No previous project — create one via server
-                st.session_state.active_project_id = _create_project_server_side()
+                _p = _create_project_server_side()
+                st.session_state.active_project_id = _p["id"] if isinstance(_p, dict) else _p
         else:
-            st.session_state.active_project_id = _create_project_server_side()
+            _p = _create_project_server_side()
+            st.session_state.active_project_id = _p["id"] if isinstance(_p, dict) else _p
     except:
-        st.session_state.active_project_id = _create_project_server_side()
+        _p = _create_project_server_side()
+        st.session_state.active_project_id = _p["id"] if isinstance(_p, dict) else _p
     
 # Initialize other state variables
 if "blocks" not in st.session_state:

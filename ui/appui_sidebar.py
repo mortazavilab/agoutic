@@ -137,20 +137,26 @@ def render_sidebar(
                     for proj in filtered:
                         proj_id = proj.get("id", "")
                         proj_name = proj.get("name", proj_id)[:30]
+                        proj_slug = proj.get("slug", "")
                         is_current = proj_id == st.session_state.active_project_id
                         archive_confirm_id = st.session_state.get("_confirm_archive_project_id")
 
                         job_count = proj.get("job_count")
                         label_extra = f" · {job_count} job{'s' if job_count != 1 else ''}" if job_count else ""
 
+                        # Show slug suffix when disk folder differs from display name
+                        slug_hint = ""
+                        if proj_slug and proj_slug != slugify_project_name(proj_name):
+                            slug_hint = f" `({proj_slug})`"
+
                         if is_current:
-                            st.info(f"📌 **{proj_name}**{label_extra}")
+                            st.info(f"📌 **{proj_name}**{slug_hint}{label_extra}")
                         else:
                             col_name, col_archive = st.columns([5, 1])
                             with col_name:
                                 if archive_confirm_id == proj_id:
                                     st.warning(f"Archive {proj_name}?")
-                                elif st.button(f"📂 {proj_name}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
+                                elif st.button(f"📂 {proj_name}{slug_hint}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
                                     st.session_state.active_project_id = proj_id
                                     st.session_state.blocks = []
                                     st.session_state._last_rendered_project = proj_id
