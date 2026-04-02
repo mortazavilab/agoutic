@@ -4,6 +4,7 @@ from pathlib import Path
 from openai import OpenAI
 from cortex.config import SKILLS_DIR, SKILLS_REGISTRY, LLM_URL, LLM_MODELS, LLM_NUM_CTX
 from cortex.config import get_source_for_skill, SERVICE_REGISTRY
+from cortex.context_budget import ContextBudgetManager
 from cortex.tool_contracts import format_tool_contract
 from atlas.config import CONSORTIUM_REGISTRY
 from common.logging_config import get_logger
@@ -307,16 +308,14 @@ Use ONLY the parameter names listed here. Do NOT invent parameter names.
         logger.info("Loading skill", skill=skill_key, model=self.display_name, llm_url=LLM_URL)
         
         system_prompt = self.construct_system_prompt(skill_key)
-        
-        # Build messages array with conversation history
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        # Add conversation history if provided
-        if conversation_history:
-            messages.extend(conversation_history)
-        
-        # Add current message
-        messages.append({"role": "user", "content": user_message})
+
+        # Use budget manager to fit everything within the context window
+        budget = ContextBudgetManager()
+        messages = budget.fit_messages(
+            system_prompt=system_prompt,
+            conversation_history=conversation_history,
+            user_message=user_message,
+        )
         
         try:
             response = client.chat.completions.create(
@@ -354,36 +353,37 @@ Use ONLY the parameter names listed here. Do NOT invent parameter names.
 
         system_prompt = self.construct_analysis_prompt()
 
-        messages = [{"role": "system", "content": system_prompt}]
+        data_user_msg = (
+            "The data queries have been executed. Here are the results:\n\n"
+            f"{data_results}\n\n"
+            "Answer my original question concisely (under 200 words).\n"
+            "The full data table is already shown as an interactive dataframe "
+            "in the UI — do NOT reproduce individual rows.\n"
+            "For count questions: state the exact total from 'Found N result(s)' first.\n"
+            "Only produce a table if you are summarising/aggregating "
+            "(e.g. counts per assay type) — use the 📊 Summary already in the data "
+            "if it is present, rather than re-computing it."
+        )
 
-        # Include conversation history for context
-        if conversation_history:
-            messages.extend(conversation_history)
+        # Build the multi-turn sequence: history + user Q + assistant first-pass + data
+        pre_history = list(conversation_history or [])
+        pre_history.append({"role": "user", "content": user_message})
+        pre_history.append({"role": "assistant", "content": first_pass_text})
 
-        # The user's original question
-        messages.append({"role": "user", "content": user_message})
+        # Use budget manager to trim history while protecting the data payload
+        budget = ContextBudgetManager()
+        alloc = budget.allocate(
+            system_prompt=system_prompt,
+            conversation_history=pre_history,
+            user_message=data_user_msg,
+        )
+        trimmed_history = budget.trim_history(pre_history, alloc.conversation_history)
+        trimmed_system = budget.trim_text(system_prompt, alloc.system_prompt)
+        trimmed_data_msg = budget.trim_text(data_user_msg, alloc.user_message)
 
-        # The assistant's first-pass reasoning + the raw data
-        messages.append({
-            "role": "assistant",
-            "content": first_pass_text,
-        })
-
-        # Inject the data as a follow-up system-like user turn
-        messages.append({
-            "role": "user",
-            "content": (
-                "The data queries have been executed. Here are the results:\n\n"
-                f"{data_results}\n\n"
-                "Answer my original question concisely (under 200 words).\n"
-                "The full data table is already shown as an interactive dataframe "
-                "in the UI — do NOT reproduce individual rows.\n"
-                "For count questions: state the exact total from 'Found N result(s)' first.\n"
-                "Only produce a table if you are summarising/aggregating "
-                "(e.g. counts per assay type) — use the 📊 Summary already in the data "
-                "if it is present, rather than re-computing it."
-            ),
-        })
+        messages = [{"role": "system", "content": trimmed_system}]
+        messages.extend(trimmed_history)
+        messages.append({"role": "user", "content": trimmed_data_msg})
 
         try:
             response = client.chat.completions.create(

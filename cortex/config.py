@@ -172,41 +172,6 @@ GENOME_ALIASES = {
 AVAILABLE_GENOMES = ["GRCh38", "mm39"]
 
 # --- SKILL REGISTRY ---
-# The menu of available workflows.
-SKILLS_REGISTRY = {
-    # Welcome / entry point
-    "welcome": "welcome/SKILL.md",
-    
-    # ENCODE skills
-    "ENCODE_Search": "ENCODE_Search/SKILL.md",
-    "ENCODE_LongRead": "ENCODE_LongRead/SKILL.md",
-    
-    # New Dogme Skills
-    "run_dogme_dna": "run_dogme_dna/SKILL.md",
-    "run_dogme_rna": "run_dogme_rna/SKILL.md",
-    "run_dogme_cdna": "run_dogme_cdna/SKILL.md",
-    
-    # Local Intake / Dispatcher Skill
-    "analyze_local_sample": "analyze_local_sample/SKILL.md",
-    
-    # Job Results Analysis Skill
-    "analyze_job_results": "analyze_job_results/SKILL.md",
-    
-    # Download / File Intake Skill
-    "download_files": "download_files/SKILL.md",
-    
-    # Differential Expression (edgePython)
-    "differential_expression": "differential_expression/SKILL.md",
-
-    # GO & Pathway Enrichment (edgePython)
-    "enrichment_analysis": "enrichment_analysis/SKILL.md",
-
-    # XgenePy cis/trans analysis
-    "xgenepy_analysis": "xgenepy_analysis/SKILL.md",
-
-    # Remote Execution (HPC3/SLURM)
-    "remote_execution": "remote_execution/SKILL.md",
-
-    # Reconcile annotated BAM outputs across workflows
-    "reconcile_bams": "reconcile_bams/SKILL.md",
-}
+# Authoritative manifests live in cortex/skill_manifest.py.
+# SKILLS_REGISTRY is re-exported here for backward compatibility (key → path).
+from cortex.skill_manifest import SKILLS_REGISTRY  # noqa: E402

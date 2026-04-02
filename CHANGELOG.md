@@ -30,6 +30,24 @@
 
 ### Features
 
+- **Unified token/context budget** (`cortex/context_budget.py`) — added a
+  `ContextBudgetManager` that allocates the LLM context window across system
+  prompt, skill content, memory, tool schemas, and conversation history using
+  tiktoken (`cl100k_base`) for accurate token counting instead of character
+  heuristics. Six priority-ranked budget slots with hard/soft trimming,
+  min-token guarantees, and oldest-first history eviction. Both `think()` and
+  `analyze_results()` in `AgentEngine` now enforce the budget before every LLM
+  call.
+
+- **Skill capability manifest** (`cortex/skill_manifest.py`) — replaced the
+  flat `SKILLS_REGISTRY` dict with declarative `SkillManifest` dataclasses.
+  Each skill now declares expected inputs, output types, required MCP services,
+  estimated runtime, supported sample types, and routing flags
+  (`analysis_only`, `switchable`). Query helpers `skills_for_service()`,
+  `skills_for_sample_type()`, and `check_service_availability()` enable
+  smarter planner routing and runtime availability checks. Backward-compatible
+  `SKILLS_REGISTRY` dict still exported from `cortex/config.py`.
+
 - **Project rename syncs local folder** — renaming a project now
   auto-generates a new slug from the new name and renames the on-disk
   directory (`AGOUTIC_DATA/users/{username}/{slug}/`) atomically so the UI

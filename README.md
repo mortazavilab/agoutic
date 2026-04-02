@@ -5,6 +5,18 @@
 
 ## Latest Updates (2026-04-02)
 
+- **Unified token/context budget** — new `ContextBudgetManager` allocates the
+  LLM context window across system prompt, skills, memory, tool schemas, and
+  conversation history using tiktoken for accurate token counting. Conversation
+  history is now automatically trimmed (oldest-first) to prevent context
+  overflow.
+
+- **Skill capability manifest** — replaced the flat `SKILLS_REGISTRY` dict
+  with declarative `SkillManifest` dataclasses declaring expected inputs,
+  output types, required MCP services, estimated runtime, and sample type
+  compatibility. Enables smarter planner routing and runtime availability
+  checks.
+
 - **Chat pipeline decomposition** — replaced the monolithic `chat_with_agent`
   function (1,637 lines) with a 15-stage registry-based pipeline.
   `cortex/app.py` reduced from 2,348 → 805 lines.
