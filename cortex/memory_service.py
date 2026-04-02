@@ -49,18 +49,37 @@ def create_memory(
     tags: dict | None = None,
     is_pinned: bool = False,
 ) -> Memory:
-    """Create a new memory entry."""
+    """Create a new memory entry. Deduplicates by content + user + project scope."""
     if category not in VALID_CATEGORIES:
         category = "custom"
     if source not in VALID_SOURCES:
         source = "user_manual"
+
+    # Dedup: if an identical active memory already exists, return it
+    normalized = content.strip()
+    dup_conditions = [
+        Memory.user_id == user_id,
+        Memory.content == normalized,
+        Memory.is_deleted == False,  # noqa: E712
+    ]
+    if project_id is not None:
+        dup_conditions.append(Memory.project_id == project_id)
+    else:
+        dup_conditions.append(Memory.project_id == None)  # noqa: E711
+
+    existing = db.execute(
+        select(Memory).where(and_(*dup_conditions)).limit(1)
+    ).scalar_one_or_none()
+    if existing:
+        logger.info("Memory dedup hit", memory_id=existing.id, content=normalized[:60])
+        return existing
 
     mem = Memory(
         id=str(uuid.uuid4()),
         user_id=user_id,
         project_id=project_id,
         category=category,
-        content=content,
+        content=normalized,
         structured_data=json.dumps(structured_data) if structured_data else None,
         source=source,
         is_pinned=is_pinned,
