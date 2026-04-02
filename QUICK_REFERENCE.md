@@ -1,4 +1,21 @@
-# Quick Reference - AGOUTIC Path Configuration
+# AGOUTIC Quick Reference
+
+A brief reference for path configuration, chat commands, slash commands, and shortcuts.
+See [README.md](README.md), [CONFIGURATION.md](CONFIGURATION.md), and
+[docs/MEMORY.md](docs/MEMORY.md) for full detail.
+
+## Table of Contents
+
+1. [Path Configuration](#two-root-variables)
+2. [Workflow Browsing Commands](#workflow-browsing-commands)
+3. [Memory Slash Commands](#memory-slash-commands)
+4. [Natural Language Memory](#natural-language-memory)
+5. [Dataframe Quick Commands](#dataframe-quick-commands)
+6. [Chat Shortcuts](#chat-shortcuts)
+7. [Remote Cluster](#remote-cluster-docs)
+8. [Documentation](#documentation)
+
+---
 
 ## Two Root Variables
 
@@ -156,6 +173,79 @@ These commands are handled by Cortex's safety net (`_auto_generate_data_calls`) 
 
 **Tip:** Use `list project files` to always target the project root. If `list files in <folder>` can't find the folder, it shows suggestions for alternative commands.
 
+---
+
+## Memory Slash Commands
+
+All memory slash commands are processed by the backend without calling the LLM — zero token cost.
+
+| Command | Syntax | Description |
+|---------|--------|--------------|
+| `/remember` | `/remember <text>` | Save a project-scoped memory |
+| `/remember-global` | `/remember-global <text>` | Save a user-global memory |
+| `/remember-df` | `/remember-df DF5` or `/remember-df DF5 as c2c12DF` | Save a conversation dataframe; optional user-given alias |
+| `/forget` | `/forget <text>` or `/forget #<id>` | Soft-delete by content match or ID prefix |
+| `/memories` | `/memories` or `/memories --global` | List active memories (project + global, or global only) |
+| `/pin` | `/pin #<id>` | Pin a memory (surfaced first in `[MEMORY]` context) |
+| `/unpin` | `/unpin #<id>` | Unpin a memory |
+| `/restore` | `/restore #<id>` | Restore a soft-deleted memory |
+| `/annotate` | `/annotate <sample> <key>=<value>...` | Annotate a sample with key/value metadata |
+| `/search-memories` | `/search-memories <query>` | Full-text search across memory content |
+| `/upgrade-to-global` | `/upgrade-to-global #<id>` | Promote a project-scoped memory to global scope |
+
+**Aliases**: `/make-global` and `/upgrade-global` are equivalent to `/upgrade-to-global`.
+
+Memory IDs in list output are 8-character prefixes (e.g. `a1b2c3d4`).
+Use them with `#` in pin, forget, restore, and upgrade commands.
+
+See [docs/MEMORY.md](docs/MEMORY.md) for the full architecture reference.
+
+---
+
+## Natural Language Memory
+
+These phrases are detected before the message reaches the LLM and fire as a
+side-effect alongside the normal LLM response (no extra turn needed).
+
+| Pattern | Example | Effect |
+|---------|---------|--------|
+| `remember [that] ...` | "remember that sample A is from mouse" | Creates a project-scoped memory |
+| `note that ...` / `save that ...` | "note that I prefer grouped bar charts" | Creates a project-scoped memory |
+| `sample X is [a/an] Y` | "sample C2C12 is a myoblast cell line" | Annotates sample with `condition=Y` |
+| `mark/label/tag sample X as Y` | "mark sample KO as treated" | Annotates sample with `condition=Y` |
+| `forget the memory about ...` | "forget the memory about the old run" | Soft-deletes by content match |
+| `what do you remember about ...?` | "what do you remember about sample B?" | Searches memories and shows results |
+
+---
+
+## Dataframe Quick Commands
+
+These commands bypass the LLM entirely — zero token cost — and return
+deterministic output.
+
+| Command | Description |
+|---------|-------------|
+| `list dfs` | List all dataframes in the conversation (labels, columns, row counts) |
+| `head DF5` | Show first 10 rows of conversation dataframe DF5 as a markdown table |
+| `head DF5 20` | Show first 20 rows of DF5 |
+| `head c2c12DF` | Show first 10 rows of a remembered named dataframe |
+| `head c2c12DF 20` | Show first 20 rows of a remembered named dataframe |
+
+**Tip**: Named remembered DFs (saved with `/remember-df DF5 as c2c12DF`) appear
+in `list dfs` and can be referenced by name in plot and analysis requests —
+the full table is injected into the LLM context automatically.
+
+---
+
+## Chat Shortcuts
+
+| Input | Description |
+|-------|-------------|
+| `try again` | Re-sends the last failed prompt (HTTP error or plan failure). Works repeatedly; clears on success. |
+| `retry` | Same as `try again`. |
+
+---
+
 ## Remote Cluster Docs
 
 For AGOUTIC's remote SLURM workflow, use these references:
@@ -191,7 +281,8 @@ grep -nEi "error|exception|caused by|singularity|apptainer|denied|timeout" .next
 
 ## Documentation
 
-- 📖 **[CONFIGURATION.md](CONFIGURATION.md)** - Complete guide
+- 📖 **[CONFIGURATION.md](CONFIGURATION.md)** - Complete configuration guide
+- 🧠 **[docs/MEMORY.md](docs/MEMORY.md)** - Memory system architecture
 - 📋 **[BEFORE_AFTER.md](BEFORE_AFTER.md)** - Changes explained
 - 📝 **[REFACTORING_SUMMARY.md](REFACTORING_SUMMARY.md)** - Technical summary
 

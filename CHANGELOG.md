@@ -105,6 +105,25 @@
   and case-insensitive lookup, `head <name>` detection), and context injection
   (named DF injection for all skill types, no injection without db params).
 
+### Docs
+
+- **`docs/MEMORY.md` created** — full architecture reference for the memory
+  system covering the data model, categories, scopes, slash commands, NL
+  detection, auto-capture, context injection, DF memories, DF context injection,
+  REST API, UI, and database migration.
+
+- **`QUICK_REFERENCE.md` restructured** — rewritten as a full command reference
+  with a table of contents and four new sections: Memory Slash Commands (all 11
+  commands with syntax), Natural Language Memory patterns, Dataframe Quick
+  Commands (`list dfs`, `head DF`, `head <name>`), and Chat Shortcuts
+  (`try again` / `retry`). Existing path configuration and workflow browsing
+  content is preserved.
+
+- **Sidebar Help expander** — quick command suggestions reorganised into
+  Workflows / Dataframes / Memory / Shortcuts groups, with sendable buttons for
+  `/memories`, `list dfs`, and `try again`, and inline captions for
+  reference-only command syntax.
+
 ## [3.4.16] - 2026-04-01
 
 ### Refactors

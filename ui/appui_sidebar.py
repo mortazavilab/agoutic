@@ -23,7 +23,7 @@ def render_sidebar(
             st.caption("🔑 Admin")
 
         with st.expander("❓ Help", expanded=False):
-            st.caption("Quick command suggestions")
+            st.caption("**Workflows**")
             if st.button("help", key="help_prompt_help", width="stretch"):
                 st.session_state["_help_prompt"] = "help"
                 st.rerun()
@@ -35,6 +35,23 @@ def render_sidebar(
                 st.rerun()
             if st.button("how do I use remote slurm", key="help_prompt_slurm", width="stretch"):
                 st.session_state["_help_prompt"] = "how do i use remote slurm"
+                st.rerun()
+            st.caption("**Dataframes**")
+            if st.button("list dfs", key="help_prompt_list_dfs", width="stretch"):
+                st.session_state["_help_prompt"] = "list dfs"
+                st.rerun()
+            st.caption("`head DF5`  ·  `head DF5 20`  ·  `head c2c12DF`")
+            st.caption("**Memory**")
+            if st.button("/memories", key="help_prompt_memories", width="stretch"):
+                st.session_state["_help_prompt"] = "/memories"
+                st.rerun()
+            st.caption("`/remember <text>`  ·  `/remember-global <text>`")
+            st.caption("`/remember-df DF5 as myDF`  ·  `/forget #<id>`")
+            st.caption("`/pin #<id>`  ·  `/annotate <sample> k=v`")
+            st.caption("`/search-memories <query>`  ·  `/upgrade-to-global #<id>`")
+            st.caption("**Shortcuts**")
+            if st.button("try again", key="help_prompt_retry", width="stretch"):
+                st.session_state["_help_prompt"] = "try again"
                 st.rerun()
 
         logout_button(api_url)
