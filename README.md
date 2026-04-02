@@ -1,285 +1,46 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.4.14
+**Version:** 3.4.17
 **Status:** Active Prototype 
 
-## Latest Updates (2026-03-31)
+## Latest Updates (2026-04-01)
 
-- **Safe project rename now defaults to display-name updates** —
-  `PATCH /projects/{project_id}` now keeps project slug/folder unchanged for
-  name-only renames (unless an explicit slug change is provided), preserving
-  stable project IDs and minimizing path/reference risk.
+- **Dual-scope memory system** — persistent memory with user-global and
+  per-project scopes. Categories: `result`, `sample_annotation`,
+  `pipeline_step`, `preference`, `finding`, `custom`. Soft-delete with
+  recovery, pinning, and configurable token-budget context injection.
 
-- **Rename conflicts are now rejected explicitly** — owner-scoped normalized
-  duplicate-name checks return `409` with a clear conflict message.
+- **Chat-line memory CRUD** — slash commands (`/remember`, `/forget`,
+  `/memories`, `/pin`, `/unpin`, `/restore`, `/annotate`,
+  `/search-memories`) plus natural language detection ("remember that...",
+  "sample X is an AD sample", "what do you remember about...?").
 
-- **Rename response payload now includes updated name** — project update
-  success responses now return `name` with `id` and `slug`, allowing immediate
-  canonical UI/API rendering.
+- **Sample metadata annotation** — `/annotate sample1 condition=AD` and
+  natural language "sample X is a Y" dual-write to `tags_json` and the
+  memory table for auditable annotation trails.
 
-- **Projects UI rename flow now has targeted error handling** — the dashboard
-  now displays specific feedback for conflict (`409`) and permission (`403`)
-  errors and uses the server-returned canonical rename value on success.
+- **Auto-capture of pipeline steps and job results** — successful workflow
+  steps and completed jobs are automatically recorded as memories with
+  deduplication and auto-pinning.
 
-- **Project-access display-name sync improved** — rename updates now
-  synchronize denormalized `project_access.project_name` values for all users
-  with access to the project.
+- **Memory-aware LLM context** — `[MEMORY]` block injected every turn with
+  pinned memories prioritized and dynamic token budget scaling.
 
-- **Launchpad copy-back now materializes symlinked artifacts** — file transfer
-  download flow now uses `copy_links=True` so symlinked outputs are copied as
-  real files into local workflow directories.
+- **Memories UI page and sidebar widget** — Streamlit page with scope tabs,
+  category filters, and an always-visible sidebar summary.
 
-- **Manual sync now supports extended timeout tuning** — Launchpad MCP adds
-  `LAUNCHPAD_SYNC_TIMEOUT` (default `9600s`) specifically for
-  `sync_job_results` operations.
+- **REST API for memories** — full CRUD at `/memories` with project/category
+  filtering, soft-delete/restore, and pin toggle.
 
-- **Manual sync timeout errors are now actionable** — read timeout failures now
-  include guidance to check transfer status and retry with a higher
-  `LAUNCHPAD_SYNC_TIMEOUT`.
+- **Planner decomposition** — split `planner.py` (2,127 LOC) into
+  `plan_templates.py`, `plan_classifier.py`, `plan_params.py`, and a slim
+  orchestration layer.
 
-- **Focused regressions added/updated** — expanded project rename tests in
-  `tests/cortex/test_project_endpoints.py` and
-  `tests/cortex/test_project_management.py`, plus Launchpad transfer/sync tests
-  in `tests/launchpad/test_file_transfer.py` and
-  `tests/launchpad/test_mcp_tools.py`.
+- **App chat-helper extraction** — extracted `chat_sync_handler.py`,
+  `chat_approval.py`, `chat_downloads.py` from `app.py`
+  (3,303 → 2,340 LOC).
 
-- **Cross-project reconcile prompts now support `project:workflow` syntax** —
-  `reconcile_bams` planning now parses references like
-  `sampleA in project-2026-03-27:workflow1`, resolves them to absolute
-  workflow directories when a base path is known, and falls back to stable
-  relative `project/workflow` references when no base path is available.
-
-- **Manual remote-to-local result sync command added for SLURM runs** — users
-  can now trigger a copy-back retry with natural language (for example,
-  "sync results back to local for workflow1"). Routing resolves the target run,
-  calls Launchpad `sync_job_results`, and returns structured statuses such as
-  `outputs_downloaded`, `already_synced`, `sync_in_progress`, and
-  `not_applicable`.
-
-- **Sync command error handling is now explicit and non-opaque** — non-SLURM
-  runs return a structured `not_applicable` response instead of failing with a
-  generic tool error, and HTTP/transport failures now surface actionable
-  status/detail context.
-
-- **3.4.13 BAM-detail resolution now prefers workflow discovery and explicit
-  workflow context** — BAM-detail requests now prioritize workflow/work_dir
-  listing and file lookup before any run-UUID-based analyzer call path.
-
-- **Non-job UUIDs are now blocked from analyzer BAM-detail dispatch** —
-  project/block UUID values are no longer forwarded as analyzer `run_uuid`
-  for BAM-detail calls; unresolved contexts return a controlled fallback.
-
-- **BAM fallback now allows safe workflow-discovery listing calls** —
-  project-root workflow discovery (`list_job_files` with shallow depth) is
-  permitted during BAM-detail resolution so the assistant can choose the
-  correct workflow containing the requested BAM.
-
-- **3.4.12 BAM-detail fallback now uses supported Analyzer tools only** —
-  BAM-detail requests under `analyze_job_results` now start by listing run
-  files (`list_job_files`) and avoid unsupported direct BAM-inspection tool
-  calls.
-
-- **Compatibility mapping for `show_bam_details` now routes to safe file
-  listing** — when this hallucinated tool appears, routing falls back to
-  `list_job_files` first instead of producing unknown-tool failures.
-
-- **Prompt/skill contract now explicitly enforces list-first BAM triage** —
-  skill guidance now states to use `list_job_files`, then `find_file` plus
-  supported read/parse tools to inspect alignment/QC-adjacent outputs.
-
-- **3.4.11 security hardening for file references** — user-controlled file
-  path inputs for cross-project and analyzer proxy routes are now validated as
-  relative-only and reject absolute paths, drive-style absolutes, traversal,
-  null bytes, and unsafe wildcard/shell-like tokens.
-
-- **Cross-project staging now supports logical file references safely** —
-  selected files may now be provided via `logical_reference` (additive to
-  `relative_path`), with deterministic `422` responses for ambiguous/no-match
-  resolution outcomes.
-
-- **User-data API responses now avoid absolute path leakage** — file and link
-  payloads return safe relative path forms (for example `data/<filename>`) in
-  API response bodies.
-
-- **Cross-project API is now merge-ready and routed through Cortex** —
-  `/cross-project/*` endpoints are now registered on the main app router, and
-  missing cross-project schema contracts were added so imports resolve cleanly.
-
-- **Cross-project recursive scans are now bounded by default** —
-  recursive browse/search stop scanning when `limit` is reached by default,
-  while still returning `truncated=true`; callers can request full counting
-  with `total_count_full_scan=true`.
-
-- **Unrelated project-stats regression was fixed at test-fixture scope only** —
-  the in-memory SQLite fixture used by project-management tests now creates
-  `dogme_jobs`, avoiding missing-table failures without changing production
-  project-stats behavior.
-
-- **New `reconcile_bams` skill and routing support** — added a dedicated skill
-  for cross-workflow annotated BAM reconciliation, registered in Cortex skill
-  and service registries, with auto-detection keywords for reconcile intents.
-
-- **Reconcile planning flow now includes strict preflight before approval** —
-  reconcile plans in `cortex/planner.py` now run helper-based reference checks,
-  then run reconcile preflight GTF resolution before `REQUEST_APPROVAL`, and
-  only execute reconcile run script after approval.
-
-- **Helper script for workflow Nextflow reference consistency** — added
-  `skills/reconcile_bams/scripts/check_workflow_references.py` to parse
-  workflow Nextflow config artifacts, normalize reference identifiers, and fail
-  on mixed/missing/ambiguous reference resolution.
-
-- **Reconcile script now performs real workflow-scoped execution** —
-  `skills/reconcile_bams/scripts/reconcile_bams.py` now enforces BAM filename
-  contract (`<sample>.<reference>.annotated.bam`), rejects mixed references,
-  resolves default GTFs from Dogme reference config, emits explicit
-  `needs_manual_gtf` follow-up state when defaults are unavailable, creates a
-  dedicated `workflow_reconcile_*` directory, symlinks inputs, and writes
-  reconcile output artifacts.
-
-- **Manual-GTF follow-up state propagated via replanner** —
-  `cortex/plan_replanner.py` now inspects reconcile preflight JSON output and
-  transitions the downstream approval step into `FOLLOW_UP` when manual GTF
-  input is required.
-
-- **Focused reconcile test coverage added and passing** — added targeted tests
-  for skill routing, reconcile planner ordering, reconcile preflight/execution,
-  and replanner payload extraction.
-
-- **Executor parallel batching for safe step kinds** — execution now batches
-  dependency-ready `LOCATE_DATA`, `SEARCH_ENCODE`, and `CHECK_EXISTING` steps
-  in parallel, while approval-gated and orchestration-heavy kinds remain
-  sequential.
-
-- **Deterministic batch persistence ordering** — parallel batch outcomes are
-  persisted in deterministic plan order (with stable step-id tie-break), so
-  persisted state is consistent even when completion timing differs.
-
-- **Hybrid-first planner bridge for six non-core flows** — planner now
-  attempts hybrid plan generation first for `compare_samples`,
-  `download_analyze`, `summarize_results`, `parse_plot_interpret`,
-  `compare_workflows`, and `search_compare_to_local`.
-
-- **Deterministic fallback is now reason-coded and explicit** — scoped flows
-  fall back only for defined hybrid failure reasons (engine/parse/fragment/
-  finalize failures and flow `plan_type` mismatch).
-
-- **Core deterministic flow ownership remains unchanged** —
-  `run_workflow`, `run_de_pipeline`, `run_enrichment`, and
-  `remote_stage_workflow` continue to use deterministic routing in this pass.
-
-- **Strict pre-dispatch plan validation** — workflow plans are now validated
-  against a centralized contract before execution begins. Invalid step kinds,
-  malformed dependencies, cyclic graphs, and project-scope mismatches now fail
-  early with structured validation errors.
-
-- **Hybrid fragment plan composition support** — planner output now supports
-  fragment-based composition with deterministic step-ID remapping and
-  dependency rewriting, enabling safe assembly of reusable planning fragments.
-
-- **Project-scoped plan instance continuity** — planning and execution now
-  preserve explicit `project_id` and `plan_instance_id` metadata for improved
-  isolation across concurrent workflows.
-
-- **Concurrency integration coverage added** — tests now validate parallel
-  plan execution isolation across separate projects and for multiple
-  plan instances inside one shared project.
-
-- **`chat_with_agent` decomposition** — extracted tag parsing, tool-call
-  dispatch, and embedded dataframe/plot handling from `cortex/app.py` into
-  owned helper modules to reduce app-level coupling and shrink the main chat
-  orchestration surface.
-- **Skill script auto-discovery for Launchpad allowlists** — `skills/*/scripts`
-  directories are now discovered automatically at startup and registered into
-  `LAUNCHPAD_SCRIPT_ALLOWLIST_IDS` and `LAUNCHPAD_SCRIPT_ALLOWLIST_ROOTS` with
-  deny-by-default behavior preserved for all non-discovered paths.
-
-- **RUN_SCRIPT plan-step support** — added a dedicated workflow step kind for
-  standalone utility-script execution paths so plans can represent script runs
-  without routing through full workflow-only submission.
-- **Local-only standalone script submission** — Launchpad `/jobs/submit` now
-  supports `run_type="script"` while preserving default Dogme behavior.
-- **Deny-by-default allowlist enforcement for scripts** — execution requires
-  an explicit allowlisted `script_id` mapping or an explicit absolute
-  `script_path` inside configured allowlisted roots.
-- **No repository script auto-discovery** — runnable scripts are not inferred
-  from repository contents; an explicit allowlisted selector is mandatory.
-- **Script status and log surfacing in existing job APIs** — script runs now
-  expose structured status and failure visibility through existing Launchpad
-  status/log paths to support plan dependency handling.
-
-- **Remote orchestration bridge removal** — removed the temporary
-  compatibility shim used during helper extraction and eliminated reverse
-  import coupling from remote orchestration back into Cortex app logic.
-- **Submission-handler extraction** — moved
-  `submit_job_after_approval` from `cortex/app.py` to
-  `cortex/workflow_submission.py` to keep app-level route/orchestration glue
-  thinner while preserving runtime behavior.
-- **Submit boundary ownership now direct** —
-  `cortex/app.py` dispatches directly to
-  `cortex.workflow_submission.submit_job_after_approval`, and
-  `cortex.app.submit_job_after_approval` is no longer maintained as an export
-  surface.
-- **Final submit bridge removed** —
-  `cortex/workflow_submission.py` no longer depends on `cortex.app` for runtime
-  behavior; deferred `app_module` lookup has been eliminated.
-- **Owned extraction module introduced** —
-  `extract_job_parameters_from_conversation` now lives in
-  `cortex/job_parameters.py` and app/workflow call sites import from this owned
-  boundary.
-- **Owned polling module introduced** —
-  `poll_job_status`, `_completed_job_results_ready`,
-  `_resolved_job_work_directory`, and `_auto_trigger_analysis` now live in
-  `cortex/job_polling.py` for clean ownership without app back-links.
-- **Approval-context extractor injection** — remote approval-context building
-  now receives parameter extraction from the app call site, preserving behavior
-  while keeping module boundaries one-directional.
-- **Defaults fallback continuity for degraded profile enrichment** — when live
-  profile enrichment is unavailable, approval-context generation now preserves
-  `slurm_account`/`slurm_partition` from resolved `get_slurm_defaults` data so
-  approval summaries and gates remain stable.
-
-- **Remote SLURM config-path correctness** — generated `nextflow.config` for
-  remote submissions now prioritizes staged remote reference cache paths in
-  `genome_annot_refs`, avoiding local host path leakage in cluster runs.
-- **Remote workflow input linking** — submissions now ensure workflow-local
-  `pod5`/`bams`/`fastqs` links map to staged remote input cache paths expected
-  by Dogme.
-- **Correct remote pipeline target** — SLURM submit scripts now run
-  `nextflow run mortazavilab/dogme`.
-- **Portable cluster runtime bootstrap** — generated sbatch scripts now attempt
-  module-based Java/container runtime setup where available and provide
-  `apptainer` compatibility for singularity-based Nextflow configs.
-- **Actionable failure diagnostics in SLURM logs** — failed jobs now include a
-  focused `.nextflow.log` error scan plus head/tail snippets in job output.
-- **Expanded Launchpad debug visibility** — `/jobs/{run_uuid}/debug` now
-  surfaces discovered `slurm-*.out/.err` previews and focused Nextflow log
-  context for failed remote jobs.
-- **Remote defaults-to-approval continuity** — when `get_slurm_defaults`
-  resolves values from saved SSH-profile defaults, Cortex now treats them as
-  valid submit-ready defaults and builds a proper approval gate instead of
-  emitting fallback "0 SLURM defaults" messaging.
-- **Launchpad context param safety net** — remote Launchpad calls now inject
-  missing context fields (`user_id`, plus `project_id` for
-  `get_slurm_defaults`) before execution to prevent missing-argument failures
-  from degraded model tags.
-- **Dedicated analysis capabilities guide** — README now includes a full
-  post-execution analysis section covering scientific interpretation goals,
-  supported analysis modes, example requests, visualization outputs, and
-  current analysis limitations.
-- **Post-extraction validation sweep completed** — focused submit/approval
-  tests plus broader Cortex endpoint/chat suites and Launchpad status/submit
-  suites passed after the submission-handler module move.
-- **Bridge-removal validation sweep completed** — compile checks plus focused
-  submit/approval/extract tests and broader chat-data-call boundary suites
-  passed after moving extraction/polling ownership out of `cortex/app.py`.
-- **Skills layout ownership refactor completed** — skills now live under
-  `skills/<skill_key>/SKILL.md`, shared markdown references moved to
-  `skills/shared/`, and registry/loader paths were updated without changing
-  skill routing or execution behavior.
-- **Skills-layout validation sweep completed** — compile checks, focused
-  skill-loading/plan-chain/skill-detection suites, stale-path audits, and
-  artifact hygiene checks passed after folderizing skill markdown ownership.
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 ## 🧬 Overview
 
@@ -1167,12 +928,11 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.3.2 — ENCODE assay alias resolution in main search path; list-type zero-result retry fix; centralized DB + Alembic migrations
+- **Release**: 3.4.17 — Dual-scope memory system, chat-line memory CRUD, sample annotation, auto-capture, memory-aware LLM context
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
 - **Nextflow**: >= 23.0
-- **Test Coverage**: 1068 tests across 54 test files
 - **Status**: Active Development
 
 ## 🗓️ Development Timeline
@@ -1181,5 +941,6 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 - complete: Web UI job monitoring, approval gates, project management
 - complete: Plan-execute-observe-replan, gene annotation, expanded templates
 - complete: Centralized DB, Alembic migrations, enrichment tools in Analyzer
-- current: Cortex modularisation and DE adapter integration
+- complete: Cortex modularisation and DE adapter integration
+- current: Dual-scope memory system, sample annotation, auto-capture
 - next: Production deployment preparation

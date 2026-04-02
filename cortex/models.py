@@ -297,3 +297,42 @@ class UserExecutionPreference(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+
+class Memory(Base):
+    """Persistent memory entries — user-global or project-scoped.
+
+    Stores results, sample annotations, pipeline steps, preferences,
+    findings, and freeform notes.  Supports soft-delete for recovery.
+    """
+    __tablename__ = "memories"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    # NULL = user-global memory; set = project-scoped
+    project_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    # result | sample_annotation | pipeline_step | preference | finding | custom
+    category: Mapped[str] = mapped_column(String, nullable=False, default="custom")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Machine-parseable payload (sample annotations, step details, etc.)
+    structured_data: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    # user_manual | auto_step | auto_result | system
+    source: Mapped[str] = mapped_column(String, nullable=False, default="user_manual")
+    is_pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    deleted_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Optional links to originating block or file
+    related_block_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    related_file_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    # Freeform user tags for custom categorization
+    tags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )

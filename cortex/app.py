@@ -61,7 +61,9 @@ from cortex.path_helpers import (
 from cortex.conversation_state import (
     _build_conversation_state, _extract_job_context_from_history,
 )
-from cortex.context_injection import _inject_job_context
+from cortex.context_injection import _inject_job_context, inject_memory_context
+from cortex.memory_commands import parse_memory_command, detect_memory_intent, execute_memory_command, execute_memory_intent
+from cortex.memory_service import get_memory_context as _get_memory_context
 from cortex.data_call_generator import _auto_generate_data_calls, _validate_analyzer_params, _validate_edgepython_params
 from cortex.tag_parser import (
     apply_response_corrections,
@@ -110,6 +112,7 @@ from cortex.routes.analyzer_proxy import (
 )
 from cortex.routes.user_data import router as user_data_router
 from cortex.routes.cross_project import router as cross_project_router
+from cortex.routes.memories import router as memories_router
 from cortex.task_service import sync_project_tasks, clear_project_tasks
 from cortex.remote_orchestration import (
     _WORKFLOW_PLAN_TYPE,
@@ -199,6 +202,7 @@ app.include_router(files_router)
 app.include_router(analyzer_proxy_router)
 app.include_router(user_data_router)
 app.include_router(cross_project_router)
+app.include_router(memories_router)
 
 # Initialize database on startup
 @app.on_event("startup")
@@ -990,7 +994,30 @@ What would you like to do?
                 active_skill, req.model or "default", _md,
                 prompt_type="df_inspection",
             )
-        
+
+        # ── MEMORY SLASH COMMANDS ──────────────────────────────────────
+        # /remember, /forget, /memories, /pin, /annotate etc. bypass the LLM.
+        _mem_cmd = parse_memory_command(req.message)
+        if _mem_cmd is not None:
+            _mem_response = execute_memory_command(session, _mem_cmd, user.id, req.project_id)
+            return await _create_prompt_response(
+                session, req, user_block, user.id,
+                active_skill, req.model or "default", _mem_response,
+                prompt_type="memory_command",
+            )
+
+        # ── NATURAL LANGUAGE MEMORY INTENT ─────────────────────────────
+        # "remember that...", "sample X is AD", etc. — execute and respond.
+        _mem_intent = detect_memory_intent(req.message)
+        if _mem_intent is not None:
+            _mem_ack = execute_memory_intent(session, _mem_intent, user.id, req.project_id)
+            if _mem_ack:
+                return await _create_prompt_response(
+                    session, req, user_block, user.id,
+                    active_skill, req.model or "default", _mem_ack,
+                    prompt_type="memory_intent",
+                )
+
         # Build conversation history in OpenAI format.
         # IMPORTANT: Strip <details>…</details> blocks from assistant messages.
         # These contain raw tool output (e.g. all 69 file rows) shown to the
@@ -1071,6 +1098,10 @@ What would you like to do?
             req.message, active_skill, conversation_history,
             history_blocks=history_blocks
         )
+
+        # Inject memory context (project + global memories)
+        _mem_ctx = _get_memory_context(session, user.id, req.project_id)
+        augmented_message = inject_memory_context(augmented_message, _mem_ctx)
 
         # Build structured conversation state and prepend as JSON
         _conv_state = _build_conversation_state(

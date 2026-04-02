@@ -130,6 +130,23 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                                 )
                             )
 
+                        # Auto-capture completed job to memory
+                        if job_status == "COMPLETED":
+                            try:
+                                from cortex.memory_service import auto_capture_result
+                                auto_capture_result(
+                                    session,
+                                    user_id=block.owner_id,
+                                    project_id=project_id,
+                                    run_uuid=run_uuid,
+                                    sample_name=payload.get("sample_name", ""),
+                                    workflow_type=payload.get("mode", payload.get("workflow_type", "")),
+                                    work_directory=payload.get("work_directory", ""),
+                                    block_id=block_id,
+                                )
+                            except Exception:
+                                logger.debug("Memory auto-capture failed for job", exc_info=True)
+
                         _job_done = True
                         break
 

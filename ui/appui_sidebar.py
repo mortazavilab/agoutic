@@ -230,6 +230,41 @@ def render_sidebar(
         except Exception:
             pass
 
+        # ── Memory sidebar widget ──────────────────────────────────
+        _mem_data = None
+        try:
+            _mem_resp = request_fn(
+                "GET", f"{api_url}/memories",
+                params={
+                    "project_id": st.session_state.get("active_project_id", ""),
+                    "include_global": True,
+                    "pinned_only": False,
+                    "limit": 10,
+                },
+                timeout=5,
+            )
+            if _mem_resp and _mem_resp.status_code == 200:
+                _mem_data = _mem_resp.json()
+        except Exception:
+            pass
+
+        _mem_list = (_mem_data or {}).get("memories", [])
+        _mem_count = (_mem_data or {}).get("total", 0)
+        _mem_label = f"🧠 Memories ({_mem_count})" if _mem_count else "🧠 Memories"
+
+        with st.expander(_mem_label, expanded=False):
+            if _mem_list:
+                for _m in _mem_list[:5]:
+                    _pin = "⭐ " if _m.get("is_pinned") else ""
+                    _scope = "🌐" if _m.get("project_id") is None else ""
+                    st.caption(f"{_pin}{_scope}{_m.get('content', '')[:60]}")
+                if _mem_count > 5:
+                    st.caption(f"*... and {_mem_count - 5} more*")
+                st.page_link("pages/memories.py", label="View all memories →")
+            else:
+                st.caption("No memories yet.")
+                st.caption("Use `/remember <text>` in chat.")
+
         _lt = (_tok_data or {}).get("lifetime", {})
         _tok_total = _lt.get("total_tokens", 0)
         _tok_limit = (_tok_data or {}).get("token_limit")

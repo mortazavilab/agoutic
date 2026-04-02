@@ -669,3 +669,21 @@ def _inject_job_context(user_message: str, active_skill: str,
                     return f"{context_line}\n{user_message}", {}, {"source": "fallback_details"}
 
     return user_message, {}, {}
+
+
+# ---------------------------------------------------------------------------
+# Memory context injection
+# ---------------------------------------------------------------------------
+
+def inject_memory_context(
+    user_message: str,
+    memory_context: str,
+) -> str:
+    """Append [MEMORY: ...] block to the augmented message.
+
+    Called from app.py after _inject_job_context, using the formatted string
+    from memory_service.get_memory_context().
+    """
+    if not memory_context:
+        return user_message
+    return f"{user_message}\n\n{memory_context}"

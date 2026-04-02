@@ -1,3 +1,67 @@
+## [3.4.17] - 2026-04-01
+
+### Features
+
+- **Dual-scope memory system** — added persistent memory with both user-global
+  and per-project scopes. Memories are stored in a dedicated `memories` table
+  with categories: `result`, `sample_annotation`, `pipeline_step`,
+  `preference`, `finding`, and `custom`.
+
+- **Chat-line memory CRUD via slash commands** — users can manage memories
+  directly from chat: `/remember`, `/remember-global`, `/forget`, `/memories`,
+  `/pin`, `/unpin`, `/restore`, `/annotate`, `/search-memories`.
+
+- **Natural language memory intent detection** — phrases like "remember
+  that...", "sample X is an AD sample", "forget the memory about...", and
+  "what do you remember about...?" are detected as side-effects alongside
+  normal LLM responses.
+
+- **Sample metadata annotation** — `/annotate sample1 condition=AD` and
+  natural language "sample X is a Y" dual-write to both `UserFile.tags_json`
+  and the memory table, creating an auditable annotation trail.
+
+- **Auto-capture of pipeline steps** — successful workflow plan steps are
+  automatically recorded as `pipeline_step` memories with deduplication by
+  block + step ID.
+
+- **Auto-capture of job results** — completed job results from the polling
+  loop are automatically pinned as `result` memories with run UUID, sample
+  name, workflow type, and status.
+
+- **Dynamic memory context injection** — a `[MEMORY]` block is prepended to
+  every LLM turn with pinned memories prioritized, sample annotations grouped,
+  and a configurable token budget (default 2,000 tokens) with soft-delete
+  filtering.
+
+- **Memory-aware system prompt** — LLM prompt templates now instruct the model
+  to reference `[MEMORY]` context for sample conditions, prior results, and
+  user preferences.
+
+- **REST API for memories** — full CRUD endpoints at `/memories` with
+  filtering by project, category, pinned status; soft-delete with restore;
+  pin/unpin toggle.
+
+- **Memories UI page** — Streamlit page with project/global scope tabs,
+  category filtering, pinned-only toggle, deleted-item recovery, and
+  emoji-badged memory cards.
+
+- **Sidebar memory widget** — sidebar expander showing pinned count, recent
+  memories, and a link to the full memories page.
+
+### Database
+
+- **Alembic migration `a1b2c3d4e5f6`** — creates `memories` table with
+  composite index on `(user_id, project_id, is_deleted)` and index on
+  `related_file_id`.
+
+### Tests
+
+- **57 new tests** — `test_memory_service.py` (32 tests covering CRUD,
+  soft-delete/restore, pinning, search, context budget, auto-capture
+  deduplication, result auto-pinning, annotation dual-write) and
+  `test_memory_commands.py` (25 tests covering slash command parsing, NL
+  intent detection).
+
 ## [3.4.16] - 2026-04-01
 
 ### Refactors

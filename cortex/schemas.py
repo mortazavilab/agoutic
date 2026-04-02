@@ -243,3 +243,45 @@ class StageStatusResponse(BaseModel):
     staging_mode: str
     item_count: int
     manifest_relative_path: str
+
+
+# ==================== Memory Schemas ====================
+
+class MemoryCreate(BaseModel):
+    """Request to create a memory entry."""
+    content: str = Field(..., min_length=1)
+    category: str = "custom"
+    project_id: Optional[str] = None
+    structured_data: Optional[dict] = None
+    tags: Optional[dict] = None
+    is_pinned: bool = False
+
+
+class MemoryOut(BaseModel):
+    """Response model for a memory entry."""
+    id: str
+    user_id: str
+    project_id: Optional[str] = None
+    category: str
+    content: str
+    structured_data: Optional[dict] = None
+    source: str
+    is_pinned: bool
+    is_deleted: bool
+    related_block_id: Optional[str] = None
+    related_file_id: Optional[str] = None
+    tags: Optional[dict] = None
+    created_at: str
+
+
+class MemoryUpdate(BaseModel):
+    """Partial update for a memory entry."""
+    content: Optional[str] = None
+    tags: Optional[dict] = None
+    is_pinned: Optional[bool] = None
+
+
+class MemoryListOut(BaseModel):
+    """Paginated list of memory entries."""
+    memories: list[MemoryOut] = Field(default_factory=list)
+    total: int = 0

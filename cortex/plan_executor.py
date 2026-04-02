@@ -858,6 +858,11 @@ async def execute_plan(
                         current_step["status"] = "COMPLETED"
                         current_step["result"] = result.data.get("results") or result.data
                         current_step["completed_at"] = completed_at
+                        # Auto-capture successful step to memory
+                        _auto_capture_step_memory(
+                            session, workflow_block, current_step, plan_payload,
+                            user=user, project_id=project_id,
+                        )
 
                 # Persist deterministic per-step batch outcomes in plan order.
                 _persist_step_update(session, workflow_block, plan_payload)
@@ -924,6 +929,12 @@ async def execute_plan(
             _persist_step_update(session, workflow_block, plan_payload)
             return
 
+        # Auto-capture successful step to memory
+        _auto_capture_step_memory(
+            session, workflow_block, step, plan_payload,
+            user=user, project_id=project_id,
+        )
+
         if result.data.get("action") in ("approval_required", "special_handling"):
             return
 
@@ -944,6 +955,37 @@ async def execute_plan(
         plan_payload["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
         _persist_step_update(session, workflow_block, plan_payload)
         logger.info("Plan completed", title=plan_payload.get("title"))
+
+
+# ---------------------------------------------------------------------------
+# Memory auto-capture hook
+# ---------------------------------------------------------------------------
+
+def _auto_capture_step_memory(
+    session,
+    workflow_block: "ProjectBlock",
+    step: dict,
+    plan_payload: dict,
+    *,
+    user: Any = None,
+    project_id: str = "",
+) -> None:
+    """Best-effort auto-capture of a completed step to the memory system."""
+    try:
+        from cortex.memory_service import auto_capture_step
+        user_id = getattr(user, "id", None) or getattr(workflow_block, "owner_id", "")
+        pid = project_id or getattr(workflow_block, "project_id", "")
+        if user_id and pid:
+            auto_capture_step(
+                session,
+                user_id=user_id,
+                project_id=pid,
+                step=step,
+                plan_payload=plan_payload,
+                block_id=getattr(workflow_block, "id", None),
+            )
+    except Exception:
+        logger.debug("Memory auto-capture failed for step", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
