@@ -74,6 +74,25 @@
   `ctx.auto_calls` was wiped by `_suppress_all_tags()` when called after
   assignment; suppress is now called first.
 
+- **Script-result file access now resolves workflow outputs correctly** —
+  fixed Analyzer path resolution for follow-up commands after script runs,
+  including `list files`, `list files in workflow2`, `parse ...csv`, and
+  other `find_file` / `read_file_content` / `parse_csv_file` flows. These
+  requests no longer reuse a skill script directory such as
+  `skills/reconcile_bams/scripts`; they now prefer the real
+  project/workflow output directory, re-resolve explicit workflow subpaths
+  from the project root, and avoid falling back to `run_uuid` routing for
+  normal file-browsing requests.
+
+- **Script completion preserves actual output work directory** — standalone
+  script jobs now capture the final `Outputs are in: ...` path from stdout and
+  retain that as the authoritative work directory during polling and follow-up
+  analysis instead of reverting to the script working directory.
+
+- **Chat timestamps render in local time again** — block timestamps in the UI
+  now treat naive stored timestamps as UTC before converting to the browser's
+  local timezone, fixing displays that had regressed to raw UTC instead of PDT.
+
 ### Docs
 
 - **`docs/CHAT_PIPELINE.md` created** — full architecture reference covering

@@ -619,6 +619,18 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         run_uuid = result.get("run_uuid") if isinstance(result, dict) else None
         _work_directory = result.get("work_directory", "") if isinstance(result, dict) else ""
 
+        # For script runs the work_directory from Launchpad is the script's
+        # cwd (the skills/scripts folder), NOT the actual output directory.
+        # Prefer the output_directory known from the job params.
+        if run_type == "script":
+            _script_output_dir = (
+                job_data.get("output_directory")
+                or job_params.get("output_directory")
+                or ""
+            ).strip()
+            if _script_output_dir and os.path.isabs(_script_output_dir):
+                _work_directory = _script_output_dir
+
         if run_uuid:
             if workflow_block is not None:
                 payload = get_block_payload(workflow_block)

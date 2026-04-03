@@ -267,6 +267,48 @@ class TestValidateAnalyzerParams:
         # work_dir should incorporate the subfolder
         assert "annot" in result["work_dir"]
 
+    def test_list_files_in_workflow_subpath_repairs_script_context(self):
+        """Explicit workflow subpaths should resolve from the project root, not a stale script dir."""
+        import json
+        blk = self._make_block(
+            "EXECUTION_JOB",
+            json.dumps({"work_directory": "/agoutic/skills/reconcile_bams/scripts"}),
+        )
+        result = _validate_analyzer_params(
+            tool="list_job_files",
+            params={"work_dir": "/agoutic/skills/reconcile_bams/scripts", "max_depth": 1},
+            user_message="list files in workflow2",
+            history_blocks=[blk],
+            project_dir="/proj",
+        )
+        assert result["work_dir"] == "/proj/workflow2"
+        assert result["max_depth"] == 1
+
+    def test_list_files_defaults_to_latest_workflow_when_context_is_script_dir(self):
+        """Plain 'list files' should land in the latest workflow when only script context exists."""
+        import json
+        blk = self._make_block(
+            "EXECUTION_JOB",
+            json.dumps({"work_directory": "/agoutic/skills/reconcile_bams/scripts"}),
+        )
+        with patch("cortex.data_call_generator.os.path.isdir") as mock_isdir, patch(
+            "cortex.data_call_generator.os.listdir",
+            return_value=["workflow2", "workflow7", "notes"],
+        ):
+            mock_isdir.side_effect = lambda path: path in {
+                "/proj",
+                "/proj/workflow2",
+                "/proj/workflow7",
+            }
+            result = _validate_analyzer_params(
+                tool="list_job_files",
+                params={"work_dir": "/agoutic/skills/reconcile_bams/scripts"},
+                user_message="list files",
+                history_blocks=[blk],
+                project_dir="/proj",
+            )
+        assert result["work_dir"] == "/proj/workflow7"
+
     def test_valid_subdir_of_context_wd_kept(self):
         """If LLM work_dir is a valid subdir of context work_dir, keep it."""
         import json

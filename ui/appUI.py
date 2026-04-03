@@ -361,8 +361,9 @@ def render_block(block, expected_project_id: str = ""):
             return ""
         try:
             dt = datetime.datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-            if dt.tzinfo is not None:
-                dt = dt.astimezone()
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            dt = dt.astimezone()
             return dt.strftime("%b %d, %H:%M")
         except Exception:
             return ""

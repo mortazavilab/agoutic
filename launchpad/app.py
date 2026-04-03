@@ -309,6 +309,22 @@ def _build_live_script_logs(job, *, limit: int) -> list[dict[str, str]]:
     return live_logs[-limit:]
 
 
+def _parse_script_output_directory(stdout_text: str) -> str | None:
+    """Extract an explicit output directory from script stdout.
+
+    Many agoutic scripts print a line like ``Outputs are in: /path/to/dir``
+    when they finish.  If present, the path is more accurate than the script's
+    working directory and should be used as the job's work_directory.
+    """
+    import re as _re
+    m = _re.search(r'Outputs are in:\s*(.+)', stdout_text)
+    if m:
+        candidate = m.group(1).strip()
+        if candidate and os.path.isabs(candidate):
+            return candidate
+    return None
+
+
 async def _monitor_script_job(
     run_uuid: str,
     process: asyncio.subprocess.Process,
@@ -346,6 +362,13 @@ async def _monitor_script_job(
                     "stderr_log": stderr_log_path,
                 }
             )
+            # If the script printed an explicit output directory, use it as
+            # the authoritative work_directory so downstream "list files"
+            # calls land in the right place instead of the script cwd.
+            if return_code == 0:
+                _script_output_dir = _parse_script_output_directory(stdout_tail)
+                if _script_output_dir:
+                    job.nextflow_work_dir = _script_output_dir
             await session.commit()
 
         await add_log_entry(

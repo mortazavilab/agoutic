@@ -25,6 +25,44 @@ from common.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+
+def _is_script_source_dir(path_value: str) -> bool:
+    return bool(path_value and "/skills/" in path_value and "/scripts" in path_value)
+
+
+def _latest_workflow_dir(project_dir: str) -> str:
+    """Return the highest-numbered workflow directory under a project root."""
+    if not project_dir or not os.path.isdir(project_dir):
+        return ""
+
+    latest_num = -1
+    latest_dir = ""
+    try:
+        for entry in os.listdir(project_dir):
+            match = re.fullmatch(r"workflow(\d+)", entry, re.IGNORECASE)
+            if not match:
+                continue
+            candidate = os.path.join(project_dir, entry)
+            if not os.path.isdir(candidate):
+                continue
+            number = int(match.group(1))
+            if number > latest_num:
+                latest_num = number
+                latest_dir = candidate
+    except OSError:
+        return ""
+
+    return latest_dir
+
+
+def _default_file_work_dir(work_dir: str, project_dir: str) -> str:
+    """Prefer a real workflow directory over a stale script source directory."""
+    if work_dir and not _is_script_source_dir(work_dir):
+        return work_dir
+    if project_dir:
+        return _latest_workflow_dir(project_dir) or project_dir
+    return work_dir
+
 _BED_COUNT_INTENT_RE = re.compile(
     r'\b(count|counts|summarize|summarise|tally|show)\b.*\bbed\b.*\b(chromosome|chromosomes|chr)\b'
     r'|\b(chromosome|chromosomes|chr)\b.*\bbed\b',
@@ -236,7 +274,9 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     if project_dir:
         _project_dir = project_dir
     elif work_dir:
-        if re.search(r'/workflow\d+/?$', work_dir):
+        if "/skills/" in work_dir and "/scripts" in work_dir:
+            _project_dir = ""
+        elif re.search(r'/workflow\d+/?$', work_dir):
             _project_dir = work_dir.rstrip("/").rsplit("/", 1)[0]
         else:
             _project_dir = work_dir
@@ -302,8 +342,14 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                     f"{_project_dir.rstrip('/')}/{_subpath}" if _project_dir else ""
                 )
         else:
-            # No subpath → list current workflow dir
-            _target_wd = work_dir or _project_dir or ""
+            # No subpath → list current workflow dir.
+            # Guard: for script runs the history work_dir may point to the
+            # skills/scripts source directory instead of the project output;
+            # prefer project_dir when that signature is detected.
+            _effective_wd = work_dir
+            if _effective_wd and _project_dir and _is_script_source_dir(_effective_wd):
+                _effective_wd = _latest_workflow_dir(_project_dir) or _project_dir
+            _target_wd = _effective_wd or _project_dir or ""
 
         if _target_wd:
             _params_f: dict = {"work_dir": _target_wd}
@@ -611,11 +657,14 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
 
                 # Resolve the path: could be just a filename, a subpath
                 # (annot/File.csv), or workflow-prefixed (workflow2/annot/File.csv).
+                _base_wd = _default_file_work_dir(work_dir, _project_dir)
+                if re.match(r'^workflow\d+(?:/|\\)', filename, re.IGNORECASE):
+                    _base_wd = _project_dir or _base_wd
                 _resolved_wd, _resolved_file = _resolve_file_path(
-                    filename, work_dir, workflows,
+                    filename, _base_wd, workflows,
                 )
-                if not _resolved_wd and work_dir:
-                    _resolved_wd = work_dir
+                if not _resolved_wd and _base_wd:
+                    _resolved_wd = _base_wd
                 if not _resolved_wd and run_uuid:
                     _resolved_wd = None  # will use run_uuid fallback
 
@@ -719,11 +768,14 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 _bed_match = re.search(r'(\S+\.bed)\b', user_message, re.IGNORECASE)
                 if _bed_match:
                     _bed_ref = _bed_match.group(1).rstrip('.,;:!?')
+                    _base_wd = _default_file_work_dir(work_dir, _project_dir)
+                    if re.match(r'^workflow\d+(?:/|\\)', _bed_ref, re.IGNORECASE):
+                        _base_wd = _project_dir or _base_wd
                     _resolved_wd, _resolved_file = _resolve_file_path(
-                        _bed_ref, work_dir, workflows,
+                        _bed_ref, _base_wd, workflows,
                     )
-                    if not _resolved_wd and work_dir:
-                        _resolved_wd = work_dir
+                    if not _resolved_wd and _base_wd:
+                        _resolved_wd = _base_wd
                     _params: dict = {"file_name": _resolved_file}
                     if _resolved_wd:
                         _params["work_dir"] = _resolved_wd
@@ -919,6 +971,8 @@ def _validate_analyzer_params(
     # Fallback: use the project directory if no workflow-level work_dir
     if not real_wd and project_dir:
         real_wd = project_dir
+    if real_wd and project_dir and _is_script_source_dir(real_wd):
+        real_wd = _latest_workflow_dir(project_dir) or project_dir
     workflows = ctx.get("workflows", [])
     if len(workflows) > 1:
         _fname = params.get("file_name", "").lower()
@@ -930,6 +984,15 @@ def _validate_analyzer_params(
 
     llm_wd = params.get("work_dir", "")
     if real_wd:
+        if (
+            llm_wd
+            and os.path.isabs(llm_wd)
+            and _is_script_source_dir(real_wd)
+            and not _is_script_source_dir(llm_wd)
+            and re.search(r'/workflow\d+(?:/|$)', llm_wd)
+        ):
+            real_wd = llm_wd
+
         _workflow_listing_request = bool(
             tool == "list_job_files"
             and re.search(
@@ -938,11 +1001,28 @@ def _validate_analyzer_params(
                 re.IGNORECASE,
             )
         )
+        _file_listing_request = bool(
+            tool == "list_job_files"
+            and re.search(
+                r'\b(?:list|show|what)\s+(?:the\s+)?files?\b',
+                user_message,
+                re.IGNORECASE,
+            )
+        )
+        _explicit_workflow_file_request = bool(
+            llm_wd
+            and os.path.isabs(llm_wd)
+            and not _is_script_source_dir(llm_wd)
+            and re.search(r'/workflow\d+(?:/|$)', llm_wd)
+            and tool in {"find_file", "read_file_content", "parse_csv_file", "parse_bed_file"}
+        )
         if (
             ctx_run_uuid
             and os.path.isabs(real_wd)
             and not os.path.exists(real_wd)
             and not _workflow_listing_request
+            and not _file_listing_request
+            and not _explicit_workflow_file_request
         ):
             logger.warning(
                 "Context work_dir is missing locally; falling back to run_uuid for Analyzer resolution",
@@ -972,7 +1052,7 @@ def _validate_analyzer_params(
         # Source 1 (preferred): parse from user message — preserves
         #   workflow prefix (e.g. "workflow1/annot") that the LLM may strip.
         # Source 2 (fallback): subfolder hint from LLM's invented param.
-        if tool == "list_job_files" and not params.get("max_depth"):
+        if tool == "list_job_files":
             _sub = ""
             _sub_m = re.search(
                 r'\b(?:list|show)\s+(?:the\s+)?files?\s+'
@@ -984,7 +1064,13 @@ def _validate_analyzer_params(
             if not _sub:
                 _sub = _subfolder_hint
             if _sub:
-                real_wd = _resolve_workflow_path(_sub, real_wd, workflows)
+                _base_wd = real_wd
+                if re.match(r'^workflow\d+(?:/|$)', _sub, re.IGNORECASE):
+                    if project_dir:
+                        _base_wd = project_dir
+                    elif re.search(r'/workflow\d+/?$', real_wd):
+                        _base_wd = real_wd.rstrip("/").rsplit("/", 1)[0]
+                real_wd = _resolve_workflow_path(_sub, _base_wd, workflows)
                 # Show only immediate contents of the subfolder, not deep recursion
                 params["max_depth"] = 1
 

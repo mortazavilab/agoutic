@@ -173,6 +173,15 @@ def _resolved_job_work_directory(existing_work_directory: str | None, status_dat
     if isinstance(status_data, dict):
         status_work_directory = (status_data.get("work_directory") or "").strip()
         if status_work_directory:
+            # Don't let a script-cwd value from Launchpad overwrite a
+            # better output directory that cortex already resolved.
+            if (
+                existing_work_directory
+                and "/skills/" in status_work_directory
+                and "/scripts" in status_work_directory
+                and "/skills/" not in existing_work_directory
+            ):
+                return existing_work_directory
             return status_work_directory
     return existing_work_directory or None
 

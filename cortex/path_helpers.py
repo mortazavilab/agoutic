@@ -11,6 +11,8 @@ Functions:
     _resolve_file_path       — resolve user path to (work_dir, filename)
 """
 
+import re
+
 
 def _pick_file_tool(filename: str) -> str:
     """Return the right analyzer tool for a given filename extension."""
@@ -98,5 +100,12 @@ def _resolve_file_path(
             sn = wf.get("sample_name", "").lower()
             if sn and sn in parts[-1].lower():
                 return wf.get("work_dir", default_work_dir), parts[-1]
+
+        if re.fullmatch(r"workflow\d+", first, re.IGNORECASE) and default_work_dir:
+            if re.search(r'/workflow\d+/?$', default_work_dir):
+                project_root = default_work_dir.rstrip("/").rsplit("/", 1)[0]
+            else:
+                project_root = default_work_dir.rstrip("/")
+            return f"{project_root}/{parts[0]}", parts[-1]
 
     return default_work_dir, parts[-1]

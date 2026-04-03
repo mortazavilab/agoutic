@@ -16,7 +16,7 @@ the LLM fails to emit them.  It handles:
 """
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from cortex.data_call_generator import _auto_generate_data_calls
 
@@ -422,6 +422,40 @@ class TestDogmeFileParsing:
         assert len(calls) >= 1
         assert calls[0]["tool"] == "find_file"
 
+    def test_parse_csv_repairs_script_context_to_latest_workflow(self):
+        blocks = self._blocks_with_job("/agoutic/skills/reconcile_bams/scripts")
+        with patch("cortex.data_call_generator.os.path.isdir") as mock_isdir, patch(
+            "cortex.data_call_generator.os.listdir",
+            return_value=["workflow2", "workflow7"],
+        ):
+            mock_isdir.side_effect = lambda path: path in {
+                "/tmp/proj",
+                "/tmp/proj/workflow2",
+                "/tmp/proj/workflow7",
+            }
+            calls = _auto_generate_data_calls(
+                "parse reconciled_novelty_by_sample.csv",
+                "analyze_job_results",
+                history_blocks=blocks,
+                project_dir="/tmp/proj",
+            )
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "find_file"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow7"
+
+    def test_parse_csv_with_explicit_workflow_prefix_uses_project_root(self):
+        blocks = self._blocks_with_job("/agoutic/skills/reconcile_bams/scripts")
+        calls = _auto_generate_data_calls(
+            "parse workflow2/annot/reconciled_novelty_by_sample.csv",
+            "analyze_job_results",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "find_file"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow2"
+        assert calls[0]["params"]["file_name"] == "reconciled_novelty_by_sample.csv"
+
 
 # ---------------------------------------------------------------------------
 # analyze_job_results catch-all auto-generates get_analysis_summary
@@ -542,3 +576,31 @@ class TestAnalyzeJobResultsCatchAll:
         assert len(calls) == 1
         assert calls[0]["tool"] == "list_job_files"
         assert calls[0]["params"].get("name_pattern") == "workflow*"
+
+
+class TestBrowseRegression:
+    def test_list_files_prefers_latest_workflow_over_script_dir(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/agoutic/skills/reconcile_bams/scripts",
+                "run_uuid": "aaaa-bbbb",
+            }},
+        ])
+        with patch("cortex.data_call_generator.os.path.isdir") as mock_isdir, patch(
+            "cortex.data_call_generator.os.listdir",
+            return_value=["workflow2", "workflow7"],
+        ):
+            mock_isdir.side_effect = lambda path: path in {
+                "/proj",
+                "/proj/workflow2",
+                "/proj/workflow7",
+            }
+            calls = _auto_generate_data_calls(
+                "list files",
+                "analyze_job_results",
+                history_blocks=blocks,
+                project_dir="/proj",
+            )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/proj/workflow7"

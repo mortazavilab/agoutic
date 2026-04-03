@@ -234,6 +234,16 @@ class TestResolveFilePath:
         wd, fn = _resolve_file_path("/File.csv/", self.DEFAULT_WD, self.WORKFLOWS)
         assert fn == "File.csv"
 
+    def test_explicit_workflow_prefix_without_known_workflows_uses_project_root(self):
+        wd, fn = _resolve_file_path("workflow2/annot/File.csv", "/data/proj", [])
+        assert wd == "/data/proj/workflow2"
+        assert fn == "File.csv"
+
+    def test_explicit_workflow_prefix_without_known_workflows_from_workflow_default(self):
+        wd, fn = _resolve_file_path("workflow2/annot/File.csv", "/data/proj/workflow1", [])
+        assert wd == "/data/proj/workflow2"
+        assert fn == "File.csv"
+
 
 # =========================================================================
 # plot intent
