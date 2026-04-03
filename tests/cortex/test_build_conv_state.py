@@ -108,6 +108,44 @@ class TestExtractJobContext:
         ctx = _extract_job_context_from_history(None, history_blocks=blocks)
         assert ctx == {}
 
+    def test_script_jobs_deprioritised(self):
+        """Pipeline (dogme) work_dir should win over script (reconcile_bams) work_dir."""
+        blocks = [
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow2",
+                "run_uuid": "uuid-dogme",
+                "sample_name": "sample1",
+                "mode": "RNA",
+                "run_type": "dogme",
+            }),
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/opt/agoutic_code/skills/reconcile_bams/scripts",
+                "run_uuid": "uuid-reconcile",
+                "sample_name": "",
+                "mode": "",
+                "run_type": "script",
+            }),
+        ]
+        ctx = _extract_job_context_from_history(None, history_blocks=blocks)
+        # Should pick the dogme workflow, not the reconcile script
+        assert ctx["work_dir"] == "/data/proj/workflow2"
+        assert ctx["run_uuid"] == "uuid-dogme"
+        # Both workflows should still be listed
+        assert len(ctx["workflows"]) == 2
+
+    def test_only_script_jobs_still_returns_context(self):
+        """When only script jobs exist, fall back to them rather than returning nothing."""
+        blocks = [
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/opt/scripts/reconcile",
+                "run_uuid": "uuid-script",
+                "run_type": "script",
+            }),
+        ]
+        ctx = _extract_job_context_from_history(None, history_blocks=blocks)
+        assert ctx["work_dir"] == "/opt/scripts/reconcile"
+        assert ctx["run_uuid"] == "uuid-script"
+
 
 # ===========================================================================
 # _build_conversation_state — slow path

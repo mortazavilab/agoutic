@@ -51,12 +51,13 @@ class TestDuplicateApproval:
 
 class TestSkillSwitchDuringJob:
     def test_skill_switch_stripped_during_running_job(self):
-        """SKILL_SWITCH should be stripped when a job is genuinely running."""
+        """SKILL_SWITCH should be stripped when a job is genuinely running and no user message after."""
         block = FakeBlock(
             type="EXECUTION_JOB",
             status="RUNNING",
             payload={"job_status": {"status": "RUNNING"}, "run_uuid": "abc"},
         )
+        block.seq = 10
         response = "Switching [[SKILL_SWITCH_TO: welcome]] now"
         cleaned, violations = _validate_llm_output(response, "run_dogme_dna", [block])
         assert "[[SKILL_SWITCH_TO:" not in cleaned
@@ -78,6 +79,40 @@ class TestSkillSwitchDuringJob:
         response = "Switching [[SKILL_SWITCH_TO: welcome]] now"
         cleaned, violations = _validate_llm_output(response, "welcome", [])
         assert "[[SKILL_SWITCH_TO:" in cleaned
+
+    def test_skill_switch_allowed_when_user_message_after_job(self):
+        """SKILL_SWITCH should be allowed when user sent a message after the running job."""
+        job_block = FakeBlock(
+            type="EXECUTION_JOB",
+            status="RUNNING",
+            payload={"job_status": {"status": "RUNNING"}, "run_uuid": "abc"},
+        )
+        job_block.seq = 5
+        user_msg = FakeBlock(type="USER_MESSAGE", status="DONE", payload={"text": "parse my csv"})
+        user_msg.seq = 10
+        response = "Switching [[SKILL_SWITCH_TO: analyze_job_results]] now"
+        cleaned, violations = _validate_llm_output(
+            response, "analyze_local_sample", [job_block, user_msg],
+        )
+        assert "[[SKILL_SWITCH_TO:" in cleaned  # Not stripped
+        assert not any("SKILL_SWITCH" in v for v in violations)
+
+    def test_skill_switch_blocked_when_user_message_before_job(self):
+        """SKILL_SWITCH should be blocked when user message was before the running job."""
+        user_msg = FakeBlock(type="USER_MESSAGE", status="DONE", payload={"text": "run pipeline"})
+        user_msg.seq = 3
+        job_block = FakeBlock(
+            type="EXECUTION_JOB",
+            status="RUNNING",
+            payload={"job_status": {"status": "RUNNING"}, "run_uuid": "abc"},
+        )
+        job_block.seq = 5
+        response = "Switching [[SKILL_SWITCH_TO: welcome]] now"
+        cleaned, violations = _validate_llm_output(
+            response, "run_dogme_dna", [user_msg, job_block],
+        )
+        assert "[[SKILL_SWITCH_TO:" not in cleaned
+        assert any("SKILL_SWITCH" in v for v in violations)
 
 
 class TestUnknownTools:
