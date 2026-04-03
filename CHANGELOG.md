@@ -6,6 +6,15 @@
 
 ### Improvements
 
+- **Remote SLURM rsync now skips wasteful compression for BAM-class binaries**
+  — remote staging and result sync still use rsync compression for HPC links,
+  but now pass a `--skip-compress` suffix list so already-compressed genomics
+  binaries such as `bam`, `bai`, `cram`, `crai`, `pod5`, and `fast5` avoid
+  unnecessary CPU overhead. When a cluster's rsync is too old to support that
+  option, AGOUTIC retries once without it so transfers remain compatible.
+  (`launchpad/backends/file_transfer.py`,
+  `launchpad/backends/local_user_broker.py`)
+
 - **Explicit pending dataframe action controls** — `PENDING_ACTION` chat blocks
   now render dedicated Apply and Dismiss buttons in the UI instead of relying
   on a follow-up free-text `yes`. The backend executes or rejects the exact

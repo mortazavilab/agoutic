@@ -15,6 +15,8 @@ import signal
 from pathlib import Path
 from typing import Any
 
+from launchpad.backends.file_transfer import build_rsync_command, should_retry_without_skip_compress
+
 logger = logging.getLogger(__name__)
 
 
@@ -157,21 +159,18 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
         timeout_seconds = request.get("timeout_seconds")
         copy_links = bool(request.get("copy_links"))
         copy_dirlinks = bool(request.get("copy_dirlinks"))
+        use_skip_compress = bool(request.get("use_skip_compress", True))
 
-        cmd = [
-            "rsync", "-avz", "--omit-dir-times", "--no-perms", "--partial", "--progress",
-            "-e", " ".join(_build_ssh_transport(profile)),
-        ]
-        if copy_links:
-            cmd.append("--copy-links")
-        elif copy_dirlinks:
-            cmd.append("--copy-dirlinks")
-        for pattern in include_patterns:
-            cmd.extend(["--include", pattern])
-        for pattern in exclude_patterns:
-            cmd.extend(["--exclude", pattern])
-
-        cmd.extend([source, dest])
+        cmd = build_rsync_command(
+            ssh_command=" ".join(_build_ssh_transport(profile)),
+            source=source,
+            dest=dest,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+            copy_links=copy_links,
+            copy_dirlinks=copy_dirlinks,
+            use_skip_compress=use_skip_compress,
+        )
 
         logger.info(
             "Local auth broker starting rsync_transfer host=%s user=%s timeout=%ss source=%s dest=%s",
@@ -182,6 +181,28 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
             dest,
         )
         result = await _run_subprocess(cmd, timeout_seconds=timeout_seconds)
+        if should_retry_without_skip_compress(
+            exit_code=result.get("exit_status"),
+            stderr_text=result.get("stderr", ""),
+        ):
+            logger.warning(
+                "Local auth broker retrying rsync_transfer without --skip-compress host=%s user=%s source=%s dest=%s",
+                profile.get("ssh_host"),
+                profile.get("ssh_username"),
+                source,
+                dest,
+            )
+            fallback_cmd = build_rsync_command(
+                ssh_command=" ".join(_build_ssh_transport(profile)),
+                source=source,
+                dest=dest,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+                copy_links=copy_links,
+                copy_dirlinks=copy_dirlinks,
+                use_skip_compress=False,
+            )
+            result = await _run_subprocess(fallback_cmd, timeout_seconds=timeout_seconds)
         result["bytes_transferred"] = _parse_rsync_bytes(result.get("stdout", ""))
         logger.info(
             "Local auth broker finished rsync_transfer host=%s user=%s timeout=%ss exit_status=%s bytes=%s source=%s dest=%s",

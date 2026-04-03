@@ -120,6 +120,7 @@ async def test_local_broker_rsync_transfer_keeps_single_file_source(monkeypatch,
     assert result["ok"] is True
     assert str(local_file) in captured["cmd"]
     assert f"{local_file}/" not in captured["cmd"]
+    assert any(str(part).startswith("--skip-compress=") for part in captured["cmd"])
     assert "--copy-links" in captured["cmd"]
 
 
@@ -158,6 +159,53 @@ async def test_local_broker_rsync_download_preserves_remote_trailing_slash(monke
     # The trailing slash on the remote source must survive — without it rsync
     # creates a nested directory instead of copying contents into dest.
     assert "seyedam@hpc3.example.edu:/share/crsp/workflow1/" in captured["cmd"]
+    assert any(str(part).startswith("--skip-compress=") for part in captured["cmd"])
+
+
+@pytest.mark.asyncio
+async def test_local_broker_rsync_retries_without_skip_compress_on_incompatible_option(monkeypatch, tmp_path):
+    local_file = tmp_path / "ENCFF921XAH.bam"
+    local_file.write_text("BAM")
+    commands = []
+
+    async def fake_run_subprocess(cmd, timeout_seconds=None):
+        commands.append(cmd)
+        if len(commands) == 1:
+            return {
+                "ok": False,
+                "stdout": "",
+                "stderr": "rsync: --skip-compress: unknown option\nrsync error: requested action not supported (code 4)",
+                "exit_status": 4,
+            }
+        return {"ok": True, "stdout": "total size is 84\n", "stderr": "", "exit_status": 0}
+
+    monkeypatch.setattr("launchpad.backends.local_user_broker._run_subprocess", fake_run_subprocess)
+
+    result = await _handle_request(
+        {
+            "auth_token": "token-123",
+            "op": "rsync_transfer",
+            "profile": {
+                "ssh_host": "hpc3.example.edu",
+                "ssh_port": 22,
+                "ssh_username": "seyedam",
+                "auth_method": "key_file",
+                "key_file_path": "~/.ssh/id_ed25519",
+            },
+            "source": str(local_file),
+            "dest": "seyedam@hpc3.example.edu:/scratch/seyedam/agoutic/data/sample",
+            "copy_links": True,
+            "timeout_seconds": 30,
+        },
+        shutdown_event=asyncio.Event(),
+        auth_token="token-123",
+    )
+
+    assert result["ok"] is True
+    assert result["bytes_transferred"] == 84
+    assert len(commands) == 2
+    assert any(str(part).startswith("--skip-compress=") for part in commands[0])
+    assert not any(str(part).startswith("--skip-compress=") for part in commands[1])
 
 
 @pytest.mark.asyncio

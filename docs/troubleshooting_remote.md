@@ -203,6 +203,22 @@ bash: rsync: command not found
 3. AGOUTIC will automatically fall back to SFTP if rsync is unavailable
 4. Ask cluster admins to install rsync
 
+### Slow Transfers for BAM or POD5 Outputs
+
+AGOUTIC keeps rsync compression enabled for remote SLURM transfers, but newer
+rsync versions can skip expensive compression work for already-compressed
+binary suffixes such as `bam`, `bai`, `cram`, `crai`, `pod5`, `fast5`, and
+`bigwig`.
+
+If large binary transfers are still slow:
+1. Check the cluster rsync version: `rsync --version`
+2. Look for an AGOUTIC log warning indicating fallback without `--skip-compress`
+3. Upgrade rsync on the cluster if it is too old to support that option
+4. Re-test with a representative BAM or POD5 transfer
+
+On older clusters AGOUTIC retries without `--skip-compress` so transfers still
+work, but they may use more CPU than newer rsync builds.
+
 ### Permission Denied During Transfer
 
 ```

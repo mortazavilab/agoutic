@@ -23,6 +23,75 @@ from launchpad.backends.ssh_manager import SSHConnection, SSHProfileData, resolv
 
 logger = get_logger(__name__)
 
+_RSYNC_SKIP_COMPRESS_SUFFIXES = (
+    "3g2", "3gp", "7z", "aac", "ace", "apk", "avi", "bam", "bai",
+    "bigwig", "bw", "bz2", "cram", "crai", "deb", "dmg", "ear",
+    "f4v", "fast5", "flac", "flv", "gpg", "gz", "h5", "hdf5",
+    "iso", "jar", "jpeg", "jpg", "lrz", "lz", "lz4", "lzma",
+    "lzo", "m1a", "m1v", "m2a", "m2ts", "m2v", "m4a", "m4b",
+    "m4p", "m4r", "m4v", "mka", "mkv", "mov", "mp1", "mp2",
+    "mp3", "mp4", "mpa", "mpeg", "mpg", "mpv", "mts", "npy",
+    "npz", "odb", "odf", "odg", "odi", "odm", "odp", "ods",
+    "odt", "oga", "ogg", "ogm", "ogv", "ogx", "opus", "otg",
+    "oth", "otp", "ots", "ott", "oxt", "parquet", "pickle",
+    "pkl", "png", "pod5", "qt", "rar", "rpm", "rz", "rzip",
+    "spx", "squashfs", "sxc", "sxd", "sxg", "sxm", "sxw", "sz",
+    "tbz", "tbz2", "tgz", "tlz", "ts", "txz", "tzo", "vob",
+    "war", "webm", "webp", "xz", "z", "zip", "zst",
+)
+_RSYNC_SKIP_COMPRESS = "/".join(_RSYNC_SKIP_COMPRESS_SUFFIXES)
+
+
+def build_rsync_command(
+    *,
+    ssh_command: str,
+    source: str,
+    dest: str,
+    include_patterns: list[str] | None,
+    exclude_patterns: list[str] | None,
+    copy_links: bool,
+    copy_dirlinks: bool = False,
+    use_skip_compress: bool = True,
+) -> list[str]:
+    cmd = [
+        "rsync", "-avz", "--omit-dir-times", "--no-perms", "--partial", "--progress",
+        "-e", ssh_command,
+    ]
+    if use_skip_compress:
+        cmd.append(f"--skip-compress={_RSYNC_SKIP_COMPRESS}")
+
+    if copy_links:
+        cmd.append("--copy-links")
+    elif copy_dirlinks:
+        cmd.append("--copy-dirlinks")
+
+    if include_patterns:
+        for pat in include_patterns:
+            cmd.extend(["--include", pat])
+
+    if exclude_patterns:
+        for pat in exclude_patterns:
+            cmd.extend(["--exclude", pat])
+
+    cmd.extend([source, dest])
+    return cmd
+
+
+def should_retry_without_skip_compress(*, exit_code: int | None, stderr_text: str) -> bool:
+    if exit_code not in {1, 4}:
+        return False
+    lowered = stderr_text.lower()
+    if "skip-compress" not in lowered:
+        return False
+    retry_markers = (
+        "unknown option",
+        "unrecognized option",
+        "invalid option",
+        "option not supported",
+        "protocol incompatibility",
+    )
+    return any(marker in lowered for marker in retry_markers)
+
 
 def _normalize_local_rsync_source(source: str) -> str:
     """Append a trailing slash only when the local rsync source is a directory."""
@@ -41,6 +110,39 @@ class FileTransferManager:
     _RE_OVERALL_PROGRESS = re.compile(r"\(xfr#(\d+),\s*(?:to|ir)-chk=(\d+)/(\d+)\)")
     _RE_FILENAME = re.compile(r"^[^\s].*[/.]")  # non-indented line with path separators or extension
 
+    async def _run_rsync_subprocess(
+        self,
+        *,
+        cmd: list[str],
+        direction: str,
+        on_progress: Callable[[dict], None] | None = None,
+    ) -> tuple[int, str, str]:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        if on_progress:
+            stdout_lines: list[str] = []
+            async for raw_line in proc.stdout:
+                decoded = raw_line.decode(errors="replace")
+                stdout_lines.append(decoded)
+                for segment in decoded.rstrip("\n").split("\r"):
+                    info = self._parse_rsync_progress_line(segment)
+                    if info:
+                        on_progress(info)
+            stderr_bytes = await proc.stderr.read()
+            await proc.wait()
+            stdout_text = "".join(stdout_lines)
+            stderr_text = stderr_bytes.decode(errors="replace")
+        else:
+            stdout_bytes, stderr_bytes = await proc.communicate()
+            stdout_text = stdout_bytes.decode(errors="replace")
+            stderr_text = stderr_bytes.decode(errors="replace")
+
+        return proc.returncode, stdout_text, stderr_text
+
     async def _try_broker_transfer(
         self,
         profile: SSHProfileData,
@@ -51,6 +153,7 @@ class FileTransferManager:
         direction: str,
         copy_links: bool,
         copy_dirlinks: bool = False,
+        use_skip_compress: bool = True,
         on_progress: Callable[[dict], None] | None = None,
     ) -> dict | None:
         """Use a local auth broker session when one is active for the profile."""
@@ -79,6 +182,7 @@ class FileTransferManager:
                 "exclude_patterns": exclude_patterns or [],
                 "copy_links": copy_links,
                 "copy_dirlinks": copy_dirlinks,
+                "use_skip_compress": use_skip_compress,
                 "timeout_seconds": LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
             },
         )
@@ -182,25 +286,16 @@ class FileTransferManager:
         on_progress: Callable[[dict], None] | None = None,
     ) -> dict:
         """Execute rsync transfer."""
-        cmd = [
-            "rsync", "-avz", "--omit-dir-times", "--no-perms", "--partial", "--progress",
-            "-e", self._build_ssh_command(profile),
-        ]
-
-        if copy_links:
-            cmd.append("--copy-links")
-        elif copy_dirlinks:
-            cmd.append("--copy-dirlinks")
-
-        if include_patterns:
-            for pat in include_patterns:
-                cmd.extend(["--include", pat])
-
-        if exclude_patterns:
-            for pat in exclude_patterns:
-                cmd.extend(["--exclude", pat])
-
-        cmd.extend([source, dest])
+        cmd = build_rsync_command(
+            ssh_command=self._build_ssh_command(profile),
+            source=source,
+            dest=dest,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+            copy_links=copy_links,
+            copy_dirlinks=copy_dirlinks,
+            use_skip_compress=True,
+        )
 
         logger.info(f"Starting {direction}: {source} → {dest}")
 
@@ -214,6 +309,7 @@ class FileTransferManager:
                 direction=direction,
                 copy_links=copy_links,
                 copy_dirlinks=copy_dirlinks,
+                use_skip_compress=True,
                 on_progress=on_progress,
             )
             if broker_result is not None:
@@ -234,33 +330,36 @@ class FileTransferManager:
                         "bytes_transferred": 0,
                     }
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            returncode, stdout_text, stderr_text = await self._run_rsync_subprocess(
+                cmd=cmd,
+                direction=direction,
+                on_progress=on_progress,
             )
+            if should_retry_without_skip_compress(exit_code=returncode, stderr_text=stderr_text):
+                logger.warning(
+                    "Retrying rsync without --skip-compress after incompatibility",
+                    direction=direction,
+                    source=source,
+                    dest=dest,
+                    stderr=stderr_text.strip(),
+                )
+                fallback_cmd = build_rsync_command(
+                    ssh_command=self._build_ssh_command(profile),
+                    source=source,
+                    dest=dest,
+                    include_patterns=include_patterns,
+                    exclude_patterns=exclude_patterns,
+                    copy_links=copy_links,
+                    copy_dirlinks=copy_dirlinks,
+                    use_skip_compress=False,
+                )
+                returncode, stdout_text, stderr_text = await self._run_rsync_subprocess(
+                    cmd=fallback_cmd,
+                    direction=direction,
+                    on_progress=on_progress,
+                )
 
-            if on_progress:
-                # Stream stdout line-by-line for real-time progress reporting
-                stdout_lines: list[str] = []
-                async for raw_line in proc.stdout:
-                    decoded = raw_line.decode(errors="replace")
-                    stdout_lines.append(decoded)
-                    # rsync may embed \r for in-place updates within a line
-                    for segment in decoded.rstrip("\n").split("\r"):
-                        info = self._parse_rsync_progress_line(segment)
-                        if info:
-                            on_progress(info)
-                stderr_bytes = await proc.stderr.read()
-                await proc.wait()
-                stdout_text = "".join(stdout_lines)
-                stderr_text = stderr_bytes.decode(errors="replace")
-            else:
-                stdout_bytes, stderr_bytes = await proc.communicate()
-                stdout_text = stdout_bytes.decode(errors="replace")
-                stderr_text = stderr_bytes.decode(errors="replace")
-
-            if proc.returncode == 0:
+            if returncode == 0:
                 logger.info(f"{direction.title()} completed successfully")
                 return {
                     "ok": True,

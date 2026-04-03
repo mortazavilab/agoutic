@@ -66,6 +66,7 @@ async def test_upload_prefers_active_broker_session(monkeypatch, tmp_path, key_f
     assert payload["dest"] == "seyedam@hpc3.example.edu:/scratch/seyedam/agoutic/data/sample"
     assert payload["include_patterns"] == []
     assert payload["copy_links"] is True
+    assert payload["use_skip_compress"] is True
     assert payload["timeout_seconds"] == LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS
 
 
@@ -134,6 +135,7 @@ async def test_download_passes_include_patterns_to_broker_session(monkeypatch, t
     assert payload["exclude_patterns"] == ["*"]
     assert payload["copy_links"] is False
     assert payload["copy_dirlinks"] is True
+    assert payload["use_skip_compress"] is True
 
 
 @pytest.mark.asyncio
@@ -196,7 +198,85 @@ async def test_upload_single_file_direct_rsync_omits_trailing_slash(monkeypatch,
     assert result == {"ok": True, "message": "Upload completed", "bytes_transferred": 123}
     assert str(local_file) in captured["cmd"]
     assert f"{local_file}/" not in captured["cmd"]
+    assert any(str(part).startswith("--skip-compress=") for part in captured["cmd"])
     assert "--copy-links" in captured["cmd"]
+
+
+@pytest.mark.asyncio
+async def test_download_direct_rsync_uses_copy_dirlinks_and_skip_compress(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    captured = {}
+
+    class FakeSessionManager:
+        async def get_active_session(self, profile):
+            return None
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"total size is 456\n", b"")
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        return FakeProcess()
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+    monkeypatch.setattr("launchpad.backends.file_transfer.os.access", lambda path, mode: True)
+    monkeypatch.setattr("launchpad.backends.file_transfer.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await manager.download_outputs(
+        profile=key_file_profile,
+        remote_path="/scratch/seyedam/agoutic/project/workflow2",
+        local_path=str(tmp_path / "workflow2"),
+    )
+
+    assert result == {"ok": True, "message": "Download completed", "bytes_transferred": 456}
+    assert "--copy-dirlinks" in captured["cmd"]
+    assert "--copy-links" not in captured["cmd"]
+    assert any(str(part).startswith("--skip-compress=") for part in captured["cmd"])
+
+
+@pytest.mark.asyncio
+async def test_direct_rsync_retries_without_skip_compress_on_incompatible_option(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_file = tmp_path / "ENCFF921XAH.bam"
+    local_file.write_text("BAM")
+    commands = []
+
+    class FakeSessionManager:
+        async def get_active_session(self, profile):
+            return None
+
+    class FakeProcess:
+        def __init__(self, returncode, stdout, stderr):
+            self.returncode = returncode
+            self._stdout = stdout
+            self._stderr = stderr
+
+        async def communicate(self):
+            return (self._stdout, self._stderr)
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        commands.append(cmd)
+        if len(commands) == 1:
+            return FakeProcess(4, b"", b"rsync: --skip-compress: unknown option\nrsync error: requested action not supported (code 4)\n")
+        return FakeProcess(0, b"total size is 789\n", b"")
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+    monkeypatch.setattr("launchpad.backends.file_transfer.os.access", lambda path, mode: True)
+    monkeypatch.setattr("launchpad.backends.file_transfer.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await manager.upload_inputs(
+        profile=key_file_profile,
+        local_path=str(local_file),
+        remote_path="/scratch/seyedam/agoutic/data/sample",
+    )
+
+    assert result == {"ok": True, "message": "Upload completed", "bytes_transferred": 789}
+    assert len(commands) == 2
+    assert any(str(part).startswith("--skip-compress=") for part in commands[0])
+    assert not any(str(part).startswith("--skip-compress=") for part in commands[1])
 
 
 def test_rsync_ssh_command_uses_fail_fast_publickey_transport(key_file_profile):

@@ -238,3 +238,20 @@ before submitting jobs.
 | `Invalid partition` | Partition does not exist or is not allowed for your account | Check your cluster's available partitions and update profile defaults |
 | Job stays queued | Cluster is busy or resources are constrained | Inspect `squeue -u youruser` on the cluster and adjust requested resources |
 | Transfer fails with `rsync not found` | `rsync` is missing on the cluster | Install `rsync` or use a cluster image that includes it |
+
+### Rsync Compression Behavior
+
+For remote SLURM staging and result sync, AGOUTIC keeps rsync compression
+enabled but asks rsync to skip CPU-heavy compression for already-compressed
+binary formats such as `bam`, `bai`, `cram`, `crai`, `pod5`, `fast5`,
+`bigwig`, `parquet`, and similar suffixes.
+
+This improves throughput on common genomics workloads by avoiding wasted
+compression work on files that do not shrink meaningfully in transit while
+still compressing text-like outputs such as `csv`, `tsv`, `txt`, `html`, and
+config files.
+
+If the cluster rsync is too old to support `--skip-compress`, AGOUTIC retries
+the transfer once without that option and logs the downgrade. Transfers remain
+functional on older clusters, but those runs will use the previous all-files
+compression behavior.
