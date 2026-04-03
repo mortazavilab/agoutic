@@ -117,15 +117,21 @@ def _build_conversation_state(
             _pl = get_block_payload(blk)
             _wd = _pl.get("work_directory", "")
             _uuid = _pl.get("run_uuid", "")
+            _run_type = _pl.get("run_type", "dogme")
             if _wd or _uuid:
                 state.workflows.append({
                     "work_dir": _wd,
                     "sample_name": _pl.get("sample_name", ""),
                     "mode": _pl.get("mode", ""),
                     "run_uuid": _uuid,
+                    "run_type": _run_type,
                 })
         if state.workflows:
-            latest = state.workflows[-1]
+            # Prefer pipeline workflows over utility scripts
+            pipeline_wfs = [
+                w for w in state.workflows if w.get("run_type") != "script"
+            ]
+            latest = (pipeline_wfs or state.workflows)[-1]
             state.work_dir = latest.get("work_dir")
             state.sample_name = latest.get("sample_name")
             state.sample_type = latest.get("mode")
@@ -248,15 +254,23 @@ def _extract_job_context_from_history(
             _pl = get_block_payload(blk)
             _wd = _pl.get("work_directory", "")
             _uuid = _pl.get("run_uuid", "")
+            _run_type = _pl.get("run_type", "dogme")
             if _wd or _uuid:
                 workflows.append({
                     "work_dir": _wd,
                     "sample_name": _pl.get("sample_name", ""),
                     "mode": _pl.get("mode", ""),
                     "run_uuid": _uuid,
+                    "run_type": _run_type,
                 })
         if workflows:
-            latest = workflows[-1]
+            # Prefer the most recent pipeline (dogme) workflow over utility
+            # scripts (reconcile_bams, etc.) whose work_directory points at
+            # the skill's scripts folder rather than a project workflow dir.
+            pipeline_workflows = [
+                w for w in workflows if w.get("run_type") != "script"
+            ]
+            latest = (pipeline_workflows or workflows)[-1]
             context["work_dir"] = latest["work_dir"]
             context["run_uuid"] = latest["run_uuid"]
             context["workflows"] = workflows

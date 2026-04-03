@@ -1,3 +1,34 @@
+## [Unreleased]
+
+### Improvements
+
+- **Date-organised download folders** — files downloaded or uploaded into a
+  user's central data directory are now written into a `YYYY-MM-DD` subfolder
+  (e.g. `data/2026-04-02/ENCFF001.bam`) instead of a single flat directory.
+  Deduplication and project symlinks continue to work as before.
+  (`cortex/routes/files.py`)
+
+### Bug Fixes
+
+- **Skill switch blocked by unrelated running jobs** — the
+  `SKILL_SWITCH_TO` output guard now checks whether the user sent a message
+  *after* the running `EXECUTION_JOB`. If they did, the switch is allowed
+  because the user has moved on to a new request. Previously, *any* running
+  job in the project would block all skill switches, even for unrelated
+  tasks like parsing a CSV while a reconcile job was still running.
+  (`cortex/llm_validators.py`)
+
+- **"List files" picks reconcile script path instead of workflow dir** —
+  `_extract_job_context_from_history` now prefers pipeline (`run_type=dogme`)
+  `EXECUTION_JOB` blocks over utility scripts (`run_type=script`) when
+  resolving `work_dir`. Previously, if a `reconcile_bams` script ran after a
+  Dogme workflow, "list files" would show files from the skill's scripts
+  folder instead of the project's workflow directory. Affects both context
+  injection and `_validate_analyzer_params` work_dir override.
+  (`cortex/conversation_state.py`)
+
+---
+
 ## [3.5.0] - 2026-04-02
 
 ### Refactors

@@ -102,9 +102,12 @@ def _validate_llm_output(
         cleaned = cleaned[:_first_pos] + cleaned[_first_pos:].replace("[[APPROVAL_NEEDED]]", "")
 
     # 3. SKILL_SWITCH during active job (block status=RUNNING)
-    # Guard only fires if the job is genuinely still running.  The block.status
-    # field may lag after a server restart (the background poll task was killed),
-    # so we double-check the nested job_status payload before blocking.
+    # Guard only fires if the job is genuinely still running AND the user has
+    # not sent a new message after the job was created (which means the user is
+    # asking for something new and the switch should be allowed).
+    # The block.status field may lag after a server restart (the background
+    # poll task was killed), so we double-check the nested job_status payload
+    # before blocking.
     _has_switch = "[[SKILL_SWITCH_TO:" in cleaned
     if _has_switch and history_blocks:
         for blk in reversed(history_blocks):
@@ -115,6 +118,15 @@ def _validate_llm_output(
                     # Block status is stale (likely due to server restart).
                     # Job is actually done — allow the skill switch.
                     break
+                # Check if the user sent a message *after* this running job.
+                # If so, the user is working on something new — allow the switch.
+                _job_seq = getattr(blk, "seq", 0)
+                _user_msg_after_job = any(
+                    b.type == "USER_MESSAGE" and getattr(b, "seq", 0) > _job_seq
+                    for b in history_blocks
+                )
+                if _user_msg_after_job:
+                    break  # User moved on — allow the skill switch
                 violations.append("SKILL_SWITCH attempted during running job — stripped")
                 cleaned = re.sub(r'\[\[SKILL_SWITCH_TO:\s*\w+\]\]', '', cleaned)
                 break
