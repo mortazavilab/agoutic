@@ -1,6 +1,24 @@
 ## [Unreleased]
 
+---
+
+## [3.5.1] - 2026-04-02
+
 ### Improvements
+
+- **Explicit pending dataframe action controls** — `PENDING_ACTION` chat blocks
+  now render dedicated Apply and Dismiss buttons in the UI instead of relying
+  on a follow-up free-text `yes`. The backend executes or rejects the exact
+  saved block selected by the user, avoiding accidental confirmation of a
+  different pending action when multiple saved dataframe transforms exist.
+  (`ui/appui_block_part1.py`, `cortex/app.py`, `cortex/pending_dataframe_actions.py`)
+
+- **Broader dataframe intent auto-routing** — local Cortex dataframe actions
+  now auto-trigger for more natural dataframe phrasing, including
+  `subset DF3 to columns ...`, `keep only ... in DF2`, multi-column rename
+  requests, and common group-by/summarize patterns. These requests are now
+  intercepted before they fall back to generic analyzer summary calls.
+  (`cortex/dataframe_actions.py`)
 
 - **Date-organised download folders** — files downloaded or uploaded into a
   user's central data directory are now written into a `YYYY-MM-DD` subfolder
@@ -8,7 +26,47 @@
   Deduplication and project symlinks continue to work as before.
   (`cortex/routes/files.py`)
 
+- **Plot metadata now persists as project memory** — every `AGENT_PLOT` block
+  now auto-creates a project-scoped `plot` memory containing the chart spec,
+  linked block id, dataframe ids, and descriptive metadata so charts can be
+  recovered from project memory later. Plot memory deduplication is keyed by
+  block id so repeated identical plots are still stored as distinct events.
+  (`cortex/memory_service.py`, `cortex/chat_stages/response_assembly.py`)
+
+### Docs
+
+- **UI help now teaches dataframe workflows** — the deterministic help view and
+  sidebar help panel now include dataframe inspection, transform, and plotting
+  examples, including grouped `color by sample` prompts and saved action
+  confirmation behavior.
+  (`ui/appui_state.py`, `ui/appui_sidebar.py`)
+
+- **New dataframe guide** — added `docs/DATAFRAMES.md` and updated
+  `QUICK_REFERENCE.md`, `README.md`, `ui/README.md`, and `docs/CHAT_PIPELINE.md`
+  to document in-memory dataframe actions, `PENDING_ACTION` blocks, and wide
+  dataframe auto-melt plotting behavior.
+  (`docs/DATAFRAMES.md`, `QUICK_REFERENCE.md`, `README.md`, `ui/README.md`, `docs/CHAT_PIPELINE.md`)
+
 ### Bug Fixes
+
+- **Wide dataframe plotting respects explicit `by measure` requests** — plot
+  intent selection now overrides stale synthetic x-axis values from the model
+  when the user explicitly asks for `plot DF1 by measure` or `plot DF1 by sample`.
+  Wide sample tables can now render grouped bars under each measure instead of
+  silently reusing the sample-axis chart.
+  (`cortex/chat_dataframes.py`, `ui/appui_renderers.py`)
+
+- **Mistral inline plot tags no longer leak into chat output** — raw
+  `[TOOL_CALLS]PLOT: ...` responses are now normalized into standard
+  `[[PLOT: ...]]` tags before parsing, so the rendered chart appears without
+  exposing tool-call syntax in assistant markdown.
+  (`cortex/tag_parser.py`)
+
+- **Plot titles and axis labels survive end-to-end rendering** — explicit
+  `title`, `xlabel`, and `ylabel` values now flow from parsed plot tags into
+  stored chart payloads and final Plotly layout, including combined multi-trace
+  chart blocks.
+  (`cortex/chat_stages/response_assembly.py`, `ui/appui_renderers.py`, `cortex/prompt_templates/first_pass_system_prompt.md`, `cortex/prompt_templates/second_pass_system_prompt.md`)
 
 - **Skill switch blocked by unrelated running jobs** — the
   `SKILL_SWITCH_TO` output guard now checks whether the user sent a message

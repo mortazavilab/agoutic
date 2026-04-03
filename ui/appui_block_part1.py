@@ -993,6 +993,68 @@ def render_block_part1(
                         del st.session_state[f"rejecting_{block_id}"]
                         st.rerun()
 
+    elif btype == "PENDING_ACTION":
+        handled = True
+        with st.chat_message("assistant", avatar="🧮"):
+            summary = content.get("summary", "Saved dataframe action")
+            action_call = content.get("action_call") or {}
+            params = action_call.get("params") or {}
+
+            section_header("Pending Dataframe Action", "Review and apply the saved transform", icon="🧮")
+            chip_kind = "pending"
+            if status in {"COMPLETED", "APPROVED", "CONFIRMED"}:
+                chip_kind = "complete"
+            elif status in {"FAILED", "REJECTED"}:
+                chip_kind = "failed"
+            status_chip(chip_kind, label=status.title(), icon="🧾")
+            metadata_row({"Tool": str(action_call.get("tool") or "cortex"), "Block": block_id[:8]})
+            st.divider()
+
+            st.write(summary)
+            if params:
+                with st.expander("Action Parameters", expanded=False):
+                    st.json(params)
+
+            if status == "PENDING":
+                info_callout(
+                    "This saved dataframe action is bound to this block. Apply it directly or dismiss it without relying on a follow-up yes/no chat message.",
+                    kind="info",
+                    icon="ℹ️",
+                )
+                col1, col2 = st.columns(2)
+                if col1.button("✅ Apply Action", key=f"pending_apply_{block_id}"):
+                    resp = make_authenticated_request(
+                        "PATCH",
+                        f"{API_URL}/block/{block_id}",
+                        json={"status": "APPROVED", "payload": dict(content)},
+                    )
+                    if resp.status_code == 200:
+                        st.rerun()
+                    st.error(f"Action failed: {resp.text}")
+                if col2.button("❌ Dismiss", key=f"pending_reject_{block_id}"):
+                    payload_update = dict(content)
+                    payload_update["rejection_reason"] = "User dismissed saved dataframe action"
+                    resp = make_authenticated_request(
+                        "PATCH",
+                        f"{API_URL}/block/{block_id}",
+                        json={"status": "REJECTED", "payload": payload_update},
+                    )
+                    if resp.status_code == 200:
+                        st.rerun()
+                    st.error(f"Dismiss failed: {resp.text}")
+            elif status == "REJECTED":
+                st.error("❌ Dismissed")
+                if content.get("rejection_reason"):
+                    st.caption(f"Reason: {content.get('rejection_reason')}")
+            elif status == "FAILED":
+                st.error("❌ Action failed")
+                if content.get("error"):
+                    st.caption(content.get("error"))
+            elif status == "COMPLETED":
+                st.success("✅ Action applied")
+                if content.get("result_df_id"):
+                    st.caption(f"Created DF{content.get('result_df_id')}")
+
     return handled
 
 

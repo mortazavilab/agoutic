@@ -88,6 +88,8 @@ def _is_help_intent(message: str) -> bool:
         "show commands",
         "how do i run a workflow",
         "how do i use remote slurm",
+        "how do i use dataframes",
+        "show dataframe commands",
     }
     return q in deterministic
 
@@ -95,7 +97,7 @@ def _is_help_intent(message: str) -> bool:
 def _render_local_help_response() -> None:
     section_header("Help", "Quick operational guide for AGOUTIC", icon="❓")
     with st.container(border=True):
-        metadata_row({"Focus": "Workflow + Remote HPC", "Mode": "Deterministic Help"})
+        metadata_row({"Focus": "Workflow + DataFrames + Remote HPC", "Mode": "Deterministic Help"})
         st.divider()
         with st.expander("Getting Started", expanded=True):
             st.markdown("1. Pick or create a project in the sidebar.")
@@ -109,6 +111,17 @@ def _render_local_help_response() -> None:
         with st.expander("Execution Modes", expanded=False):
             st.markdown("- Local: run on AGOUTIC host")
             st.markdown("- SLURM: submit via remote profile and queue")
+        with st.expander("Dataframe Commands", expanded=False):
+            st.markdown("- `list dfs` lists the dataframes currently available in the chat")
+            st.markdown("- `head DF5` or `head DF5 20` previews the first rows of a dataframe")
+            st.markdown("- `head c2c12DF` works for remembered named dataframes")
+            st.markdown("- You can ask for in-memory dataframe actions in natural language: filter, subset, keep columns, rename columns, sort, melt, group, join, and pivot")
+            st.markdown("- Example prompts: `subset DF3 to columns sample, modification, reads`, `rename DF2 columns old_reads to reads`, `summarize DF4 by sample and sum reads`")
+            st.markdown("- If AGOUTIC saves a dataframe action for confirmation, use the block's Apply or Dismiss buttons in chat")
+        with st.expander("Plotting From Dataframes", expanded=False):
+            st.markdown("- Ask naturally: `plot DF5 by assay`, `make a bar chart of DF3 by sample`, `color by sample`")
+            st.markdown("- Wide sample tables can auto-melt when you ask for grouped plots such as `color by sample`")
+            st.markdown("- Histogram, scatter, bar, box, heatmap, and pie charts render inline in chat")
         with st.expander("Status Guide", expanded=False):
             st.markdown("- pending: waiting for action")
             st.markdown("- running: task active")

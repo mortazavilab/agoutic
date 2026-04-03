@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 VALID_CATEGORIES = frozenset({
     "result", "sample_annotation", "pipeline_step",
-    "preference", "finding", "custom", "dataframe",
+    "preference", "finding", "custom", "dataframe", "plot",
 })
 VALID_SOURCES = frozenset({
     "user_manual", "auto_step", "auto_result", "system",
@@ -48,6 +48,7 @@ def create_memory(
     related_file_id: str | None = None,
     tags: dict | None = None,
     is_pinned: bool = False,
+    deduplicate: bool = True,
 ) -> Memory:
     """Create a new memory entry. Deduplicates by content + user + project scope."""
     if category not in VALID_CATEGORIES:
@@ -55,24 +56,25 @@ def create_memory(
     if source not in VALID_SOURCES:
         source = "user_manual"
 
-    # Dedup: if an identical active memory already exists, return it
     normalized = content.strip()
-    dup_conditions = [
-        Memory.user_id == user_id,
-        Memory.content == normalized,
-        Memory.is_deleted == False,  # noqa: E712
-    ]
-    if project_id is not None:
-        dup_conditions.append(Memory.project_id == project_id)
-    else:
-        dup_conditions.append(Memory.project_id == None)  # noqa: E711
+    if deduplicate:
+        # Dedup: if an identical active memory already exists, return it
+        dup_conditions = [
+            Memory.user_id == user_id,
+            Memory.content == normalized,
+            Memory.is_deleted == False,  # noqa: E712
+        ]
+        if project_id is not None:
+            dup_conditions.append(Memory.project_id == project_id)
+        else:
+            dup_conditions.append(Memory.project_id == None)  # noqa: E711
 
-    existing = db.execute(
-        select(Memory).where(and_(*dup_conditions)).limit(1)
-    ).scalar_one_or_none()
-    if existing:
-        logger.info("Memory dedup hit", memory_id=existing.id, content=normalized[:60])
-        return existing
+        existing = db.execute(
+            select(Memory).where(and_(*dup_conditions)).limit(1)
+        ).scalar_one_or_none()
+        if existing:
+            logger.info("Memory dedup hit", memory_id=existing.id, content=normalized[:60])
+            return existing
 
     mem = Memory(
         id=str(uuid.uuid4()),
@@ -622,6 +624,67 @@ def auto_capture_result(
     )
 
 
+def auto_capture_plot(
+    db: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    charts: list[dict],
+    block_id: str,
+) -> Memory | None:
+    """Auto-create a project memory for a rendered AGENT_PLOT block."""
+    if not charts:
+        return None
+
+    existing = db.execute(
+        select(Memory).where(
+            Memory.user_id == user_id,
+            Memory.project_id == project_id,
+            Memory.category == "plot",
+            Memory.related_block_id == block_id,
+            Memory.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return existing
+
+    chart_types = [str(chart.get("type") or "plot") for chart in charts]
+    df_ids: list[int] = []
+    for chart in charts:
+        df_id = chart.get("df_id")
+        if isinstance(df_id, int) and df_id not in df_ids:
+            df_ids.append(df_id)
+
+    structured = {
+        "chart_count": len(charts),
+        "chart_types": chart_types,
+        "df_ids": df_ids,
+        "charts": charts,
+    }
+    tags = {
+        "chart_types": chart_types,
+        "df_ids": df_ids,
+    }
+
+    first_chart = charts[0]
+    first_title = str(first_chart.get("title") or "").strip()
+    if first_title:
+        tags["title"] = first_title
+
+    return create_memory(
+        db,
+        user_id=user_id,
+        content=_build_plot_memory_content(charts),
+        category="plot",
+        project_id=project_id,
+        structured_data=structured,
+        source="system",
+        related_block_id=block_id,
+        tags=tags,
+        deduplicate=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sample annotation (dual-write)
 # ---------------------------------------------------------------------------
@@ -677,6 +740,39 @@ def annotate_sample(
         source="user_manual",
         related_file_id=file_id,
     )
+
+
+def _build_plot_memory_content(charts: list[dict]) -> str:
+    first_chart = charts[0] if charts else {}
+    chart_type = str(first_chart.get("type") or "plot")
+    df_id = first_chart.get("df_id")
+    title = str(first_chart.get("title") or "").strip()
+    x_axis = str(first_chart.get("x") or "").strip()
+    y_axis = str(first_chart.get("y") or "").strip()
+
+    if len(charts) == 1:
+        if x_axis and y_axis:
+            description = f"{chart_type} plot of {y_axis} by {x_axis}"
+        elif x_axis:
+            description = f"{chart_type} plot by {x_axis}"
+        else:
+            description = f"{chart_type} plot"
+        if isinstance(df_id, int):
+            description += f" from DF{df_id}"
+        if title:
+            description += f' - "{title}"'
+        return f"Plot created: {description}"
+
+    unique_df_ids: list[int] = []
+    for chart in charts:
+        value = chart.get("df_id")
+        if isinstance(value, int) and value not in unique_df_ids:
+            unique_df_ids.append(value)
+    df_label = ""
+    if unique_df_ids:
+        joined = ", ".join(f"DF{value}" for value in unique_df_ids)
+        df_label = f" from {joined}"
+    return f"Plot created: {len(charts)} charts{df_label}"
 
 
 # ---------------------------------------------------------------------------

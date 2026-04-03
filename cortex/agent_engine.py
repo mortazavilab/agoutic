@@ -267,6 +267,30 @@ Use ONLY the parameter names listed here. Do NOT invent parameter names.
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+        if skill_key in {
+            "analyze_job_results",
+            "ENCODE_Search",
+            "ENCODE_LongRead",
+            "differential_expression",
+            "enrichment_analysis",
+            "xgenepy_analysis",
+        }:
+            cortex_contract = format_tool_contract("cortex", "service")
+            if cortex_contract:
+                data_call_block += f"""
+═══════════════════════════════════════════════════════════════════════════════
+🧮 LOCAL DATAFRAME ACTIONS — use these when the user asks to reshape, filter,
+subset, rename, aggregate, join, pivot, or otherwise transform an existing DF.
+These are in-memory operations on conversation dataframes, not analyzer file calls.
+
+EXAMPLES:
+[[DATA_CALL: service=cortex, tool=melt_dataframe, df_id=1, id_vars=sample, var_name=modification, value_name=reads]]
+[[DATA_CALL: service=cortex, tool=filter_dataframe, df_id=1, column=reads, operator=>, value=100]]
+
+{cortex_contract}
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
         return data_call_block
 
     def construct_analysis_prompt(self) -> str:

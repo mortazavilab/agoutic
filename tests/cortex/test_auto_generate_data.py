@@ -66,6 +66,43 @@ class TestDFAndVisualizationEarlyExit:
         calls = _auto_generate_data_calls("scatter plot of coverage vs length", "ENCODE_Search")
         assert calls == []
 
+    def test_reshape_df_request_generates_local_dataframe_call(self):
+        calls = _auto_generate_data_calls(
+            "reshape DF1 into long format with columns sample, modification, reads",
+            "analyze_job_results",
+        )
+        assert len(calls) == 1
+        assert calls[0]["source_key"] == "cortex"
+        assert calls[0]["tool"] == "melt_dataframe"
+
+    def test_subset_df_to_columns_generates_select_call(self):
+        calls = _auto_generate_data_calls(
+            "subset DF3 to columns sample, modification, reads",
+            "analyze_job_results",
+        )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "select_dataframe_columns"
+        assert calls[0]["params"]["df_id"] == 3
+
+    def test_rename_df_columns_generates_rename_call(self):
+        calls = _auto_generate_data_calls(
+            "rename DF2 columns old_reads to reads and old_sample to sample",
+            "analyze_job_results",
+        )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "rename_dataframe_columns"
+        assert calls[0]["params"]["rename_map"] == {"old_reads": "reads", "old_sample": "sample"}
+
+    def test_group_df_by_column_generates_aggregate_call(self):
+        calls = _auto_generate_data_calls(
+            "summarize DF4 by sample and sum reads",
+            "analyze_job_results",
+        )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "aggregate_dataframe"
+        assert calls[0]["params"]["group_by"] == ["sample"]
+        assert calls[0]["params"]["aggregations"] == {"reads": "sum"}
+
     def test_compound_encode_plot_query_still_generates_search_call(self):
         calls = _auto_generate_data_calls(
             "plot C2C12 experiments in encode by assay type in purple",

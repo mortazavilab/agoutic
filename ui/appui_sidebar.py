@@ -40,7 +40,12 @@ def render_sidebar(
             if st.button("list dfs", key="help_prompt_list_dfs", width="stretch"):
                 st.session_state["_help_prompt"] = "list dfs"
                 st.rerun()
+            if st.button("how do I use dataframes", key="help_prompt_dataframe_help", width="stretch"):
+                st.session_state["_help_prompt"] = "how do i use dataframes"
+                st.rerun()
             st.caption("`head DF5`  ·  `head DF5 20`  ·  `head c2c12DF`")
+            st.caption("`subset DF3 to columns sample, reads`  ·  `rename DF2 columns old to new`")
+            st.caption("`summarize DF4 by sample and sum reads`  ·  `plot DF5 color by sample`")
             st.caption("**Memory**")
             if st.button("/memories", key="help_prompt_memories", width="stretch"):
                 st.session_state["_help_prompt"] = "/memories"

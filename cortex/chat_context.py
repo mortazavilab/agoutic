@@ -62,6 +62,8 @@ class ChatContext:
     embedded_dataframes: dict = field(default_factory=dict)
     embedded_images: dict = field(default_factory=dict)
     pending_download_files: list = field(default_factory=list)
+    pending_action_payloads: list = field(default_factory=list)
+    pending_action_source_block: Any = None
 
     # ── Token usage ────────────────────────────────────────────────────
     think_usage: dict = field(default_factory=lambda: {
@@ -87,6 +89,9 @@ class ChatContext:
     # ── Remote stage ───────────────────────────────────────────────────
     remote_stage_approval_context: dict | None = None
     sync_run_uuid: str = ""
+    skip_llm_first_pass: bool = False
+    skip_tag_parsing: bool = False
+    skip_second_pass: bool = False
 
     # ── Pipeline control ───────────────────────────────────────────────
     response: dict | None = None  # set to short-circuit the pipeline

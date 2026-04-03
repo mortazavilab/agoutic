@@ -24,6 +24,7 @@ from atlas.config import (
 from common import MCPHttpClient
 from common.logging_config import get_logger
 from cortex.config import SERVICE_REGISTRY, get_service_url
+from cortex.dataframe_actions import execute_local_dataframe_call, is_local_dataframe_tool
 from cortex.encode_helpers import (
     _looks_like_assay,
     _correct_tool_routing,
@@ -196,6 +197,13 @@ _BASE_TOOL_ALIASES: dict[str, str] = {
     "gene_lookup": "lookup_gene",
     "get_gene": "lookup_gene",
     "find_gene": "lookup_gene",
+    "subset_dataframe": "filter_dataframe",
+    "filter_rows": "filter_dataframe",
+    "select_columns": "select_dataframe_columns",
+    "subset_columns": "select_dataframe_columns",
+    "rename_columns": "rename_dataframe_columns",
+    "group_dataframe": "aggregate_dataframe",
+    "groupby_dataframe": "aggregate_dataframe",
 }
 
 _BASE_PARAM_ALIASES: dict[str, dict[str, str]] = {
@@ -530,6 +538,7 @@ async def execute_tool_calls(
     active_skill: str,
     needs_approval: bool,
     request_id: str,
+    history_blocks: list,
     is_cancelled: Callable[[str], bool],
     emit_progress: Callable,
 ) -> ToolExecutionResult:
@@ -548,10 +557,43 @@ async def execute_tool_calls(
     for source_key, calls in calls_by_source.items():
         logger.info("Executing tool calls", source=source_key, count=len(calls))
         source_label = (
-            CONSORTIUM_REGISTRY.get(source_key, {}).get("display_name")
-            or SERVICE_REGISTRY.get(source_key, {}).get("display_name", source_key)
+            "Local Dataframe Actions"
+            if source_key == "cortex"
+            else (
+                CONSORTIUM_REGISTRY.get(source_key, {}).get("display_name")
+                or SERVICE_REGISTRY.get(source_key, {}).get("display_name", source_key)
+            )
         )
         emit_progress(request_id, "tools", f"Querying {source_label}...")
+
+        if source_key == "cortex":
+            source_results: list[dict] = []
+            for call in calls:
+                tool_name = call["tool"]
+                params = call["params"]
+                try:
+                    if not is_local_dataframe_tool(tool_name):
+                        raise ValueError(f"Unknown local dataframe tool: {tool_name}")
+                    result_data = execute_local_dataframe_call(
+                        tool_name,
+                        params,
+                        history_blocks=history_blocks,
+                    )
+                    source_results.append({
+                        "tool": tool_name,
+                        "params": params,
+                        "data": result_data,
+                    })
+                    logger.info("Local dataframe action successful", tool=tool_name)
+                except Exception as exc:
+                    logger.error("Local dataframe action failed", tool=tool_name, error=str(exc))
+                    source_results.append({
+                        "tool": tool_name,
+                        "params": params,
+                        "error": str(exc),
+                    })
+            all_results[source_key] = source_results
+            continue
 
         try:
             url = get_service_url(source_key)

@@ -12,6 +12,7 @@ from cortex.tag_parser import (
     apply_response_corrections,
     clean_tags_from_markdown,
     fix_hallucinated_accessions,
+    parse_pending_action_tags,
     override_hallucinated_df_refs,
     parse_approval_tag,
     parse_data_tags,
@@ -30,7 +31,7 @@ class TagParsingStage:
     priority = PRIORITY
 
     async def should_run(self, ctx: ChatContext) -> bool:
-        return True
+        return not ctx.skip_tag_parsing
 
     async def run(self, ctx: ChatContext) -> None:
         ctx.needs_approval, ctx.raw_response = parse_approval_tag(
@@ -43,6 +44,7 @@ class TagParsingStage:
 
         # Plot tags
         ctx.plot_specs = parse_plot_tags(corrected_response)
+        ctx.pending_action_payloads = parse_pending_action_tags(corrected_response)
         override_hallucinated_df_refs(
             ctx.plot_specs, ctx.message,
             ctx.conv_state.latest_dataframe if ctx.conv_state else None,

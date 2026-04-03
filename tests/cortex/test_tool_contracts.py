@@ -46,6 +46,11 @@ class TestFormatToolContract:
         result = format_tool_contract("encode", "consortium")
         assert result == ""
 
+    def test_local_cortex_contract_uses_builtin_schemas(self):
+        result = format_tool_contract("cortex", "service")
+        assert "filter_dataframe" in result
+        assert "melt_dataframe" in result
+
     def test_single_tool_with_required_and_optional(self):
         _inject_schema("encode", {
             "get_experiment": {

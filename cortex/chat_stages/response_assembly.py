@@ -17,9 +17,11 @@ from cortex.chat_dataframes import (
     rebind_plots_to_new_df,
 )
 from cortex.chat_sync_handler import _emit_progress, _extract_plot_style_params
+from cortex.dataframe_actions import summarize_dataframe_action
 from cortex.db import row_to_dict
 from cortex.db_helpers import _create_block_internal, save_conversation_message
 from cortex.llm_validators import get_block_payload
+from cortex.memory_service import auto_capture_plot
 import cortex.job_parameters as job_parameters
 
 logger = get_logger(__name__)
@@ -158,6 +160,8 @@ class ResponseAssemblyStage:
                         "color": _cs.get("color"),
                         "palette": _cs.get("palette"),
                         "title": _cs.get("title"),
+                        "xlabel": _cs.get("xlabel") or _cs.get("x_label"),
+                        "ylabel": _cs.get("ylabel") or _cs.get("y_label"),
                         "agg": _cs.get("agg"),
                     }
                     _charts.append({k: v for k, v in _entry.items() if v is not None})
@@ -168,6 +172,16 @@ class ResponseAssemblyStage:
                     status="DONE", owner_id=ctx.user.id,
                 )
                 plot_blocks.append(_plot_block)
+                try:
+                    auto_capture_plot(
+                        ctx.session,
+                        user_id=ctx.user.id,
+                        project_id=ctx.project_id,
+                        charts=_charts,
+                        block_id=_plot_block.id,
+                    )
+                except Exception:
+                    logger.warning("Failed to persist plot memory", block_id=_plot_block.id, exc_info=True)
                 logger.info("Created AGENT_PLOT block",
                             block_id=_plot_block.id, chart_count=len(_charts), df_key=_df_key)
 
@@ -175,6 +189,16 @@ class ResponseAssemblyStage:
         gate_block = None
         if ctx.needs_approval:
             gate_block = await _build_approval_gate(ctx)
+
+        pending_action_block = None
+        if ctx.pending_action_payloads:
+            pending_action_block = _build_pending_action_block(ctx)
+
+        if ctx.pending_action_source_block:
+            _results = ctx.all_results.get("cortex", [])
+            _has_error = any("error" in item for item in _results) if _results else False
+            ctx.pending_action_source_block.status = "FAILED" if _has_error else "COMPLETED"
+            ctx.session.commit()
 
         # Save user conversation message
         await save_conversation_message(ctx.session, ctx.project_id, ctx.user.id, "user", ctx.message)
@@ -184,6 +208,7 @@ class ResponseAssemblyStage:
             "user_block": row_to_dict(ctx.user_block),
             "agent_block": row_to_dict(agent_block),
             "gate_block": row_to_dict(gate_block) if gate_block else None,
+            "pending_action_block": row_to_dict(pending_action_block) if pending_action_block else None,
             "plot_blocks": [row_to_dict(pb) for pb in plot_blocks] if plot_blocks else None,
         })
 
@@ -254,6 +279,33 @@ async def _build_approval_gate(ctx: ChatContext):
             "skill": gate_skill,
             "model": ctx.engine.model_name,
         },
+        status="PENDING",
+        owner_id=ctx.user.id,
+    )
+
+
+def _build_pending_action_block(ctx: ChatContext):
+    action = ctx.pending_action_payloads[0]
+    summary = action.get("summary") or summarize_dataframe_action(
+        action.get("tool", ""), action.get("params", {}),
+    )
+    payload = {
+        "summary": summary,
+        "action_call": {
+            "source_type": action.get("source_type", "service"),
+            "source_key": action.get("source_key", "cortex"),
+            "tool": action.get("tool"),
+            "params": action.get("params", {}),
+        },
+        "confirmation_markdown": f"{summary}. Proceeding with the saved dataframe action.",
+        "skill": ctx.active_skill,
+        "model": ctx.engine.model_name,
+    }
+    return _create_block_internal(
+        ctx.session,
+        ctx.project_id,
+        "PENDING_ACTION",
+        payload,
         status="PENDING",
         owner_id=ctx.user.id,
     )

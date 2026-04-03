@@ -21,6 +21,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from common.database import Base
+from cortex.memory_service import list_memories
 from cortex.models import (
     User, Session as SessionModel, Project, ProjectAccess,
     ProjectBlock, Conversation, ConversationMessage,
@@ -130,6 +131,172 @@ def _chat(client, message, skill="welcome", project_id="proj-plot"):
 
 class TestPlotTagParsing:
     """Tests covering lines 4284-4497 (plot tag parsing in chat handler)."""
+
+    def test_mistral_inline_plot_tag_is_normalized_and_hidden_from_markdown(self, SL, seed, tmp_path):
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF1 (reconcile, 3 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "reconcile": {
+                        "columns": ["sample", "ANTISENSE", "KNOWN", "NIC"],
+                        "data": [
+                            {"sample": "s1", "ANTISENSE": 268, "KNOWN": 1000, "NIC": 30},
+                            {"sample": "s2", "ANTISENSE": 221, "KNOWN": 1100, "NIC": 25},
+                            {"sample": "s3", "ANTISENSE": 247, "KNOWN": 1050, "NIC": 27},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 1, "visible": True, "label": "reconcile", "row_count": 3},
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "I need to plot DF1 by sample. Let me create a visualization."
+                "[TOOL_CALLS]PLOT: type=bar, df=DF1, x=sample, agg=sum, title=Summary by Sample",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "plot DF1 by sample", skill="analyze_job_results")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        agent_markdown = (data.get("agent_block", {}).get("payload") or {}).get("markdown", "")
+        assert "[TOOL_CALLS]PLOT:" not in agent_markdown
+        assert "Let me create a visualization" in agent_markdown
+
+    def test_plot_payload_preserves_ylabel(self, SL, seed, tmp_path):
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF1 (reconcile, 3 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "reconcile": {
+                        "columns": ["sample", "reads"],
+                        "data": [
+                            {"sample": "s1", "reads": 10},
+                            {"sample": "s2", "reads": 20},
+                            {"sample": "s3", "reads": 15},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 1, "visible": True, "label": "reconcile", "row_count": 3},
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the chart.\n[[PLOT: type=bar, df=DF1, x=sample, y=reads, title=Reads by Sample, ylabel=Reads]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "plot DF1 by sample with y axis label Reads", skill="analyze_job_results")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
+        assert chart.get("ylabel") == "Reads"
+
+    def test_plot_is_saved_as_project_memory(self, SL, seed, tmp_path):
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF1 (reconcile, 3 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "reconcile": {
+                        "columns": ["sample", "reads"],
+                        "data": [
+                            {"sample": "s1", "reads": 10},
+                            {"sample": "s2", "reads": 20},
+                            {"sample": "s3", "reads": 15},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 1, "visible": True, "label": "reconcile", "row_count": 3},
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the chart.\n[[PLOT: type=bar, df=DF1, x=sample, y=reads, title=Reads by Sample, ylabel=Reads]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "plot DF1 by sample", skill="analyze_job_results")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+
+        s = SL()
+        memories = list_memories(
+            s,
+            "u-plot",
+            project_id="proj-plot",
+            include_global=False,
+            category="plot",
+        )
+        assert len(memories) == 1
+        memory = memories[0]
+        assert memory.project_id == "proj-plot"
+        assert memory.related_block_id == plot_blocks[0]["id"]
+        assert "Reads by Sample" in memory.content
+        assert json.loads(memory.structured_data)["charts"][0]["ylabel"] == "Reads"
+        s.close()
 
     def test_duplicate_plot_specs_collapse_to_single_chart(self, SL, seed, tmp_path):
         """Identical plot specs should not create duplicate overlaid traces."""
@@ -346,6 +513,59 @@ class TestPlotTagParsing:
         assert len(charts) == 1
         assert charts[0].get("x") == "Assay"
         assert charts[0].get("color") is None
+
+    def test_explicit_measure_request_overrides_stale_sample_axis(self, SL, seed, tmp_path):
+        """An explicit by-measure request should override a stale sample x-axis spec."""
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF1 (reconcile, 3 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "reconcile": {
+                        "columns": ["sample", "ANTISENSE", "KNOWN", "NIC"],
+                        "data": [
+                            {"sample": "s1", "ANTISENSE": 268, "KNOWN": 1000, "NIC": 30},
+                            {"sample": "s2", "ANTISENSE": 221, "KNOWN": 1100, "NIC": 25},
+                            {"sample": "s3", "ANTISENSE": 247, "KNOWN": 1050, "NIC": 27},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 1, "visible": True, "label": "reconcile", "row_count": 3},
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "I see you want to plot DF1 by measure. Let me create a visualization for you.\n"
+                "[[PLOT: type=bar, df=DF1, x=sample, agg=sum, title=DF1 Measures by Sample]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "plot DF1 by measure", skill="analyze_job_results")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        charts = (plot_blocks[0].get("payload") or {}).get("charts", [])
+        assert len(charts) == 1
+        assert charts[0].get("x") == "measure"
 
     def test_plot_tag_with_key_value(self, SL, seed, tmp_path):
         """LLM emits [[PLOT: type=scatter, df=DF1, x=score, y=enrichment]]."""

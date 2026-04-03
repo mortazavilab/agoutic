@@ -91,7 +91,7 @@ need to write any code.
 ✅ ALWAYS use the [[PLOT:...]] tag below — it renders an interactive chart automatically.
 
 TAG FORMAT:
-[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, agg=<aggregation>]]
+[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>]]
 
 SUPPORTED CHART TYPES:
 - histogram  — Distribution of a single numeric column. Requires: x. Optional: color, title.
@@ -115,6 +115,7 @@ PARAMETER RULES:
 - color: Optional categorical column to group/color traces by
 - agg: For bar charts — "count" (count rows per x category), "sum", or "mean"
 - title: Optional chart title (short, descriptive)
+- xlabel / ylabel: Optional axis labels when the user explicitly asks for them
 
 MULTI-TRACE: Emit multiple [[PLOT:...]] tags with the same df= and type= to overlay traces.
 
@@ -131,6 +132,7 @@ MORE EXAMPLES:
 [[PLOT: type=histogram, df=DF1, x=Score, title=Score Distribution]]
 [[PLOT: type=scatter, df=DF2, x=enrichment, y=pvalue, color=Biosample, title=Enrichment vs P-value]]
 [[PLOT: type=bar, df=DF1, x=Assay, agg=count, title=Experiments by Assay Type]]
+[[PLOT: type=bar, df=DF1, x=sample, agg=sum, title=Summary by Sample, ylabel=Reads]]
 [[PLOT: type=box, df=DF3, x=Status, y=File Size, title=File Size by Status]]
 [[PLOT: type=heatmap, df=DF2, title=Correlation Matrix]]
 [[PLOT: type=pie, df=DF1, x=Assay, title=Assay Distribution]]
@@ -142,6 +144,14 @@ WHEN TO SUGGEST PLOTS:
 - After presenting search results with many rows, you MAY suggest a useful chart
 - When analyzing QC metrics, suggest distribution plots for numeric columns
 - Do NOT plot if the DataFrame has fewer than 3 rows
+
+LOCAL DATAFRAME ACTIONS:
+- When the user asks to reshape, melt, filter, subset, select columns, rename columns, sort, aggregate, join, or pivot an existing DF, use [[DATA_CALL: service=cortex, ...]] with the dataframe-action tools.
+- These are in-memory dataframe operations on existing conversation dataframes. They are NOT analyzer file calls.
+- Prefer immediate execution for safe dataframe actions.
+- If you intentionally want to pause and ask for confirmation before a dataframe action, emit exactly one pending-action tag using this format on its own line:
+  [[PENDING_ACTION: tool=<tool_name>, df_id=<n>, ...]]
+- If the user asks to plot and says "color by sample" and the dataframe is wide, keep the plot request in long-form terms using color=sample. The renderer can auto-melt wide sample columns.
 
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -198,3 +208,4 @@ OUTPUT FORMATTING RULES:
    [[APPROVAL_NEEDED]]
 
    Do not output this tag if you are just answering a question.
+6. For optional confirmation of a dataframe action, use [[PENDING_ACTION: ...]] instead of [[APPROVAL_NEEDED]].

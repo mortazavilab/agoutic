@@ -17,6 +17,7 @@ from cortex.memory_service import (
     get_memory_context,
     auto_capture_step,
     auto_capture_result,
+    auto_capture_plot,
     annotate_sample,
     soft_delete_project_memories,
     memory_to_dict,
@@ -84,6 +85,13 @@ class TestCreateMemory:
             is_pinned=True,
         )
         assert mem.is_pinned
+
+    def test_create_plot_category(self, db_session, user_id, project_id):
+        mem = create_memory(
+            db_session, user_id=user_id, content="plot note",
+            category="plot", project_id=project_id,
+        )
+        assert mem.category == "plot"
 
 
 class TestDeleteMemory:
@@ -276,6 +284,56 @@ class TestAutoCapture:
         mem1 = auto_capture_result(db_session, **args)
         mem2 = auto_capture_result(db_session, **args)
         assert mem1.id == mem2.id
+
+    def test_auto_capture_plot_creates_project_memory(self, db_session, user_id, project_id):
+        charts = [{
+            "type": "bar",
+            "df_id": 1,
+            "x": "sample",
+            "y": "reads",
+            "title": "Reads by Sample",
+            "ylabel": "Reads",
+        }]
+        mem = auto_capture_plot(
+            db_session,
+            user_id=user_id,
+            project_id=project_id,
+            charts=charts,
+            block_id="plot-block-1",
+        )
+        assert mem is not None
+        assert mem.category == "plot"
+        assert mem.project_id == project_id
+        assert mem.related_block_id == "plot-block-1"
+        assert mem.source == "system"
+        assert "Reads by Sample" in mem.content
+        assert json.loads(mem.structured_data)["charts"] == charts
+
+    def test_auto_capture_plot_dedups_by_block_id_only(self, db_session, user_id, project_id):
+        charts = [{"type": "bar", "df_id": 1, "x": "sample", "y": "reads"}]
+        mem1 = auto_capture_plot(
+            db_session,
+            user_id=user_id,
+            project_id=project_id,
+            charts=charts,
+            block_id="plot-block-1",
+        )
+        mem2 = auto_capture_plot(
+            db_session,
+            user_id=user_id,
+            project_id=project_id,
+            charts=charts,
+            block_id="plot-block-1",
+        )
+        mem3 = auto_capture_plot(
+            db_session,
+            user_id=user_id,
+            project_id=project_id,
+            charts=charts,
+            block_id="plot-block-2",
+        )
+        assert mem1.id == mem2.id
+        assert mem3.id != mem1.id
 
 
 # ---------------------------------------------------------------------------

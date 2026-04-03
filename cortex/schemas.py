@@ -28,6 +28,8 @@ class ConversationState:
     active_workflow_index: int | None = None
     active_plan_id: str | None = None           # block ID of active WORKFLOW_PLAN
     active_plan_step: str | None = None         # current step ID within that plan
+    pending_action_id: str | None = None
+    pending_action_summary: str | None = None
     # --- Remote execution state (Phase 1) ---
     execution_mode: str | None = None           # "local" or "slurm"
     ssh_profile_id: str | None = None

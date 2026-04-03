@@ -507,3 +507,72 @@ class TestBuildPlotlyFigure:
 
         assert fig is not None
         assert fig.data[0].marker.color == "red"
+
+    def test_bar_auto_melts_wide_dataframe_for_color_by_sample(self):
+        fn = _load_function("_build_plotly_figure")
+        df = pd.DataFrame(
+            {
+                "Modification": ["KNOWN", "NIC"],
+                "sampleA": [10, 5],
+                "sampleB": [12, 6],
+                "sampleC": [11, 4],
+            }
+        )
+
+        fig = fn({"type": "bar", "x": "Modification", "y": "reads", "color": "sample"}, df, "Wide DF")
+
+        assert fig is not None
+        assert len(fig.data) == 3
+        assert {trace.name for trace in fig.data} == {"sampleA", "sampleB", "sampleC"}
+
+    def test_bar_with_sample_x_and_multiple_numeric_columns_renders_all_measures(self):
+        fn = _load_function("_build_plotly_figure")
+        df = pd.DataFrame(
+            {
+                "sample": ["s1", "s2", "s3"],
+                "ANTISENSE": [268, 221, 247],
+                "KNOWN": [1000, 1100, 1050],
+                "NIC": [30, 25, 27],
+            }
+        )
+
+        fig = fn({"type": "bar", "x": "sample", "agg": "sum"}, df, "Wide Sample DF")
+
+        assert fig is not None
+        assert {trace.name for trace in fig.data} == {"ANTISENSE", "KNOWN", "NIC"}
+
+    def test_bar_with_measure_x_and_multiple_numeric_columns_groups_by_sample(self):
+        fn = _load_function("_build_plotly_figure")
+        df = pd.DataFrame(
+            {
+                "sample": ["s1", "s2", "s3"],
+                "ANTISENSE": [268, 221, 247],
+                "KNOWN": [1000, 1100, 1050],
+                "NIC": [30, 25, 27],
+            }
+        )
+
+        fig = fn({"type": "bar", "x": "measure", "agg": "sum"}, df, "Wide Sample DF")
+
+        assert fig is not None
+        assert {trace.name for trace in fig.data} == {"s1", "s2", "s3"}
+        assert set(fig.data[0].x) == {"ANTISENSE", "KNOWN", "NIC"}
+
+    def test_bar_applies_title_and_y_axis_label(self):
+        fn = _load_function("_build_plotly_figure")
+        df = pd.DataFrame(
+            {
+                "sample": ["s1", "s2", "s3"],
+                "reads": [10, 20, 15],
+            }
+        )
+
+        fig = fn(
+            {"type": "bar", "x": "sample", "y": "reads", "title": "Reads by Sample", "ylabel": "Reads"},
+            df,
+            "Simple DF",
+        )
+
+        assert fig is not None
+        assert fig.layout.title.text == "Reads by Sample"
+        assert fig.layout.yaxis.title.text == "Reads"

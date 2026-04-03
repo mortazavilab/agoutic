@@ -74,6 +74,18 @@ def extract_embedded_dataframes(
             elif tool == "run_allowlisted_script" and "data" in r:
                 _extract_script_dataframe(r, embedded)
 
+            elif src_key == "cortex" and tool in {
+                "filter_dataframe",
+                "select_dataframe_columns",
+                "rename_dataframe_columns",
+                "sort_dataframe",
+                "melt_dataframe",
+                "aggregate_dataframe",
+                "join_dataframes",
+                "pivot_dataframe",
+            } and "data" in r:
+                _extract_transform_result(r, embedded)
+
             elif tool in _FILE_TOOLS and "data" in r:
                 _extract_files_by_type(r, user_message, embedded)
 
@@ -109,6 +121,21 @@ def _extract_script_dataframe(r: dict, embedded: dict) -> None:
         "columns": dataframe.get("columns", []),
         "data": dataframe["data"],
         "row_count": dataframe.get("row_count", len(dataframe["data"])),
+        "metadata": metadata,
+    }
+
+
+def _extract_transform_result(r: dict, embedded: dict) -> None:
+    rd = r["data"]
+    if not (isinstance(rd, dict) and isinstance(rd.get("data"), list)):
+        return
+
+    metadata = dict(rd.get("metadata") or {})
+    label = metadata.get("label") or r.get("tool") or "dataframe_transform"
+    embedded[label] = {
+        "columns": rd.get("columns", []),
+        "data": rd.get("data", []),
+        "row_count": rd.get("row_count", len(rd.get("data", []))),
         "metadata": metadata,
     }
 
@@ -463,7 +490,7 @@ def collapse_competing_specs(
         user_message, re.IGNORECASE,
     ))
     if multi_trace:
-        return plot_specs
+        return _apply_explicit_special_x(plot_specs, _explicit_special_plot_x(user_message))
 
     requested_style = extract_plot_style_params(user_message)
     requested_palette = _normalize_plot_token(requested_style.get("palette"))
@@ -478,6 +505,7 @@ def collapse_competing_specs(
         _normalize_plot_token(requested_x_match.group(1).strip())
         if requested_x_match else ""
     )
+    explicit_special_x = _explicit_special_plot_x(user_message)
     requested_type = _requested_plot_type(user_message)
 
     grouped: dict[tuple, list[tuple[int, dict]]] = defaultdict(list)
@@ -487,7 +515,7 @@ def collapse_competing_specs(
     selected: list[dict] = []
     for group_specs in grouped.values():
         if len(group_specs) == 1:
-            selected.append(group_specs[0][1])
+            selected.append(_override_spec_x(group_specs[0][1], explicit_special_x))
             continue
 
         best_spec = None
@@ -502,7 +530,7 @@ def collapse_competing_specs(
                 best_spec = spec
 
         if best_spec is not None:
-            selected.append(best_spec)
+            selected.append(_override_spec_x(best_spec, explicit_special_x))
 
     if len(selected) != len(plot_specs):
         logger.info(
@@ -618,6 +646,41 @@ def _normalize_plot_token(value: str | None) -> str:
     if norm.endswith("type"):
         norm = norm[:-4]
     return norm
+
+
+def _explicit_special_plot_x(message: str) -> str:
+    requested_x_match = re.search(
+        r'\bby\s+([\w][\w ]*?)(?:\s+in\s+[#A-Za-z]|,|\.|$)',
+        message,
+        re.IGNORECASE,
+    ) or re.search(
+        r'\bof\s+([\w][\w ]*?)(?:\s+in\s+[#A-Za-z]|,|\.|$)',
+        message,
+        re.IGNORECASE,
+    )
+    if not requested_x_match:
+        return ""
+
+    normalized = _normalize_plot_token(requested_x_match.group(1).strip())
+    if normalized in {"sample", "samples"}:
+        return "sample"
+    if normalized in {"measure", "measures", "metric", "metrics", "variable", "variables"}:
+        return "measure"
+    return ""
+
+
+def _override_spec_x(spec: dict, explicit_special_x: str) -> dict:
+    if not explicit_special_x or _normalize_plot_token(spec.get("x")) == explicit_special_x:
+        return spec
+    updated = dict(spec)
+    updated["x"] = explicit_special_x
+    return updated
+
+
+def _apply_explicit_special_x(plot_specs: list[dict], explicit_special_x: str) -> list[dict]:
+    if not explicit_special_x:
+        return plot_specs
+    return [_override_spec_x(spec, explicit_special_x) for spec in plot_specs]
 
 
 def _requested_plot_type(message: str) -> str:

@@ -41,6 +41,14 @@ def _build_conversation_state(
                 if cached and isinstance(cached, dict):
                     state = ConversationState.from_dict(cached)
                     state.active_skill = active_skill
+                    for _newer_blk in reversed(history_blocks):
+                        if _newer_blk.id == blk.id:
+                            break
+                        if _newer_blk.type == "PENDING_ACTION" and _newer_blk.status == "PENDING":
+                            _pending_payload = get_block_payload(_newer_blk)
+                            state.pending_action_id = _newer_blk.id
+                            state.pending_action_summary = _pending_payload.get("summary")
+                            break
                     # The cached state was saved *before* the block's own DFs
                     # were embedded, so latest_dataframe may be stale.  Patch it
                     # by scanning the same block's embedded dataframes.
@@ -146,6 +154,15 @@ def _build_conversation_state(
                     state.active_plan_id = blk.id
                     state.active_plan_step = _pl.get("current_step_id")
                     break
+
+    # --- Extract pending dataframe action from PENDING_ACTION blocks ---
+    if history_blocks:
+        for blk in reversed(history_blocks):
+            if blk.type == "PENDING_ACTION" and blk.status == "PENDING":
+                _pl = get_block_payload(blk)
+                state.pending_action_id = blk.id
+                state.pending_action_summary = _pl.get("summary")
+                break
 
     # --- Extract ENCSR/ENCFF accessions from conversation ---
     if conversation_history:

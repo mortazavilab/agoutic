@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from atlas.config import get_all_fallback_patterns
 from common.logging_config import get_logger
+from cortex.dataframe_actions import parse_pending_action_tag, strip_pending_action_tags
 from cortex.llm_validators import _parse_tag_params
 
 logger = get_logger(__name__)
@@ -53,6 +54,11 @@ _MISTRAL_TC_PATTERN = re.compile(
 # Mistral inline [TOOL_CALLS]DATA_CALL: key=value, ...
 _MISTRAL_INLINE_PATTERN = re.compile(
     r'\[TOOL_CALLS\]\s*DATA_CALL:\s*(.+?)(?:\n|$)'
+)
+
+# Mistral inline [TOOL_CALLS]PLOT: key=value, ...
+_MISTRAL_INLINE_PLOT_PATTERN = re.compile(
+    r'\[TOOL_CALLS\]\s*PLOT:\s*(.+?)(?:\n|$)'
 )
 
 # REST-style [[TOOL_CALL: GET /analysis/...?params]]
@@ -139,6 +145,10 @@ def _convert_mistral_inline(m: re.Match) -> str:
     return f"[[DATA_CALL: {m.group(1).rstrip()}]]"
 
 
+def _convert_mistral_inline_plot(m: re.Match) -> str:
+    return f"[[PLOT: {m.group(1).rstrip()}]]"
+
+
 def _detect_chart_type(message: str) -> str:
     msg = message.lower()
     if "pie" in msg:
@@ -205,6 +215,13 @@ def apply_response_corrections(raw_response: str) -> tuple[str, int]:
     if corrected != before:
         fixes += 1
         logger.warning("Converted [TOOL_CALLS]DATA_CALL:... to [[DATA_CALL:...]]")
+
+    # Mistral inline [TOOL_CALLS]PLOT: ...
+    before = corrected
+    corrected = _MISTRAL_INLINE_PLOT_PATTERN.sub(_convert_mistral_inline_plot, corrected)
+    if corrected != before:
+        fixes += 1
+        logger.warning("Converted [TOOL_CALLS]PLOT:... to [[PLOT:...]]")
 
     if fixes:
         logger.warning("Applied fallback tag fixes to LLM response", count=fixes)
@@ -288,6 +305,13 @@ def parse_plot_tags(response: str) -> list[dict]:
             specs=[{"type": s.get("type"), "df_id": s.get("df_id")} for s in specs],
         )
     return specs
+
+
+def parse_pending_action_tags(response: str) -> list[dict]:
+    pending = parse_pending_action_tag(response)
+    if pending:
+        logger.info("Parsed pending action tags", count=len(pending))
+    return pending
 
 
 def override_hallucinated_df_refs(
@@ -428,6 +452,7 @@ def clean_tags_from_markdown(
     cleaned = LEGACY_ENCODE_PATTERN.sub('', cleaned).strip()
     cleaned = LEGACY_ANALYSIS_PATTERN.sub('', cleaned).strip()
     cleaned = PLOT_TAG_PATTERN.sub('', cleaned).strip()
+    cleaned = strip_pending_action_tags(cleaned)
 
     for pattern in get_all_fallback_patterns():
         cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE).strip()

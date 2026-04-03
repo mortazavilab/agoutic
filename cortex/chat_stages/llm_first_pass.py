@@ -37,7 +37,7 @@ class FirstPassLLMStage:
     priority = PRIORITY
 
     async def should_run(self, ctx: ChatContext) -> bool:
-        return True
+        return not ctx.skip_llm_first_pass
 
     async def run(self, ctx: ChatContext) -> None:
         if _is_cancelled(ctx.request_id):

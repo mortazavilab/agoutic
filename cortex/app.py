@@ -672,6 +672,16 @@ async def update_block(
                 asyncio.create_task(workflow_submission.submit_job_after_approval(block.project_id, block_id))
             else:
                 asyncio.create_task(handle_rejection(block.project_id, block_id))
+
+        if block.type == "PENDING_ACTION" and old_status == "PENDING" and block.status == "APPROVED":
+            execute_pending_dataframe_action(session, block)
+
+        if block.type == "PENDING_ACTION" and old_status == "PENDING" and block.status == "REJECTED":
+            reject_pending_dataframe_action(
+                session,
+                block,
+                reason=(get_block_payload(block).get("rejection_reason") or "User dismissed saved dataframe action"),
+            )
         
         return row_to_dict(block)
     finally:
@@ -713,6 +723,10 @@ from cortex.chat_approval import (  # noqa: F401 — re-exported for backward co
 )
 from cortex.chat_downloads import (  # noqa: F401 — re-exported for backward compat
     download_after_approval, _auto_execute_plan_steps,
+)
+from cortex.pending_dataframe_actions import (  # noqa: E402
+    execute_pending_dataframe_action,
+    reject_pending_dataframe_action,
 )
 
 

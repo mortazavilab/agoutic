@@ -28,7 +28,7 @@ class SecondPassStage:
     priority = PRIORITY
 
     async def should_run(self, ctx: ChatContext) -> bool:
-        return bool(ctx.all_results)
+        return bool(ctx.all_results) and not ctx.skip_second_pass
 
     async def run(self, ctx: ChatContext) -> None:
         all_results = ctx.all_results

@@ -63,6 +63,7 @@ class ToolExecutionStage:
             active_skill=ctx.active_skill,
             needs_approval=ctx.needs_approval,
             request_id=ctx.request_id,
+            history_blocks=ctx.history_blocks,
             is_cancelled=_is_cancelled,
             emit_progress=_emit_progress,
         )

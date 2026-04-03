@@ -177,14 +177,232 @@ def _resolve_payload_df_by_id(df_id: int, dfs: dict):
     return None, None
 
 
+def _match_column_name(columns: list[str], requested: str | None) -> str | None:
+    if not requested:
+        return None
+    for column in columns:
+        if column == requested:
+            return column
+    lowered = str(requested).strip().lower()
+    for column in columns:
+        if str(column).strip().lower() == lowered:
+            return column
+    return None
+
+
+def _should_auto_melt_for_grouping(chart_type: str, color_col: str | None) -> bool:
+    if chart_type not in {"bar", "box", "histogram"}:
+        return False
+    if not color_col:
+        return False
+    lowered = str(color_col).strip().lower()
+    return lowered in {"sample", "samples", "group", "condition", "replicate"}
+
+
+def _auto_melt_for_grouping(
+    df_plot: pd.DataFrame,
+    *,
+    chart_type: str,
+    x_col: str | None,
+    y_col: str | None,
+    color_col: str | None,
+):
+    actual_color = _match_column_name(list(df_plot.columns), color_col)
+    if actual_color or not _should_auto_melt_for_grouping(chart_type, color_col):
+        return df_plot, x_col, y_col, actual_color
+
+    numeric_cols = [col for col in df_plot.select_dtypes(include="number").columns.tolist() if col != x_col]
+    if len(numeric_cols) < 2:
+        return df_plot, x_col, y_col, actual_color
+
+    if x_col and x_col in df_plot.columns:
+        id_vars = [x_col]
+    else:
+        cat_cols = [col for col in df_plot.columns if col not in numeric_cols]
+        id_vars = cat_cols[:1] if cat_cols else []
+    if not id_vars:
+        return df_plot, x_col, y_col, actual_color
+
+    value_name = y_col or "value"
+    var_name = color_col or "group"
+    melted = pd.melt(
+        df_plot,
+        id_vars=id_vars,
+        value_vars=numeric_cols,
+        var_name=var_name,
+        value_name=value_name,
+    )
+    new_x = x_col if x_col in melted.columns else id_vars[0]
+    return melted, new_x, value_name, var_name
+
+
+def _auto_melt_for_wide_measure_axis(
+    df_plot: pd.DataFrame,
+    *,
+    requested_x: str | None,
+    y_col: str | None,
+    color_col: str | None,
+):
+    lowered_x = str(requested_x or "").strip().lower()
+    if lowered_x not in {"measure", "measures", "metric", "metrics", "variable", "variables"}:
+        return df_plot, None, y_col, color_col
+
+    numeric_cols = df_plot.select_dtypes(include="number").columns.tolist()
+    if len(numeric_cols) < 2:
+        return df_plot, None, y_col, color_col
+
+    id_candidates = [col for col in df_plot.columns if col not in numeric_cols]
+    if not id_candidates:
+        return df_plot, None, y_col, color_col
+
+    group_col = next(
+        (
+            col
+            for col in id_candidates
+            if str(col).strip().lower() in {"sample", "samples", "group", "condition", "replicate"}
+        ),
+        id_candidates[0],
+    )
+    value_name = y_col or "value"
+    melted = pd.melt(
+        df_plot,
+        id_vars=[group_col],
+        value_vars=numeric_cols,
+        var_name="measure",
+        value_name=value_name,
+    )
+    return melted, "measure", value_name, color_col or group_col
+
+
 def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plotly_template: str):
     """Build a Plotly figure from chart spec and dataframe."""
+    named_colors = {
+        "aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige", "bisque", "black",
+        "blanchedalmond", "blue", "blueviolet", "brown", "burlywood", "cadetblue", "chartreuse",
+        "chocolate", "coral", "cornflowerblue", "cornsilk", "crimson", "cyan", "darkblue",
+        "darkcyan", "darkgoldenrod", "darkgray", "darkgreen", "darkgrey", "darkkhaki", "darkmagenta",
+        "darkolivegreen", "darkorange", "darkorchid", "darkred", "darksalmon", "darkseagreen",
+        "darkslateblue", "darkslategray", "darkslategrey", "darkturquoise", "darkviolet", "deeppink",
+        "deepskyblue", "dimgray", "dimgrey", "dodgerblue", "firebrick", "floralwhite", "forestgreen",
+        "fuchsia", "gainsboro", "ghostwhite", "gold", "goldenrod", "gray", "green", "greenyellow",
+        "grey", "honeydew", "hotpink", "indianred", "indigo", "ivory", "khaki", "lavender",
+        "lavenderblush", "lawngreen", "lemonchiffon", "lightblue", "lightcoral", "lightcyan",
+        "lightgoldenrodyellow", "lightgray", "lightgreen", "lightgrey", "lightpink", "lightsalmon",
+        "lightseagreen", "lightskyblue", "lightslategray", "lightslategrey", "lightsteelblue",
+        "lightyellow", "lime", "limegreen", "linen", "magenta", "maroon", "mediumaquamarine",
+        "mediumblue", "mediumorchid", "mediumpurple", "mediumseagreen", "mediumslateblue",
+        "mediumspringgreen", "mediumturquoise", "mediumvioletred", "midnightblue", "mintcream",
+        "mistyrose", "moccasin", "navajowhite", "navy", "oldlace", "olive", "olivedrab", "orange",
+        "orangered", "orchid", "palegoldenrod", "palegreen", "paleturquoise", "palevioletred",
+        "papayawhip", "peachpuff", "peru", "pink", "plum", "powderblue", "purple", "red",
+        "rosybrown", "royalblue", "saddlebrown", "salmon", "sandybrown", "seagreen", "seashell",
+        "sienna", "silver", "skyblue", "slateblue", "slategray", "slategrey", "snow", "springgreen",
+        "steelblue", "tan", "teal", "thistle", "tomato", "turquoise", "violet", "wheat", "white",
+        "whitesmoke", "yellow", "yellowgreen",
+    }
+
+    def _match_column_name_local(columns: list[str], requested: str | None) -> str | None:
+        if not requested:
+            return None
+        for column in columns:
+            if column == requested:
+                return column
+        lowered = str(requested).strip().lower()
+        for column in columns:
+            if str(column).strip().lower() == lowered:
+                return column
+        return None
+
+    def _should_auto_melt_for_grouping_local(chart_type_value: str, color_value: str | None) -> bool:
+        if chart_type_value not in {"bar", "box", "histogram"}:
+            return False
+        if not color_value:
+            return False
+        lowered = str(color_value).strip().lower()
+        return lowered in {"sample", "samples", "group", "condition", "replicate"}
+
+    def _auto_melt_for_grouping_local(
+        df_plot_local: pd.DataFrame,
+        *,
+        chart_type_value: str,
+        x_col_value: str | None,
+        y_col_value: str | None,
+        color_col_value: str | None,
+    ):
+        actual_color = _match_column_name_local(list(df_plot_local.columns), color_col_value)
+        if actual_color or not _should_auto_melt_for_grouping_local(chart_type_value, color_col_value):
+            return df_plot_local, x_col_value, y_col_value, actual_color
+
+        numeric_cols = [col for col in df_plot_local.select_dtypes(include="number").columns.tolist() if col != x_col_value]
+        if len(numeric_cols) < 2:
+            return df_plot_local, x_col_value, y_col_value, actual_color
+
+        if x_col_value and x_col_value in df_plot_local.columns:
+            id_vars = [x_col_value]
+        else:
+            cat_cols = [col for col in df_plot_local.columns if col not in numeric_cols]
+            id_vars = cat_cols[:1] if cat_cols else []
+        if not id_vars:
+            return df_plot_local, x_col_value, y_col_value, actual_color
+
+        value_name = y_col_value or "value"
+        var_name = color_col_value or "group"
+        melted = pd.melt(
+            df_plot_local,
+            id_vars=id_vars,
+            value_vars=numeric_cols,
+            var_name=var_name,
+            value_name=value_name,
+        )
+        new_x = x_col_value if x_col_value in melted.columns else id_vars[0]
+        return melted, new_x, value_name, var_name
+
+    def _auto_melt_for_wide_measure_axis_local(
+        df_plot_local: pd.DataFrame,
+        *,
+        requested_x_value: str | None,
+        y_col_value: str | None,
+        color_col_value: str | None,
+    ):
+        lowered_x = str(requested_x_value or "").strip().lower()
+        if lowered_x not in {"measure", "measures", "metric", "metrics", "variable", "variables"}:
+            return df_plot_local, None, y_col_value, color_col_value
+
+        numeric_cols = df_plot_local.select_dtypes(include="number").columns.tolist()
+        if len(numeric_cols) < 2:
+            return df_plot_local, None, y_col_value, color_col_value
+
+        id_candidates = [col for col in df_plot_local.columns if col not in numeric_cols]
+        if not id_candidates:
+            return df_plot_local, None, y_col_value, color_col_value
+
+        group_col = next(
+            (
+                col
+                for col in id_candidates
+                if str(col).strip().lower() in {"sample", "samples", "group", "condition", "replicate"}
+            ),
+            id_candidates[0],
+        )
+        value_name = y_col_value or "value"
+        melted = pd.melt(
+            df_plot_local,
+            id_vars=[group_col],
+            value_vars=numeric_cols,
+            var_name="measure",
+            value_name=value_name,
+        )
+        return melted, "measure", value_name, color_col_value or group_col
+
     chart_type = chart_spec.get("type", "histogram")
+    requested_x_col = chart_spec.get("x")
     x_col = chart_spec.get("x")
     y_col = chart_spec.get("y")
     color_col = chart_spec.get("color")
     palette = chart_spec.get("palette")
     title = chart_spec.get("title", "")
+    x_axis_label = chart_spec.get("xlabel") or chart_spec.get("x_label")
+    y_axis_label = chart_spec.get("ylabel") or chart_spec.get("y_label")
     agg = chart_spec.get("agg")
     literal_color = None
 
@@ -198,7 +416,7 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
             return True
         if re.fullmatch(r"(?:rgb|rgba|hsl|hsla)\([^\)]*\)", value, re.IGNORECASE):
             return True
-        return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", value))
+        return value.lower() in named_colors
 
     def _parse_palette_values(value):
         if not value:
@@ -217,8 +435,8 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
     if palette_values and len(palette_values) == 1 and _looks_like_literal_color(palette_values[0]):
         literal_color = palette_values[0]
 
-    px_color_kwargs = {}
     available = list(df.columns)
+    requested_color_col = color_col
 
     if x_col and x_col not in available:
         match = [c for c in available if c.lower() == x_col.lower()]
@@ -236,13 +454,20 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
         else:
             color_col = None
 
-    if color_col:
-        px_color_kwargs["color"] = color_col
-    if palette_values:
-        px_color_kwargs["color_discrete_sequence"] = palette_values
-
     try:
         df_plot = df.copy()
+        df_plot, x_col, y_col, color_col = _auto_melt_for_grouping_local(
+            df_plot,
+            chart_type_value=chart_type,
+            x_col_value=x_col,
+            y_col_value=y_col,
+            color_col_value=color_col or requested_color_col,
+        )
+        px_color_kwargs = {}
+        if color_col:
+            px_color_kwargs["color"] = color_col
+        if palette_values:
+            px_color_kwargs["color_discrete_sequence"] = palette_values
         for col in [x_col, y_col]:
             if col and col in df_plot.columns:
                 try:
@@ -280,12 +505,36 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
 
         elif chart_type == "bar":
             if not x_col:
+                df_plot, wide_x_col, wide_y_col, wide_color_col = _auto_melt_for_wide_measure_axis_local(
+                    df_plot,
+                    requested_x_value=requested_x_col,
+                    y_col_value=y_col,
+                    color_col_value=color_col,
+                )
+                if wide_x_col:
+                    x_col = wide_x_col
+                    y_col = wide_y_col
+                    color_col = wide_color_col
+                    if color_col:
+                        px_color_kwargs["color"] = color_col
+            if not x_col:
                 cat_cols = df_plot.select_dtypes(exclude="number").columns
                 x_col = cat_cols[0] if len(cat_cols) > 0 else available[0]
             x_is_cat = not pd.api.types.is_numeric_dtype(df_plot[x_col])
             if not y_col and x_is_cat and agg != "count":
                 num_cols = df_plot.select_dtypes(include="number").columns.tolist()
-                if num_cols:
+                if len(num_cols) > 1 and not color_col:
+                    df_plot = pd.melt(
+                        df_plot,
+                        id_vars=[x_col],
+                        value_vars=[col for col in num_cols if col != x_col],
+                        var_name="measure",
+                        value_name="value",
+                    )
+                    y_col = "value"
+                    color_col = "measure"
+                    px_color_kwargs["color"] = color_col
+                elif num_cols:
                     _count_names = {"count", "counts", "value", "values", "n", "total", "freq", "frequency", "amount"}
                     y_col = next((c for c in num_cols if c.lower() in _count_names), num_cols[0])
             if agg == "count" or not y_col:
@@ -293,10 +542,11 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 counts.columns = [x_col, "Count"]
                 fig = px.bar(counts, x=x_col, y="Count", **px_color_kwargs, title=title or f"Count by {x_col}")
             else:
+                group_keys = [x_col] + ([color_col] if color_col and color_col in df_plot.columns else [])
                 if agg == "mean":
-                    agg_df = df_plot.groupby(x_col, as_index=False)[y_col].mean()
+                    agg_df = df_plot.groupby(group_keys, as_index=False)[y_col].mean()
                 elif agg == "sum":
-                    agg_df = df_plot.groupby(x_col, as_index=False)[y_col].sum()
+                    agg_df = df_plot.groupby(group_keys, as_index=False)[y_col].sum()
                 else:
                     agg_df = df_plot
                 fig = px.bar(agg_df, x=x_col, y=y_col, **px_color_kwargs, title=title or f"{y_col} by {x_col}")
@@ -369,7 +619,14 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                     if hasattr(trace, "fillcolor"):
                         trace.fillcolor = literal_color
 
-        fig.update_layout(template=plotly_template)
+        if chart_type == "bar" and color_col:
+            fig.update_layout(barmode="group")
+        layout_updates = {"template": plotly_template}
+        if x_axis_label:
+            layout_updates["xaxis_title"] = x_axis_label
+        if y_axis_label:
+            layout_updates["yaxis_title"] = y_axis_label
+        fig.update_layout(**layout_updates)
         return fig
     except Exception:
         return None
@@ -419,9 +676,12 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str, plotly_te
                     if spec.get("title"):
                         title_parts.append(spec["title"])
             if combined.data:
+                first_spec = chart_group[0] if chart_group else {}
                 combined.update_layout(
                     template=plotly_template,
                     title=" / ".join(title_parts) if title_parts else f"DF{df_id} — {chart_type}",
+                    xaxis_title=first_spec.get("xlabel") or first_spec.get("x_label"),
+                    yaxis_title=first_spec.get("ylabel") or first_spec.get("y_label"),
                 )
                 _safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"plot_{block_id}_{chart_idx}")
                 st.plotly_chart(combined, width="stretch", key=_safe_key)

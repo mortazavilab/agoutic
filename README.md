@@ -1,9 +1,22 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.5.0
+**Version:** 3.5.1
 **Status:** Active Prototype 
 
 ## Latest Updates (2026-04-02)
+
+- **Chat dataframe guide and help refresh** — added a dedicated
+  `docs/DATAFRAMES.md` guide, expanded deterministic UI help with dataframe
+  commands and plotting examples, and updated the quick reference so dataframe
+  inspection and transform workflows are documented in one place.
+
+- **Pending dataframe action controls** — saved dataframe transforms can now
+  be applied or dismissed directly from their chat block instead of relying on
+  a free-text confirmation.
+
+- **Broader in-memory dataframe actions** — AGOUTIC now auto-routes more
+  natural dataframe requests such as subset, rename, summarize, and grouped
+  plotting from existing conversation dataframes.
 
 - **Unified token/context budget** — new `ContextBudgetManager` allocates the
   LLM context window across system prompt, skills, memory, tool schemas, and
@@ -18,7 +31,7 @@
   checks.
 
 - **Chat pipeline decomposition** — replaced the monolithic `chat_with_agent`
-  function (1,637 lines) with a 15-stage registry-based pipeline.
+  function (1,637 lines) with a 16-stage registry-based pipeline.
   `cortex/app.py` reduced from 2,348 → 805 lines.
 
 - **Project rename syncs local folder** — renaming a project auto-generates
@@ -347,8 +360,9 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Robust DATA_CALL tag parsing** — bracket-aware parameter parser handles JSON arrays inside DATA_CALL tags (e.g. `gene_symbols=["TP53", "BRCA1"]`). Mistral-native `[TOOL_CALLS]DATA_CALL:` format is auto-normalized to standard `[[DATA_CALL:...]]` tags.
   - **Skill-defined plan chains** — skill authors can declare multi-step workflows in skill Markdown files under a `## Plan Chains` section. A single message like "get K562 experiments and make a plot by assay type" is detected at classify-time and produces both a data search and a visualization. Trigger phrases support multi-phrasing (AND/OR keyword groups) for flexible matching. See `SKILLS.md` for the full authoring guide.
   - **Skills system documentation** — new top-level `SKILLS.md` documents the complete skills framework: skill file structure, routing patterns, `[[DATA_CALL:...]]` / `[[PLOT:...]]` tag system, plan chains format, and a step-by-step guide for creating new skills.
-  - **Inline Plotly visualizations with deduplication** — `[[PLOT:...]]` tags produce interactive bar, scatter, pie, histogram, box, and heatmap charts rendered directly in chat. A three-layer pipeline guarantees chart generation: chain context injection → second-pass PLOT tag instructions → post-DataFrame fallback. Deduplication and prompt-intent selection prevent duplicate/overlapping traces and stale style leakage across turns. Supports explicit colors (`color=green`) and grouping palettes.
+  - **Inline Plotly visualizations with deduplication** — `[[PLOT:...]]` tags produce interactive bar, scatter, pie, histogram, box, and heatmap charts rendered directly in chat. A three-layer pipeline guarantees chart generation: chain context injection → second-pass PLOT tag instructions → post-DataFrame fallback. Deduplication and prompt-intent selection prevent duplicate/overlapping traces and stale style leakage across turns. Supports explicit colors (`color=green`) and grouping palettes. Wide sample tables can auto-melt for grouped `color by sample` charts.
   - **DF inspection quick commands** — `list dfs` lists all dataframes in the conversation with their metadata; `head df1` (or `head df3 5`) shows the first N rows as a markdown table. Both bypass the LLM entirely — zero token cost.
+  - **In-memory dataframe actions** — filter, subset, select columns, rename, sort, melt, aggregate, join, and pivot existing conversation dataframes without going through analyzer file calls. Saved transforms can also appear as block-specific `PENDING_ACTION` controls in the UI.
 
 ### Atlas: ENCODELIB (Port 8006 MCP)
 - **Role:** ENCODE Portal data retrieval
@@ -771,8 +785,10 @@ curl http://localhost:8003/jobs/{run_uuid}
 ### Configuration & Setup
 - [CONFIGURATION.md](CONFIGURATION.md) - Full configuration guide
 - [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - Path configuration quick start
+- [docs/DATAFRAMES.md](docs/DATAFRAMES.md) - Dataframe commands, transforms, plotting, and memory guide
 
 ### Architecture & Details
+- [docs/DATAFRAMES.md](docs/DATAFRAMES.md) - Dataframe commands, transforms, plotting, and memory guide
 - [launchpad/DUAL_INTERFACE.md](launchpad/DUAL_INTERFACE.md) - REST + MCP architecture
 - [launchpad/IMPLEMENTATION_SUMMARY.md](launchpad/IMPLEMENTATION_SUMMARY.md) - Implementation details
 

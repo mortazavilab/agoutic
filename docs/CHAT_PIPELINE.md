@@ -28,6 +28,10 @@ request  ──▶  ChatContext  ──▶  run_chat_pipeline(ctx)
          │ History 300│  conversation history
          └─────┬─────┘
                ▼
+         ┌──────────────────────┐
+         │ Confirmation 350      │  resume pending dataframe actions
+         └─────┬────────────────┘
+               ▼
          ┌──────────────┐
          │ ContextPrep 400│  engine, project dir, context injection
          └─────┬────────┘
@@ -81,12 +85,12 @@ used.
 | Skill | `active_skill`, `pre_llm_skill`, `auto_skill` |
 | History | `history_blocks`, `conversation_history`, `conv_state` |
 | LLM | `engine`, `augmented_message`, `raw_response`, `clean_markdown` |
-| Tags | `needs_approval`, `plot_specs`, `data_call_matches`, `has_any_tags` |
+| Tags | `needs_approval`, `plot_specs`, `data_call_matches`, `pending_action_payloads`, `has_any_tags` |
 | Tools | `auto_calls`, `all_results`, `provenance` |
-| DataFrames | `injected_dfs`, `embedded_dataframes`, `embedded_images`, `pending_download_files` |
+| DataFrames | `injected_dfs`, `embedded_dataframes`, `embedded_images`, `pending_download_files`, `pending_action_source_block` |
 | Tokens | `think_usage`, `analyze_usage` |
 | Overrides | `is_user_data_override`, `is_browsing_override`, `is_remote_browsing_override`, `is_sync_override` |
-| Control | **`response`** — set by any stage to short-circuit the pipeline |
+| Control | `skip_llm_first_pass`, `skip_tag_parsing`, `skip_second_pass`, **`response`** |
 
 **`short_circuit(response)`** — helper that sets `ctx.response` and returns, so
 a stage can call `ctx.short_circuit(resp)` to exit the pipeline.
@@ -172,6 +176,13 @@ Loads `USER_MESSAGE`, `AGENT_PLAN`, and `EXECUTION_JOB` blocks, formats them
 into OpenAI-style messages, and caps at `MAX_HISTORY_TURNS=20` user–assistant
 pairs.
 
+### 350 — Confirmation Detection  (`chat_stages/confirmation_detection.py`)
+
+Detects short affirmative replies such as `yes` and resumes the most recent
+pending dataframe action. It populates `ctx.auto_calls`, sets skip flags to
+avoid a redundant LLM round-trip, and marks the saved pending-action block as
+confirmed.
+
 ### 400 — Context Preparation  (`chat_stages/context_prep.py`)
 
 Initialises the `AgentEngine`, resolves the project directory, detects
@@ -218,8 +229,9 @@ calls `engine.analyze_results()` for a second LLM pass.
 
 Extracts embedded DataFrames and images, assigns DF IDs, rebinds and
 deduplicates plot specs, creates `AGENT_PLAN` / `AGENT_PLOT` /
-`APPROVAL_GATE` blocks, saves the conversation message, and short-circuits
-with the final response dict.  **Always short-circuits** (final stage).
+`APPROVAL_GATE` / `PENDING_ACTION` blocks, saves the conversation message,
+and short-circuits with the final response dict.  **Always short-circuits**
+(final stage).
 
 ---
 
@@ -258,6 +270,7 @@ insertion without renumbering:
 | 100 | Setup |
 | 200–299 | Quick exits (no LLM) |
 | 300 | History |
+| 350 | Pending-action confirmation |
 | 400 | Context preparation |
 | 500 | Plan detection |
 | 600 | First-pass LLM |
@@ -279,6 +292,7 @@ insertion without renumbering:
 | `cortex/chat_stages/setup.py` | Stage 100 |
 | `cortex/chat_stages/quick_exits.py` | Stages 200–240 |
 | `cortex/chat_stages/history.py` | Stage 300 |
+| `cortex/chat_stages/confirmation_detection.py` | Stage 350 |
 | `cortex/chat_stages/context_prep.py` | Stage 400 |
 | `cortex/chat_stages/plan_detection.py` | Stage 500 |
 | `cortex/chat_stages/llm_first_pass.py` | Stage 600 |

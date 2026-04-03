@@ -10,6 +10,7 @@ import os
 import re
 
 from cortex.conversation_state import _extract_job_context_from_history
+from cortex.dataframe_actions import build_auto_dataframe_call
 from cortex.encode_helpers import (
     _ENCODE_ASSAY_ALIASES,
     _extract_encode_search_term,
@@ -138,6 +139,11 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 )
             )
         )
+
+    # --- Explicit dataframe transforms on existing DFs ---
+    _df_action_call = build_auto_dataframe_call(user_message)
+    if _df_action_call is not None:
+        return [_df_action_call]
 
     # --- DF reference / visualization follow-up: never auto-call ---
     # If the user references an existing DataFrame (DF1, DF2, ...) this is

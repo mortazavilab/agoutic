@@ -235,6 +235,35 @@ deterministic output.
 in `list dfs` and can be referenced by name in plot and analysis requests —
 the full table is injected into the LLM context automatically.
 
+### Dataframe Actions
+
+These actions operate on existing conversation dataframes in memory and create
+new dataframe results in chat.
+
+| Pattern | Example | Effect |
+|---------|---------|--------|
+| Filter / subset rows | `subset DF3 to rows where reads > 100` | Creates a filtered dataframe |
+| Keep columns | `subset DF3 to columns sample, modification, reads` | Keeps only selected columns |
+| Rename columns | `rename DF2 columns old_reads to reads and old_sample to sample` | Renames one or more columns |
+| Sort | `sort DF4 by reads descending` | Sorts by one or more columns |
+| Melt / reshape | `reshape DF1 into long format with columns sample, modification, reads` | Converts wide data to long format |
+| Aggregate | `summarize DF4 by sample and sum reads` | Groups and aggregates rows |
+| Join | `join DF3 and DF5 on sample` | Joins two dataframes |
+| Pivot | `pivot DF6 index sample columns modification values reads` | Converts long data wider |
+
+### Dataframe Plotting
+
+| Prompt | Effect |
+|--------|--------|
+| `plot DF5 by assay` | Creates an inline plot from DF5 |
+| `make a grouped bar chart of DF3 by modification color by sample` | Groups bars by sample |
+| `plot this color by sample` | Uses the latest dataframe and can auto-melt wide sample columns |
+
+If AGOUTIC asks for confirmation before applying a dataframe transform, use the
+`PENDING_ACTION` block's Apply or Dismiss buttons in chat.
+
+See [docs/DATAFRAMES.md](docs/DATAFRAMES.md) for a fuller guide.
+
 ---
 
 ## Chat Shortcuts

@@ -50,7 +50,7 @@ output a [[PLOT:...]] tag. The system renders the chart automatically.
 ✅ ALWAYS use the [[PLOT:...]] tag — it renders an interactive chart automatically.
 
 TAG FORMAT:
-[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, agg=<aggregation>]]
+[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>]]
 
 CHART TYPES: histogram, scatter, bar, box, heatmap, pie
 
@@ -60,8 +60,10 @@ PARAMETER RULES:
 - NEVER reuse a stale DF number from an earlier turn when the current data
    below represents a newer dataframe for this request.
 - x / y: MUST be actual column names from the data.
+- color: Use a real grouping column when one exists. If the user said "color by sample" and the source dataframe is wide, you may still emit color=sample; the renderer can auto-melt sample columns.
 - agg: For bar/pie charts counting rows per category, use agg=count.
 - title: Short descriptive title.
+- xlabel / ylabel: Optional axis labels when the user explicitly asks for them.
 
 EXAMPLES:
 [[PLOT: type=bar, df=DF1, x=Assay, agg=count, title=Experiments by Assay Type]]
