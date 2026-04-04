@@ -413,3 +413,214 @@ async def _auto_trigger_analysis(
             )
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# Staging task polling
+# ---------------------------------------------------------------------------
+
+async def poll_staging_status(
+    task_id: str,
+    project_id: str,
+    block_id: str,
+    owner_id: str | None,
+    *,
+    job_data: dict,
+    ssh_profile_id: str,
+    ssh_profile_nickname: str | None,
+    workflow_block_id: str | None = None,
+    stage_input_step_id: str | None = None,
+    complete_stage_only_step_id: str | None = None,
+    gate_payload: dict | None = None,
+    initial_stage_parts: dict | None = None,
+):
+    """
+    Background task to poll Launchpad for staging progress and update the STAGING_TASK block.
+    Mirrors poll_job_status() with an adaptive schedule tuned for transfers.
+    """
+    from cortex.remote_orchestration import (
+        _failed_stage_parts,
+        _final_stage_parts,
+        _find_workflow_plan,
+        _make_stage_part,
+        _resolve_workflow_step_id,
+        _set_workflow_step_status,
+        _stage_part_progress,
+        _update_project_block_payload,
+    )
+
+    _POLL_SCHEDULE = [
+        (40, 3),     # first 2 min   -> every 3 s
+        (60, 10),    # next 10 min   -> every 10 s
+        (120, 30),   # next 60 min   -> every 30 s
+        (840, 30),   # next ~7 h     -> every 30 s
+    ]
+
+    gate_payload = gate_payload or {}
+    stage_parts = dict(initial_stage_parts) if initial_stage_parts else {}
+    _done = False
+
+    for _batch_polls, _interval in _POLL_SCHEDULE:
+        if _done:
+            break
+        for _ in range(_batch_polls):
+            if _done:
+                break
+            await asyncio.sleep(_interval)
+
+            session = SessionLocal()
+            try:
+                launchpad_url = get_service_url("launchpad")
+                client = MCPHttpClient(name="launchpad", base_url=launchpad_url)
+                await client.connect()
+                try:
+                    status_data = await client.call_tool(
+                        "get_staging_task_status", task_id=task_id,
+                    )
+                finally:
+                    await client.disconnect()
+
+                if not isinstance(status_data, dict):
+                    logger.warning("Bad staging poll response", task_id=task_id)
+                    continue
+
+                task_status = status_data.get("status", "unknown")
+                progress = status_data.get("progress") or {}
+                stage_result = status_data.get("result")
+                error_msg = status_data.get("error")
+
+                # Derive a human-friendly progress message
+                pct = progress.get("file_percent", 0)
+                speed = progress.get("speed", "")
+                xfr = progress.get("files_transferred", 0)
+                total = progress.get("files_total", 0)
+
+                if task_status == "running":
+                    if total:
+                        msg = f"Uploading {xfr}/{total} files ({pct}% current file) {speed}".strip()
+                    elif pct:
+                        msg = f"Uploading... {pct}% {speed}".strip()
+                    else:
+                        msg = "Staging in progress..."
+
+                    if stage_parts.get("data", {}).get("status") != "COMPLETED":
+                        stage_parts["data"] = _make_stage_part("RUNNING", max(35, pct), msg)
+
+                    _update_project_block_payload(
+                        session,
+                        block_id,
+                        {
+                            "progress_percent": _stage_part_progress(stage_parts),
+                            "message": msg,
+                            "stage_parts": stage_parts,
+                        },
+                        status="RUNNING",
+                    )
+                    logger.debug(
+                        "Staging progress", task_id=task_id,
+                        pct=pct, files=f"{xfr}/{total}", speed=speed,
+                    )
+
+                elif task_status == "completed" and isinstance(stage_result, dict):
+                    stage_parts = _final_stage_parts(stage_result, stage_parts)
+                    remote_data_path = stage_result.get("remote_data_path", "")
+
+                    _update_project_block_payload(
+                        session,
+                        block_id,
+                        {
+                            "status": "COMPLETED",
+                            "progress_percent": _stage_part_progress(stage_parts),
+                            "message": f"Remote staging complete: {remote_data_path}",
+                            "remote_data_path": remote_data_path,
+                            "remote_reference_paths": stage_result.get("remote_reference_paths"),
+                            "data_cache_status": stage_result.get("data_cache_status"),
+                            "reference_cache_statuses": stage_result.get("reference_cache_statuses"),
+                            "reference_asset_evidence": stage_result.get("reference_asset_evidence"),
+                            "stage_parts": stage_parts,
+                        },
+                        status="DONE",
+                    )
+
+                    # Update workflow steps
+                    if workflow_block_id:
+                        workflow_block = session.query(ProjectBlock).filter(
+                            ProjectBlock.id == workflow_block_id
+                        ).first()
+                        if workflow_block and stage_input_step_id:
+                            decision = "reuse" if stage_result.get("data_cache_status") == "reused" else "stage"
+                            _set_workflow_step_status(
+                                session, workflow_block, stage_input_step_id, "COMPLETED",
+                                extra={
+                                    "decision": decision,
+                                    "staged_input_directory": remote_data_path,
+                                    "reference_cache_statuses": stage_result.get("reference_cache_statuses"),
+                                },
+                            )
+                        if workflow_block and complete_stage_only_step_id:
+                            _set_workflow_step_status(
+                                session, workflow_block, complete_stage_only_step_id, "COMPLETED",
+                                extra={"staged_input_directory": remote_data_path},
+                            )
+
+                    # Completion announcement
+                    _create_block_internal(
+                        session,
+                        project_id,
+                        "AGENT_PLAN",
+                        {
+                            "markdown": (
+                                f"### Remote staging complete\n\n"
+                                f"Sample `{job_data.get('sample_name', '')}` is staged on "
+                                f"`{ssh_profile_nickname or ssh_profile_id}` at `{remote_data_path}`."
+                            ),
+                            "skill": gate_payload.get("skill", "remote_execution"),
+                            "model": gate_payload.get("model", "default"),
+                            "stage_result": stage_result,
+                            "workflow_plan_block_id": workflow_block_id,
+                        },
+                        status="DONE",
+                        owner_id=owner_id,
+                    )
+
+                    logger.info("Staging completed", task_id=task_id, project_id=project_id)
+                    _done = True
+                    break
+
+                elif task_status == "failed":
+                    stage_parts = _failed_stage_parts(stage_parts)
+                    fail_msg = error_msg or "Remote staging failed"
+                    _update_project_block_payload(
+                        session,
+                        block_id,
+                        {
+                            "status": "FAILED",
+                            "progress_percent": _stage_part_progress(stage_parts),
+                            "message": fail_msg,
+                            "error": fail_msg,
+                            "stage_parts": stage_parts,
+                        },
+                        status="FAILED",
+                    )
+
+                    if workflow_block_id and stage_input_step_id:
+                        workflow_block = session.query(ProjectBlock).filter(
+                            ProjectBlock.id == workflow_block_id
+                        ).first()
+                        if workflow_block:
+                            _set_workflow_step_status(
+                                session, workflow_block, stage_input_step_id, "FAILED",
+                                extra={"error": fail_msg},
+                            )
+
+                    logger.error("Staging failed", task_id=task_id, error=fail_msg)
+                    _done = True
+                    break
+
+            except Exception as e:
+                logger.warning("Error polling staging task", task_id=task_id, error=str(e))
+            finally:
+                session.close()
+
+    if not _done:
+        logger.warning("Stopped polling staging task (schedule exhausted)", task_id=task_id)

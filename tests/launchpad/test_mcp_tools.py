@@ -282,10 +282,9 @@ class TestRunAllowlistedScript:
     async def test_stage_remote_sample_posts_expected_payload(self, monkeypatch):
         fake_client = FakeAsyncClient(
             post_response=FakeResponse(
-                json_data={"remote_data_path": "/remote/agoutic/data/fp1", "data_cache_status": "reused"}
+                json_data={"task_id": "stg-abc123", "status": "accepted"}
             )
         )
-        monkeypatch.setenv("LAUNCHPAD_STAGE_TIMEOUT", "3600")
 
         with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
             tools = LaunchpadMCPTools("http://launchpad.local")
@@ -302,11 +301,11 @@ class TestRunAllowlistedScript:
                 remote_base_path="/remote/agoutic",
             )
 
-        assert result["remote_data_path"] == "/remote/agoutic/data/fp1"
+        assert result["task_id"] == "stg-abc123"
         url, kwargs = fake_client.post_calls[0]
         assert url == "http://launchpad.local/remote/stage"
         assert isinstance(kwargs["timeout"], httpx.Timeout)
-        assert kwargs["timeout"].read == 3600.0
+        assert kwargs["timeout"].read == 60.0
         assert kwargs["timeout"].connect == 30.0
         assert kwargs["json"] == {
             "project_id": "proj-1",
@@ -322,12 +321,12 @@ class TestRunAllowlistedScript:
         }
 
     @pytest.mark.asyncio
-    async def test_stage_remote_sample_read_timeout_has_actionable_message(self):
+    async def test_stage_remote_sample_wraps_errors(self):
         fake_client = FakeAsyncClient(post_error=httpx.ReadTimeout("", request=None))
 
         with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
             tools = LaunchpadMCPTools("http://launchpad.local")
-            with pytest.raises(RuntimeError, match="REMOTE_STAGE_TRANSFER_TIMEOUT_SECONDS"):
+            with pytest.raises(RuntimeError, match="Failed to start staging"):
                 await tools.stage_remote_sample(
                     project_id="proj-1",
                     user_id="user-1",
@@ -337,6 +336,21 @@ class TestRunAllowlistedScript:
                     reference_genome=["mm39"],
                     ssh_profile_id="profile-1",
                 )
+
+    @pytest.mark.asyncio
+    async def test_get_staging_task_status(self):
+        fake_client = FakeAsyncClient(
+            get_responses=[FakeResponse(json_data={"task_id": "stg-abc", "status": "running", "progress": {"file_percent": 42}})]
+        )
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            result = await tools.get_staging_task_status("stg-abc")
+
+        assert result["status"] == "running"
+        assert result["progress"]["file_percent"] == 42
+        url, kwargs = fake_client.get_calls[0]
+        assert url == "http://launchpad.local/remote/stage/stg-abc"
 
     @pytest.mark.asyncio
     async def test_submit_dogme_job_wraps_transport_errors(self):

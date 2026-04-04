@@ -1,5 +1,28 @@
 ## [Unreleased]
 
+### Improvements
+
+- **Remote staging is now a durable background job** — `POST /remote/stage`
+  returns a `task_id` immediately and runs the rsync transfer as an
+  `asyncio.Task`.  Cortex polls `GET /remote/stage/{task_id}` with an
+  adaptive schedule and updates the STAGING_TASK block with live progress
+  (file count, percent, speed).  Large uploads that previously timed out or
+  were killed by the HTTP request deadline now run to completion.
+  (`launchpad/backends/staging_worker.py` — new,
+  `launchpad/app.py`, `launchpad/schemas.py`,
+  `launchpad/mcp_tools.py`, `launchpad/mcp_server.py`,
+  `cortex/job_polling.py`, `cortex/workflow_submission.py`)
+
+- **Idle/stall timeout replaces the hard rsync timeout** — when progress
+  tracking is active (background staging), rsync is killed only if no output
+  arrives for `STAGE_IDLE_TIMEOUT_SECONDS` (default 600 s).  A safety ceiling
+  of `STAGE_MAX_TOTAL_TIMEOUT_SECONDS` (default 28 800 s / 8 h) caps any
+  single transfer.  Transfers that are slow but still making progress are no
+  longer killed.  (`launchpad/backends/file_transfer.py`)
+
+- **Retry endpoint for failed staging tasks** — `POST /remote/stage/{task_id}/retry`
+  re-queues a failed staging task so the user can retry without re-submitting.
+
 ---
 
 ## [3.5.1] - 2026-04-02

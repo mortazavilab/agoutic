@@ -141,6 +141,24 @@ class StageRemoteSampleResponse(BaseModel):
     reference_cache_statuses: dict[str, str]
     reference_asset_evidence: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
+
+class StageTaskAcceptedResponse(BaseModel):
+    """Returned immediately when staging is started asynchronously."""
+    task_id: str
+    status: str = "queued"
+
+
+class StagingTaskStatusResponse(BaseModel):
+    """Current state of a background staging task."""
+    task_id: str
+    status: str  # queued | running | completed | failed
+    progress: dict[str, Any] = Field(default_factory=dict)
+    result: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float
+    updated_at: float
+
+
 class JobListResponse(BaseModel):
     """Response with list of jobs."""
     jobs: list[JobDetailsResponse]

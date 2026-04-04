@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 import shlex
 import uuid
@@ -1272,6 +1273,7 @@ class SlurmBackend:
         conn,
         *,
         run_uuid: str | None,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> dict:
         """Stage or reuse remote references and sample data, optionally updating a job record."""
         from launchpad.db import (
@@ -1323,6 +1325,7 @@ class SlurmBackend:
                     profile=profile,
                     local_path=str(ref_source_dir),
                     remote_path=cache_path,
+                    on_progress=on_progress,
                 )
                 if not result["ok"]:
                     if run_uuid:
@@ -1379,6 +1382,7 @@ class SlurmBackend:
                 profile=profile,
                 local_path=params.input_directory,
                 remote_path=data_cache_path,
+                on_progress=on_progress,
             )
             if not result["ok"]:
                 if run_uuid:

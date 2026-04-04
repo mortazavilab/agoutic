@@ -46,6 +46,8 @@ from launchpad.schemas import (
     SubmitJobRequest,
     StageRemoteSampleRequest,
     StageRemoteSampleResponse,
+    StageTaskAcceptedResponse,
+    StagingTaskStatusResponse,
     JobStatusResponse,
     JobStatusExtendedResponse,
     JobResultSyncResponse,
@@ -411,6 +413,11 @@ async def startup():
     if is_sqlite():
         await init_db()  # Auto-create tables for local SQLite dev
     # For Postgres, tables are managed by Alembic migrations
+
+    # Start periodic cleanup of finished/old staging task entries.
+    from launchpad.backends.staging_worker import periodic_cleanup
+    asyncio.create_task(periodic_cleanup())
+
     logger.info("Launchpad initialized", max_concurrent_jobs=MAX_CONCURRENT_JOBS, poll_interval=JOB_POLL_INTERVAL)
 
 @app.on_event("shutdown")
@@ -542,34 +549,115 @@ async def list_genomes():
     }
 
 
-@app.post("/remote/stage", response_model=StageRemoteSampleResponse)
-async def stage_remote_sample(req: StageRemoteSampleRequest):
-    """Stage references and input data remotely without submitting a scheduler job."""
-    backend = get_backend("slurm")
-    try:
-        return await backend.stage_remote_sample(
-            SubmitParams(
-                project_id=req.project_id,
-                user_id=req.user_id,
-                username=req.username,
-                project_slug=req.project_slug,
-                sample_name=req.sample_name,
-                mode=req.mode,
-                input_directory=req.input_directory,
-                reference_genome=req.reference_genome,
-                ssh_profile_id=req.ssh_profile_id,
-                remote_base_path=req.remote_base_path,
+@app.post("/remote/stage")
+async def stage_remote_sample(
+    req: StageRemoteSampleRequest,
+    sync: bool = Query(False, description="Run synchronously and return result directly"),
+):
+    """Stage references and input data remotely without submitting a scheduler job.
+
+    By default the upload runs in the background and a ``task_id`` is returned
+    immediately.  Poll ``GET /remote/stage/{task_id}`` for progress.
+
+    Pass ``?sync=true`` to fall back to the legacy synchronous behaviour
+    (blocks until the transfer completes or times out).
+    """
+    from launchpad.backends.staging_worker import (
+        StagingTaskState,
+        get_staging_tasks,
+        active_task_count,
+        new_task_id,
+        run_staging,
+        MAX_CONCURRENT_STAGING_TASKS,
+    )
+
+    params_dict = {
+        "project_id": req.project_id,
+        "user_id": req.user_id,
+        "username": req.username,
+        "project_slug": req.project_slug,
+        "sample_name": req.sample_name,
+        "mode": req.mode,
+        "input_directory": req.input_directory,
+        "reference_genome": req.reference_genome,
+        "ssh_profile_id": req.ssh_profile_id,
+        "remote_base_path": req.remote_base_path,
+    }
+
+    # --- Legacy synchronous mode ---
+    if sync:
+        backend = get_backend("slurm")
+        try:
+            result = await backend.stage_remote_sample(
+                SubmitParams(**params_dict)
             )
+            return result
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=400, detail=_describe_exception(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=_describe_exception(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+        except Exception as exc:
+            logger.exception("Remote stage failed", sample_name=req.sample_name, ssh_profile_id=req.ssh_profile_id)
+            raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+
+    # --- Async background mode (default) ---
+    if active_task_count() >= MAX_CONCURRENT_STAGING_TASKS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many concurrent staging tasks ({MAX_CONCURRENT_STAGING_TASKS}). "
+            "Wait for a running transfer to finish before starting another.",
         )
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=400, detail=_describe_exception(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_describe_exception(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
-    except Exception as exc:
-        logger.exception("Remote stage failed", sample_name=req.sample_name, ssh_profile_id=req.ssh_profile_id)
-        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+
+    task = StagingTaskState(task_id=new_task_id(), params=params_dict)
+    staging_tasks = get_staging_tasks()
+    staging_tasks[task.task_id] = task
+    task._task = asyncio.create_task(run_staging(task))
+    logger.info("Background staging task created", task_id=task.task_id, sample_name=req.sample_name)
+
+    return StageTaskAcceptedResponse(task_id=task.task_id, status=task.status)
+
+
+@app.get("/remote/stage/{task_id}", response_model=StagingTaskStatusResponse)
+async def get_staging_task_status(task_id: str = FastAPIPath(..., min_length=1)):
+    """Poll the status of a background staging task."""
+    from launchpad.backends.staging_worker import get_staging_tasks
+
+    task = get_staging_tasks().get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Staging task {task_id} not found")
+    return StagingTaskStatusResponse(**task.to_dict())
+
+
+@app.post("/remote/stage/{task_id}/retry", response_model=StageTaskAcceptedResponse)
+async def retry_staging_task(task_id: str = FastAPIPath(..., min_length=1)):
+    """Re-queue a failed staging task using its stored parameters."""
+    from launchpad.backends.staging_worker import (
+        StagingTaskState,
+        get_staging_tasks,
+        active_task_count,
+        new_task_id,
+        run_staging,
+        MAX_CONCURRENT_STAGING_TASKS,
+    )
+
+    staging_tasks = get_staging_tasks()
+    old_task = staging_tasks.get(task_id)
+    if old_task is None:
+        raise HTTPException(status_code=404, detail=f"Staging task {task_id} not found")
+    if old_task.status not in ("failed",):
+        raise HTTPException(status_code=409, detail=f"Only failed tasks can be retried (current status: {old_task.status})")
+    if active_task_count() >= MAX_CONCURRENT_STAGING_TASKS:
+        raise HTTPException(status_code=429, detail="Too many concurrent staging tasks")
+
+    new_id = new_task_id()
+    task = StagingTaskState(task_id=new_id, params=dict(old_task.params))
+    staging_tasks[new_id] = task
+    task._task = asyncio.create_task(run_staging(task))
+    logger.info("Retrying staging task", old_task_id=task_id, new_task_id=new_id)
+
+    return StageTaskAcceptedResponse(task_id=new_id, status=task.status)
 
 
 @app.get("/remote/files")

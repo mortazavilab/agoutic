@@ -1171,16 +1171,8 @@ class TestSubmitJobAfterApproval:
 
         mock_client = AsyncMock()
         mock_client.call_tool = AsyncMock(return_value={
-            "remote_data_path": "/remote/u1/agoutic/data/fp1",
-            "data_cache_status": "reused",
-            "reference_cache_statuses": {"mm39": "reused"},
-            "reference_asset_evidence": {
-                "mm39": {
-                    "requires_kallisto": True,
-                    "missing_required_assets": [],
-                    "all_required_present": True,
-                }
-            },
+            "task_id": "stg-test-001",
+            "status": "accepted",
         })
 
         with _patch_session(session_factory), \
@@ -1197,22 +1189,17 @@ class TestSubmitJobAfterApproval:
         assert submitted["ssh_profile_id"] == "profile-123"
         assert submitted["sample_name"] == "Jamshid"
 
+        # Background polling was spawned
+        assert mock_aio.create_task.call_count == 1
+
         sess = session_factory()
         workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
         payload = get_block_payload(workflow_block)
         assert payload["workflow_type"] == "remote_sample_intake"
-        assert payload["steps"][1]["status"] == "COMPLETED"
-        assert payload["steps"][2]["status"] == "COMPLETED"
+        # stage_input step is RUNNING (completion happens in the polling coroutine)
+        assert payload["steps"][1]["status"] == "RUNNING"
         staging_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "STAGING_TASK").one()
-        staging_payload = get_block_payload(staging_block)
-        assert staging_block.status == "DONE"
-        assert staging_payload["remote_data_path"] == "/remote/u1/agoutic/data/fp1"
-        assert staging_payload["reference_asset_evidence"]["mm39"]["all_required_present"] is True
-        assert staging_payload["stage_parts"]["references"]["status"] == "COMPLETED"
-        assert staging_payload["stage_parts"]["references"]["progress_percent"] == 100
-        assert "already staged" in staging_payload["stage_parts"]["references"]["message"].lower()
-        assert staging_payload["stage_parts"]["data"]["status"] == "COMPLETED"
-        assert staging_payload["stage_parts"]["data"]["progress_percent"] == 100
+        assert staging_block.status == "RUNNING"
         assert sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all() == []
         sess.close()
 
@@ -1235,16 +1222,8 @@ class TestSubmitJobAfterApproval:
 
         mock_client = AsyncMock()
         mock_client.call_tool = AsyncMock(return_value={
-            "remote_data_path": "/remote/u1/agoutic/data/fp1",
-            "data_cache_status": "staged",
-            "reference_cache_statuses": {"mm39": "reused"},
-            "reference_asset_evidence": {
-                "mm39": {
-                    "requires_kallisto": True,
-                    "missing_required_assets": [],
-                    "all_required_present": True,
-                }
-            },
+            "task_id": "stg-test-002",
+            "status": "accepted",
         })
 
         with _patch_session(session_factory), \
@@ -1293,10 +1272,8 @@ class TestSubmitJobAfterApproval:
 
         mock_client = AsyncMock()
         mock_client.call_tool = AsyncMock(return_value={
-            "remote_data_path": "/remote/u1/agoutic/data/fp1",
-            "data_cache_status": "staged",
-            "reference_cache_statuses": {"mm39": "reused"},
-            "reference_asset_evidence": {"mm39": {"all_required_present": True}},
+            "task_id": "stg-test-003",
+            "status": "accepted",
         })
 
         with _patch_session(session_factory), \

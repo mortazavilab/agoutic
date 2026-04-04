@@ -142,6 +142,32 @@ def _remaining_timeout_seconds(deadline: float | None) -> float | None:
     return max(0.001, deadline - asyncio.get_running_loop().time())
 
 
+_DEFAULT_STAGE_IDLE_TIMEOUT_SECONDS = 600.0
+_DEFAULT_STAGE_MAX_TOTAL_TIMEOUT_SECONDS = 28800.0  # 8 hours
+
+
+def _stage_idle_timeout_seconds() -> float:
+    """Max seconds of silence (no rsync output) before declaring a stall."""
+    raw = os.getenv("STAGE_IDLE_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        try:
+            return max(30.0, float(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_STAGE_IDLE_TIMEOUT_SECONDS
+
+
+def _stage_max_total_timeout_seconds() -> float:
+    """Absolute safety ceiling for a single transfer, even if progress flows."""
+    raw = os.getenv("STAGE_MAX_TOTAL_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        try:
+            return max(60.0, float(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_STAGE_MAX_TOTAL_TIMEOUT_SECONDS
+
+
 def _rsync_timeout_stderr(direction: str, timeout_seconds: float | None) -> str:
     timeout_label = int(timeout_seconds) if timeout_seconds and float(timeout_seconds).is_integer() else timeout_seconds
     return (
@@ -172,20 +198,68 @@ class FileTransferManager:
             stderr=asyncio.subprocess.PIPE,
         )
 
-        async def _communicate() -> tuple[str, str]:
-            if on_progress:
+        # -- on_progress path: idle-based stall detection + safety ceiling ----
+        if on_progress:
+            idle_timeout = _stage_idle_timeout_seconds()
+            max_total = (
+                timeout_seconds
+                if (timeout_seconds and timeout_seconds > 0)
+                else _stage_max_total_timeout_seconds()
+            )
+
+            async def _stream_with_idle_timeout() -> tuple[int, str, str]:
                 stdout_lines: list[str] = []
-                async for raw_line in proc.stdout:
+                stalled = False
+                while True:
+                    try:
+                        raw_line = await asyncio.wait_for(
+                            proc.stdout.readline(), timeout=idle_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        stalled = True
+                        break
+                    if not raw_line:
+                        break
                     decoded = raw_line.decode(errors="replace")
                     stdout_lines.append(decoded)
                     for segment in decoded.rstrip("\n").split("\r"):
                         info = self._parse_rsync_progress_line(segment)
                         if info:
                             on_progress(info)
+
+                if stalled:
+                    proc.kill()
                 stderr_bytes = await proc.stderr.read()
                 await proc.wait()
-                return "".join(stdout_lines), stderr_bytes.decode(errors="replace")
+                stdout_text = "".join(stdout_lines)
+                stderr_text = stderr_bytes.decode(errors="replace")
+                if stalled:
+                    idle_msg = (
+                        f"{direction.title()} transfer stalled — no rsync output for "
+                        f"{int(idle_timeout)}s. Partial files (--partial) are preserved for retry."
+                    )
+                    stderr_text = f"{idle_msg}\n{stderr_text}" if stderr_text.strip() else idle_msg
+                    return 124, stdout_text, stderr_text
+                return proc.returncode, stdout_text, stderr_text
 
+            try:
+                return await asyncio.wait_for(
+                    _stream_with_idle_timeout(), timeout=max_total,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                stdout_bytes, stderr_bytes = await proc.communicate()
+                stdout_text = stdout_bytes.decode(errors="replace")
+                stderr_text = stderr_bytes.decode(errors="replace")
+                timeout_text = _rsync_timeout_stderr(direction, max_total)
+                if stderr_text.strip():
+                    stderr_text = f"{timeout_text}\n{stderr_text}"
+                else:
+                    stderr_text = timeout_text
+                return 124, stdout_text, stderr_text
+
+        # -- non-progress path: original hard timeout --------------------------
+        async def _communicate() -> tuple[str, str]:
             stdout_bytes, stderr_bytes = await proc.communicate()
             return (
                 stdout_bytes.decode(errors="replace"),
@@ -281,6 +355,7 @@ class FileTransferManager:
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
         timeout_seconds: float | None = None,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> dict:
         """Upload local input files to the remote host via rsync.
 
@@ -303,6 +378,7 @@ class FileTransferManager:
             direction="upload",
             copy_links=True,
             timeout_seconds=timeout_seconds if timeout_seconds is not None else _stage_upload_timeout_seconds(),
+            on_progress=on_progress,
         )
 
     async def download_outputs(

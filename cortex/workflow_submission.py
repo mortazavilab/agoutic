@@ -515,10 +515,10 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
 
             try:
                 launchpad_url = get_service_url("launchpad")
-                client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=REMOTE_STAGE_MCP_TIMEOUT)
+                client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=60.0)
                 await client.connect()
                 try:
-                    stage_result = await client.call_tool(
+                    stage_response = await client.call_tool(
                         "stage_remote_sample",
                         project_id=project_id,
                         user_id=owner_id,
@@ -537,65 +537,35 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 _err = str(e).strip() or f"{type(e).__name__}: {e!r}"
                 raise Exception(f"MCP call to Launchpad failed: {_err}")
 
-            if workflow_block is not None and stage_input_step_id:
-                decision = "reuse" if stage_result.get("data_cache_status") == "reused" else "stage"
-                _set_workflow_step_status(
-                    session,
-                    workflow_block,
-                    stage_input_step_id,
-                    "COMPLETED",
-                    extra={
-                        "decision": decision,
-                        "staged_input_directory": stage_result.get("remote_data_path"),
-                        "reference_cache_statuses": stage_result.get("reference_cache_statuses"),
-                    },
-                )
-            if workflow_block is not None and complete_stage_only_step_id:
-                _set_workflow_step_status(
-                    session,
-                    workflow_block,
-                    complete_stage_only_step_id,
-                    "COMPLETED",
-                    extra={"staged_input_directory": stage_result.get("remote_data_path")},
+            staging_task_id = stage_response.get("task_id") if isinstance(stage_response, dict) else None
+            if not staging_task_id:
+                raise RuntimeError(
+                    f"Launchpad did not return a staging task_id: {stage_response!r}"
                 )
 
-            if stage_task_block is not None:
-                stage_parts = _final_stage_parts(stage_result, stage_parts)
-                _update_project_block_payload(
-                    session,
-                    stage_task_block.id,
-                    {
-                        "status": "COMPLETED",
-                        "progress_percent": _stage_part_progress(stage_parts),
-                        "message": f"Remote staging complete: {stage_result.get('remote_data_path', '')}",
-                        "remote_data_path": stage_result.get("remote_data_path"),
-                        "remote_reference_paths": stage_result.get("remote_reference_paths"),
-                        "data_cache_status": stage_result.get("data_cache_status"),
-                        "reference_cache_statuses": stage_result.get("reference_cache_statuses"),
-                        "reference_asset_evidence": stage_result.get("reference_asset_evidence"),
-                        "stage_parts": stage_parts,
-                    },
-                    status="DONE",
+            # Spawn background poller — completion and block updates happen there
+            asyncio.create_task(
+                job_polling.poll_staging_status(
+                    task_id=staging_task_id,
+                    project_id=project_id,
+                    block_id=stage_task_block.id if stage_task_block else None,
+                    owner_id=owner_id,
+                    job_data=job_data,
+                    ssh_profile_id=ssh_profile_id,
+                    ssh_profile_nickname=ssh_profile_nickname,
+                    workflow_block_id=workflow_block.id if workflow_block is not None else None,
+                    stage_input_step_id=stage_input_step_id,
+                    complete_stage_only_step_id=complete_stage_only_step_id,
+                    gate_payload=gate_payload,
+                    initial_stage_parts=stage_parts,
                 )
-
-            _create_block_internal(
-                session,
-                project_id,
-                "AGENT_PLAN",
-                {
-                    "markdown": (
-                        f"### Remote staging complete\n\n"
-                        f"Sample `{job_data['sample_name']}` is staged on `{ssh_profile_nickname or ssh_profile_id}` at `{stage_result.get('remote_data_path', '')}`."
-                    ),
-                    "skill": gate_payload.get("skill", "remote_execution"),
-                    "model": gate_payload.get("model", "default"),
-                    "stage_result": stage_result,
-                    "workflow_plan_block_id": workflow_block.id if workflow_block is not None else None,
-                },
-                status="DONE",
-                owner_id=owner_id,
             )
-            logger.info("Remote stage-only request completed", project_id=project_id, sample_name=job_data["sample_name"])
+            logger.info(
+                "Remote staging dispatched to background",
+                project_id=project_id,
+                sample_name=job_data["sample_name"],
+                staging_task_id=staging_task_id,
+            )
             return
 
         if gate_action == "remote_stage" or remote_action == "stage_only":

@@ -520,6 +520,7 @@ async def test_stage_sample_inputs_refreshes_remote_cache_when_top_level_symlink
             "profile": profile,
             "local_path": "data/ENCFF921XAH.bam",
             "remote_path": data_cache_path,
+            "on_progress": None,
         }
     ]
     assert (f"rm -rf {data_cache_path}", True) in fake_conn.run_calls

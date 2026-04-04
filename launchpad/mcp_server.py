@@ -172,6 +172,14 @@ async def stage_remote_sample(
     )
     return json.dumps(result, indent=2)
 
+
+@mcp.tool()
+async def get_staging_task_status(task_id: str) -> str:
+    """Poll the status of an async staging task started by stage_remote_sample."""
+    result = await tools.get_staging_task_status(task_id=task_id)
+    return json.dumps(result, indent=2)
+
+
 @mcp.tool()
 async def check_nextflow_status(run_uuid: str) -> str:
     """Check the status of a Nextflow job."""

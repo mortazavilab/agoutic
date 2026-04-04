@@ -346,7 +346,7 @@ class LaunchpadMCPTools:
         project_slug: Optional[str] = None,
         remote_base_path: Optional[str] = None,
     ) -> dict:
-        """Stage a sample and references on the remote host without submitting a SLURM job."""
+        """Start async staging of a sample on the remote host. Returns a task_id for polling."""
         payload = {
             "project_id": project_id,
             "user_id": user_id,
@@ -369,18 +369,10 @@ class LaunchpadMCPTools:
                     f"{self.server_url}/remote/stage",
                     json=payload,
                     headers=self._headers(),
-                    timeout=httpx.Timeout(self.stage_timeout, connect=30.0),
+                    timeout=httpx.Timeout(60.0, connect=30.0),
                 )
                 response.raise_for_status()
                 return response.json()
-        except httpx.ReadTimeout as e:
-            raise RuntimeError(
-                "Failed to stage remote sample: request timed out while waiting for remote staging to finish. "
-                "The upload may have exceeded its staging timeout budget or the remote transfer may still be running. "
-                "Retry after checking the remote profile and consider increasing LAUNCHPAD_STAGE_TIMEOUT or "
-                "REMOTE_STAGE_TRANSFER_TIMEOUT_SECONDS for unusually large samples. "
-                f"Underlying error: {_describe_exception(e)}"
-            )
         except httpx.HTTPStatusError as e:
             detail = ""
             try:
@@ -389,13 +381,40 @@ class LaunchpadMCPTools:
                 detail = ""
             if detail:
                 raise RuntimeError(
-                    f"Failed to stage remote sample: HTTP {e.response.status_code} from {e.request.url} - {detail}"
+                    f"Failed to start staging: HTTP {e.response.status_code} from {e.request.url} - {detail}"
                 )
             raise RuntimeError(
-                f"Failed to stage remote sample: HTTP {e.response.status_code} from {e.request.url}"
+                f"Failed to start staging: HTTP {e.response.status_code} from {e.request.url}"
             )
         except Exception as e:
-            raise RuntimeError(f"Failed to stage remote sample: {_describe_exception(e)}")
+            raise RuntimeError(f"Failed to start staging: {_describe_exception(e)}")
+
+    async def get_staging_task_status(self, task_id: str) -> dict:
+        """Poll the status of an async staging task."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.server_url}/remote/stage/{task_id}",
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = e.response.text
+            except Exception:
+                detail = ""
+            if detail:
+                raise RuntimeError(
+                    f"Failed to get staging status: HTTP {e.response.status_code} - {detail}"
+                )
+            raise RuntimeError(
+                f"Failed to get staging status: HTTP {e.response.status_code}"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to get staging status: {_describe_exception(e)}")
 
     async def list_remote_files(
         self,
