@@ -91,14 +91,13 @@ async def run_staging(task: StagingTaskState) -> None:
     Updates *task* in-place with progress, result, or error.
     """
     from launchpad.backends.slurm_backend import SlurmBackend, SubmitParams
-    from launchpad.backends.ssh_manager import SSHManager
-    from launchpad.backends.remote_path_validation import validate_remote_paths, check_all_paths_ok
+    from launchpad.backends.path_validator import validate_remote_paths, check_all_paths_ok
 
     task.status = "running"
     task.touch()
 
     params = SubmitParams(**task.params)
-    backend = SlurmBackend(SSHManager())
+    backend = SlurmBackend()
     profile = None
     conn = None
 

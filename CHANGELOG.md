@@ -29,6 +29,16 @@
   exhaustion failsafe so polling never runs indefinitely.
   (`cortex/job_polling.py`)
 
+### Bug Fixes
+
+- **Async remote staging worker now uses the live SLURM backend API** — the
+  background `/remote/stage` worker no longer imports removed path-validation
+  symbols or instantiates `SlurmBackend` with a stale SSH manager argument,
+  fixing stage-only tasks that could otherwise stall before SSH validation or
+  rsync startup.
+  (`launchpad/backends/staging_worker.py`,
+  `tests/launchpad/test_staging_worker.py`)
+
 ---
 
 ## [3.5.1] - 2026-04-02
