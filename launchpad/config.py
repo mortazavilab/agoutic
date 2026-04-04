@@ -65,6 +65,8 @@ REFERENCE_GENOMES = {
     "GRCh38": {
         "fasta": AGOUTIC_DATA / "references" / "GRCh38" / "GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta",
         "gtf": AGOUTIC_DATA / "references" / "GRCh38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf",
+        "kallisto_index": AGOUTIC_DATA / "references" / "GRCh38" / "hg38Genc47_k63.idx",
+        "kallisto_t2g": AGOUTIC_DATA / "references" / "GRCh38" / "hg38Genc47_k63.t2g",
     },
     "mm39": {
         "fasta": AGOUTIC_DATA / "references" / "mm39" / "IGVFFI9282QLXO.fasta",

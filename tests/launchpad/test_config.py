@@ -47,5 +47,10 @@ class TestReferenceGenomes:
         assert "fasta" in ref
         assert "gtf" in ref
 
+    def test_grch38_has_kallisto_sidecars(self):
+        ref = REFERENCE_GENOMES["GRCh38"]
+        assert ref["kallisto_index"].name == "hg38Genc47_k63.idx"
+        assert ref["kallisto_t2g"].name == "hg38Genc47_k63.t2g"
+
     def test_default_genome(self):
         assert REFERENCE_GENOMES["default"] == "GRCh38"

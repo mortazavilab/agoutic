@@ -39,6 +39,13 @@
   (`launchpad/backends/staging_worker.py`,
   `tests/launchpad/test_staging_worker.py`)
 
+- **GRCh38 jobs now emit human kallisto references** — Nextflow config
+  generation now reads the human kallisto index and transcript-to-gene files
+  from the canonical `GRCh38` reference definition instead of falling back to
+  the mouse defaults when building `kallistoIndex` and `t2g`.
+  (`launchpad/config.py`, `tests/launchpad/test_config.py`,
+  `tests/launchpad/test_nextflow_executor.py`)
+
 ---
 
 ## [3.5.1] - 2026-04-02
