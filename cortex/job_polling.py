@@ -459,6 +459,8 @@ async def poll_staging_status(
     gate_payload = gate_payload or {}
     stage_parts = dict(initial_stage_parts) if initial_stage_parts else {}
     _done = False
+    _consecutive_not_found = 0
+    _NOT_FOUND_THRESHOLD = 3  # consecutive 404s before declaring task lost
 
     for _batch_polls, _interval in _POLL_SCHEDULE:
         if _done:
@@ -479,6 +481,9 @@ async def poll_staging_status(
                     )
                 finally:
                     await client.disconnect()
+
+                # Successful response — reset 404 counter
+                _consecutive_not_found = 0
 
                 if not isinstance(status_data, dict):
                     logger.warning("Bad staging poll response", task_id=task_id)
@@ -618,9 +623,85 @@ async def poll_staging_status(
                     break
 
             except Exception as e:
-                logger.warning("Error polling staging task", task_id=task_id, error=str(e))
+                err_str = str(e)
+                # Detect 404 — task_id vanished (Launchpad restart or cleanup)
+                if "HTTP 404" in err_str or "not found" in err_str.lower():
+                    _consecutive_not_found += 1
+                    logger.warning(
+                        "Staging task not found",
+                        task_id=task_id,
+                        consecutive=_consecutive_not_found,
+                    )
+                    if _consecutive_not_found >= _NOT_FOUND_THRESHOLD:
+                        fail_msg = (
+                            "Staging task lost — Launchpad may have restarted during the transfer. "
+                            "Partial files are preserved on the remote profile (rsync --partial). "
+                            "Re-submit the staging request to resume."
+                        )
+                        stage_parts = _failed_stage_parts(stage_parts)
+                        _update_project_block_payload(
+                            session,
+                            block_id,
+                            {
+                                "status": "FAILED",
+                                "progress_percent": _stage_part_progress(stage_parts),
+                                "message": fail_msg,
+                                "error": fail_msg,
+                                "stage_parts": stage_parts,
+                            },
+                            status="FAILED",
+                        )
+                        if workflow_block_id and stage_input_step_id:
+                            workflow_block = session.query(ProjectBlock).filter(
+                                ProjectBlock.id == workflow_block_id
+                            ).first()
+                            if workflow_block:
+                                _set_workflow_step_status(
+                                    session, workflow_block, stage_input_step_id, "FAILED",
+                                    extra={"error": fail_msg},
+                                )
+                        logger.error("Staging task lost after consecutive 404s", task_id=task_id)
+                        _done = True
+                        break
+                else:
+                    logger.warning("Error polling staging task", task_id=task_id, error=err_str)
             finally:
                 session.close()
 
     if not _done:
+        # Schedule exhausted without terminal state — fail the block so it
+        # doesn't stay stuck at RUNNING forever.
+        session = SessionLocal()
+        try:
+            fail_msg = (
+                "Staging status polling timed out after the maximum polling window. "
+                "The transfer may still be running on the remote host. "
+                "Check the remote profile or re-submit to resume."
+            )
+            stage_parts = _failed_stage_parts(stage_parts)
+            _update_project_block_payload(
+                session,
+                block_id,
+                {
+                    "status": "FAILED",
+                    "progress_percent": _stage_part_progress(stage_parts),
+                    "message": fail_msg,
+                    "error": fail_msg,
+                    "stage_parts": stage_parts,
+                },
+                status="FAILED",
+            )
+            if workflow_block_id and stage_input_step_id:
+                workflow_block = session.query(ProjectBlock).filter(
+                    ProjectBlock.id == workflow_block_id
+                ).first()
+                if workflow_block:
+                    _set_workflow_step_status(
+                        session, workflow_block, stage_input_step_id, "FAILED",
+                        extra={"error": fail_msg},
+                    )
+        except Exception:
+            logger.error("Failed to mark staging block as failed on schedule exhaustion", task_id=task_id, exc_info=True)
+        finally:
+            session.close()
         logger.warning("Stopped polling staging task (schedule exhausted)", task_id=task_id)

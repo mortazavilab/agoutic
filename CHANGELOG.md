@@ -23,6 +23,12 @@
 - **Retry endpoint for failed staging tasks** — `POST /remote/stage/{task_id}/retry`
   re-queues a failed staging task so the user can retry without re-submitting.
 
+- **Staging poller hardening** — the Cortex staging poller now detects
+  Launchpad restarts (three consecutive 404s mark the STAGING_TASK block as
+  FAILED with an actionable re-submit message) and enforces a schedule
+  exhaustion failsafe so polling never runs indefinitely.
+  (`cortex/job_polling.py`)
+
 ---
 
 ## [3.5.1] - 2026-04-02
