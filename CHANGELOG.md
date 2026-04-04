@@ -6,6 +6,17 @@
 
 ### Improvements
 
+- **Remote stage uploads now fail before the outer MCP request times out**
+  — remote sample staging now enforces an inner rsync timeout budget for
+  direct and brokered uploads, sharing that budget across the
+  `--skip-compress` compatibility retry so Launchpad returns a concrete stage
+  failure instead of leaving Cortex with a bare `ReadTimeout('')`. Timeout
+  errors now tell the user that partial files may already exist remotely and
+  point to the relevant timeout knobs for unusually large samples.
+  (`launchpad/backends/file_transfer.py`,
+  `launchpad/backends/local_user_broker.py`,
+  `launchpad/mcp_tools.py`)
+
 - **Remote SLURM rsync now skips wasteful compression for BAM-class binaries**
   — remote staging and result sync still use rsync compression for HPC links,
   but now pass a `--skip-compress` suffix list so already-compressed genomics

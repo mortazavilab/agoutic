@@ -144,6 +144,12 @@ def _parse_rsync_bytes(output: str) -> int:
     return 0
 
 
+def _remaining_timeout_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.001, deadline - asyncio.get_running_loop().time())
+
+
 async def _run_subprocess(command: list[str], timeout_seconds: float | None = None) -> dict[str, Any]:
     proc = await asyncio.create_subprocess_exec(
         *command,
@@ -244,7 +250,10 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
             source,
             dest,
         )
-        result = await _run_subprocess(cmd, timeout_seconds=timeout_seconds)
+        deadline = None
+        if timeout_seconds and timeout_seconds > 0:
+            deadline = asyncio.get_running_loop().time() + timeout_seconds
+        result = await _run_subprocess(cmd, timeout_seconds=_remaining_timeout_seconds(deadline))
         if _should_retry_without_skip_compress(
             exit_code=result.get("exit_status"),
             stderr_text=result.get("stderr", ""),
@@ -266,7 +275,10 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
                 copy_dirlinks=copy_dirlinks,
                 use_skip_compress=False,
             )
-            result = await _run_subprocess(fallback_cmd, timeout_seconds=timeout_seconds)
+            result = await _run_subprocess(
+                fallback_cmd,
+                timeout_seconds=_remaining_timeout_seconds(deadline),
+            )
         result["bytes_transferred"] = _parse_rsync_bytes(result.get("stdout", ""))
         logger.info(
             "Local auth broker finished rsync_transfer host=%s user=%s timeout=%ss exit_status=%s bytes=%s source=%s dest=%s",

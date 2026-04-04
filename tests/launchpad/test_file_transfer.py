@@ -1,6 +1,8 @@
 """Tests for launchpad/backends/file_transfer.py."""
 
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -67,7 +69,8 @@ async def test_upload_prefers_active_broker_session(monkeypatch, tmp_path, key_f
     assert payload["include_patterns"] == []
     assert payload["copy_links"] is True
     assert payload["use_skip_compress"] is True
-    assert payload["timeout_seconds"] == LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS
+    assert payload["timeout_seconds"] == pytest.approx(3480.0, rel=0.01)
+    assert payload["timeout_seconds"] < LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -277,6 +280,89 @@ async def test_direct_rsync_retries_without_skip_compress_on_incompatible_option
     assert len(commands) == 2
     assert any(str(part).startswith("--skip-compress=") for part in commands[0])
     assert not any(str(part).startswith("--skip-compress=") for part in commands[1])
+
+
+@pytest.mark.asyncio
+async def test_upload_direct_rsync_times_out_with_actionable_message(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_dir = tmp_path / "inputs"
+    local_dir.mkdir()
+    (local_dir / "reads.fastq").write_text("ACGT")
+
+    class FakeSessionManager:
+        async def get_active_session(self, profile):
+            return None
+
+    class FakeProcess:
+        returncode = None
+
+        async def communicate(self):
+            raise AssertionError("communicate should not be called directly during timeout path")
+
+        def kill(self):
+            self.returncode = -9
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        return FakeProcess()
+
+    async def fake_wait_for(awaitable, timeout):
+        awaitable.close()
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+    monkeypatch.setattr("launchpad.backends.file_transfer.os.access", lambda path, mode: True)
+    monkeypatch.setattr("launchpad.backends.file_transfer.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("launchpad.backends.file_transfer.asyncio.wait_for", fake_wait_for)
+
+    async def fake_communicate(self):
+        return (b"", b"")
+
+    monkeypatch.setattr(FakeProcess, "communicate", fake_communicate, raising=False)
+
+    result = await manager.upload_inputs(
+        profile=key_file_profile,
+        local_path=str(local_dir),
+        remote_path="/scratch/seyedam/agoutic/data/sample",
+        timeout_seconds=5,
+    )
+
+    assert result["ok"] is False
+    assert "Upload failed" in result["message"]
+    assert "timeout budget" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_upload_broker_uses_shared_timeout_budget_for_retry(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_dir = tmp_path / "inputs"
+    local_dir.mkdir()
+    (local_dir / "reads.fastq").write_text("ACGT")
+    fake_session = SimpleNamespace(session_id="sess-1")
+    invoke_calls = []
+
+    class FakeSessionManager:
+        async def get_active_session(self, profile):
+            return fake_session
+
+        async def invoke(self, session, payload):
+            invoke_calls.append(payload)
+            return {"ok": False, "stderr": "Operation timed out after 42s", "exit_status": 124}
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+
+    result = await manager.upload_inputs(
+        profile=key_file_profile,
+        local_path=str(local_dir),
+        remote_path="/scratch/seyedam/agoutic/data/sample",
+        timeout_seconds=42,
+    )
+
+    assert result == {
+        "ok": False,
+        "message": "Upload failed: Operation timed out after 42s",
+        "bytes_transferred": 0,
+    }
+    assert invoke_calls[0]["timeout_seconds"] == pytest.approx(42.0, rel=0.01)
 
 
 def test_rsync_ssh_command_uses_fail_fast_publickey_transport(key_file_profile):

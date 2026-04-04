@@ -373,6 +373,14 @@ class LaunchpadMCPTools:
                 )
                 response.raise_for_status()
                 return response.json()
+        except httpx.ReadTimeout as e:
+            raise RuntimeError(
+                "Failed to stage remote sample: request timed out while waiting for remote staging to finish. "
+                "The upload may have exceeded its staging timeout budget or the remote transfer may still be running. "
+                "Retry after checking the remote profile and consider increasing LAUNCHPAD_STAGE_TIMEOUT or "
+                "REMOTE_STAGE_TRANSFER_TIMEOUT_SECONDS for unusually large samples. "
+                f"Underlying error: {_describe_exception(e)}"
+            )
         except httpx.HTTPStatusError as e:
             detail = ""
             try:

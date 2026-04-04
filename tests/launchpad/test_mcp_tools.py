@@ -322,6 +322,23 @@ class TestRunAllowlistedScript:
         }
 
     @pytest.mark.asyncio
+    async def test_stage_remote_sample_read_timeout_has_actionable_message(self):
+        fake_client = FakeAsyncClient(post_error=httpx.ReadTimeout("", request=None))
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            with pytest.raises(RuntimeError, match="REMOTE_STAGE_TRANSFER_TIMEOUT_SECONDS"):
+                await tools.stage_remote_sample(
+                    project_id="proj-1",
+                    user_id="user-1",
+                    sample_name="Jamshid",
+                    mode="CDNA",
+                    input_directory="/data/pod5",
+                    reference_genome=["mm39"],
+                    ssh_profile_id="profile-1",
+                )
+
+    @pytest.mark.asyncio
     async def test_submit_dogme_job_wraps_transport_errors(self):
         fake_client = FakeAsyncClient(post_error=httpx.ConnectError("connection refused"))
 

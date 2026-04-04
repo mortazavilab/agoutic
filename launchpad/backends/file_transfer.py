@@ -23,6 +23,9 @@ from launchpad.backends.ssh_manager import SSHConnection, SSHProfileData, resolv
 
 logger = get_logger(__name__)
 
+_DEFAULT_STAGE_TIMEOUT_SECONDS = 3600.0
+_DEFAULT_STAGE_TIMEOUT_RESERVE_SECONDS = 120.0
+
 _RSYNC_SKIP_COMPRESS_SUFFIXES = (
     "3g2", "3gp", "7z", "aac", "ace", "apk", "avi", "bam", "bai",
     "bigwig", "bw", "bz2", "cram", "crai", "deb", "dmg", "ear",
@@ -102,6 +105,51 @@ def _normalize_local_rsync_source(source: str) -> str:
     return normalized
 
 
+def _stage_upload_timeout_seconds() -> float:
+    raw_explicit = os.getenv("REMOTE_STAGE_TRANSFER_TIMEOUT_SECONDS", "").strip()
+    if raw_explicit:
+        try:
+            return max(1.0, float(raw_explicit))
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid REMOTE_STAGE_TRANSFER_TIMEOUT_SECONDS",
+                raw_value=raw_explicit,
+            )
+
+    raw_stage_timeout = os.getenv("LAUNCHPAD_STAGE_TIMEOUT", str(_DEFAULT_STAGE_TIMEOUT_SECONDS)).strip()
+    raw_reserve = os.getenv(
+        "LAUNCHPAD_STAGE_TIMEOUT_RESERVE_SECONDS",
+        str(_DEFAULT_STAGE_TIMEOUT_RESERVE_SECONDS),
+    ).strip()
+    try:
+        stage_timeout = float(raw_stage_timeout)
+    except ValueError:
+        stage_timeout = _DEFAULT_STAGE_TIMEOUT_SECONDS
+    try:
+        reserve_seconds = float(raw_reserve)
+    except ValueError:
+        reserve_seconds = _DEFAULT_STAGE_TIMEOUT_RESERVE_SECONDS
+
+    derived_timeout = stage_timeout - reserve_seconds
+    if derived_timeout <= 0:
+        return max(1.0, stage_timeout)
+    return derived_timeout
+
+
+def _remaining_timeout_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.001, deadline - asyncio.get_running_loop().time())
+
+
+def _rsync_timeout_stderr(direction: str, timeout_seconds: float | None) -> str:
+    timeout_label = int(timeout_seconds) if timeout_seconds and float(timeout_seconds).is_integer() else timeout_seconds
+    return (
+        f"{direction.title()} transfer exceeded its timeout budget after {timeout_label}s while waiting for rsync to finish. "
+        "Partial files may already exist on the remote profile."
+    )
+
+
 class FileTransferManager:
     """Handles file transfers between local and remote systems."""
 
@@ -115,6 +163,7 @@ class FileTransferManager:
         *,
         cmd: list[str],
         direction: str,
+        timeout_seconds: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_exec(
@@ -123,23 +172,42 @@ class FileTransferManager:
             stderr=asyncio.subprocess.PIPE,
         )
 
-        if on_progress:
-            stdout_lines: list[str] = []
-            async for raw_line in proc.stdout:
-                decoded = raw_line.decode(errors="replace")
-                stdout_lines.append(decoded)
-                for segment in decoded.rstrip("\n").split("\r"):
-                    info = self._parse_rsync_progress_line(segment)
-                    if info:
-                        on_progress(info)
-            stderr_bytes = await proc.stderr.read()
-            await proc.wait()
-            stdout_text = "".join(stdout_lines)
-            stderr_text = stderr_bytes.decode(errors="replace")
-        else:
+        async def _communicate() -> tuple[str, str]:
+            if on_progress:
+                stdout_lines: list[str] = []
+                async for raw_line in proc.stdout:
+                    decoded = raw_line.decode(errors="replace")
+                    stdout_lines.append(decoded)
+                    for segment in decoded.rstrip("\n").split("\r"):
+                        info = self._parse_rsync_progress_line(segment)
+                        if info:
+                            on_progress(info)
+                stderr_bytes = await proc.stderr.read()
+                await proc.wait()
+                return "".join(stdout_lines), stderr_bytes.decode(errors="replace")
+
+            stdout_bytes, stderr_bytes = await proc.communicate()
+            return (
+                stdout_bytes.decode(errors="replace"),
+                stderr_bytes.decode(errors="replace"),
+            )
+
+        try:
+            if timeout_seconds and timeout_seconds > 0:
+                stdout_text, stderr_text = await asyncio.wait_for(_communicate(), timeout=timeout_seconds)
+            else:
+                stdout_text, stderr_text = await _communicate()
+        except asyncio.TimeoutError:
+            proc.kill()
             stdout_bytes, stderr_bytes = await proc.communicate()
             stdout_text = stdout_bytes.decode(errors="replace")
             stderr_text = stderr_bytes.decode(errors="replace")
+            timeout_text = _rsync_timeout_stderr(direction, timeout_seconds)
+            if stderr_text.strip():
+                stderr_text = f"{timeout_text}\n{stderr_text}"
+            else:
+                stderr_text = timeout_text
+            return 124, stdout_text, stderr_text
 
         return proc.returncode, stdout_text, stderr_text
 
@@ -154,6 +222,7 @@ class FileTransferManager:
         copy_links: bool,
         copy_dirlinks: bool = False,
         use_skip_compress: bool = True,
+        timeout_seconds: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ) -> dict | None:
         """Use a local auth broker session when one is active for the profile."""
@@ -183,7 +252,7 @@ class FileTransferManager:
                 "copy_links": copy_links,
                 "copy_dirlinks": copy_dirlinks,
                 "use_skip_compress": use_skip_compress,
-                "timeout_seconds": LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
+                "timeout_seconds": timeout_seconds or LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
             },
         )
         if response.get("ok"):
@@ -211,6 +280,7 @@ class FileTransferManager:
         remote_path: str,
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict:
         """Upload local input files to the remote host via rsync.
 
@@ -232,6 +302,7 @@ class FileTransferManager:
             exclude_patterns=exclude_patterns,
             direction="upload",
             copy_links=True,
+            timeout_seconds=timeout_seconds if timeout_seconds is not None else _stage_upload_timeout_seconds(),
         )
 
     async def download_outputs(
@@ -283,6 +354,7 @@ class FileTransferManager:
         direction: str,
         copy_links: bool,
         copy_dirlinks: bool = False,
+        timeout_seconds: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ) -> dict:
         """Execute rsync transfer."""
@@ -298,6 +370,9 @@ class FileTransferManager:
         )
 
         logger.info(f"Starting {direction}: {source} → {dest}")
+        deadline = None
+        if timeout_seconds and timeout_seconds > 0:
+            deadline = asyncio.get_running_loop().time() + timeout_seconds
 
         try:
             broker_result = await self._try_broker_transfer(
@@ -310,6 +385,7 @@ class FileTransferManager:
                 copy_links=copy_links,
                 copy_dirlinks=copy_dirlinks,
                 use_skip_compress=True,
+                timeout_seconds=_remaining_timeout_seconds(deadline),
                 on_progress=on_progress,
             )
             if broker_result is not None:
@@ -333,6 +409,7 @@ class FileTransferManager:
             returncode, stdout_text, stderr_text = await self._run_rsync_subprocess(
                 cmd=cmd,
                 direction=direction,
+                timeout_seconds=_remaining_timeout_seconds(deadline),
                 on_progress=on_progress,
             )
             if should_retry_without_skip_compress(exit_code=returncode, stderr_text=stderr_text):
@@ -356,6 +433,7 @@ class FileTransferManager:
                 returncode, stdout_text, stderr_text = await self._run_rsync_subprocess(
                     cmd=fallback_cmd,
                     direction=direction,
+                    timeout_seconds=_remaining_timeout_seconds(deadline),
                     on_progress=on_progress,
                 )
 
