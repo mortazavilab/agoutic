@@ -176,8 +176,8 @@ def _launch_helper_via_su(local_username: str, password: str, host: str, port_fi
     broker_script = AGOUTIC_CODE / "launchpad" / "backends" / "local_user_broker.py"
     command = (
         f"cd {shlex.quote(str(AGOUTIC_CODE))} && "
-        f"PYTHONPATH={shlex.quote(str(AGOUTIC_CODE))} "
         f"umask 022 && "
+        f"PYTHONPATH={shlex.quote(str(AGOUTIC_CODE))} "
         f"nohup {shlex.quote(sys.executable)} {shlex.quote(str(broker_script))} "
         f"--host {shlex.quote(host)} --port-file {shlex.quote(port_file)} --pid-file {shlex.quote(pid_file)} --token {shlex.quote(auth_token)} "
         f">>{shlex.quote(log_file)} 2>&1 </dev/null &"

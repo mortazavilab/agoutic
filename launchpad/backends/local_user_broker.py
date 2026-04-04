@@ -15,9 +15,25 @@ import signal
 from pathlib import Path
 from typing import Any
 
-from launchpad.backends.file_transfer import build_rsync_command, should_retry_without_skip_compress
-
 logger = logging.getLogger(__name__)
+
+_RSYNC_SKIP_COMPRESS_SUFFIXES = (
+    "3g2", "3gp", "7z", "aac", "ace", "apk", "avi", "bam", "bai",
+    "bigwig", "bw", "bz2", "cram", "crai", "deb", "dmg", "ear",
+    "f4v", "fast5", "flac", "flv", "gpg", "gz", "h5", "hdf5",
+    "iso", "jar", "jpeg", "jpg", "lrz", "lz", "lz4", "lzma",
+    "lzo", "m1a", "m1v", "m2a", "m2ts", "m2v", "m4a", "m4b",
+    "m4p", "m4r", "m4v", "mka", "mkv", "mov", "mp1", "mp2",
+    "mp3", "mp4", "mpa", "mpeg", "mpg", "mpv", "mts", "npy",
+    "npz", "odb", "odf", "odg", "odi", "odm", "odp", "ods",
+    "odt", "oga", "ogg", "ogm", "ogv", "ogx", "opus", "otg",
+    "oth", "otp", "ots", "ott", "oxt", "parquet", "pickle",
+    "pkl", "png", "pod5", "qt", "rar", "rpm", "rz", "rzip",
+    "spx", "squashfs", "sxc", "sxd", "sxg", "sxm", "sxw", "sz",
+    "tbz", "tbz2", "tgz", "tlz", "ts", "txz", "tzo", "vob",
+    "war", "webm", "webp", "xz", "z", "zip", "zst",
+)
+_RSYNC_SKIP_COMPRESS = "/".join(_RSYNC_SKIP_COMPRESS_SUFFIXES)
 
 
 def _normalize_local_rsync_source(source: str) -> str:
@@ -27,6 +43,54 @@ def _normalize_local_rsync_source(source: str) -> str:
     if candidate.exists() and candidate.is_dir() and not normalized.endswith("/"):
         return normalized + "/"
     return normalized
+
+
+def _build_rsync_command(
+    *,
+    ssh_command: str,
+    source: str,
+    dest: str,
+    include_patterns: list[str] | None,
+    exclude_patterns: list[str] | None,
+    copy_links: bool,
+    copy_dirlinks: bool = False,
+    use_skip_compress: bool = True,
+) -> list[str]:
+    cmd = [
+        "rsync", "-avz", "--omit-dir-times", "--no-perms", "--partial", "--progress",
+        "-e", ssh_command,
+    ]
+    if use_skip_compress:
+        cmd.append(f"--skip-compress={_RSYNC_SKIP_COMPRESS}")
+
+    if copy_links:
+        cmd.append("--copy-links")
+    elif copy_dirlinks:
+        cmd.append("--copy-dirlinks")
+
+    for pattern in include_patterns or []:
+        cmd.extend(["--include", pattern])
+    for pattern in exclude_patterns or []:
+        cmd.extend(["--exclude", pattern])
+
+    cmd.extend([source, dest])
+    return cmd
+
+
+def _should_retry_without_skip_compress(*, exit_code: int | None, stderr_text: str) -> bool:
+    if exit_code not in {1, 4}:
+        return False
+    lowered = stderr_text.lower()
+    if "skip-compress" not in lowered:
+        return False
+    retry_markers = (
+        "unknown option",
+        "unrecognized option",
+        "invalid option",
+        "option not supported",
+        "protocol incompatibility",
+    )
+    return any(marker in lowered for marker in retry_markers)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 SSH_KNOWN_HOSTS = os.getenv("SSH_KNOWN_HOSTS", "").strip() or None
@@ -161,7 +225,7 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
         copy_dirlinks = bool(request.get("copy_dirlinks"))
         use_skip_compress = bool(request.get("use_skip_compress", True))
 
-        cmd = build_rsync_command(
+        cmd = _build_rsync_command(
             ssh_command=" ".join(_build_ssh_transport(profile)),
             source=source,
             dest=dest,
@@ -181,7 +245,7 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
             dest,
         )
         result = await _run_subprocess(cmd, timeout_seconds=timeout_seconds)
-        if should_retry_without_skip_compress(
+        if _should_retry_without_skip_compress(
             exit_code=result.get("exit_status"),
             stderr_text=result.get("stderr", ""),
         ):
@@ -192,7 +256,7 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
                 source,
                 dest,
             )
-            fallback_cmd = build_rsync_command(
+            fallback_cmd = _build_rsync_command(
                 ssh_command=" ".join(_build_ssh_transport(profile)),
                 source=source,
                 dest=dest,
