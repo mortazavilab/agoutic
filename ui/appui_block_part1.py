@@ -442,6 +442,11 @@ def render_block_part1(
                         submit_reject = col2.form_submit_button("❌ Cancel Staging", width="stretch")
 
                         if submit_approve:
+                            remote_input_path = extracted_params.get("remote_input_path") or ""
+                            if not remote_input_path and isinstance(input_directory, str) and input_directory.lower().startswith("remote:"):
+                                candidate = input_directory[len("remote:"):].strip()
+                                if candidate.startswith("/"):
+                                    remote_input_path = candidate.rstrip('.,;:!?')
                             edited_params = {
                                 "sample_name": sample_name,
                                 "mode": mode,
@@ -455,6 +460,9 @@ def render_block_part1(
                                 "ssh_profile_nickname": ssh_profile_nickname or None,
                                 "remote_base_path": remote_base_path or None,
                                 "local_workflow_directory": local_workflow_directory or None,
+                                "remote_input_path": remote_input_path or None,
+                                "staged_remote_input_path": remote_input_path or None,
+                                "result_destination": extracted_params.get("result_destination") or ("both" if remote_input_path else "local"),
                             }
                             payload_update = dict(content)
                             payload_update["edited_params"] = edited_params

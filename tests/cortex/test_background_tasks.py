@@ -1291,6 +1291,53 @@ class TestSubmitJobAfterApproval:
         assert mock_client.call_tool.call_args.args[0] == "stage_remote_sample"
 
     @pytest.mark.asyncio
+    async def test_remote_stage_only_recovers_remote_input_path_from_remote_prefixed_input_directory(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "gate_action": "remote_stage",
+            "skill": "remote_execution",
+            "edited_params": {
+                "sample_name": "igvfr_086-04_dRNA_p2_1",
+                "mode": "RNA",
+                "input_type": "pod5",
+                "input_directory": "remote:/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_086-04_dRNA_p2_1/pod5",
+                "reference_genome": ["mm39"],
+                "execution_mode": "slurm",
+                "remote_action": "stage_only",
+                "gate_action": "remote_stage",
+                "ssh_profile_nickname": "hpc3",
+                "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "task_id": "stg-test-remote-prefix",
+            "status": "accepted",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.await_count == 1
+        assert mock_client.call_tool.call_args.args[0] == "stage_remote_sample"
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["remote_input_path"] == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_086-04_dRNA_p2_1/pod5"
+
+        sess = session_factory()
+        refreshed_gate = sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one()
+        gate_payload = get_block_payload(refreshed_gate)
+        approved = gate_payload["edited_params"]
+        assert approved["remote_input_path"] == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_086-04_dRNA_p2_1/pod5"
+        assert approved["staged_remote_input_path"] == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_086-04_dRNA_p2_1/pod5"
+        assert approved["result_destination"] == "both"
+        sess.close()
+
+    @pytest.mark.asyncio
     async def test_remote_stage_only_request_never_falls_through_to_submit_job(self, session_factory, seed_data):
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
             "gate_action": "remote_stage",

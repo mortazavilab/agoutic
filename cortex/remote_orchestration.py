@@ -41,6 +41,16 @@ def _remote_path_fingerprint(remote_path: str) -> str:
     return hashlib.sha256(f"remote:{cleaned}".encode("utf-8")).hexdigest()
 
 
+def _extract_remote_input_from_input_directory(input_directory: str | None) -> str:
+    raw = str(input_directory or "").strip()
+    if not raw.lower().startswith("remote:"):
+        return ""
+    candidate = raw[len("remote:"):].strip()
+    if not candidate.startswith("/"):
+        return ""
+    return candidate.rstrip('.,;:!?')
+
+
 def _launchpad_internal_headers() -> dict[str, str]:
     from cortex.config import INTERNAL_API_SECRET
 
@@ -757,6 +767,13 @@ async def _prepare_remote_execution_params(
         normalized["execution_mode"] = "slurm"
     if (normalized.get("execution_mode") or "local") != "slurm":
         return normalized
+
+    if not normalized.get("remote_input_path"):
+        recovered_remote_input = _extract_remote_input_from_input_directory(
+            normalized.get("input_directory")
+        )
+        if recovered_remote_input:
+            normalized["remote_input_path"] = recovered_remote_input
 
     normalized["slurm_gpus"] = max(int(normalized.get("slurm_gpus") or 0), 1)
     remote_input_path = str(normalized.get("remote_input_path") or "").strip()

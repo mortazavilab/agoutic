@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+---
+
+## [3.5.2] - 2026-04-06
+
 ### Improvements
 
 - **Remote staging is now a durable background job** — `POST /remote/stage`
@@ -44,6 +48,16 @@
   `skills/remote_execution/SKILL.md`)
 
 ### Bug Fixes
+
+- **Remote-input staging approvals now preserve no-copy remote folder reuse** —
+  stage-only approvals that carry a `remote:/...` input path no longer lose
+  `remote_input_path` when the approval form is submitted.  The server now
+  recovers remote input paths from `remote:/...` values defensively, the UI
+  preserves `remote_input_path` and `staged_remote_input_path` in edited
+  approval payloads, and stage-only remote-folder requests continue through the
+  `use_remote_path` flow instead of falling back to placeholder local staging.
+  (`cortex/remote_orchestration.py`, `ui/appui_block_part1.py`,
+  `tests/cortex/test_background_tasks.py`)
 
 - **Async remote staging worker now uses the live SLURM backend API** — the
   background `/remote/stage` worker no longer imports removed path-validation

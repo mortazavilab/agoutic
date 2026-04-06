@@ -1,9 +1,9 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.5.1
+**Version:** 3.5.2
 **Status:** Active Prototype 
 
-## Latest Updates (2026-04-02)
+## Latest Updates (2026-04-06)
 
 - **Chat dataframe guide and help refresh** — added a dedicated
   `docs/DATAFRAMES.md` guide, expanded deterministic UI help with dataframe
