@@ -561,6 +561,32 @@ class TestRemoteExecutionDetection:
         assert result["gate_action"] == "remote_stage"
 
     @pytest.mark.asyncio
+    async def test_detects_remote_input_path_for_slurm_submission(self):
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {"text": "Run the mouse DNA sample Jamshid on hpc3 using remote data at /crsp/lab/seyedam/share/pod5/Jamshid"},
+        )
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+                 "id": "profile-123",
+                 "nickname": "hpc3",
+                 "ssh_username": "jdoe",
+                 "remote_base_path": "/remote/{ssh_username}/agoutic",
+             }])):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["execution_mode"] == "slurm"
+        assert result["remote_input_path"] == "/crsp/lab/seyedam/share/pod5/Jamshid"
+        assert result["staged_remote_input_path"] == "/crsp/lab/seyedam/share/pod5/Jamshid"
+        assert result["input_directory"] == "remote:/crsp/lab/seyedam/share/pod5/Jamshid"
+        assert result["cache_preflight"]["data_action"]["action"] == "use_remote_path"
+        assert result["result_destination"] == "both"
+
+    @pytest.mark.asyncio
     async def test_reuses_matching_remote_staged_sample_when_no_explicit_input_path(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Analyze Jamshid on hpc3"})
         sess = self.sf()

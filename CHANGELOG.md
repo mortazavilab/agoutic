@@ -29,6 +29,20 @@
   exhaustion failsafe so polling never runs indefinitely.
   (`cortex/job_polling.py`)
 
+- **Remote SLURM runs can now use a folder already present on the cluster**
+  — users can provide a remote input folder and submit or stage a job without
+  first copying the starting data into the local AGOUTIC data area. Cortex now
+  carries an explicit `remote_input_path` through approval and submission,
+  approval summaries show the remote path directly, Launchpad accepts remote-only
+  SLURM input requests, and the SLURM backend auto-detects the remote input type
+  from file extensions, registers the folder for future staged-sample reuse, and
+  defaults these runs to keeping results in both places unless overridden.
+  (`cortex/job_parameters.py`, `cortex/remote_orchestration.py`,
+  `cortex/workflow_submission.py`, `launchpad/schemas.py`,
+  `launchpad/mcp_tools.py`, `launchpad/mcp_server.py`, `launchpad/app.py`,
+  `launchpad/backends/base.py`, `launchpad/backends/slurm_backend.py`,
+  `skills/remote_execution/SKILL.md`)
+
 ### Bug Fixes
 
 - **Async remote staging worker now uses the live SLURM backend API** — the

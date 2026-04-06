@@ -36,6 +36,11 @@ _REMOTE_SAMPLE_WORKFLOW = "remote_sample_intake"
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
+def _remote_path_fingerprint(remote_path: str) -> str:
+    cleaned = str(remote_path or "").strip()
+    return hashlib.sha256(f"remote:{cleaned}".encode("utf-8")).hexdigest()
+
+
 def _launchpad_internal_headers() -> dict[str, str]:
     from cortex.config import INTERNAL_API_SECRET
 
@@ -342,6 +347,7 @@ async def _build_remote_stage_approval_context(
     sample_name = prepared.get("sample_name") or "sample"
     mode = prepared.get("mode") or "DNA"
     input_directory = prepared.get("input_directory") or ""
+    remote_input_path = prepared.get("remote_input_path") or ""
     reference_genome = prepared.get("reference_genome") or ["mm39"]
     if isinstance(reference_genome, str):
         reference_genome = [reference_genome]
@@ -350,17 +356,22 @@ async def _build_remote_stage_approval_context(
     account = prepared.get("slurm_account") or defaults_data.get("account") or selected_defaults.get("default_slurm_account") or "(unset)"
     partition = prepared.get("slurm_partition") or defaults_data.get("partition") or selected_defaults.get("default_slurm_partition") or "(unset)"
     remote_base_path = prepared.get("remote_base_path") or selected_defaults.get("remote_base_path") or "(unset)"
-    result_destination = prepared.get("result_destination") or "local"
+    result_destination = prepared.get("result_destination") or ("both" if remote_input_path else "local")
     cpus = int(prepared.get("slurm_cpus") or 4)
     memory_gb = int(prepared.get("slurm_memory_gb") or 16)
     walltime = prepared.get("slurm_walltime") or "04:00:00"
     gpus = int(prepared.get("slurm_gpus") or 1)
+    data_path_line = (
+        f"📂 **Remote Input Path:** {remote_input_path}\n"
+        if remote_input_path
+        else f"📁 **Data Path:** {input_directory}\n"
+    )
 
     if remote_request.get("stage_only"):
         summary = (
             "I found the saved remote defaults needed for staging.\n\n"
             f"📋 **Sample Name:** {sample_name}\n"
-            f"📁 **Data Path:** {input_directory}\n"
+            f"{data_path_line}"
             f"🧬 **Data Type:** {mode}\n"
             f"🔬 **Reference Genome:** {reference_text}\n"
             f"🖥️ **Execution Mode:** SLURM staging only\n"
@@ -375,7 +386,7 @@ async def _build_remote_stage_approval_context(
         summary = (
             "I found the saved remote defaults needed to submit this run.\n\n"
             f"📋 **Sample Name:** {sample_name}\n"
-            f"📁 **Data Path:** {input_directory}\n"
+            f"{data_path_line}"
             f"🧬 **Data Type:** {mode}\n"
             f"🔬 **Reference Genome:** {reference_text}\n"
             f"🖥️ **Execution Mode:** SLURM\n"
@@ -606,7 +617,12 @@ async def _build_slurm_cache_preflight(
     primary_ref = ref_ids[0]
 
     input_directory = str(normalized.get("input_directory") or "")
-    input_fingerprint = _compute_local_input_fingerprint(input_directory)
+    remote_input_path = str(normalized.get("remote_input_path") or "").strip()
+    input_fingerprint = (
+        _remote_path_fingerprint(remote_input_path)
+        if remote_input_path
+        else _compute_local_input_fingerprint(input_directory)
+    )
     data_key = input_fingerprint[:16]
 
     preflight = {
@@ -623,9 +639,9 @@ async def _build_slurm_cache_preflight(
         "data_action": {
             "reference_id": primary_ref,
             "input_fingerprint": input_fingerprint,
-            "cache_path": f"{normalized['remote_data_cache_root']}/{data_key}",
-            "action": "stage",
-            "reason": "cache_miss",
+            "cache_path": remote_input_path or f"{normalized['remote_data_cache_root']}/{data_key}",
+            "action": "use_remote_path" if remote_input_path else "stage",
+            "reason": "user_specified_remote_path" if remote_input_path else "cache_miss",
         },
         "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
     }
@@ -675,7 +691,9 @@ async def _build_slurm_cache_preflight(
                 }
             )
 
-        if input_fingerprint == _EMPTY_SHA256 or input_fingerprint.startswith("e3b0c442"):
+        if remote_input_path:
+            pass
+        elif input_fingerprint == _EMPTY_SHA256 or input_fingerprint.startswith("e3b0c442"):
             preflight["data_action"].update(
                 {
                     "action": "stage",
@@ -741,7 +759,8 @@ async def _prepare_remote_execution_params(
         return normalized
 
     normalized["slurm_gpus"] = max(int(normalized.get("slurm_gpus") or 0), 1)
-    normalized["result_destination"] = normalized.get("result_destination") or "local"
+    remote_input_path = str(normalized.get("remote_input_path") or "").strip()
+    normalized["result_destination"] = normalized.get("result_destination") or ("both" if remote_input_path else "local")
 
     owner_user = session.execute(select(User).where(User.id == owner_id)).scalar_one_or_none()
     project_obj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
@@ -808,7 +827,26 @@ async def _prepare_remote_execution_params(
         normalized["remote_reference_cache_root"] = f"{remote_base_path}/ref"
         normalized["remote_data_cache_root"] = f"{remote_base_path}/data"
 
+    if remote_input_path:
+        normalized["staged_remote_input_path"] = remote_input_path
+        if not normalized.get("input_directory"):
+            normalized["input_directory"] = f"remote:{remote_input_path}"
+
     normalized = await _build_slurm_cache_preflight(session, project_id, owner_id, normalized)
+
+    if remote_input_path:
+        preflight = normalized.get("cache_preflight") or {}
+        if isinstance(preflight, dict):
+            preflight["status"] = "ready"
+            preflight["data_action"] = {
+                "reference_id": _normalize_reference_id((normalized.get("reference_genome") or ["default"])[0]),
+                "input_fingerprint": _remote_path_fingerprint(remote_input_path),
+                "cache_path": remote_input_path,
+                "action": "use_remote_path",
+                "reason": "user_specified_remote_path",
+            }
+            normalized["cache_preflight"] = preflight
+        return normalized
 
     if normalized.get("remote_action") != "stage_only":
         staged_entry = _find_remote_staged_sample(

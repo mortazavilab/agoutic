@@ -99,9 +99,26 @@ class _FakeStageConn:
         return SimpleNamespace(stdout="", stderr="", exit_status=0)
 
 
+def _make_profile() -> SSHProfileData:
+    return SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+
+
 @pytest.mark.asyncio
 async def test_reuse_pre_staged_input_raises_when_remote_path_missing():
     backend = SlurmBackend()
+    profile = _make_profile()
     params = SubmitParams(
         staged_remote_input_path="/remote/agoutic/data/fingerprint123456",
         reference_cache_path="/remote/agoutic/ref/mm39",
@@ -110,12 +127,13 @@ async def test_reuse_pre_staged_input_raises_when_remote_path_missing():
     fake_conn = _FakeStageConn(existing_paths=set())
 
     with pytest.raises(FileNotFoundError, match="no longer exists"):
-        await backend._reuse_pre_staged_input("run-1", params, conn=fake_conn)
+        await backend._reuse_pre_staged_input("run-1", params, profile=profile, conn=fake_conn)
 
 
 @pytest.mark.asyncio
 async def test_reuse_pre_staged_input_removes_symlink_cache_and_raises():
     backend = SlurmBackend()
+    profile = _make_profile()
     remote_input = "/remote/agoutic/data/fingerprint123456"
     params = SubmitParams(
         staged_remote_input_path=remote_input,
@@ -132,9 +150,76 @@ async def test_reuse_pre_staged_input_removes_symlink_cache_and_raises():
     )
 
     with pytest.raises(RuntimeError, match="contained symlinks"):
-        await backend._reuse_pre_staged_input("run-1", params, conn=fake_conn)
+        await backend._reuse_pre_staged_input("run-1", params, profile=profile, conn=fake_conn)
 
     assert (f"rm -rf {remote_input}", True) in fake_conn.run_calls
+
+
+@pytest.mark.asyncio
+async def test_detect_remote_input_type_uses_remote_listing():
+    backend = SlurmBackend()
+    fake_conn = _FakeStageConn(
+        existing_paths={"/remote/agoutic/incoming/Jamshid"},
+        listings={
+            "/remote/agoutic/incoming/Jamshid": [
+                {"name": "Jamshid_rep1.fastq", "type": "file", "size": 100},
+            ]
+        },
+    )
+
+    detected = await backend._detect_remote_input_type(
+        fake_conn,
+        "/remote/agoutic/incoming/Jamshid",
+        fallback="pod5",
+    )
+
+    assert detected == "fastq"
+
+
+@pytest.mark.asyncio
+async def test_reuse_pre_staged_input_registers_user_remote_folder_without_removing_symlinks(monkeypatch):
+    backend = SlurmBackend()
+    profile = _make_profile()
+    remote_input = "/remote/agoutic/incoming/Jamshid"
+    params = SubmitParams(
+        user_id="user-1",
+        sample_name="Jamshid",
+        mode="DNA",
+        input_type="pod5",
+        remote_base_path="/remote/agoutic",
+        remote_input_path=remote_input,
+        staged_remote_input_path=remote_input,
+        cache_preflight={
+            "data_action": {"action": "use_remote_path", "cache_path": remote_input},
+            "reference_actions": [{"reference_id": "mm39", "cache_path": "/remote/agoutic/ref/mm39"}],
+        },
+        reference_genome=["mm39"],
+    )
+    fake_conn = _FakeStageConn(
+        existing_paths={remote_input},
+        listings={
+            remote_input: [
+                {"name": "sample1.bam", "type": "file", "size": 42},
+                {"name": "shared_link", "type": "symlink", "size": 0},
+            ]
+        },
+    )
+    registered = {}
+
+    async def fake_upsert_remote_staged_sample(**kwargs):
+        registered.update(kwargs)
+        return None
+
+    monkeypatch.setattr("launchpad.db.upsert_remote_staged_sample", fake_upsert_remote_staged_sample)
+
+    result = await backend._reuse_pre_staged_input(None, params, profile=profile, conn=fake_conn)
+
+    assert result["remote_input"] == remote_input
+    assert result["detected_input_type"] == "bam"
+    assert registered["source_path"] == remote_input
+    assert registered["remote_data_path"] == remote_input
+    assert registered["remote_reference_paths"] == {"mm39": "/remote/agoutic/ref/mm39"}
+    assert not any(command.startswith("rm -rf") for command, _ in fake_conn.run_calls)
 
 
 @pytest.mark.asyncio

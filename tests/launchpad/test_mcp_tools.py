@@ -104,6 +104,7 @@ class TestSubmitDogmeJob:
                 slurm_gpus=1,
                 slurm_gpu_type="a100",
                 remote_base_path="/remote/agoutic",
+                remote_input_path="/remote/agoutic/incoming/sample-a",
                 staged_remote_input_path="/remote/agoutic/data/fp123",
                 result_destination="both",
             )
@@ -142,6 +143,7 @@ class TestSubmitDogmeJob:
             "slurm_gpus": 1,
             "slurm_gpu_type": "a100",
             "remote_base_path": "/remote/agoutic",
+            "remote_input_path": "/remote/agoutic/incoming/sample-a",
             "staged_remote_input_path": "/remote/agoutic/data/fp123",
             "result_destination": "both",
         }
@@ -318,6 +320,39 @@ class TestRunAllowlistedScript:
             "username": "alim",
             "project_slug": "project-a",
             "remote_base_path": "/remote/agoutic",
+        }
+
+    @pytest.mark.asyncio
+    async def test_stage_remote_sample_posts_remote_input_path_without_local_input(self, monkeypatch):
+        fake_client = FakeAsyncClient(
+            post_response=FakeResponse(
+                json_data={"task_id": "stg-remote1", "status": "accepted"}
+            )
+        )
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            result = await tools.stage_remote_sample(
+                project_id="proj-1",
+                user_id="user-1",
+                sample_name="Jamshid",
+                mode="CDNA",
+                ssh_profile_id="profile-1",
+                input_directory="",
+                remote_input_path="/remote/agoutic/incoming/Jamshid",
+            )
+
+        assert result["task_id"] == "stg-remote1"
+        _, kwargs = fake_client.post_calls[0]
+        assert kwargs["json"] == {
+            "project_id": "proj-1",
+            "user_id": "user-1",
+            "sample_name": "Jamshid",
+            "mode": "CDNA",
+            "input_directory": "",
+            "reference_genome": "mm39",
+            "ssh_profile_id": "profile-1",
+            "remote_input_path": "/remote/agoutic/incoming/Jamshid",
         }
 
     @pytest.mark.asyncio

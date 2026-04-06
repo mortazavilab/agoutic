@@ -67,7 +67,7 @@ async def run_allowlisted_script(
 async def submit_dogme_job(
     sample_name: str,
     mode: str,
-    input_directory: str,
+    input_directory: str = "",
     run_type: str = "dogme",
     reference_genome: str | list[str] = "mm39",
     project_id: str | None = None,
@@ -93,6 +93,7 @@ async def submit_dogme_job(
     slurm_gpus: int | None = None,
     slurm_gpu_type: str | None = None,
     remote_base_path: str | None = None,
+    remote_input_path: str | None = None,
     staged_remote_input_path: str | None = None,
     cache_preflight: dict | None = None,
     result_destination: str | None = None,
@@ -133,6 +134,7 @@ async def submit_dogme_job(
         slurm_gpus=slurm_gpus,
         slurm_gpu_type=slurm_gpu_type,
         remote_base_path=remote_base_path,
+        remote_input_path=remote_input_path,
         staged_remote_input_path=staged_remote_input_path,
         cache_preflight=cache_preflight,
         result_destination=result_destination,
@@ -150,12 +152,13 @@ async def stage_remote_sample(
     user_id: str,
     sample_name: str,
     mode: str,
-    input_directory: str,
     ssh_profile_id: str,
+    input_directory: str = "",
     reference_genome: str | list[str] = "mm39",
     username: str | None = None,
     project_slug: str | None = None,
     remote_base_path: str | None = None,
+    remote_input_path: str | None = None,
 ) -> str:
     """Stage a sample and references remotely without submitting a SLURM job."""
     result = await tools.stage_remote_sample(
@@ -169,6 +172,7 @@ async def stage_remote_sample(
         reference_genome=reference_genome,
         ssh_profile_id=ssh_profile_id,
         remote_base_path=remote_base_path,
+        remote_input_path=remote_input_path,
     )
     return json.dumps(result, indent=2)
 

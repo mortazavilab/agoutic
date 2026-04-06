@@ -176,7 +176,7 @@ class LaunchpadMCPTools:
         project_id: str,
         sample_name: str,
         mode: str,
-        input_directory: str,
+        input_directory: str = "",
         run_type: str = "dogme",
         reference_genome: str | list[str] = "GRCh38",
         modifications: Optional[str] = None,
@@ -201,6 +201,7 @@ class LaunchpadMCPTools:
         slurm_gpus: Optional[int] = None,
         slurm_gpu_type: Optional[str] = None,
         remote_base_path: Optional[str] = None,
+        remote_input_path: Optional[str] = None,
         staged_remote_input_path: Optional[str] = None,
         cache_preflight: Optional[dict] = None,
         result_destination: Optional[str] = None,
@@ -219,7 +220,7 @@ class LaunchpadMCPTools:
             project_id: Unique project identifier
             sample_name: Name/ID of the sample
             mode: Analysis mode - "DNA", "RNA", or "CDNA"
-            input_directory: Path to input data (pod5, bam, or fastq files)
+            input_directory: Path to input data (pod5, bam, or fastq files). Optional when a remote input path is supplied.
             reference_genome: Reference genome(s) — single string or list for
                 parallel multi-genome (e.g., "GRCh38" or ["GRCh38", "mm39"])
             modifications: Optional modification motifs to call
@@ -292,6 +293,8 @@ class LaunchpadMCPTools:
             payload["slurm_gpu_type"] = slurm_gpu_type
         if remote_base_path is not None:
             payload["remote_base_path"] = remote_base_path
+        if remote_input_path is not None:
+            payload["remote_input_path"] = remote_input_path
         if staged_remote_input_path is not None:
             payload["staged_remote_input_path"] = staged_remote_input_path
         if cache_preflight is not None:
@@ -339,12 +342,13 @@ class LaunchpadMCPTools:
         user_id: str,
         sample_name: str,
         mode: str,
-        input_directory: str,
         ssh_profile_id: str,
+        input_directory: str = "",
         reference_genome: str | list[str] = "mm39",
         username: Optional[str] = None,
         project_slug: Optional[str] = None,
         remote_base_path: Optional[str] = None,
+        remote_input_path: Optional[str] = None,
     ) -> dict:
         """Start async staging of a sample on the remote host. Returns a task_id for polling."""
         payload = {
@@ -362,6 +366,8 @@ class LaunchpadMCPTools:
             payload["project_slug"] = project_slug
         if remote_base_path is not None:
             payload["remote_base_path"] = remote_base_path
+        if remote_input_path is not None:
+            payload["remote_input_path"] = remote_input_path
 
         try:
             async with httpx.AsyncClient() as client:
@@ -835,7 +841,7 @@ TOOL_REGISTRY = {
             "properties": {
                 "sample_name": {"type": "string", "description": "Sample name/ID"},
                 "mode": {"type": "string", "enum": ["DNA", "RNA", "CDNA"], "description": "Analysis mode"},
-                "input_directory": {"type": "string", "description": "Path to input data (pod5, bam, or fastq files)"},
+                "input_directory": {"type": "string", "description": "Path to local input data (pod5, bam, or fastq files). Optional when remote_input_path is provided."},
                 "run_type": {"type": "string", "enum": ["dogme", "script"], "description": "Execution payload type (default: dogme)"},
                 "reference_genome": {
                     "oneOf": [
@@ -857,6 +863,7 @@ TOOL_REGISTRY = {
                 "slurm_gpus": {"type": "integer", "description": "Requested GPU count"},
                 "slurm_gpu_type": {"type": "string", "description": "Optional GPU type"},
                 "remote_base_path": {"type": "string", "description": "Top-level remote folder used for ref/, data/, and project workflow directories"},
+                "remote_input_path": {"type": "string", "description": "Folder already present on the remote SLURM host to use as job input without uploading local data"},
                 "staged_remote_input_path": {"type": "string", "description": "Previously staged remote data path to reuse instead of restaging local input"},
                 "cache_preflight": {"type": "object", "description": "Planner/approval cache preflight metadata"},
                 "result_destination": {"type": "string", "enum": ["local", "remote", "both"], "description": "Where final outputs should be kept"},
@@ -865,7 +872,7 @@ TOOL_REGISTRY = {
                 "script_args": {"type": "array", "items": {"type": "string"}, "description": "Explicit script arguments"},
                 "script_working_directory": {"type": "string", "description": "Explicit script working directory under allowlisted roots"},
             },
-            "required": ["sample_name", "mode", "input_directory"],
+            "required": ["sample_name", "mode"],
         }
     },
     "stage_remote_sample": {
@@ -880,12 +887,13 @@ TOOL_REGISTRY = {
                 "project_slug": {"type": "string", "description": "Optional project slug"},
                 "sample_name": {"type": "string", "description": "Sample name to register for staged reuse"},
                 "mode": {"type": "string", "description": "Dogme mode such as DNA, RNA, or CDNA"},
-                "input_directory": {"type": "string", "description": "Local input directory to stage remotely"},
+                "input_directory": {"type": "string", "description": "Local input directory to stage remotely. Optional when remote_input_path is provided."},
                 "reference_genome": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}], "description": "Reference genome or genomes to stage"},
                 "ssh_profile_id": {"type": "string", "description": "SSH profile identifier"},
-                "remote_base_path": {"type": "string", "description": "Optional remote base path override"}
+                "remote_base_path": {"type": "string", "description": "Optional remote base path override"},
+                "remote_input_path": {"type": "string", "description": "Folder already present on the remote SLURM host to register and reuse without uploading local data"}
             },
-            "required": ["project_id", "user_id", "sample_name", "mode", "input_directory", "ssh_profile_id"]
+            "required": ["project_id", "user_id", "sample_name", "mode", "ssh_profile_id"]
         }
     },
     "list_remote_files": {

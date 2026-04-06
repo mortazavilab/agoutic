@@ -11,6 +11,29 @@ from cortex.user_jail import get_user_data_dir
 
 logger = get_logger(__name__)
 
+_REMOTE_INPUT_PATTERNS = [
+    re.compile(
+        r"\b(?:use|using|with|from|at)\s+(?:the\s+)?remote\s+(?:data|folder|path|input(?:\s+folder)?|directory)\s+(?:at|in)?\s*(/[\w./-]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bremote\s+(?:data|folder|path|input(?:\s+folder)?|directory)\s+(?:at|in)?\s*(/[\w./-]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:use|using|with|from)\s+(?:data\s+)?on\s+(?:the\s+)?cluster\s+(?:at|in)?\s*(/[\w./-]+)",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _extract_remote_input_path(user_text: str) -> str | None:
+    for pattern in _REMOTE_INPUT_PATTERNS:
+        match = pattern.search(user_text or "")
+        if match:
+            return match.group(1).rstrip('.,;:!?')
+    return None
+
 
 def _resolve_relative_input_path(
     *,
@@ -144,6 +167,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         "mode": None,
         "input_directory": None,
         "input_directory_explicit": False,
+        "remote_input_path": None,
         "input_type": "pod5",  # Default to pod5
         "entry_point": None,  # Dogme entry point
         "reference_genome": [],  # Now a list for multi-genome support
@@ -176,6 +200,11 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
 
     if re.search(r"\b(slurm|sbatch|cluster|remote(?:ly|\s+execution)?)\b", all_user_text):
         params["execution_mode"] = "slurm"
+
+    remote_input_path = _extract_remote_input_path(all_user_text_original)
+    if remote_input_path:
+        params["execution_mode"] = "slurm"
+        params["remote_input_path"] = remote_input_path
 
     profile_target_match = re.search(
         r"\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)([a-zA-Z0-9_-]+)(?:\s+profile)?(?:[?.!,]|$)|(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile)\b",
@@ -327,8 +356,13 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     _abs_path_pattern = r'(?:(?<=^)|(?<=[\s"\'(]))(/[^\s,]+(?:/[^\s,]+)*)'
     _abs_paths = re.findall(_abs_path_pattern, all_user_text_original)
 
-    if _abs_paths:
-        cleaned_path = _abs_paths[0].rstrip('.,;:!?')
+    filtered_abs_paths = [
+        candidate for candidate in _abs_paths
+        if not remote_input_path or candidate.rstrip('.,;:!?') != remote_input_path
+    ]
+
+    if filtered_abs_paths:
+        cleaned_path = filtered_abs_paths[0].rstrip('.,;:!?')
         params["input_directory"] = cleaned_path
         params["input_directory_explicit"] = True
     elif _rel_paths:
@@ -353,6 +387,8 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
             )
         else:
             params["input_directory"] = cleaned_path
+    elif remote_input_path:
+        params["input_directory"] = f"remote:{remote_input_path}"
     else:
         params["input_directory"] = "/data/samples/test"
 

@@ -12,6 +12,7 @@ Guides the agent through collecting execution mode, SSH profile, SLURM resources
 - SLURM resource configuration (CPUs, memory, walltime, GPUs, partition, account)
 - Remote path setup (work directory, output directory)
 - Remote base path setup and browsing
+- Remote input folders already present on the cluster
 - Stage-only remote sample preparation
 - Reuse of already staged remote samples by name
 - Result destination choice (keep remote, sync to local, both)
@@ -25,6 +26,7 @@ Guides the agent through collecting execution mode, SSH profile, SLURM resources
 - "Use my localCluster profile"
 - "Stage Jamshid on localCluster"
 - "Analyze Jamshid on localCluster"
+- "Run Jamshid on localCluster using remote data at /crsp/lab/seyedam/share/pod5/Jamshid"
 - "List files on localCluster"
 - "What's the status of my remote job?"
 - "Why is my job still pending?"
@@ -115,7 +117,13 @@ Collect or confirm the following in order:
    - Input data stages under `{remote_base_path}/data/{input_fingerprint}`
    - Runs stage under `{remote_base_path}/{project_slug}/workflowN`
 
-4. **Result Destination** — if `preferred_result_destination` is not set:
+4. **Remote Input Folder (optional)** — If the user already has input data on the cluster, accept a remote folder path instead of requiring a local upload path.
+   - Example: `/crsp/lab/seyedam/share/pod5/Jamshid`
+   - When provided, treat it as the job input source and skip local-to-remote data upload
+   - Prefer `result_destination=both` unless the user explicitly asks for `remote` or `local`
+   - Auto-detect `input_type` from remote file extensions when possible (`.pod5`, `.bam`, `.fastq`, `.fq`)
+
+5. **Result Destination** — if `preferred_result_destination` is not set:
    > "After completion, should results stay **remote**, be **synced to local**, or **both**?"
 
 ### Stage 4: Approval Summary
@@ -157,10 +165,12 @@ After approval:
    ```
    [[DATA_CALL: service=launchpad, tool=stage_remote_sample, project_id=<project_id>, user_id=<user_id>, sample_name=<sample>, mode=<mode>, input_directory=<path>, ssh_profile_id=<id>]]
    ```
+   - For a folder already on the cluster, pass `remote_input_path=<path>` and omit local `input_directory`
 4. Otherwise submit the job:
    ```
    [[DATA_CALL: service=launchpad, tool=submit_dogme_job, execution_mode=slurm, ...]]
    ```
+   - For a folder already on the cluster, pass `remote_input_path=<path>` and omit local `input_directory`
 5. Report stage transitions as they occur
 6. If job enters PENDING: explain the pending reason using `explain_pending_reason`
 7. If job fails: explain the failure using `explain_failure` and suggest fixes

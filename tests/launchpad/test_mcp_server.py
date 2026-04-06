@@ -110,6 +110,7 @@ async def test_submit_dogme_job_forwards_cache_fields(monkeypatch):
         slurm_gpus=None,
         slurm_gpu_type=None,
         remote_base_path="/remote/u1/agoutic",
+        remote_input_path=None,
         staged_remote_input_path=None,
         cache_preflight=cache_preflight,
         result_destination="local",
@@ -149,7 +150,30 @@ async def test_stage_remote_sample_forwards_arguments(monkeypatch):
         reference_genome=["mm39"],
         ssh_profile_id="profile-1",
         remote_base_path="/remote/u1/agoutic",
+        remote_input_path=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_submit_dogme_job_forwards_remote_input_path(monkeypatch):
+    submit_mock = AsyncMock(return_value={"run_uuid": "run-remote", "status": "PENDING"})
+    monkeypatch.setattr(mcp_server.tools, "submit_dogme_job", submit_mock)
+
+    result = await mcp_server.submit_dogme_job(
+        sample_name="Jamshid",
+        mode="DNA",
+        input_directory="",
+        project_id="proj-1",
+        user_id="user-1",
+        execution_mode="slurm",
+        ssh_profile_id="profile-1",
+        remote_input_path="/remote/agoutic/incoming/Jamshid",
+    )
+
+    parsed = json.loads(result)
+    assert parsed["run_uuid"] == "run-remote"
+    submit_mock.assert_awaited_once()
+    assert submit_mock.await_args.kwargs["remote_input_path"] == "/remote/agoutic/incoming/Jamshid"
 
 
 @pytest.mark.asyncio

@@ -148,6 +148,12 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         else:
             job_params = dict(job_params)
             job_params["execution_mode"] = "local"
+        remote_input_path = str(job_params.get("remote_input_path") or "").strip()
+        if remote_input_path:
+            job_params["staged_remote_input_path"] = remote_input_path
+            job_params["result_destination"] = job_params.get("result_destination") or "both"
+            if not job_params.get("input_directory"):
+                job_params["input_directory"] = f"remote:{remote_input_path}"
         if gate_payload.get("edited_params"):
             gate_payload["edited_params"] = job_params
         else:
@@ -236,9 +242,10 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "slurm_gpus": (job_params.get("slurm_resources") or {}).get("gpus") or job_params.get("slurm_gpus"),
             "slurm_gpu_type": (job_params.get("slurm_resources") or {}).get("gpu_type") or job_params.get("slurm_gpu_type"),
             "remote_base_path": (job_params.get("remote_paths") or {}).get("remote_base_path") or job_params.get("remote_base_path"),
+            "remote_input_path": remote_input_path or None,
             "staged_remote_input_path": job_params.get("staged_remote_input_path"),
             "cache_preflight": job_params.get("cache_preflight"),
-            "result_destination": job_params.get("result_destination"),
+            "result_destination": job_params.get("result_destination") or ("both" if remote_input_path else None),
             "script_id": job_params.get("script_id"),
             "script_path": job_params.get("script_path"),
             "script_args": job_params.get("script_args") if isinstance(job_params.get("script_args"), list) else None,
@@ -433,14 +440,14 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             cache_preflight = job_data.get("cache_preflight") if isinstance(job_data.get("cache_preflight"), dict) else {}
             data_action = cache_preflight.get("data_action") if isinstance(cache_preflight, dict) else {}
             data_action_name = str((data_action or {}).get("action") or "").strip().lower()
-            if job_data.get("staged_remote_input_path") and data_action_name == "reuse":
+            if job_data.get("staged_remote_input_path") and data_action_name in {"reuse", "use_remote_path"}:
                 _set_workflow_step_status(
                     session,
                     workflow_block,
                     stage_input_step_id,
                     "COMPLETED",
                     extra={
-                        "decision": "reuse",
+                        "decision": "use_remote_path" if data_action_name == "use_remote_path" else "reuse",
                         "staged_input_directory": job_data.get("staged_remote_input_path"),
                         "data_action": data_action,
                     },
@@ -530,6 +537,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                         reference_genome=job_data["reference_genome"],
                         ssh_profile_id=ssh_profile_id,
                         remote_base_path=job_data.get("remote_base_path"),
+                        remote_input_path=job_data.get("remote_input_path"),
                     )
                 finally:
                     await client.disconnect()

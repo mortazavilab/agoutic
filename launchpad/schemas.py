@@ -15,7 +15,7 @@ class SubmitJobRequest(BaseModel):
     sample_name: str = Field(..., min_length=1)
     mode: str = Field(..., min_length=1)  # DNA, RNA, CDNA
     input_type: Literal["pod5", "bam", "fastq"] = "pod5"  # Type of input files
-    input_directory: str = Field(..., min_length=1)
+    input_directory: str = Field(default="", min_length=0)
     reference_genome: Union[str, List[str]] = "mm39"  # Single or multiple genomes
     modifications: Optional[str] = None
     entry_point: Optional[str] = None  # Dogme entry point (e.g., "remap", "basecall")
@@ -35,6 +35,7 @@ class SubmitJobRequest(BaseModel):
     slurm_gpus: Optional[int] = None
     slurm_gpu_type: Optional[str] = None
     remote_base_path: Optional[str] = None
+    remote_input_path: Optional[str] = None
     staged_remote_input_path: Optional[str] = None
     cache_preflight: Optional[dict] = None
     result_destination: Optional[Literal["local", "remote", "both"]] = None
@@ -67,6 +68,8 @@ class SubmitJobRequest(BaseModel):
                 raise ValueError("run_type 'script' currently supports execution_mode 'local' only")
             if not (self.script_id or self.script_path):
                 raise ValueError("run_type 'script' requires explicit script_id or script_path")
+            if not self.input_directory:
+                raise ValueError("input_directory is required when run_type is 'script'")
             return self
 
         if self.execution_mode == "slurm":
@@ -74,6 +77,14 @@ class SubmitJobRequest(BaseModel):
                 raise ValueError("user_id is required when execution_mode is 'slurm'")
             if not self.ssh_profile_id:
                 raise ValueError("ssh_profile_id is required when execution_mode is 'slurm'")
+            if not self.input_directory and not (self.staged_remote_input_path or self.remote_input_path):
+                raise ValueError(
+                    "input_directory is required unless staged_remote_input_path or remote_input_path is provided when execution_mode is 'slurm'"
+                )
+            return self
+
+        if not self.input_directory:
+            raise ValueError("input_directory is required")
         return self
 
 class JobStatusResponse(BaseModel):
@@ -116,10 +127,11 @@ class StageRemoteSampleRequest(BaseModel):
     project_slug: Optional[str] = None
     sample_name: str = Field(..., min_length=1)
     mode: str = Field(..., min_length=1)
-    input_directory: str = Field(..., min_length=1)
+    input_directory: str = Field(default="", min_length=0)
     reference_genome: Union[str, List[str]] = "mm39"
     ssh_profile_id: str = Field(..., min_length=1)
     remote_base_path: Optional[str] = None
+    remote_input_path: Optional[str] = None
 
     @field_validator("reference_genome")
     @classmethod
@@ -127,6 +139,12 @@ class StageRemoteSampleRequest(BaseModel):
         if isinstance(v, str):
             return [v]
         return v
+
+    @model_validator(mode="after")
+    def validate_stage_input_source(self):
+        if not self.input_directory and not self.remote_input_path:
+            raise ValueError("input_directory or remote_input_path is required for stage_remote_sample")
+        return self
 
 
 class StageRemoteSampleResponse(BaseModel):

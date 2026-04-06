@@ -124,9 +124,14 @@ async def run_staging(task: StagingTaskState) -> None:
         if not ok:
             raise ValueError(f"Remote path validation failed: {'; '.join(path_errors)}")
 
-        stage_result = await backend._stage_sample_inputs(
-            params, profile, conn, run_uuid=None, on_progress=_on_progress,
-        )
+        if params.remote_input_path or params.staged_remote_input_path:
+            stage_result = await backend._reuse_pre_staged_input(
+                None, params, profile=profile, conn=conn,
+            )
+        else:
+            stage_result = await backend._stage_sample_inputs(
+                params, profile, conn, run_uuid=None, on_progress=_on_progress,
+            )
         reference_statuses = dict(stage_result.get("reference_cache_statuses") or {})
         reference_asset_evidence, reference_statuses = await backend._ensure_reference_assets_present(
             params=params,
@@ -146,6 +151,7 @@ async def run_staging(task: StagingTaskState) -> None:
             "data_cache_status": stage_result["data_cache_status"],
             "reference_cache_statuses": reference_statuses,
             "reference_asset_evidence": reference_asset_evidence,
+            "detected_input_type": stage_result.get("detected_input_type") or params.input_type,
         }
         task.status = "completed"
         task.touch()

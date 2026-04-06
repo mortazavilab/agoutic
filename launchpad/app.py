@@ -582,6 +582,8 @@ async def stage_remote_sample(
         "reference_genome": req.reference_genome,
         "ssh_profile_id": req.ssh_profile_id,
         "remote_base_path": req.remote_base_path,
+        "remote_input_path": req.remote_input_path,
+        "staged_remote_input_path": req.remote_input_path,
     }
 
     # --- Legacy synchronous mode ---
@@ -858,6 +860,7 @@ async def submit_job(req: SubmitJobRequest):
                         slurm_gpus=req.slurm_gpus,
                         slurm_gpu_type=req.slurm_gpu_type,
                         remote_base_path=req.remote_base_path,
+                        remote_input_path=req.remote_input_path,
                         workflow_number=workflow_number,
                         staged_remote_input_path=req.staged_remote_input_path,
                         cache_preflight=req.cache_preflight,

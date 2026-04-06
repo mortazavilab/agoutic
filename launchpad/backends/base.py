@@ -43,6 +43,7 @@ class SubmitParams:
     slurm_gpu_type: str | None = None
     remote_base_path: str | None = None
     workflow_number: int | None = None
+    remote_input_path: str | None = None
     staged_remote_input_path: str | None = None
     result_destination: str = "local"  # "local", "remote", "both"
     cache_preflight: dict | None = None

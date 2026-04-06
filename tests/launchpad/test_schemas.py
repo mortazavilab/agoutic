@@ -136,6 +136,28 @@ class TestSubmitJobRequest:
         )
         assert req.staged_remote_input_path == "/remote/agoutic/data/abc123"
 
+    def test_slurm_accepts_remote_input_path_without_local_input_directory(self):
+        req = SubmitJobRequest(
+            project_id="p",
+            user_id="user-1",
+            sample_name="s",
+            mode="DNA",
+            input_directory="",
+            execution_mode="slurm",
+            ssh_profile_id="prof-1",
+            remote_input_path="/remote/agoutic/incoming/sample-a",
+        )
+        assert req.remote_input_path == "/remote/agoutic/incoming/sample-a"
+
+    def test_local_execution_rejects_empty_input_directory(self):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="s",
+                mode="DNA",
+                input_directory="",
+            )
+
     def test_script_run_requires_explicit_script_selector(self):
         with pytest.raises(ValidationError):
             SubmitJobRequest(
@@ -187,6 +209,19 @@ class TestStageRemoteSampleRequest:
             reference_genome="mm39",
         )
         assert req.reference_genome == ["mm39"]
+
+    def test_accepts_remote_input_path_without_local_input_directory(self):
+        req = StageRemoteSampleRequest(
+            project_id="proj-1",
+            user_id="user-1",
+            sample_name="Jamshid",
+            mode="CDNA",
+            input_directory="",
+            remote_input_path="/remote/agoutic/incoming/Jamshid",
+            ssh_profile_id="profile-1",
+            reference_genome="mm39",
+        )
+        assert req.remote_input_path == "/remote/agoutic/incoming/Jamshid"
 
 
 class TestJobStatusResponse:

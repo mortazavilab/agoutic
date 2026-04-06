@@ -50,6 +50,53 @@ class SlurmBackend:
         self._ssh_manager = SSHConnectionManager()
         self._transfer_manager = FileTransferManager()
 
+    @staticmethod
+    def _compute_remote_input_fingerprint(remote_path: str) -> str:
+        return hashlib.sha256(f"remote:{str(remote_path or '').strip()}".encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _is_user_remote_input(params: SubmitParams) -> bool:
+        explicit_remote_path = str(params.remote_input_path or "").strip()
+        if explicit_remote_path:
+            return True
+        cache_preflight = params.cache_preflight if isinstance(params.cache_preflight, dict) else {}
+        data_action = cache_preflight.get("data_action") if isinstance(cache_preflight, dict) else {}
+        return str((data_action or {}).get("action") or "").strip().lower() == "use_remote_path"
+
+    @staticmethod
+    def _infer_input_type_from_names(names: list[str]) -> str | None:
+        lowered = [str(name or "").strip().lower() for name in names]
+        if any(name.endswith(".pod5") or name.endswith(".fast5") for name in lowered):
+            return "pod5"
+        if any(name.endswith(".bam") for name in lowered):
+            return "bam"
+        if any(name.endswith(".fastq") or name.endswith(".fq") for name in lowered):
+            return "fastq"
+        return None
+
+    async def _detect_remote_input_type(self, conn, remote_input: str, *, fallback: str = "pod5") -> str:
+        detected = self._infer_input_type_from_names([remote_input])
+        if detected:
+            return detected
+
+        try:
+            entries = await conn.list_dir(remote_input)
+        except Exception as exc:
+            logger.info(
+                "Unable to inspect remote input directory for input type detection; using fallback",
+                remote_input=remote_input,
+                fallback=fallback,
+                error=str(exc),
+            )
+            return fallback
+
+        detected = self._infer_input_type_from_names([
+            entry.get("name")
+            for entry in entries
+            if isinstance(entry, dict)
+        ])
+        return detected or fallback
+
     async def stage_remote_sample(self, params: SubmitParams) -> dict:
         """Stage references and input data on the remote system without submitting a job."""
         profile = await self._load_profile(params.ssh_profile_id, params.user_id)
@@ -69,7 +116,10 @@ class SlurmBackend:
             if not ok:
                 raise ValueError(f"Remote path validation failed: {'; '.join(path_errors)}")
 
-            stage_result = await self._stage_sample_inputs(params, profile, conn, run_uuid=None)
+            if params.remote_input_path or params.staged_remote_input_path:
+                stage_result = await self._reuse_pre_staged_input(None, params, profile=profile, conn=conn)
+            else:
+                stage_result = await self._stage_sample_inputs(params, profile, conn, run_uuid=None)
             reference_statuses = dict(stage_result.get("reference_cache_statuses") or {})
             reference_asset_evidence, reference_statuses = await self._ensure_reference_assets_present(
                 params=params,
@@ -88,6 +138,7 @@ class SlurmBackend:
                 "data_cache_status": stage_result["data_cache_status"],
                 "reference_cache_statuses": reference_statuses,
                 "reference_asset_evidence": reference_asset_evidence,
+                "detected_input_type": stage_result.get("detected_input_type") or params.input_type,
             }
         finally:
             await conn.close()
@@ -142,11 +193,13 @@ class SlurmBackend:
             try:
                 if params.staged_remote_input_path:
                     logger.info(f"Reusing pre-staged input: {params.staged_remote_input_path}")
-                    cache_resolution = await self._reuse_pre_staged_input(run_uuid, params, conn=conn)
+                    cache_resolution = await self._reuse_pre_staged_input(run_uuid, params, profile=profile, conn=conn)
                 else:
                     logger.info("Resolving staging cache (fresh stage or reuse)")
                     cache_resolution = await self._resolve_staging_cache(run_uuid, params, profile, conn)
             except Exception as cache_error:
+                if self._is_user_remote_input(params):
+                    raise RuntimeError(f"Remote input path could not be prepared: {cache_error}") from cache_error
                 logger.warning(
                     "Cache resolution degraded; falling back to direct staging",
                     run_uuid=run_uuid,
@@ -173,6 +226,9 @@ class SlurmBackend:
             remote_output = remote_paths["remote_output"]
             remote_cache_root = remote_paths["remote_base_path"]
             remote_input = cache_resolution["remote_input"]
+            detected_input_type = str(cache_resolution.get("detected_input_type") or "").strip().lower()
+            if detected_input_type:
+                params.input_type = detected_input_type
 
             # Ensure workflow-local input folders point at staged cache paths.
             await self._ensure_workflow_input_links(
@@ -1456,6 +1512,20 @@ class SlurmBackend:
             return False
         return any((entry.get("type") or "") == "symlink" for entry in entries)
 
+    @staticmethod
+    def _reference_paths_from_cache_preflight(params: SubmitParams) -> dict[str, str]:
+        cache_preflight = params.cache_preflight if isinstance(params.cache_preflight, dict) else {}
+        reference_actions = cache_preflight.get("reference_actions") if isinstance(cache_preflight, dict) else []
+        reference_paths: dict[str, str] = {}
+        for action in reference_actions or []:
+            if not isinstance(action, dict):
+                continue
+            ref_id = (action.get("reference_id") or "").strip().lower()
+            cache_path = str(action.get("cache_path") or "").strip()
+            if ref_id and cache_path:
+                reference_paths[ref_id] = cache_path
+        return reference_paths
+
     async def _collect_reference_asset_evidence(
         self,
         params: SubmitParams,
@@ -1618,9 +1688,16 @@ class SlurmBackend:
 
         return evidence, reference_statuses
 
-    async def _reuse_pre_staged_input(self, run_uuid: str, params: SubmitParams, *, conn) -> dict:
+    async def _reuse_pre_staged_input(
+        self,
+        run_uuid: str | None,
+        params: SubmitParams,
+        *,
+        profile: SSHProfileData,
+        conn,
+    ) -> dict:
         """Use a previously staged remote data path without restaging local inputs."""
-        from launchpad.db import update_job_fields
+        from launchpad.db import update_job_fields, upsert_remote_staged_sample
 
         remote_input = (params.staged_remote_input_path or "").strip()
         if not remote_input:
@@ -1629,24 +1706,55 @@ class SlurmBackend:
         if not await conn.path_exists(remote_input):
             raise FileNotFoundError(f"Pre-staged remote input path no longer exists: {remote_input}")
 
+        user_remote_input = self._is_user_remote_input(params)
         if await self._remote_dir_contains_symlinks(conn, remote_input):
-            await conn.run(f"rm -rf {shlex.quote(remote_input)}", check=True)
-            raise RuntimeError(f"Pre-staged remote input cache contained symlinks and was removed: {remote_input}")
+            if user_remote_input:
+                logger.info(
+                    "User-specified remote input path contains symlinks; leaving them in place",
+                    remote_input=remote_input,
+                )
+            else:
+                await conn.run(f"rm -rf {shlex.quote(remote_input)}", check=True)
+                raise RuntimeError(f"Pre-staged remote input cache contained symlinks and was removed: {remote_input}")
 
-        await update_job_fields(
-            run_uuid,
-            {
-                "reference_cache_status": "reused",
-                "data_cache_status": "reused",
-                "data_cache_path": remote_input,
-                "reference_cache_path": params.reference_cache_path,
-            },
-        )
+        fallback_input_type = (params.input_type or "pod5").strip().lower() or "pod5"
+        detected_input_type = await self._detect_remote_input_type(conn, remote_input, fallback=fallback_input_type)
 
-        remote_reference_paths: dict[str, str] = {}
-        if params.reference_cache_path and params.reference_genome:
+        if run_uuid:
+            await update_job_fields(
+                run_uuid,
+                {
+                    "reference_cache_status": "reused",
+                    "data_cache_status": "reused",
+                    "data_cache_path": remote_input,
+                    "reference_cache_path": params.reference_cache_path,
+                },
+            )
+
+        remote_reference_paths = self._reference_paths_from_cache_preflight(params)
+        if not remote_reference_paths and params.reference_cache_path and params.reference_genome:
             first_ref = self._normalize_reference_id((params.reference_genome or ["default"])[0])
             remote_reference_paths[first_ref] = params.reference_cache_path
+
+        if user_remote_input:
+            remote_roots = self._derive_remote_roots(params, profile)
+            sample_slug = self._slugify(params.sample_name or "sample")
+            await upsert_remote_staged_sample(
+                user_id=params.user_id or self._cache_user_key(params, profile),
+                ssh_profile_id=profile.id,
+                ssh_profile_nickname=profile.nickname,
+                sample_name=params.sample_name,
+                sample_slug=sample_slug,
+                mode=params.mode,
+                reference_genome=list(params.reference_genome or []),
+                source_path=params.remote_input_path or remote_input,
+                input_fingerprint=self._compute_remote_input_fingerprint(remote_input),
+                remote_base_path=remote_roots["remote_base_path"],
+                remote_data_path=remote_input,
+                remote_reference_paths=remote_reference_paths,
+                status="READY",
+                mark_used=True,
+            )
 
         return {
             "reference_cache_path": params.reference_cache_path,
@@ -1656,6 +1764,7 @@ class SlurmBackend:
             "data_cache_status": "reused",
             "reference_cache_statuses": {},
             "remote_reference_paths": remote_reference_paths,
+            "detected_input_type": detected_input_type,
         }
 
     async def _fallback_stage_inputs(
