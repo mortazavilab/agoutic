@@ -533,6 +533,73 @@ def render_block_part2(
                                     else:
                                         instances_sorted = sorted(instances)
                                         st.text(f"✔ {base_name} ({len(instances)}/{max(instances_sorted)})")
+
+                    st.divider()
+                    _completed_workflow_name = workflow_label or "workflow"
+                    _delete_col, _rerun_col = st.columns(2)
+                    with _delete_col:
+                        _confirm_key = f"completed_del_confirm_{block_id}"
+                        if st.session_state.get(_confirm_key):
+                            st.warning(f"⚠️ This will permanently delete `{_completed_workflow_name}` and all its files.")
+                            _yes_col, _no_col = st.columns(2)
+                            with _yes_col:
+                                if st.button("Yes, delete", key=f"completed_del_yes_{block_id}", type="primary"):
+                                    _pause_auto_refresh(4)
+                                    try:
+                                        _del_resp = make_authenticated_request(
+                                            "DELETE", f"{API_URL}/jobs/{run_uuid}", timeout=30
+                                        )
+                                        if _del_resp.status_code == 200:
+                                            st.success(_del_resp.json().get("message", "Deleted."))
+                                            st.session_state.pop(_confirm_key, None)
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Delete failed: {_del_resp.status_code} — {_del_resp.text[:200]}")
+                                    except Exception as _e:
+                                        st.error(f"Error: {_e}")
+                            with _no_col:
+                                if st.button("No, keep it", key=f"completed_del_no_{block_id}"):
+                                    st.session_state.pop(_confirm_key, None)
+                                    st.rerun()
+                        elif st.button(f"🗑️ Delete {_completed_workflow_name}", key=f"completed_del_btn_{block_id}"):
+                            st.session_state[_confirm_key] = True
+                            _pause_auto_refresh(4)
+                            st.rerun()
+                    with _rerun_col:
+                        if st.button("↻ Rerun Workflow", key=f"completed_rerun_{block_id}"):
+                            try:
+                                _rerun_resp = make_authenticated_request(
+                                    "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
+                                )
+                                if _rerun_resp.status_code == 200:
+                                    st.success("Workflow rerun submitted.")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Rerun failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
+                            except Exception as _e:
+                                st.error(f"Error: {_e}")
+
+                    _rename_default = sample_name or _completed_workflow_name
+                    _rename_value = st.text_input(
+                        "Rename workflow",
+                        value=_rename_default,
+                        key=f"completed_rename_input_{block_id}",
+                    )
+                    if _rename_value.strip() and _rename_value.strip() != _rename_default and st.button("✏️ Rename Workflow", key=f"completed_rename_btn_{block_id}"):
+                        try:
+                            _rename_resp = make_authenticated_request(
+                                "POST",
+                                f"{API_URL}/jobs/{run_uuid}/rename",
+                                json={"new_name": _rename_value.strip()},
+                                timeout=20,
+                            )
+                            if _rename_resp.status_code == 200:
+                                st.success(f"Workflow renamed to {_rename_value.strip()}.")
+                                st.rerun()
+                            else:
+                                st.error(f"Rename failed: {_rename_resp.status_code} — {_rename_resp.text[:200]}")
+                        except Exception as _e:
+                            st.error(f"Error: {_e}")
                     
                 elif status_str == "FAILED":
                     info_callout(message or "Job failed during execution.", kind="error", icon="❌")
@@ -636,7 +703,7 @@ def render_block_part2(
                     if work_directory:
                         import pathlib as _pl
                         _work_dir_name = _pl.PurePosixPath(work_directory).name
-                    _del_col, _resub_col = st.columns(2)
+                    _del_col, _rerun_col, _resub_col = st.columns(3)
                     with _del_col:
                         _del_key = f"del_{block_id}"
                         _confirm_key = f"del_confirm_{block_id}"
@@ -668,6 +735,19 @@ def render_block_part2(
                                 st.session_state[_confirm_key] = True
                                 _pause_auto_refresh(4)
                                 st.rerun()
+                    with _rerun_col:
+                        if st.button("↻ Rerun Workflow", key=f"cancel_rerun_{block_id}"):
+                            try:
+                                _rerun_resp = make_authenticated_request(
+                                    "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
+                                )
+                                if _rerun_resp.status_code == 200:
+                                    st.success("Workflow rerun submitted.")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Rerun failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
+                            except Exception as _e:
+                                st.error(f"Error: {_e}")
                     with _resub_col:
                         if st.button("🔄 Resubmit Job", key=f"resub_{block_id}"):
                             try:
@@ -681,6 +761,27 @@ def render_block_part2(
                                     st.error(f"Resubmit failed: {_resub_resp.status_code} — {_resub_resp.text[:200]}")
                             except Exception as _e:
                                 st.error(f"Error: {_e}")
+
+                    _cancelled_rename = st.text_input(
+                        "Rename workflow",
+                        value=sample_name or _work_dir_name,
+                        key=f"cancelled_rename_input_{block_id}",
+                    )
+                    if _cancelled_rename.strip() and _cancelled_rename.strip() != (sample_name or _work_dir_name) and st.button("✏️ Rename Workflow", key=f"cancelled_rename_btn_{block_id}"):
+                        try:
+                            _rename_resp = make_authenticated_request(
+                                "POST",
+                                f"{API_URL}/jobs/{run_uuid}/rename",
+                                json={"new_name": _cancelled_rename.strip()},
+                                timeout=20,
+                            )
+                            if _rename_resp.status_code == 200:
+                                st.success(f"Workflow renamed to {_cancelled_rename.strip()}.")
+                                st.rerun()
+                            else:
+                                st.error(f"Rename failed: {_rename_resp.status_code} — {_rename_resp.text[:200]}")
+                        except Exception as _e:
+                            st.error(f"Error: {_e}")
 
                 elif status_str == "DELETED":
                     st.info(f"🗑️ {message or 'Workflow folder deleted.'}")
@@ -799,7 +900,7 @@ def render_block_part2(
                 if status_str == "FAILED" and run_uuid:
                     st.divider()
                     _work_dir_name = workflow_label or "workflow folder"
-                    _delete_col, _resubmit_col = st.columns(2)
+                    _delete_col, _rerun_col, _resubmit_col = st.columns(3)
                     with _delete_col:
                         _confirm_key = f"del_confirm_{block_id}"
                         if st.session_state.get(_confirm_key):
@@ -828,6 +929,19 @@ def render_block_part2(
                             st.session_state[_confirm_key] = True
                             _pause_auto_refresh(4)
                             st.rerun()
+                    with _rerun_col:
+                        if st.button("↻ Rerun Workflow", key=f"failed_rerun_{block_id}"):
+                            try:
+                                _rerun_resp = make_authenticated_request(
+                                    "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
+                                )
+                                if _rerun_resp.status_code == 200:
+                                    st.success("Workflow rerun submitted.")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Rerun failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
+                            except Exception as _e:
+                                st.error(f"Error: {_e}")
                     with _resubmit_col:
                         if st.button("🔄 Resubmit Job", key=f"failed_resub_{block_id}"):
                             try:
@@ -841,6 +955,27 @@ def render_block_part2(
                                     st.error(f"Resubmit failed: {_resub_resp.status_code} — {_resub_resp.text[:200]}")
                             except Exception as _e:
                                 st.error(f"Error: {_e}")
+
+                    _failed_rename = st.text_input(
+                        "Rename workflow",
+                        value=sample_name or _work_dir_name,
+                        key=f"failed_rename_input_{block_id}",
+                    )
+                    if _failed_rename.strip() and _failed_rename.strip() != (sample_name or _work_dir_name) and st.button("✏️ Rename Workflow", key=f"failed_rename_btn_{block_id}"):
+                        try:
+                            _rename_resp = make_authenticated_request(
+                                "POST",
+                                f"{API_URL}/jobs/{run_uuid}/rename",
+                                json={"new_name": _failed_rename.strip()},
+                                timeout=20,
+                            )
+                            if _rename_resp.status_code == 200:
+                                st.success(f"Workflow renamed to {_failed_rename.strip()}.")
+                                st.rerun()
+                            else:
+                                st.error(f"Rename failed: {_rename_resp.status_code} — {_rename_resp.text[:200]}")
+                        except Exception as _e:
+                            st.error(f"Error: {_e}")
             else:
                 # Fallback for initial state
                 init_message = content.get("message", "Job submitted")

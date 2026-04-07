@@ -110,6 +110,10 @@ class JobDetailsResponse(BaseModel):
     """Full job details."""
     run_uuid: str
     project_id: str
+    workflow_index: Optional[int] = None
+    workflow_alias: Optional[str] = None
+    workflow_folder_name: Optional[str] = None
+    workflow_display_name: Optional[str] = None
     sample_name: str
     mode: str
     status: str
@@ -128,6 +132,11 @@ class JobSubmitResponse(BaseModel):
     status: str
     work_directory: str
     cache_actions: Optional[dict] = None
+
+
+class WorkflowRenameRequest(BaseModel):
+    """Request to rename a workflow's current folder/display name."""
+    new_name: str = Field(..., min_length=1)
 
 
 class StageRemoteSampleRequest(BaseModel):

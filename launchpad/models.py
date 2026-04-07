@@ -16,6 +16,10 @@ class DogmeJob(Base):
     # Job metadata
     project_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     user_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)  # Owner; nullable for legacy jobs
+    workflow_index: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    workflow_alias: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    workflow_folder_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    workflow_display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     sample_name: Mapped[str] = mapped_column(String, nullable=False)
     mode: Mapped[str] = mapped_column(String, nullable=False)  # DNA, RNA, CDNA
     

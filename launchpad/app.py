@@ -5,10 +5,11 @@ Receives job submissions from Cortex and manages pipeline execution.
 import asyncio
 import json
 import os
+import re
 import sys
 import uuid
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Path as FastAPIPath, Query, Body, Request
@@ -34,11 +35,15 @@ from launchpad.db import (
     init_db,
     SessionLocal,
     create_job,
+    get_next_workflow_index,
     get_job,
+    infer_workflow_index_from_path,
+    get_workflow_identity_for_path,
     update_job_status,
     add_log_entry,
     get_job_logs,
     job_to_dict,
+    workflow_alias_for_index,
 )
 from launchpad.models import DogmeJob, SSHProfile
 from launchpad.nextflow_executor import NextflowExecutor
@@ -62,6 +67,7 @@ from launchpad.schemas import (
     SSHProfileOut,
     SSHProfileTestResult,
     SSHProfileAuthSessionResult,
+    WorkflowRenameRequest,
 )
 from launchpad.backends import get_backend, SubmitParams
 from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
@@ -116,6 +122,62 @@ def _job_timing_payload(job) -> dict[str, str | int | None]:
         "completed_at": completed_at,
         "duration_seconds": duration_seconds,
     }
+
+
+def _normalize_reference_genome(raw_value: str | list[str] | None) -> list[str]:
+    value = raw_value
+    if isinstance(value, str) and value.startswith("["):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return []
+
+
+def _normalize_workflow_name(raw_value: str) -> str:
+    value = str(raw_value or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="Workflow name is required")
+    if value in {".", ".."} or "/" in value or "\\" in value:
+        raise HTTPException(status_code=400, detail="Workflow name cannot contain path separators")
+    if re.fullmatch(r"workflow\d+", value, flags=re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="Workflow names like workflowN are reserved")
+    return value
+
+
+def _replace_path_prefix(path_value: str | None, old_prefix: str | None, new_prefix: str | None) -> str | None:
+    if not path_value or not old_prefix or not new_prefix:
+        return path_value
+    if path_value == old_prefix:
+        return new_prefix
+    normalized_old = old_prefix.rstrip("/")
+    if path_value.startswith(f"{normalized_old}/"):
+        return f"{new_prefix.rstrip('/')}" + path_value[len(normalized_old):]
+    return path_value
+
+
+def _rename_local_workflow_artifacts(work_dir: Path, old_sample_names: list[str], new_sample_name: str) -> None:
+    seen: set[str] = set()
+    for sample_name in old_sample_names:
+        cleaned = str(sample_name or "").strip()
+        if not cleaned or cleaned == new_sample_name or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        for suffix in ("report.html", "timeline.html", "trace.txt"):
+            source_path = work_dir / f"{cleaned}_{suffix}"
+            target_path = work_dir / f"{new_sample_name}_{suffix}"
+            if not source_path.exists():
+                continue
+            if target_path.exists():
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Cannot rename workflow artifacts because {target_path.name} already exists",
+                )
+            source_path.rename(target_path)
 
 # Internal API secret validation middleware
 class InternalSecretMiddleware(BaseHTTPMiddleware):
@@ -690,12 +752,31 @@ async def submit_job(req: SubmitJobRequest):
     try:
         # Generate unique run ID
         run_uuid = str(uuid.uuid4())
+        run_type = (req.run_type or "dogme").strip().lower()
+
+        workflow_index = None
+        workflow_alias = None
+        workflow_folder_name = None
+        if run_type == "dogme":
+            workflow_index, workflow_alias, workflow_folder_name = await get_workflow_identity_for_path(
+                session,
+                req.project_id,
+                req.resume_from_dir,
+            )
+            if workflow_index is None:
+                workflow_index = await get_next_workflow_index(session, req.project_id)
+                workflow_alias = workflow_alias_for_index(workflow_index)
+                workflow_folder_name = workflow_alias
         
         # Create job record in database
         job = await create_job(
             session,
             run_uuid=run_uuid,
             project_id=req.project_id,
+            workflow_index=workflow_index,
+            workflow_alias=workflow_alias,
+            workflow_folder_name=workflow_folder_name,
+            workflow_display_name=req.sample_name if run_type == "dogme" else None,
             sample_name=req.sample_name,
             mode=req.mode,
             input_directory=req.input_directory,
@@ -704,7 +785,6 @@ async def submit_job(req: SubmitJobRequest):
             parent_block_id=req.parent_block_id,
             user_id=req.user_id,
         )
-        run_type = (req.run_type or "dogme").strip().lower()
         job.execution_mode = req.execution_mode
         job.ssh_profile_id = req.ssh_profile_id
         job.slurm_account = req.slurm_account
@@ -807,26 +887,22 @@ async def submit_job(req: SubmitJobRequest):
                 work_directory = str(script_cwd)
                 response_status = JobStatus.RUNNING
             elif exec_mode == "slurm":
-                workflow_number = None
+                workflow_number = workflow_index
                 local_workflow_dir = None
                 if req.resume_from_dir:
                     local_workflow_dir = Path(req.resume_from_dir)
-                    if local_workflow_dir.name.startswith("workflow"):
-                        try:
-                            workflow_number = int(local_workflow_dir.name[len("workflow"):])
-                        except ValueError:
-                            workflow_number = None
+                    job.workflow_folder_name = local_workflow_dir.name
 
-                if workflow_number is None:
+                if local_workflow_dir is None:
                     user_key = req.username or req.user_id or "user"
                     project_key = req.project_slug or req.project_id
                     project_dir = AGOUTIC_DATA / "users" / user_key / project_key
                     project_dir.mkdir(parents=True, exist_ok=True)
-                    workflow_number = NextflowExecutor._next_workflow_number(project_dir)
-                    local_workflow_dir = project_dir / f"workflow{workflow_number}"
+                    local_workflow_dir = project_dir / NextflowExecutor.workflow_dir_name(workflow_number)
                     local_workflow_dir.mkdir(parents=True, exist_ok=True)
 
                 job.nextflow_work_dir = str(local_workflow_dir) if local_workflow_dir else None
+                job.workflow_folder_name = local_workflow_dir.name if local_workflow_dir else job.workflow_folder_name
                 await session.commit()
 
                 backend = get_backend("slurm")
@@ -892,6 +968,7 @@ async def submit_job(req: SubmitJobRequest):
                     per_mod=req.per_mod,
                     accuracy=req.accuracy,
                     max_gpu_tasks=req.max_gpu_tasks if req.max_gpu_tasks is not None else DEFAULT_MAX_GPU_TASKS,
+                    workflow_index=workflow_index,
                     user_id=req.user_id,
                     project_id=req.project_id,
                     username=req.username,
@@ -901,6 +978,7 @@ async def submit_job(req: SubmitJobRequest):
                 
                 # Update job with work directory info
                 job.nextflow_work_dir = str(work_dir)
+                job.workflow_folder_name = work_dir.name
                 job.status = JobStatus.RUNNING
                 job.started_at = datetime.utcnow()
                 # Persist the Nextflow process PID for cancellation support
@@ -1388,6 +1466,300 @@ async def delete_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             "file_count": _file_count,
         }
 
+    finally:
+        await session.close()
+
+
+@app.post("/jobs/{run_uuid}/rerun", response_model=JobSubmitResponse)
+async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
+    """Create a new job attempt that reruns an existing workflow in the same folder."""
+    session = SessionLocal()
+
+    try:
+        source_job = await get_job(session, run_uuid)
+        if not source_job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        allowed_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        if source_job.status not in allowed_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot rerun job with status {source_job.status}. Only {', '.join(s.value for s in allowed_statuses)} jobs can be rerun.",
+            )
+
+        reference_genome = _normalize_reference_genome(source_job.reference_genome)
+        sample_name = getattr(source_job, "workflow_display_name", None) or source_job.sample_name
+        archive_sample_names = [source_job.sample_name]
+        if sample_name != source_job.sample_name:
+            archive_sample_names.append(sample_name)
+
+        rerun_uuid = str(uuid.uuid4())
+        rerun_job = await create_job(
+            session,
+            run_uuid=rerun_uuid,
+            project_id=source_job.project_id,
+            workflow_index=source_job.workflow_index,
+            workflow_alias=source_job.workflow_alias,
+            workflow_folder_name=source_job.workflow_folder_name,
+            workflow_display_name=getattr(source_job, "workflow_display_name", None) or sample_name,
+            sample_name=sample_name,
+            mode=source_job.mode,
+            input_directory=source_job.input_directory,
+            reference_genome=reference_genome,
+            modifications=source_job.modifications,
+            parent_block_id=source_job.parent_block_id,
+            user_id=source_job.user_id,
+        )
+        rerun_job.execution_mode = source_job.execution_mode
+        rerun_job.ssh_profile_id = source_job.ssh_profile_id
+        rerun_job.slurm_account = source_job.slurm_account
+        rerun_job.slurm_partition = source_job.slurm_partition
+        rerun_job.slurm_cpus = source_job.slurm_cpus
+        rerun_job.slurm_memory_gb = source_job.slurm_memory_gb
+        rerun_job.slurm_walltime = source_job.slurm_walltime
+        rerun_job.slurm_gpus = source_job.slurm_gpus
+        rerun_job.slurm_gpu_type = source_job.slurm_gpu_type
+        rerun_job.result_destination = source_job.result_destination
+        rerun_job.cache_preflight_json = source_job.cache_preflight_json
+        rerun_job.reference_cache_status = source_job.reference_cache_status
+        rerun_job.data_cache_status = source_job.data_cache_status
+        rerun_job.reference_cache_path = source_job.reference_cache_path
+        rerun_job.data_cache_path = source_job.data_cache_path
+        await session.commit()
+
+        await add_log_entry(
+            session,
+            rerun_uuid,
+            "INFO",
+            f"Rerun requested from workflow alias {source_job.workflow_alias or source_job.workflow_folder_name or run_uuid}",
+            source="api",
+        )
+
+        execution_mode = (source_job.execution_mode or "local").strip().lower()
+        if execution_mode == "slurm":
+            if not source_job.remote_work_dir:
+                raise HTTPException(status_code=400, detail="Cannot rerun SLURM job without a remote workflow directory")
+
+            backend = get_backend("slurm")
+            params = SubmitParams(
+                project_id=source_job.project_id,
+                user_id=source_job.user_id,
+                sample_name=sample_name,
+                mode=source_job.mode,
+                input_type="pod5",
+                input_directory=source_job.input_directory,
+                reference_genome=reference_genome,
+                modifications=source_job.modifications,
+                max_gpu_tasks=None,
+                resume_from_dir=source_job.nextflow_work_dir,
+                rerun_in_place=True,
+                ssh_profile_id=source_job.ssh_profile_id,
+                slurm_account=source_job.slurm_account,
+                slurm_partition=source_job.slurm_partition,
+                slurm_cpus=source_job.slurm_cpus,
+                slurm_memory_gb=source_job.slurm_memory_gb,
+                slurm_walltime=source_job.slurm_walltime,
+                slurm_gpus=source_job.slurm_gpus,
+                slurm_gpu_type=source_job.slurm_gpu_type,
+                workflow_number=source_job.workflow_index,
+                result_destination=source_job.result_destination or "local",
+                cache_preflight=source_job.cache_preflight_json,
+                reference_cache_path=source_job.reference_cache_path,
+                data_cache_path=source_job.data_cache_path,
+            )
+            await backend.rerun_existing(
+                rerun_uuid,
+                params,
+                remote_work=source_job.remote_work_dir,
+                remote_output=source_job.remote_output_dir or str(Path(source_job.remote_work_dir) / "output"),
+                local_work_dir=source_job.nextflow_work_dir,
+                archive_sample_names=archive_sample_names,
+            )
+            await session.refresh(rerun_job)
+            rerun_job.nextflow_work_dir = source_job.nextflow_work_dir
+            rerun_job.remote_work_dir = source_job.remote_work_dir
+            rerun_job.remote_output_dir = source_job.remote_output_dir
+            rerun_job.started_at = datetime.utcnow()
+            await session.commit()
+            return {
+                "run_uuid": rerun_uuid,
+                "sample_name": sample_name,
+                "status": rerun_job.status or JobStatus.PENDING,
+                "work_directory": _effective_job_work_directory(rerun_job) or "",
+                "cache_actions": {
+                    "reference_status": rerun_job.reference_cache_status,
+                    "data_status": rerun_job.data_cache_status,
+                    "reference_cache_path": rerun_job.reference_cache_path,
+                    "data_cache_path": rerun_job.data_cache_path,
+                    "cache_preflight": rerun_job.cache_preflight_json,
+                },
+            }
+
+        if not source_job.nextflow_work_dir:
+            raise HTTPException(status_code=400, detail="Cannot rerun local job without a workflow directory")
+
+        _, work_dir = await executor.submit_job(
+            run_uuid=rerun_uuid,
+            sample_name=sample_name,
+            mode=source_job.mode,
+            input_type="pod5",
+            input_dir=source_job.input_directory,
+            reference_genome=reference_genome,
+            modifications=source_job.modifications,
+            max_gpu_tasks=None,
+            workflow_index=source_job.workflow_index,
+            rerun_in_place=True,
+            archive_sample_names=archive_sample_names,
+            user_id=source_job.user_id,
+            project_id=source_job.project_id,
+            resume_from_dir=source_job.nextflow_work_dir,
+        )
+
+        rerun_job.nextflow_work_dir = str(work_dir)
+        rerun_job.workflow_folder_name = work_dir.name
+        rerun_job.status = JobStatus.RUNNING
+        rerun_job.started_at = datetime.utcnow()
+        pid_file = work_dir / ".nextflow_pid"
+        if pid_file.exists():
+            try:
+                rerun_job.nextflow_process_id = int(pid_file.read_text().strip())
+            except (ValueError, OSError):
+                pass
+        await session.commit()
+
+        monitor_task = asyncio.create_task(monitor_job(rerun_uuid, work_dir))
+        job_monitors[rerun_uuid] = monitor_task
+
+        return {
+            "run_uuid": rerun_uuid,
+            "sample_name": sample_name,
+            "status": JobStatus.RUNNING,
+            "work_directory": str(work_dir),
+            "cache_actions": {
+                "reference_status": rerun_job.reference_cache_status,
+                "data_status": rerun_job.data_cache_status,
+                "reference_cache_path": rerun_job.reference_cache_path,
+                "data_cache_path": rerun_job.data_cache_path,
+                "cache_preflight": rerun_job.cache_preflight_json,
+            },
+        }
+    finally:
+        await session.close()
+
+
+@app.post("/jobs/{run_uuid}/rename")
+async def rename_job_workflow(
+    req: WorkflowRenameRequest,
+    run_uuid: str = FastAPIPath(..., min_length=1),
+):
+    """Rename a workflow folder and display/sample name while keeping its stable alias."""
+    session = SessionLocal()
+
+    try:
+        job = await get_job(session, run_uuid)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        terminal_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        if job.status not in terminal_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot rename job with status {job.status}. Only {', '.join(s.value for s in terminal_statuses)} jobs can be renamed.",
+            )
+        if job.workflow_index is None:
+            raise HTTPException(status_code=400, detail="Only workflow-backed jobs can be renamed")
+
+        new_name = _normalize_workflow_name(req.new_name)
+        current_display_name = getattr(job, "workflow_display_name", None) or job.sample_name
+        current_folder_name = getattr(job, "workflow_folder_name", None) or (
+            Path(job.nextflow_work_dir).name if job.nextflow_work_dir else new_name
+        )
+
+        existing_result = await session.execute(
+            select(DogmeJob.run_uuid).where(
+                DogmeJob.project_id == job.project_id,
+                DogmeJob.workflow_folder_name == new_name,
+                DogmeJob.workflow_index != job.workflow_index,
+                DogmeJob.status != JobStatus.DELETED,
+            )
+        )
+        if existing_result.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail=f"Workflow name already exists: {new_name}")
+
+        old_sample_names = [job.sample_name, getattr(job, "workflow_display_name", None)]
+        local_old_dir = str(job.nextflow_work_dir or "").strip() or None
+        local_new_dir = None
+        if local_old_dir:
+            source_local_path = Path(local_old_dir)
+            target_local_path = source_local_path.with_name(new_name)
+            local_new_dir = str(target_local_path)
+            if target_local_path != source_local_path and target_local_path.exists():
+                raise HTTPException(status_code=409, detail=f"Local workflow folder already exists: {target_local_path}")
+
+        remote_old_dir = str(job.remote_work_dir or "").strip() or None
+        remote_new_dir = None
+        remote_old_output = str(job.remote_output_dir or "").strip() or None
+        remote_new_output = remote_old_output
+        if remote_old_dir and not job.ssh_profile_id:
+            raise HTTPException(status_code=400, detail="Cannot rename remote workflow without an SSH profile")
+
+        if local_old_dir:
+            source_local_path = Path(local_old_dir)
+            target_local_path = source_local_path.with_name(new_name)
+            if target_local_path != source_local_path and source_local_path.exists():
+                source_local_path.rename(target_local_path)
+            if target_local_path.exists():
+                _rename_local_workflow_artifacts(target_local_path, old_sample_names, new_name)
+            local_new_dir = str(target_local_path)
+
+        if remote_old_dir:
+            backend = get_backend("slurm")
+            remote_new_dir, remote_new_output = await backend.rename_workflow(
+                ssh_profile_id=job.ssh_profile_id,
+                user_id=job.user_id,
+                old_remote_work=remote_old_dir,
+                old_sample_names=old_sample_names,
+                new_folder_name=new_name,
+                new_sample_name=new_name,
+            )
+
+        workflow_result = await session.execute(
+            select(DogmeJob).where(
+                DogmeJob.project_id == job.project_id,
+                DogmeJob.workflow_index == job.workflow_index,
+            )
+        )
+        workflow_jobs = list(workflow_result.scalars().all())
+        for workflow_job in workflow_jobs:
+            workflow_job.sample_name = new_name
+            workflow_job.workflow_folder_name = new_name
+            workflow_job.workflow_display_name = new_name
+            workflow_job.nextflow_work_dir = _replace_path_prefix(workflow_job.nextflow_work_dir, local_old_dir, local_new_dir)
+            workflow_job.nextflow_config_path = _replace_path_prefix(workflow_job.nextflow_config_path, local_old_dir, local_new_dir)
+            workflow_job.output_directory = _replace_path_prefix(workflow_job.output_directory, local_old_dir, local_new_dir)
+            workflow_job.log_file = _replace_path_prefix(workflow_job.log_file, local_old_dir, local_new_dir)
+            workflow_job.stderr_log = _replace_path_prefix(workflow_job.stderr_log, local_old_dir, local_new_dir)
+            workflow_job.remote_work_dir = _replace_path_prefix(workflow_job.remote_work_dir, remote_old_dir, remote_new_dir)
+            workflow_job.remote_output_dir = _replace_path_prefix(workflow_job.remote_output_dir, remote_old_output, remote_new_output)
+
+        await session.commit()
+
+        await add_log_entry(
+            session,
+            run_uuid,
+            "INFO",
+            f"Workflow {job.workflow_alias or job.workflow_index} renamed from {current_display_name}/{current_folder_name} to {new_name}",
+            source="api",
+        )
+
+        return {
+            "status": "renamed",
+            "run_uuid": run_uuid,
+            "workflow_alias": job.workflow_alias,
+            "old_name": current_display_name,
+            "new_name": new_name,
+            "work_directory": local_new_dir or remote_new_dir,
+        }
     finally:
         await session.close()
 

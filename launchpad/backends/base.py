@@ -30,6 +30,7 @@ class SubmitParams:
     accuracy: str = "sup"
     max_gpu_tasks: Optional[int] = None
     resume_from_dir: str | None = None
+    rerun_in_place: bool = False
     parent_block_id: str | None = None
 
     # Remote execution (SLURM backend only)

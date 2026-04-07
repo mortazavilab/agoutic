@@ -426,6 +426,129 @@ async def delete_job_proxy(run_uuid: str, request: Request):
         raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
 
 
+@app.post("/jobs/{run_uuid}/rerun")
+async def rerun_job_proxy(run_uuid: str, request: Request):
+    """Rerun a workflow in place and create a fresh EXECUTION_JOB block for live monitoring."""
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
+
+    from launchpad.models import DogmeJob as LaunchpadDogmeJob
+
+    session = SessionLocal()
+    try:
+        source_job = session.execute(
+            select(LaunchpadDogmeJob).where(LaunchpadDogmeJob.run_uuid == run_uuid)
+        ).scalar_one_or_none()
+        if not source_job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{_launchpad_rest_base_url()}/jobs/{run_uuid}/rerun",
+                headers=_launchpad_internal_headers(),
+            )
+        if resp.status_code == 400:
+            raise HTTPException(status_code=400, detail=resp.json().get("detail", "Cannot rerun job"))
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Job not found")
+        resp.raise_for_status()
+        result = resp.json() or {}
+
+        job_block = _create_block_internal(
+            session,
+            source_job.project_id,
+            "EXECUTION_JOB",
+            {
+                "run_uuid": result.get("run_uuid"),
+                "work_directory": result.get("work_directory"),
+                "sample_name": result.get("sample_name") or source_job.sample_name,
+                "mode": source_job.mode,
+                "run_type": "dogme",
+                "status": "SUBMITTED",
+                "message": f"Job submitted: {result.get('run_uuid')}",
+                "cache_actions": result.get("cache_actions"),
+                "job_status": {
+                    "status": result.get("status", "PENDING"),
+                    "progress_percent": 0,
+                    "message": "Workflow rerun submitted.",
+                    "tasks": {},
+                },
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id=user.id,
+        )
+        session.commit()
+
+        if result.get("run_uuid"):
+            asyncio.create_task(job_polling.poll_job_status(source_job.project_id, job_block.id, result["run_uuid"]))
+
+        result["block_id"] = job_block.id
+        return result
+    finally:
+        session.close()
+
+
+class WorkflowRenameBody(BaseModel):
+    new_name: str
+
+
+@app.post("/jobs/{run_uuid}/rename")
+async def rename_job_proxy(run_uuid: str, body: WorkflowRenameBody, request: Request):
+    """Rename a workflow via Launchpad and update matching EXECUTION_JOB block payloads."""
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
+
+    from launchpad.models import DogmeJob as LaunchpadDogmeJob
+
+    session = SessionLocal()
+    try:
+        source_job = session.execute(
+            select(LaunchpadDogmeJob).where(LaunchpadDogmeJob.run_uuid == run_uuid)
+        ).scalar_one_or_none()
+        if not source_job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{_launchpad_rest_base_url()}/jobs/{run_uuid}/rename",
+                headers=_launchpad_internal_headers(),
+                json={"new_name": body.new_name},
+            )
+        if resp.status_code == 400:
+            raise HTTPException(status_code=400, detail=resp.json().get("detail", "Cannot rename job"))
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if resp.status_code == 409:
+            raise HTTPException(status_code=409, detail=resp.json().get("detail", "Workflow name already exists"))
+        resp.raise_for_status()
+        result = resp.json() or {}
+
+        workflow_jobs = session.execute(
+            select(LaunchpadDogmeJob).where(
+                LaunchpadDogmeJob.project_id == source_job.project_id,
+                LaunchpadDogmeJob.workflow_index == source_job.workflow_index,
+            )
+        ).scalars().all()
+        workflow_run_ids = {job.run_uuid for job in workflow_jobs}
+
+        blocks = session.query(ProjectBlock).filter(ProjectBlock.project_id == source_job.project_id).all()
+        for blk in blocks:
+            if blk.block_type != "EXECUTION_JOB":
+                continue
+            payload = get_block_payload(blk)
+            if payload.get("run_uuid") not in workflow_run_ids:
+                continue
+            payload["sample_name"] = result.get("new_name") or body.new_name
+            if result.get("work_directory"):
+                payload["work_directory"] = result["work_directory"]
+            blk.payload = json.dumps(payload) if isinstance(payload, dict) else payload
+        session.commit()
+        return result
+    finally:
+        session.close()
+
+
 @app.post("/jobs/{run_uuid}/resubmit")
 async def resubmit_job(run_uuid: str, request: Request):
     """

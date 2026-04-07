@@ -6,9 +6,10 @@ Retains Launchpad-specific CRUD helpers.
 """
 import json
 import uuid
+import re
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func, or_
 
 from common.database import (
     AsyncSessionLocal as SessionLocal,
@@ -30,6 +31,10 @@ def job_to_dict(job: DogmeJob) -> dict:
     return {
         "run_uuid": job.run_uuid,
         "project_id": job.project_id,
+        "workflow_index": job.workflow_index,
+        "workflow_alias": job.workflow_alias,
+        "workflow_folder_name": job.workflow_folder_name,
+        "workflow_display_name": job.workflow_display_name,
         "sample_name": job.sample_name,
         "mode": job.mode,
         "input_directory": job.input_directory,
@@ -61,6 +66,10 @@ async def create_job(
     modifications: str | None = None,
     parent_block_id: str | None = None,
     user_id: str | None = None,
+    workflow_index: int | None = None,
+    workflow_alias: str | None = None,
+    workflow_folder_name: str | None = None,
+    workflow_display_name: str | None = None,
 ) -> DogmeJob:
     """Create a new job record."""
     import json
@@ -75,6 +84,10 @@ async def create_job(
         run_uuid=run_uuid,
         project_id=project_id,
         user_id=user_id,
+        workflow_index=workflow_index,
+        workflow_alias=workflow_alias,
+        workflow_folder_name=workflow_folder_name,
+        workflow_display_name=workflow_display_name,
         sample_name=sample_name,
         mode=mode,
         input_directory=input_directory,
@@ -86,6 +99,79 @@ async def create_job(
     await session.commit()
     await session.refresh(job)
     return job
+
+
+_WORKFLOW_SUFFIX_RE = re.compile(r"^workflow(\d+)$", re.IGNORECASE)
+
+
+def workflow_alias_for_index(index: int) -> str:
+    return f"workflow{index}"
+
+
+def infer_workflow_index_from_path(path: str | None) -> int | None:
+    if not path:
+        return None
+    folder_name = str(path).rstrip("/").rsplit("/", 1)[-1]
+    match = _WORKFLOW_SUFFIX_RE.fullmatch(folder_name)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+async def get_next_workflow_index(session: AsyncSession, project_id: str) -> int:
+    """Return the next monotonic workflow index for a project.
+
+    Falls back to parsing legacy workflow folder names when older rows do not yet
+    have workflow_index populated.
+    """
+    result = await session.execute(
+        select(func.max(DogmeJob.workflow_index)).where(DogmeJob.project_id == project_id)
+    )
+    current_max = result.scalar_one_or_none()
+    if current_max:
+        return int(current_max) + 1
+
+    legacy_rows = await session.execute(
+        select(DogmeJob.nextflow_work_dir, DogmeJob.remote_work_dir).where(DogmeJob.project_id == project_id)
+    )
+    legacy_max = 0
+    for local_work_dir, remote_work_dir in legacy_rows.all():
+        for candidate in (local_work_dir, remote_work_dir):
+            inferred = infer_workflow_index_from_path(candidate)
+            if inferred and inferred > legacy_max:
+                legacy_max = inferred
+    return legacy_max + 1 if legacy_max else 1
+
+
+async def get_workflow_identity_for_path(
+    session: AsyncSession,
+    project_id: str,
+    workflow_path: str | None,
+) -> tuple[int | None, str | None, str | None]:
+    """Resolve a workflow's persisted identity from a local or remote work path."""
+    if not workflow_path:
+        return None, None, None
+
+    result = await session.execute(
+        select(DogmeJob.workflow_index, DogmeJob.workflow_alias, DogmeJob.workflow_folder_name)
+        .where(DogmeJob.project_id == project_id)
+        .where(or_(DogmeJob.nextflow_work_dir == workflow_path, DogmeJob.remote_work_dir == workflow_path))
+        .order_by(DogmeJob.submitted_at.desc())
+        .limit(1)
+    )
+    row = result.first()
+    if row:
+        return row[0], row[1], row[2]
+
+    inferred_index = infer_workflow_index_from_path(workflow_path)
+    if inferred_index is None:
+        return None, None, None
+    alias = workflow_alias_for_index(inferred_index)
+    folder_name = str(workflow_path).rstrip("/").rsplit("/", 1)[-1]
+    return inferred_index, alias, folder_name
 
 async def get_job(session: AsyncSession, run_uuid: str) -> DogmeJob | None:
     """Retrieve a job by UUID."""

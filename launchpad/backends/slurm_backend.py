@@ -286,6 +286,109 @@ class SlurmBackend:
         finally:
             await conn.close()
 
+    async def rerun_existing(
+        self,
+        run_uuid: str,
+        params: SubmitParams,
+        *,
+        remote_work: str,
+        remote_output: str,
+        local_work_dir: str | None = None,
+        archive_sample_names: list[str] | None = None,
+    ) -> str:
+        """Rerun an existing remote workflow directory in place with Nextflow -rerun."""
+        profile = await self._load_profile(params.ssh_profile_id, params.user_id)
+        controller_account, controller_partition = self._resolve_controller_resources(params, profile)
+
+        if local_work_dir:
+            local_path = Path(local_work_dir)
+            if local_path.exists():
+                from launchpad.nextflow_executor import NextflowExecutor
+
+                NextflowExecutor.prepare_rerun_directory(local_path, archive_sample_names or [params.sample_name])
+
+        conn = await self._ssh_manager.connect(profile)
+        try:
+            if not await conn.path_exists(remote_work):
+                raise FileNotFoundError(f"Remote workflow directory not found: {remote_work}")
+
+            await self._archive_remote_workflow_artifacts(conn, remote_work, archive_sample_names or [params.sample_name])
+
+            remote_config = str(PurePosixPath(remote_work) / "nextflow.config")
+            if not await conn.path_exists(remote_config):
+                raise FileNotFoundError(f"Remote nextflow.config not found: {remote_config}")
+
+            remote_input = str(params.data_cache_path or "").strip() or self._workflow_input_link_path(params, remote_work)
+            nf_cmd = self._build_nextflow_command(
+                params,
+                remote_input,
+                remote_output,
+                remote_config,
+                rerun_in_place=True,
+            )
+
+            remote_cache_root = (profile.remote_base_path or "").strip() or remote_work
+            script = generate_sbatch_script(
+                job_name=f"agoutic-{params.sample_name}-{run_uuid[:8]}",
+                account=controller_account,
+                partition=controller_partition,
+                cpus=params.slurm_cpus or 4,
+                memory_gb=params.slurm_memory_gb or 16,
+                walltime=params.slurm_walltime or "48:00:00",
+                gpus=0,
+                gpu_type=None,
+                output_log=f"{remote_work}/slurm-%j.out",
+                error_log=f"{remote_work}/slurm-%j.err",
+                work_dir=remote_work,
+                container_cache_dir=f"{remote_cache_root}/.nxf-apptainer-cache",
+                nextflow_command=nf_cmd,
+            )
+
+            script_path = f"{remote_work}/submit_{run_uuid[:8]}.sh"
+            quoted_script_path = shlex.quote(script_path)
+            await conn.run(f"cat > {quoted_script_path} << 'AGOUTIC_EOF'\n{script}AGOUTIC_EOF", check=True)
+            await conn.run(f"chmod +x {quoted_script_path}", check=True)
+
+            slurm_job_id = (await conn.run_checked(f"sbatch --parsable {quoted_script_path}")).strip()
+            await self._update_job_slurm_info(run_uuid, slurm_job_id, remote_work, remote_output)
+            await self._update_job_stage(run_uuid, RunStage.QUEUED)
+            return run_uuid
+        finally:
+            await conn.close()
+
+    async def rename_workflow(
+        self,
+        *,
+        ssh_profile_id: str | None,
+        user_id: str | None,
+        old_remote_work: str,
+        old_sample_names: list[str] | None,
+        new_folder_name: str,
+        new_sample_name: str,
+    ) -> tuple[str, str]:
+        profile = await self._load_profile(ssh_profile_id, user_id)
+        conn = await self._ssh_manager.connect(profile)
+        try:
+            old_remote_path = PurePosixPath(old_remote_work)
+            new_remote_work = str(old_remote_path.parent / new_folder_name)
+            if new_remote_work != old_remote_work and await conn.path_exists(new_remote_work):
+                raise FileExistsError(f"Remote workflow folder already exists: {new_remote_work}")
+            if new_remote_work != old_remote_work:
+                await conn.run(
+                    f"mv {shlex.quote(old_remote_work)} {shlex.quote(new_remote_work)}",
+                    check=True,
+                )
+
+            await self._rename_remote_workflow_artifacts(
+                conn,
+                remote_work=new_remote_work,
+                sample_names=old_sample_names,
+                new_sample_name=new_sample_name,
+            )
+            return new_remote_work, str(PurePosixPath(new_remote_work) / "output")
+        finally:
+            await conn.close()
+
     async def check_status(self, run_uuid: str) -> JobStatus:
         """Check SLURM job status via sacct/squeue."""
         from launchpad.db import get_job_by_uuid as get_job
@@ -1061,6 +1164,8 @@ class SlurmBackend:
         remote_input: str,
         remote_output: str,
         config_path: str,
+        *,
+        rerun_in_place: bool = False,
     ) -> str:
         """Build the Nextflow command line for the sbatch script."""
         genome_list = ",".join(params.reference_genome)
@@ -1077,7 +1182,86 @@ class SlurmBackend:
             cmd_parts.append(f"--modifications {shlex.quote(params.modifications)}")
         if params.entry_point:
             cmd_parts.append(f"-entry {shlex.quote(params.entry_point)}")
+        if rerun_in_place:
+            cmd_parts.append("-rerun")
         return " \\\n    ".join(cmd_parts)
+
+    @staticmethod
+    def _workflow_input_link_path(params: SubmitParams, remote_work: str) -> str:
+        input_type = (params.input_type or "pod5").strip().lower()
+        link_dir_name = {
+            "pod5": "pod5",
+            "bam": "bams",
+            "fastq": "fastqs",
+            "fq": "fastqs",
+        }.get(input_type, "pod5")
+        return str(PurePosixPath(remote_work) / link_dir_name)
+
+    @staticmethod
+    async def _archive_remote_workflow_artifacts(conn, remote_work: str, sample_names: list[str] | None = None) -> None:
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        candidate_names = ["report.html"]
+        for sample_name in sample_names or []:
+            cleaned = str(sample_name or "").strip()
+            if not cleaned:
+                continue
+            candidate_names.extend(
+                [
+                    f"{cleaned}_report.html",
+                    f"{cleaned}_timeline.html",
+                    f"{cleaned}_trace.txt",
+                ]
+            )
+
+        seen: set[str] = set()
+        for file_name in candidate_names:
+            if file_name in seen:
+                continue
+            seen.add(file_name)
+            file_path = str(PurePosixPath(remote_work) / file_name)
+            if not await conn.path_exists(file_path):
+                continue
+            path_obj = PurePosixPath(file_path)
+            suffix = path_obj.suffix
+            stem = path_obj.name[:-len(suffix)] if suffix else path_obj.name
+            archive_name = f"{stem}.rerun_{timestamp}{suffix}"
+            target_path = str(path_obj.with_name(archive_name))
+            await conn.run(f"mv {shlex.quote(file_path)} {shlex.quote(target_path)}", check=True)
+
+        for marker_name in (
+            ".nextflow_success",
+            ".nextflow_failed",
+            ".nextflow_cancelled",
+            ".nextflow_running",
+            ".nextflow_error",
+            ".launch_error",
+            ".nextflow_pid",
+        ):
+            marker_path = str(PurePosixPath(remote_work) / marker_name)
+            if await conn.path_exists(marker_path):
+                await conn.run(f"rm -f {shlex.quote(marker_path)}", check=True)
+
+    @staticmethod
+    async def _rename_remote_workflow_artifacts(
+        conn,
+        remote_work: str,
+        sample_names: list[str] | None,
+        new_sample_name: str,
+    ) -> None:
+        seen: set[str] = set()
+        for sample_name in sample_names or []:
+            cleaned = str(sample_name or "").strip()
+            if not cleaned or cleaned == new_sample_name or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            for suffix in ("report.html", "timeline.html", "trace.txt"):
+                file_path = str(PurePosixPath(remote_work) / f"{cleaned}_{suffix}")
+                target_path = str(PurePosixPath(remote_work) / f"{new_sample_name}_{suffix}")
+                if not await conn.path_exists(file_path):
+                    continue
+                if await conn.path_exists(target_path):
+                    raise FileExistsError(f"Remote workflow artifact already exists: {target_path}")
+                await conn.run(f"mv {shlex.quote(file_path)} {shlex.quote(target_path)}", check=True)
 
     def _resolve_controller_resources(
         self,

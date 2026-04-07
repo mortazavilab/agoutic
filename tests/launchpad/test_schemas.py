@@ -260,6 +260,10 @@ class TestJobDetailsResponse:
         resp = JobDetailsResponse(
             run_uuid="abc",
             project_id="proj-1",
+            workflow_index=1,
+            workflow_alias="workflow1",
+            workflow_folder_name="workflow1",
+            workflow_display_name="sample-a-renamed",
             sample_name="s1",
             mode="DNA",
             status="COMPLETED",
@@ -273,6 +277,8 @@ class TestJobDetailsResponse:
         )
         assert resp.status == "COMPLETED"
         assert resp.error_message is None
+        assert resp.workflow_alias == "workflow1"
+        assert resp.workflow_display_name == "sample-a-renamed"
 
 
 class TestJobSubmitResponse:

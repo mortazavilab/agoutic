@@ -44,12 +44,17 @@ class TestDogmeJob:
         assert loaded.sample_name == "sample1"
         assert loaded.mode == "DNA"
         assert loaded.status == "PENDING"
+        assert loaded.workflow_index is None
 
     def test_full_fields(self, db):
         job = DogmeJob(
             run_uuid="test-uuid-2",
             project_id="proj-1",
             user_id="user-1",
+            workflow_index=2,
+            workflow_alias="workflow2",
+            workflow_folder_name="workflow2",
+            workflow_display_name="sample2-renamed",
             sample_name="sample2",
             mode="RNA",
             input_directory="/data/pod5",
@@ -70,6 +75,8 @@ class TestDogmeJob:
         loaded = db.get(DogmeJob, "test-uuid-2")
         assert loaded.nextflow_process_id == 12345
         assert loaded.reference_genome == "GRCh38"
+        assert loaded.workflow_alias == "workflow2"
+        assert loaded.workflow_display_name == "sample2-renamed"
 
     def test_status_update(self, db):
         job = DogmeJob(

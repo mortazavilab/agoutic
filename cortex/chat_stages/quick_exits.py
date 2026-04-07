@@ -23,6 +23,11 @@ from cortex.memory_commands import (
     execute_memory_intent,
     parse_memory_command,
 )
+from cortex.workflow_commands import (
+    detect_workflow_intent,
+    execute_workflow_command,
+    parse_workflow_command,
+)
 
 logger = get_logger(__name__)
 
@@ -214,7 +219,66 @@ class MemoryCommandStage:
 register_stage(MemoryCommandStage())
 
 
+class WorkflowCommandStage:
+    name = "workflow_command"
+    priority = 235
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return parse_workflow_command(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        workflow_cmd = parse_workflow_command(ctx.message)
+        markdown = await execute_workflow_command(
+            ctx.session,
+            workflow_cmd,
+            project_id=ctx.project_id,
+        )
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="workflow_command",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(WorkflowCommandStage())
+
+
 # ── 240  Natural-language memory intent ────────────────────────────────────
+
+class WorkflowIntentStage:
+    name = "workflow_intent"
+    priority = 238
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return detect_workflow_intent(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        workflow_cmd = detect_workflow_intent(ctx.message)
+        markdown = await execute_workflow_command(
+            ctx.session,
+            workflow_cmd,
+            project_id=ctx.project_id,
+        )
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="workflow_intent",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(WorkflowIntentStage())
 
 class MemoryIntentStage:
     name = "memory_intent"

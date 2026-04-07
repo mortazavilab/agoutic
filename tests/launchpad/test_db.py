@@ -12,9 +12,12 @@ from launchpad.db import (
     create_job,
     get_job,
     get_job_logs,
+    get_next_workflow_index,
     get_remote_input_cache_entry,
     get_remote_reference_cache_entry,
     get_remote_staged_sample,
+    get_workflow_identity_for_path,
+    infer_workflow_index_from_path,
     job_to_dict,
     list_remote_staged_samples,
     upsert_remote_input_cache_entry,
@@ -64,6 +67,26 @@ class TestCreateJob:
         assert loaded is not None
         assert loaded.parent_block_id == "block-1"
         assert loaded.user_id == "user-1"
+
+    @pytest.mark.asyncio
+    async def test_persists_workflow_identity_fields(self, async_session):
+        job = await create_job(
+            session=async_session,
+            run_uuid="run-identity",
+            project_id="proj-identity",
+            workflow_index=3,
+            workflow_alias="workflow3",
+            workflow_folder_name="workflow3",
+            workflow_display_name="sample-a-renamed",
+            sample_name="sample-a",
+            mode="DNA",
+            input_directory="/data/input",
+        )
+
+        assert job.workflow_index == 3
+        assert job.workflow_alias == "workflow3"
+        assert job.workflow_folder_name == "workflow3"
+        assert job.workflow_display_name == "sample-a-renamed"
 
     @pytest.mark.asyncio
     async def test_preserves_scalar_reference_genome(self, async_session):
@@ -148,6 +171,75 @@ class TestJobToDict:
         assert result["completed_at"] == completed.isoformat()
         assert result["report"] == {"files": 3, "status": "ok"}
         assert result["reference_genome"] == '["GRCh38", "mm39"]'
+
+
+class TestWorkflowIdentityHelpers:
+    @pytest.mark.asyncio
+    async def test_get_next_workflow_index_uses_stored_index(self, async_session):
+        await create_job(
+            session=async_session,
+            run_uuid="run-10",
+            project_id="proj-next",
+            workflow_index=10,
+            workflow_alias="workflow10",
+            workflow_folder_name="workflow10",
+            sample_name="sample-a",
+            mode="DNA",
+            input_directory="/data/input",
+        )
+
+        next_index = await get_next_workflow_index(async_session, "proj-next")
+
+        assert next_index == 11
+
+    @pytest.mark.asyncio
+    async def test_get_next_workflow_index_bootstraps_from_legacy_folder_names(self, async_session):
+        await create_job(
+            session=async_session,
+            run_uuid="run-legacy",
+            project_id="proj-legacy",
+            sample_name="sample-a",
+            mode="DNA",
+            input_directory="/data/input",
+        )
+        job = await get_job(async_session, "run-legacy")
+        job.nextflow_work_dir = "/data/proj/workflow7"
+        await async_session.commit()
+
+        next_index = await get_next_workflow_index(async_session, "proj-legacy")
+
+        assert next_index == 8
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_identity_for_path_prefers_persisted_identity(self, async_session):
+        await create_job(
+            session=async_session,
+            run_uuid="run-renamed",
+            project_id="proj-renamed",
+            workflow_index=5,
+            workflow_alias="workflow5",
+            workflow_folder_name="tumor-retry",
+            sample_name="tumor-retry",
+            mode="DNA",
+            input_directory="/data/input",
+        )
+        job = await get_job(async_session, "run-renamed")
+        job.nextflow_work_dir = "/data/proj/tumor-retry"
+        await async_session.commit()
+
+        workflow_index, workflow_alias, workflow_folder_name = await get_workflow_identity_for_path(
+            async_session,
+            "proj-renamed",
+            "/data/proj/tumor-retry",
+        )
+
+        assert workflow_index == 5
+        assert workflow_alias == "workflow5"
+        assert workflow_folder_name == "tumor-retry"
+
+    def test_infer_workflow_index_from_path(self):
+        assert infer_workflow_index_from_path("/data/proj/workflow9") == 9
+        assert infer_workflow_index_from_path("/data/proj/tumor-retry") is None
 
 
 class TestLogHelpers:

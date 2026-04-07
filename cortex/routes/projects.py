@@ -472,7 +472,8 @@ async def get_project_stats(project_id: str, request: Request):
         # Query dogme_jobs for this project (shared DB, raw SQL)
         jobs_result = session.execute(text(
             "SELECT run_uuid, sample_name, mode, status, submitted_at, started_at, "
-            "completed_at, nextflow_work_dir, remote_work_dir, execution_mode, user_id "
+            "completed_at, nextflow_work_dir, remote_work_dir, execution_mode, user_id, "
+            "workflow_index, workflow_alias, workflow_folder_name, workflow_display_name "
             "FROM dogme_jobs WHERE project_id = :pid ORDER BY submitted_at DESC"
         ), {"pid": project_id}).fetchall()
 
@@ -502,8 +503,11 @@ async def get_project_stats(project_id: str, request: Request):
                 except Exception:
                     duration_seconds = None
 
-            workflow_label = None
-            if work_dir:
+            workflow_alias = row[11]
+            workflow_folder_name = row[13]
+            workflow_display_name = row[14]
+            workflow_label = workflow_alias or workflow_folder_name
+            if not workflow_label and work_dir:
                 try:
                     workflow_label = Path(work_dir).name
                 except Exception:
@@ -520,6 +524,9 @@ async def get_project_stats(project_id: str, request: Request):
                 "duration_seconds": duration_seconds,
                 "work_dir": work_dir,
                 "workflow_label": workflow_label,
+                "workflow_alias": workflow_alias,
+                "workflow_folder_name": workflow_folder_name,
+                "workflow_display_name": workflow_display_name,
                 "execution_mode": row[9],
             })
 

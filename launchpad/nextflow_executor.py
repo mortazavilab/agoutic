@@ -332,6 +332,64 @@ class NextflowExecutor:
                     except ValueError:
                         continue
         return max_n + 1
+
+    @staticmethod
+    def workflow_dir_name(workflow_index: int) -> str:
+        return f"workflow{workflow_index}"
+
+    @staticmethod
+    def prepare_rerun_directory(work_dir: Path, sample_names: list[str] | None = None) -> dict[str, str]:
+        """Archive prior summary artifacts and clear stale Nextflow markers."""
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        archived: dict[str, str] = {}
+        candidate_names = ["report.html"]
+        for sample_name in sample_names or []:
+            cleaned = str(sample_name or "").strip()
+            if not cleaned:
+                continue
+            candidate_names.extend(
+                [
+                    f"{cleaned}_report.html",
+                    f"{cleaned}_timeline.html",
+                    f"{cleaned}_trace.txt",
+                ]
+            )
+
+        seen: set[str] = set()
+        for file_name in candidate_names:
+            if file_name in seen:
+                continue
+            seen.add(file_name)
+            source_path = work_dir / file_name
+            if not source_path.exists():
+                continue
+
+            suffix = source_path.suffix
+            stem = source_path.name[:-len(suffix)] if suffix else source_path.name
+            archived_name = f"{stem}.rerun_{timestamp}{suffix}"
+            target_path = work_dir / archived_name
+            counter = 1
+            while target_path.exists():
+                archived_name = f"{stem}.rerun_{timestamp}_{counter}{suffix}"
+                target_path = work_dir / archived_name
+                counter += 1
+            source_path.rename(target_path)
+            archived[file_name] = archived_name
+
+        for marker_name in (
+            ".nextflow_success",
+            ".nextflow_failed",
+            ".nextflow_cancelled",
+            ".nextflow_running",
+            ".nextflow_error",
+            ".launch_error",
+            ".nextflow_pid",
+        ):
+            marker_path = work_dir / marker_name
+            if marker_path.exists():
+                marker_path.unlink()
+
+        return archived
     
     async def submit_job(
         self,
@@ -348,6 +406,9 @@ class NextflowExecutor:
         per_mod: int = 5,
         accuracy: str = "sup",
         max_gpu_tasks: Optional[int] = None,
+        workflow_index: Optional[int] = None,
+        rerun_in_place: bool = False,
+        archive_sample_names: Optional[list[str]] = None,
         user_id: Optional[str] = None,
         project_id: Optional[str] = None,
         username: Optional[str] = None,
@@ -383,11 +444,20 @@ class NextflowExecutor:
             if resume_path.exists() and resume_path.is_dir():
                 work_dir = resume_path
                 is_resume = True
-                # Clean up old cancellation/failure markers so the run starts fresh
-                for marker in (".nextflow_cancelled", ".nextflow_failed", ".nextflow_running"):
-                    marker_file = work_dir / marker
-                    if marker_file.exists():
-                        marker_file.unlink()
+                if rerun_in_place:
+                    archived = self.prepare_rerun_directory(work_dir, archive_sample_names or [sample_name])
+                    logger.info(
+                        "Preparing rerun in existing workflow directory",
+                        work_dir=str(work_dir),
+                        run_uuid=run_uuid,
+                        archived=list(archived.items()),
+                    )
+                else:
+                    # Clean up old cancellation/failure markers so the run starts fresh
+                    for marker in (".nextflow_cancelled", ".nextflow_failed", ".nextflow_running"):
+                        marker_file = work_dir / marker
+                        if marker_file.exists():
+                            marker_file.unlink()
                 logger.info("Resuming in existing workflow directory",
                            work_dir=str(work_dir), run_uuid=run_uuid)
             else:
@@ -399,8 +469,8 @@ class NextflowExecutor:
                 # Human-readable path — compute next workflow number
                 project_dir = AGOUTIC_DATA / "users" / username / project_slug
                 project_dir.mkdir(parents=True, exist_ok=True)
-                next_n = self._next_workflow_number(project_dir)
-                work_dir = project_dir / f"workflow{next_n}"
+                next_n = workflow_index or self._next_workflow_number(project_dir)
+                work_dir = project_dir / self.workflow_dir_name(next_n)
                 work_dir.mkdir(parents=True, exist_ok=True)
                 logger.info("Using workflow directory", work_dir=str(work_dir),
                            username=username, project_slug=project_slug, workflow_n=next_n)
@@ -624,10 +694,11 @@ class NextflowExecutor:
             "-with-trace", str(work_dir / f"{sample_name}_trace.txt"),
         ])
         
-        # Add -resume flag when resuming from a cancelled/failed job
+        # Add rerun/resume flag when reusing an existing workflow directory
         if is_resume:
-            cmd.append("-resume")
-            logger.info("Adding -resume flag for job resumption", work_dir=str(work_dir))
+            rerun_flag = "-rerun" if rerun_in_place else "-resume"
+            cmd.append(rerun_flag)
+            logger.info("Adding workflow reuse flag", flag=rerun_flag, work_dir=str(work_dir))
         
         # Validate prerequisites before attempting launch
         if not self.nextflow_bin.exists():
