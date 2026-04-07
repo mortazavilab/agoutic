@@ -31,6 +31,7 @@ from analyzer.schemas import (
     JobFileSummary,
     AnalysisSummary
 )
+from sqlalchemy.orm import load_only
 from analyzer.models import DogmeJob
 from analyzer.db import get_db
 
@@ -77,7 +78,12 @@ def get_job_work_dir(run_uuid: str) -> Optional[Path]:
       4. Legacy flat path: AGOUTIC_WORK_DIR/{run_uuid}/
     """
     with get_db() as db:
-        job = db.query(DogmeJob).filter(DogmeJob.run_uuid == run_uuid).first()
+        job = db.query(DogmeJob).options(
+            load_only(
+                DogmeJob.run_uuid, DogmeJob.nextflow_work_dir,
+                DogmeJob.output_directory, DogmeJob.user_id, DogmeJob.project_id,
+            )
+        ).filter(DogmeJob.run_uuid == run_uuid).first()
         if not job:
             return None
         # Use nextflow_work_dir if available — this is the authoritative source.
@@ -637,7 +643,12 @@ def generate_analysis_summary(
     if not run_uuid:
         raise ValueError("run_uuid is required for generate_analysis_summary")
     with get_db() as db:
-        job = db.query(DogmeJob).filter(DogmeJob.run_uuid == run_uuid).first()
+        job = db.query(DogmeJob).options(
+            load_only(
+                DogmeJob.run_uuid, DogmeJob.sample_name, DogmeJob.mode,
+                DogmeJob.status, DogmeJob.nextflow_work_dir, DogmeJob.output_directory,
+            )
+        ).filter(DogmeJob.run_uuid == run_uuid).first()
         if not job:
             raise ValueError(f"Job not found: {run_uuid}")
 

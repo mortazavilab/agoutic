@@ -1,5 +1,5 @@
 """
-Tests for cortex/db.py — row_to_dict() and next_seq_sync().
+Tests for cortex/db.py and cortex/db_helpers.py helpers.
 """
 
 import json
@@ -10,7 +10,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from common.database import Base
+from cortex.db_helpers import _resolve_project_dir
 from cortex.models import ProjectBlock
+from cortex.models import Project, User
 from cortex.db import row_to_dict, next_seq_sync
 
 
@@ -93,3 +95,65 @@ class TestNextSeqSync:
         # proj-b should start at 1, not 11
         seq = next_seq_sync(db, "proj-b")
         assert seq == 1
+
+
+class TestResolveProjectDir:
+    def test_prefers_owner_username_for_slug_path(self, db):
+        owner = User(
+            id="owner-1",
+            email="owner@example.com",
+            username="elnaz-a",
+            role="user",
+            is_active=True,
+        )
+        requester = User(
+            id="viewer-1",
+            email="viewer@example.com",
+            username="agoutic-runner",
+            role="user",
+            is_active=True,
+        )
+        project = Project(
+            id="proj-1",
+            name="ad-samples",
+            slug="ad-samples",
+            owner_id=owner.id,
+            is_public=False,
+            is_archived=False,
+        )
+        db.add_all([owner, requester, project])
+        db.commit()
+
+        resolved = _resolve_project_dir(db, requester, project.id)
+
+        assert str(resolved).endswith("/users/elnaz-a/ad-samples")
+
+    def test_falls_back_to_owner_uuid_path_when_owner_has_no_username(self, db):
+        owner = User(
+            id="owner-2",
+            email="owner2@example.com",
+            username=None,
+            role="user",
+            is_active=True,
+        )
+        requester = User(
+            id="viewer-2",
+            email="viewer2@example.com",
+            username="viewer-two",
+            role="user",
+            is_active=True,
+        )
+        project = Project(
+            id="proj-2",
+            name="legacy-project",
+            slug=None,
+            owner_id=owner.id,
+            is_public=False,
+            is_archived=False,
+        )
+        db.add_all([owner, requester, project])
+        db.commit()
+
+        resolved = _resolve_project_dir(db, requester, project.id)
+
+        assert str(resolved).endswith("/users/owner-2/proj-2")

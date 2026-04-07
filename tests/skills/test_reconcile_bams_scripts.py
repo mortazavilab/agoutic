@@ -274,6 +274,19 @@ def test_reconcile_script_requires_manual_gtf_when_default_missing(tmp_path: Pat
     assert payload["required_input"]["field"] == "annotation_gtf"
 
 
+def test_reconcile_script_rejects_missing_explicit_workflow_dirs(tmp_path: Path):
+    missing_workflow = tmp_path / "workflow5"
+
+    result = _run_script(
+        RECONCILE,
+        ["--workflow-dir", str(missing_workflow), "--json"],
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert "Requested workflow directories do not exist" in payload["error"]
+
+
 def test_reconcile_script_preflight_ready_with_manual_gtf(tmp_path: Path):
     bam = tmp_path / "sample1.GRCh38.annotated.bam"
     _write_annotated_bam(bam, "sample1")

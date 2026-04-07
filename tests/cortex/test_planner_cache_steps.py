@@ -111,6 +111,7 @@ def test_reconcile_bams_template_locate_step_uses_workflow_annot_dirs():
                 "work_dir": "/tmp/workflow2/annot",
                 "extensions": ".bam",
                 "max_depth": 1,
+                "allow_missing": True,
             },
         },
         {
@@ -120,6 +121,7 @@ def test_reconcile_bams_template_locate_step_uses_workflow_annot_dirs():
                 "work_dir": "/tmp/workflow3/annot",
                 "extensions": ".bam",
                 "max_depth": 1,
+                "allow_missing": True,
             },
         },
     ]
@@ -299,6 +301,24 @@ def test_extract_plan_params_reconcile_cross_project_workflow_refs_keep_relative
     assert params["workflow_dirs"] == [
         "projectX/workflow2",
         "projectY/workflow7",
+    ]
+
+
+def test_extract_plan_params_reconcile_bare_workflow_names_resolve_against_project_dir():
+    """Bare workflow folder names like 'workflow5' should be resolved to absolute
+    paths using project_dir when conv_state has no matching workflows."""
+    params = _extract_plan_params(
+        "reconcile the annotated bams from workflow5, workflow6, workflow7, and workflow8",
+        ConversationState(active_skill="reconcile_bams", active_project="ad-samples"),
+        "reconcile_bams",
+        project_dir="/media/backup_disk/agoutic_root/users/elnaz-a/ad-samples",
+    )
+
+    assert params["workflow_dirs"] == [
+        "/media/backup_disk/agoutic_root/users/elnaz-a/ad-samples/workflow5",
+        "/media/backup_disk/agoutic_root/users/elnaz-a/ad-samples/workflow6",
+        "/media/backup_disk/agoutic_root/users/elnaz-a/ad-samples/workflow7",
+        "/media/backup_disk/agoutic_root/users/elnaz-a/ad-samples/workflow8",
     ]
 
 

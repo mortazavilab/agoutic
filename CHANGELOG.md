@@ -34,6 +34,31 @@
   (`cortex/task_service.py`, `cortex/chat_stages/plan_detection.py`,
   `tests/cortex/test_workflow_task_isolation.py`)
 
+- **Analyzer and project detail queries no longer crash when workflow identity
+  migration has not yet been applied** — `generate_analysis_summary` and
+  `get_job_work_dir` now use `load_only()` to select only the columns they
+  need, and the project-detail raw SQL falls back gracefully when
+  `workflow_index` / `workflow_alias` columns are absent.
+  (`analyzer/analysis_engine.py`, `cortex/routes/projects.py`)
+
+- **Reconcile plan resolves bare workflow folder names to absolute paths** —
+  when the user names workflows like `workflow5` without an explicit path and
+  `conv_state.workflows` has no matching entries, the extracted `workflow_dirs`
+  are now resolved against `project_dir` instead of being passed as relative
+  names that the analyzer cannot find.
+  (`cortex/plan_params.py`, `tests/cortex/test_planner_cache_steps.py`)
+
+- **Cross-workflow reconcile now resolves owner paths correctly and no longer
+  hard-fails when a workflow lacks an `annot/` directory** — project path
+  resolution now prefers the project owner's username/UUID path instead of the
+  requesting user, reconcile locate steps mark missing `annot/` folders as an
+  empty result instead of an immediate fatal error, and the reconcile script
+  now reports missing explicit workflow directories clearly during preflight.
+  (`cortex/db_helpers.py`, `cortex/plan_templates.py`,
+  `analyzer/mcp_tools.py`, `skills/reconcile_bams/scripts/reconcile_bams.py`,
+  `tests/cortex/test_db_helpers.py`, `tests/analyzer/test_mcp_tools.py`,
+  `tests/skills/test_reconcile_bams_scripts.py`)
+
 ---
 
 ## [3.5.2] - 2026-04-06

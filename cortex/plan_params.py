@@ -335,7 +335,12 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             for match in re.findall(r"(workflow[\w.-]+)", message, re.I):
                 normalized = match.strip()
                 if normalized and normalized.lower() not in known_workflow_basenames and normalized not in workflow_dirs:
-                    workflow_dirs.append(normalized)
+                    # Resolve bare folder names against project_dir when available
+                    if project_dir:
+                        resolved = f"{project_dir.rstrip('/')}/{normalized}"
+                    else:
+                        resolved = normalized
+                    workflow_dirs.append(resolved)
 
         if workflow_dirs:
             params["workflow_dirs"] = workflow_dirs

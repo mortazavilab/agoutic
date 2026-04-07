@@ -50,6 +50,13 @@ def _discover_workflow_dirs(project_dir: Path, explicit_workflow_dirs: list[str]
     return sorted(path for path in project_dir.iterdir() if path.is_dir() and path.name.startswith("workflow"))
 
 
+def _validate_explicit_workflow_dirs(workflow_dirs: list[Path]) -> None:
+    missing = [path for path in workflow_dirs if not path.is_dir()]
+    if missing:
+        joined = ", ".join(str(path) for path in missing)
+        raise ReconcileInputError(f"Requested workflow directories do not exist: {joined}")
+
+
 def _discover_bams(workflow_dirs: list[Path]) -> list[Path]:
     bams: list[Path] = []
     seen: set[Path] = set()
@@ -499,6 +506,8 @@ def main() -> int:
     try:
         project_dir = Path(args.project_dir).expanduser().resolve()
         workflow_dirs = _discover_workflow_dirs(project_dir, list(args.workflow_dir or []))
+        if args.workflow_dir:
+            _validate_explicit_workflow_dirs(workflow_dirs)
         output_root = _resolve_output_root(project_dir, workflow_dirs, args.output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
 

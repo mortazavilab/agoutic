@@ -31,21 +31,32 @@ logger = get_logger(__name__)
 def _resolve_project_dir(session, user, project_id: str) -> Path:
     """Resolve the on-disk directory for a project.
 
-    Uses slug-based path (_cfg.AGOUTIC_DATA/users/{username}/{slug}/) if both
-    username and slug are available.  Falls back to legacy UUID-based path.
-    Returns the Path (may or may not exist yet).
+    Uses slug-based path (_cfg.AGOUTIC_DATA/users/{owner_username}/{slug}/)
+    whenever the owning user's username and project slug are available.
+    Falls back to legacy UUID-based owner paths, then to the requesting user
+    only if owner metadata is unavailable. Returns the Path (may or may not
+    exist yet).
     """
     project = session.execute(
         select(Project).where(Project.id == project_id)
     ).scalar_one_or_none()
 
-    username = getattr(user, "username", None)
     slug = project.slug if project else None
+    owner_id = project.owner_id if project else None
+
+    owner_username = None
+    if owner_id:
+        owner_username = session.execute(
+            select(User.username).where(User.id == owner_id)
+        ).scalar_one_or_none()
+
+    username = owner_username or getattr(user, "username", None)
+    fallback_user_id = owner_id or user.id
 
     if username and slug:
         return _cfg.AGOUTIC_DATA / "users" / username / slug
     # Legacy fallback
-    return _cfg.AGOUTIC_DATA / "users" / user.id / project_id
+    return _cfg.AGOUTIC_DATA / "users" / fallback_user_id / project_id
 
 
 def archive_deleted_project_token_usage(

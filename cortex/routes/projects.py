@@ -470,12 +470,24 @@ async def get_project_stats(project_id: str, request: Request):
         ).scalar() or 0
 
         # Query dogme_jobs for this project (shared DB, raw SQL)
-        jobs_result = session.execute(text(
+        # Try with workflow identity columns first; fall back if migration not yet applied.
+        _WF_COLS = ", workflow_index, workflow_alias, workflow_folder_name, workflow_display_name"
+        _BASE_SQL = (
             "SELECT run_uuid, sample_name, mode, status, submitted_at, started_at, "
-            "completed_at, nextflow_work_dir, remote_work_dir, execution_mode, user_id, "
-            "workflow_index, workflow_alias, workflow_folder_name, workflow_display_name "
+            "completed_at, nextflow_work_dir, remote_work_dir, execution_mode, user_id{wf} "
             "FROM dogme_jobs WHERE project_id = :pid ORDER BY submitted_at DESC"
-        ), {"pid": project_id}).fetchall()
+        )
+        try:
+            jobs_result = session.execute(
+                text(_BASE_SQL.format(wf=_WF_COLS)), {"pid": project_id}
+            ).fetchall()
+            _has_wf_cols = True
+        except Exception:
+            session.rollback()
+            jobs_result = session.execute(
+                text(_BASE_SQL.format(wf="")), {"pid": project_id}
+            ).fetchall()
+            _has_wf_cols = False
 
         jobs = []
         total_completed = 0
@@ -503,9 +515,9 @@ async def get_project_stats(project_id: str, request: Request):
                 except Exception:
                     duration_seconds = None
 
-            workflow_alias = row[11]
-            workflow_folder_name = row[13]
-            workflow_display_name = row[14]
+            workflow_alias = row[11] if _has_wf_cols else None
+            workflow_folder_name = row[13] if _has_wf_cols else None
+            workflow_display_name = row[14] if _has_wf_cols else None
             workflow_label = workflow_alias or workflow_folder_name
             if not workflow_label and work_dir:
                 try:

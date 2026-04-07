@@ -138,6 +138,7 @@ async def list_job_files(
     compact: bool = True,
     max_depth: Optional[int] = None,
     name_pattern: Optional[str] = None,
+    allow_missing: bool = False,
 ) -> Dict[str, Any]:
     """
     List all files in a job's work directory.
@@ -179,6 +180,16 @@ async def list_job_files(
         }
     
     except FileNotFoundError as e:
+        if allow_missing:
+            requested = str(Path(work_dir).expanduser()) if work_dir else ""
+            return {
+                "success": True,
+                "work_dir": requested,
+                "file_count": 0,
+                "total_size_bytes": 0,
+                "files": [],
+                "missing_work_dir": True,
+            }
         return {
             "success": False,
             "error": "Job not found or work directory missing",

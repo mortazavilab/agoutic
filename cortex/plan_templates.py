@@ -717,6 +717,7 @@ def _template_reconcile_bams(params: dict) -> dict:
                         "work_dir": f"{workflow_dir.rstrip('/')}/annot",
                         "extensions": ".bam",
                         "max_depth": 1,
+                        "allow_missing": True,
                     },
                 }
             )
@@ -729,6 +730,7 @@ def _template_reconcile_bams(params: dict) -> dict:
                     "work_dir": f"{work_dir.rstrip('/')}/annot",
                     "extensions": ".bam",
                     "max_depth": 1,
+                    "allow_missing": True,
                 },
             }
         )
