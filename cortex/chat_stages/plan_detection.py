@@ -13,7 +13,7 @@ from cortex.chat_sync_handler import _emit_progress, _is_cancelled
 from cortex.db import row_to_dict
 from cortex.db_helpers import _create_block_internal, save_conversation_message
 from cortex.remote_orchestration import _WORKFLOW_PLAN_TYPE
-from cortex.task_service import sync_project_tasks
+from cortex.task_service import sync_project_tasks, archive_superseded_tasks
 from cortex.tool_dispatch import ChatCancelled
 
 logger = get_logger(__name__)
@@ -82,6 +82,8 @@ class PlanDetectionStage:
                     ctx.session, ctx.project_id, _WORKFLOW_PLAN_TYPE,
                     _plan_payload, status="PENDING", owner_id=ctx.user.id,
                 )
+                # Archive tasks from previous workflows before sync
+                archive_superseded_tasks(ctx.session, ctx.project_id)
                 sync_project_tasks(ctx.session, ctx.project_id)
 
                 _plan_md = render_plan_markdown(_plan_payload)

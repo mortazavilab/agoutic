@@ -22,6 +22,18 @@
   `ui/appui_block_part1.py`, `ui/components/slurm_form.py`,
   `docs/user_guide_execution_modes.md`, `README.md`)
 
+### Bug Fixes
+
+- **Project task lists now isolate the active workflow instead of mixing in
+  older runs** — task sync now keeps only the latest active workflow plan (or,
+  if all workflows are finished, only the most recent completed one), skips
+  approval/staging/execution blocks tied to superseded workflow plans, and
+  archives stale task rows before rendering a newly generated plan. This fixes
+  task lists where a new run such as `EXC` could still show older items from
+  prior runs like `GKO` or `LWF` in the same project.
+  (`cortex/task_service.py`, `cortex/chat_stages/plan_detection.py`,
+  `tests/cortex/test_workflow_task_isolation.py`)
+
 ---
 
 ## [3.5.2] - 2026-04-06

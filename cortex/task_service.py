@@ -6,7 +6,7 @@ import datetime
 import json
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from cortex.models import ProjectBlock, ProjectTask
 from cortex.llm_validators import get_block_payload
@@ -327,6 +327,35 @@ def _collect_analysis_state(blocks: list[ProjectBlock]) -> tuple[set[str], set[s
     return analyzed_samples, reviewed_samples
 
 
+def _active_workflow_ids(blocks: list[ProjectBlock]) -> set[str]:
+    """Return the set of WORKFLOW_PLAN block IDs that should be visible.
+
+    Logic:
+    * Walk blocks newest-first and find the latest WORKFLOW_PLAN whose
+      payload status is NOT ``COMPLETED`` or ``FAILED``.  That is the
+      *active* workflow — all older workflow plans are superseded.
+    * If every workflow plan is completed/failed, keep only the most
+      recent one so its final results remain visible.
+    * Standalone blocks (DOWNLOAD_TASK, EXECUTION_JOB without a
+      ``workflow_plan_block_id``) are never filtered here.
+    """
+    workflow_plans: list[ProjectBlock] = [
+        b for b in blocks if b.type == "WORKFLOW_PLAN"
+    ]
+    if not workflow_plans:
+        return set()
+
+    # Walk newest-first (highest seq).
+    sorted_plans = sorted(workflow_plans, key=lambda b: b.seq, reverse=True)
+    for plan in sorted_plans:
+        p = get_block_payload(plan)
+        if p.get("status") not in ("COMPLETED", "FAILED"):
+            return {plan.id}
+
+    # All completed/failed — show the most recent only.
+    return {sorted_plans[0].id}
+
+
 def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
     blocks = session.execute(
         select(ProjectBlock)
@@ -345,11 +374,17 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
     workflow_parent_ids: dict[str, str] = {}
     workflow_run_ids: set[str] = set()
 
+    # ── Determine which workflow plans are active ──────────────────
+    active_wf_ids = _active_workflow_ids(blocks)
+
     for block in blocks:
         payload = get_block_payload(block)
         owner_id = block.owner_id
 
         if block.type == "WORKFLOW_PLAN":
+            # Skip superseded workflow plans
+            if active_wf_ids and block.id not in active_wf_ids:
+                continue
             source_key = f"workflow-plan:{block.id}"
             seen_sources.add(source_key)
             plan_task = _upsert_task(
@@ -383,6 +418,9 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             continue
 
         if block.type == "APPROVAL_GATE":
+            # Skip gates belonging to superseded workflows
+            if active_wf_ids and block.parent_id and block.parent_id not in active_wf_ids:
+                continue
             task_status = {
                 "PENDING": "PENDING",
                 "APPROVED": "COMPLETED",
@@ -459,6 +497,10 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             continue
 
         if block.type == "STAGING_TASK":
+            # Skip staging tasks belonging to superseded workflows
+            _wf_plan_id = payload.get("workflow_plan_block_id")
+            if active_wf_ids and _wf_plan_id and _wf_plan_id not in active_wf_ids:
+                continue
             task_status = {
                 "RUNNING": "RUNNING",
                 "DONE": "COMPLETED",
@@ -492,6 +534,11 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             continue
 
         if block.type != "EXECUTION_JOB":
+            continue
+
+        # Skip execution jobs belonging to superseded workflows
+        _wf_plan_id = payload.get("workflow_plan_block_id")
+        if active_wf_ids and _wf_plan_id and _wf_plan_id not in active_wf_ids:
             continue
 
         run_uuid = payload.get("run_uuid", "")
@@ -635,6 +682,25 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
         .where(ProjectTask.archived_at.is_(None))
         .order_by(ProjectTask.created_at.asc())
     ).scalars().all()
+
+
+def archive_superseded_tasks(session, project_id: str) -> int:
+    """Bulk-archive all non-archived tasks for a project.
+
+    Called when a new workflow plan is created so that the subsequent
+    ``sync_project_tasks`` starts from a clean slate and only
+    (re-)creates tasks for the active workflow.  Returns the number
+    of tasks archived.
+    """
+    now = datetime.datetime.utcnow()
+    result = session.execute(
+        update(ProjectTask)
+        .where(ProjectTask.project_id == project_id)
+        .where(ProjectTask.archived_at.is_(None))
+        .values(archived_at=now, updated_at=now)
+    )
+    session.commit()
+    return result.rowcount  # type: ignore[return-value]
 
 
 def build_task_sections(tasks: list[ProjectTask]) -> dict:
