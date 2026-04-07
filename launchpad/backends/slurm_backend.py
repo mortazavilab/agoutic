@@ -255,7 +255,7 @@ class SlurmBackend:
                 partition=controller_partition,
                 cpus=params.slurm_cpus or 4,
                 memory_gb=params.slurm_memory_gb or 16,
-                walltime=params.slurm_walltime or "04:00:00",
+                walltime=params.slurm_walltime or "48:00:00",
                 gpus=0,
                 gpu_type=None,
                 output_log=f"{remote_work}/slurm-%j.out",

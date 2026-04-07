@@ -678,16 +678,19 @@ def render_block_part1(
                         
                         # Max concurrent GPU tasks — visible at top level (not hidden in Advanced)
                         _gpu_raw = extracted_params.get("max_gpu_tasks")
-                        _gpu_val = int(_gpu_raw) if _gpu_raw is not None else 1
-                        if _gpu_val < 1:
+                        _gpu_val = int(_gpu_raw) if _gpu_raw is not None else None
+                        if _gpu_val is not None and _gpu_val < 1:
                             _gpu_val = 1
-                        _gpu_options = [1, 2, 3, 4, 5, 6, 7, 8]
+                        if _gpu_val is not None and _gpu_val > 16:
+                            _gpu_val = 16
+                        _gpu_options = [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
                         _gpu_idx = _gpu_options.index(_gpu_val) if _gpu_val in _gpu_options else 0
                         max_gpu_tasks = st.selectbox(
                             "🖥️ Max Concurrent GPU Tasks",
                             options=_gpu_options,
                             index=_gpu_idx,
-                            help="Maximum simultaneous dorado/GPU tasks within a pipeline run (default: 1)",
+                            format_func=lambda value: "No maximum" if value is None else str(value),
+                            help="Maximum simultaneous dorado/GPU tasks within a pipeline run. Leave at 'No maximum' to let Nextflow manage concurrency.",
                         )
 
                         grouped_section("Execution")
@@ -710,7 +713,7 @@ def render_block_part1(
                         slurm_gpu_partition = extracted_params.get("slurm_gpu_partition", "") or ""
                         slurm_cpus = int(extracted_params.get("slurm_cpus") or 4)
                         slurm_memory_gb = int(extracted_params.get("slurm_memory_gb") or 16)
-                        slurm_walltime = extracted_params.get("slurm_walltime", "04:00:00") or "04:00:00"
+                        slurm_walltime = extracted_params.get("slurm_walltime", "48:00:00") or "48:00:00"
                         slurm_gpus = max(int(extracted_params.get("slurm_gpus") or 1), 1)
                         slurm_gpu_type = extracted_params.get("slurm_gpu_type", "") or ""
                         remote_base_path = extracted_params.get("remote_base_path", "") or ""

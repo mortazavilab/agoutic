@@ -92,7 +92,17 @@ class TestSubmitJobRequest:
         assert req.modkit_filter_threshold == 0.9
         assert req.per_mod == 5
         assert req.accuracy == "sup"
-        assert req.max_gpu_tasks == 1
+        assert req.max_gpu_tasks is None
+
+    def test_max_gpu_tasks_range_validation(self):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="s",
+                mode="DNA",
+                input_directory="/d",
+                max_gpu_tasks=17,
+            )
 
     def test_slurm_requires_user_and_profile(self):
         with pytest.raises(ValidationError):

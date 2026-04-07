@@ -871,10 +871,10 @@ python launchpad/demo_launchpad.py
 Control the number of simultaneous GPU tasks (dorado basecalling, openChromatin) within a single pipeline run. Configurable in the approval form or via environment variable:
 
 ```bash
-export DEFAULT_MAX_GPU_TASKS=1  # Default: 1 (safe for single-GPU). Range: 1-8
+export DEFAULT_MAX_GPU_TASKS=8  # Optional explicit limit. Leave unset for no maximum. Range: 1-16
 ```
 
-Users can also override per-job in the approval form dropdown or via chat ("limit dorado to 3 concurrent tasks").
+If `DEFAULT_MAX_GPU_TASKS` is unset, Launchpad omits Nextflow `maxForks` for GPU-bound Dogme processes and lets Nextflow manage concurrency. Users can also override per-job in the approval form dropdown or via chat ("limit dorado to 3 concurrent tasks").
 
 ### Concurrent Jobs
 

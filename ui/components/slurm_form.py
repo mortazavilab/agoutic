@@ -61,8 +61,8 @@ def render_slurm_form(defaults: Optional[dict] = None) -> Optional[dict]:
         )
 
     walltime = st.text_input(
-        "Wall Time (HH:MM:SS)",
-        value=defaults.get("walltime", "04:00:00"),
+        "Wall Time (HH:MM:SS or D-HH:MM:SS)",
+        value=defaults.get("walltime", "48:00:00"),
         key="slurm_walltime",
     )
 

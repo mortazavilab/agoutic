@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, Any, List, Literal, Union
 from datetime import datetime
 
+from launchpad.config import MAX_GPU_TASKS_LIMIT
+
 class SubmitJobRequest(BaseModel):
     """Request to submit a Dogme job."""
     run_type: Literal["dogme", "script"] = "dogme"
@@ -45,7 +47,7 @@ class SubmitJobRequest(BaseModel):
     min_cov: Optional[int] = None  # Minimum coverage (defaults: 1 for DNA, 3 for RNA/CDNA)
     per_mod: Optional[int] = 5  # Percentage threshold for modifications
     accuracy: Optional[str] = "sup"  # Basecalling accuracy (sup/hac/fast)
-    max_gpu_tasks: Optional[int] = 1  # Max concurrent GPU tasks (dorado/openChromatin) per pipeline run
+    max_gpu_tasks: Optional[int] = None  # None lets Nextflow manage concurrency without maxForks
 
     # Standalone script execution (local only)
     script_id: Optional[str] = None
@@ -60,6 +62,15 @@ class SubmitJobRequest(BaseModel):
         if isinstance(v, str):
             return [v]
         return v
+
+    @field_validator("max_gpu_tasks")
+    @classmethod
+    def validate_max_gpu_tasks(cls, value):
+        if value is None:
+            return value
+        if value < 1 or value > MAX_GPU_TASKS_LIMIT:
+            raise ValueError(f"max_gpu_tasks must be between 1 and {MAX_GPU_TASKS_LIMIT}")
+        return value
 
     @model_validator(mode="after")
     def validate_remote_execution(self):

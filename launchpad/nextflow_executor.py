@@ -41,7 +41,7 @@ class NextflowConfig:
         min_cov: Optional[int] = None,
         per_mod: int = 5,
         accuracy: str = "sup",
-        max_gpu_tasks: int = 1,
+        max_gpu_tasks: Optional[int] = None,
         execution_mode: str = "local",
         slurm_cpu_partition: str | None = None,
         slurm_gpu_partition: str | None = None,
@@ -222,7 +222,8 @@ class NextflowConfig:
             config_lines.append("        queue = \"${gpuPartition}\"")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
-        config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
+        if max_gpu_tasks is not None:
+            config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
             gpu_container_options = f"--nv {slurm_container_base_options}"
             config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
@@ -236,7 +237,8 @@ class NextflowConfig:
             config_lines.append("        queue = \"${gpuPartition}\"")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
-        config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
+        if max_gpu_tasks is not None:
+            config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
             gpu_container_options = f"--nv {slurm_container_base_options}"
             config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
@@ -250,7 +252,8 @@ class NextflowConfig:
             config_lines.append("        queue = \"${gpuPartition}\"")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
-        config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
+        if max_gpu_tasks is not None:
+            config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
             gpu_container_options = f"--nv {slurm_container_base_options}"
             config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
@@ -344,7 +347,7 @@ class NextflowExecutor:
         min_cov: Optional[int] = None,
         per_mod: int = 5,
         accuracy: str = "sup",
-        max_gpu_tasks: int = 1,
+        max_gpu_tasks: Optional[int] = None,
         user_id: Optional[str] = None,
         project_id: Optional[str] = None,
         username: Optional[str] = None,

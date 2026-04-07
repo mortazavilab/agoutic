@@ -10,7 +10,7 @@ def generate_sbatch_script(
     partition: str,
     cpus: int = 4,
     memory_gb: int = 16,
-    walltime: str = "04:00:00",
+    walltime: str = "48:00:00",
     gpus: int = 0,
     gpu_type: str | None = None,
     output_log: str = "slurm-%j.out",

@@ -4,7 +4,7 @@ ExecutionBackend protocol and shared types.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable
 
 
 @dataclass
@@ -28,7 +28,7 @@ class SubmitParams:
     min_cov: int | None = None
     per_mod: int = 5
     accuracy: str = "sup"
-    max_gpu_tasks: int = 1
+    max_gpu_tasks: Optional[int] = None
     resume_from_dir: str | None = None
     parent_block_id: str | None = None
 

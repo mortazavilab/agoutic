@@ -150,7 +150,7 @@ class SlurmDefaults(Base):
     partition: Mapped[str] = mapped_column(String, nullable=False)
     cpus: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
     memory_gb: Mapped[int] = mapped_column(Integer, default=16, nullable=False)
-    walltime: Mapped[str] = mapped_column(String, default="04:00:00", nullable=False)
+    walltime: Mapped[str] = mapped_column(String, default="48:00:00", nullable=False)
     gpus: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     gpu_type: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

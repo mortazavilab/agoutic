@@ -3,6 +3,18 @@ import json
 from pathlib import Path
 from enum import Enum
 
+
+def _optional_int_env(name: str, default: int | None = None) -> int | None:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    cleaned = value.strip()
+    if not cleaned or cleaned.lower() in {"none", "null", "unlimited"}:
+        return default
+
+    return int(cleaned)
+
 # --- ROOT PATH CONFIGURATION ---
 # AGOUTIC_CODE: Where the source code lives (this repository)
 AGOUTIC_CODE = Path(os.getenv("AGOUTIC_CODE", Path(__file__).resolve().parent.parent))
@@ -35,9 +47,14 @@ NEXTFLOW_BIN = Path(os.getenv("NEXTFLOW_BIN", "/usr/local/bin/nextflow"))
 # Max concurrent jobs
 MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "2"))
 
-# Default max concurrent GPU tasks (dorado, openChromatin) per pipeline run
-# Controls Nextflow maxForks for GPU-bound processes
-DEFAULT_MAX_GPU_TASKS = int(os.getenv("DEFAULT_MAX_GPU_TASKS", "1"))
+# Default max concurrent GPU tasks (dorado, openChromatin) per pipeline run.
+# None means no explicit Nextflow maxForks limit; Nextflow manages concurrency.
+DEFAULT_MAX_GPU_TASKS = _optional_int_env("DEFAULT_MAX_GPU_TASKS")
+MAX_GPU_TASKS_LIMIT = int(os.getenv("MAX_GPU_TASKS_LIMIT", "16"))
+if DEFAULT_MAX_GPU_TASKS is not None and not 1 <= DEFAULT_MAX_GPU_TASKS <= MAX_GPU_TASKS_LIMIT:
+    raise ValueError(
+        f"DEFAULT_MAX_GPU_TASKS must be between 1 and {MAX_GPU_TASKS_LIMIT}, or unset for no maximum"
+    )
 
 # Job polling interval (seconds)
 JOB_POLL_INTERVAL = int(os.getenv("JOB_POLL_INTERVAL", "10"))
@@ -86,8 +103,11 @@ DEFAULT_CDNA_MODS = ""  # cDNA does not call modifications
 # Default SLURM resource limits (override via environment)
 SLURM_MAX_CPUS = int(os.getenv("SLURM_MAX_CPUS", "128"))
 SLURM_MAX_MEMORY_GB = int(os.getenv("SLURM_MAX_MEMORY_GB", "1024"))
+SLURM_MIN_WALLTIME_MINUTES = int(os.getenv("SLURM_MIN_WALLTIME_MINUTES", "2880"))  # 48h
 SLURM_MAX_WALLTIME_MINUTES = int(os.getenv("SLURM_MAX_WALLTIME_MINUTES", "4320"))  # 72h
 SLURM_MAX_GPUS = int(os.getenv("SLURM_MAX_GPUS", "8"))
+if SLURM_MIN_WALLTIME_MINUTES > SLURM_MAX_WALLTIME_MINUTES:
+    raise ValueError("SLURM_MIN_WALLTIME_MINUTES cannot exceed SLURM_MAX_WALLTIME_MINUTES")
 # Comma-separated whitelist (empty = any allowed)
 SLURM_ALLOWED_PARTITIONS = [p for p in os.getenv("SLURM_ALLOWED_PARTITIONS", "").split(",") if p] or None
 SLURM_ALLOWED_ACCOUNTS = [a for a in os.getenv("SLURM_ALLOWED_ACCOUNTS", "").split(",") if a] or None

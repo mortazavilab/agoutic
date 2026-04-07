@@ -1,5 +1,27 @@
 ## [Unreleased]
 
+### Improvements
+
+- **Dogme GPU task concurrency now defaults to no explicit Nextflow cap** —
+  Launchpad now treats omitted `max_gpu_tasks` as "no maximum", so Dogme
+  Nextflow configs no longer emit `maxForks` for GPU-bound processes unless an
+  explicit limit is requested. Explicit per-run and environment-configured GPU
+  limits are now validated up to a maximum of 16, and the approval UI exposes
+  `No maximum` plus `1-16` as selectable values.
+  (`launchpad/config.py`, `launchpad/schemas.py`, `launchpad/app.py`,
+  `launchpad/nextflow_executor.py`, `launchpad/backends/base.py`,
+  `launchpad/mcp_tools.py`, `ui/appui_block_part1.py`)
+
+- **SLURM walltime defaults and limits raised to 48-72 hours** — Dogme SLURM
+  submissions now default to `48:00:00`, resource validation enforces a minimum
+  walltime of 48 hours and a maximum of 72 hours, and shared SLURM presets/UI
+  defaults were aligned to the same range.
+  (`launchpad/config.py`, `launchpad/backends/resource_validator.py`,
+  `launchpad/backends/slurm_backend.py`,
+  `launchpad/backends/sbatch_generator.py`, `launchpad/models.py`,
+  `ui/appui_block_part1.py`, `ui/components/slurm_form.py`,
+  `docs/user_guide_execution_modes.md`, `README.md`)
+
 ---
 
 ## [3.5.2] - 2026-04-06

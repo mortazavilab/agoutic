@@ -233,7 +233,7 @@ class LaunchpadMCPTools:
             min_cov: Optional minimum coverage
             per_mod: Optional per-modification threshold
             accuracy: Optional basecalling accuracy level (e.g., "sup", "hac")
-            max_gpu_tasks: Optional max concurrent GPU tasks (dorado/openChromatin) per run (default: 1)
+            max_gpu_tasks: Optional max concurrent GPU tasks (dorado/openChromatin) per run (default: no maximum, max: 16)
         
         Returns:
             {"run_uuid": str, "sample_name": str, "status": str, "work_directory": str}
@@ -852,7 +852,7 @@ TOOL_REGISTRY = {
                 },
                 "input_type": {"type": "string", "enum": ["pod5", "bam", "fastq"], "description": "Type of input files (default: pod5)"},
                 "modifications": {"type": "string", "description": "Modification motifs to call (optional)"},
-                "max_gpu_tasks": {"type": "integer", "description": "Max concurrent GPU tasks (dorado/openChromatin) per pipeline run (default: 1)"},
+                "max_gpu_tasks": {"type": "integer", "description": "Max concurrent GPU tasks (dorado/openChromatin) per pipeline run. Omit for no explicit maximum; max allowed is 16."},
                 "execution_mode": {"type": "string", "enum": ["local", "slurm"], "description": "Execution backend to use (default: local)"},
                 "ssh_profile_id": {"type": "string", "description": "Saved SSH profile to use for SLURM execution"},
                 "slurm_account": {"type": "string", "description": "SLURM account/allocation"},

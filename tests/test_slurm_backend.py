@@ -25,8 +25,12 @@ from launchpad.backends.sbatch_generator import generate_sbatch_script
 
 class TestValidateResources:
     def test_valid_resources_pass(self):
-        errors = validate_resources(cpus=4, memory_gb=16, walltime="04:00:00", gpus=0)
+        errors = validate_resources(cpus=4, memory_gb=16, walltime="48:00:00", gpus=0)
         assert errors == []
+
+    def test_walltime_below_minimum_fails(self):
+        errors = validate_resources(walltime="47:59:00")
+        assert any("below minimum" in e for e in errors)
 
     def test_cpus_too_high(self):
         errors = validate_resources(cpus=999)

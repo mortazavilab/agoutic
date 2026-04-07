@@ -93,7 +93,7 @@ When submitting to SLURM, you can configure these resource parameters:
 | **Partition** | The queue/set of nodes to use | `standard`, `gpu`, `highmem` |
 | **CPUs** | Number of CPU cores per task | `4` |
 | **Memory (GB)** | RAM allocated to the job | `16` |
-| **Walltime** | Maximum allowed run time | `04:00:00` (4 hours) |
+| **Walltime** | Maximum allowed run time | `48:00:00` minimum, up to `72:00:00` |
 | **GPUs** | Number of GPUs (0 = none) | `1` |
 
 These are set as defaults per SSH profile and can be overridden per job.

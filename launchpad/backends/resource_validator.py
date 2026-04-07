@@ -6,6 +6,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from launchpad.config import (
+    SLURM_ALLOWED_ACCOUNTS,
+    SLURM_ALLOWED_PARTITIONS,
+    SLURM_MAX_CPUS,
+    SLURM_MAX_GPUS,
+    SLURM_MAX_MEMORY_GB,
+    SLURM_MAX_WALLTIME_MINUTES,
+    SLURM_MIN_WALLTIME_MINUTES,
+)
+
 
 @dataclass
 class ResourceLimits:
@@ -14,7 +24,7 @@ class ResourceLimits:
     max_cpus: int = 128
     min_memory_gb: int = 1
     max_memory_gb: int = 1024
-    min_walltime_minutes: int = 1
+    min_walltime_minutes: int = 2880  # 48 hours
     max_walltime_minutes: int = 4320  # 72 hours
     max_gpus: int = 8
     allowed_partitions: list[str] | None = None  # None = any partition allowed
@@ -23,15 +33,23 @@ class ResourceLimits:
 
 
 # Default safe limits (can be overridden via config/env)
-DEFAULT_LIMITS = ResourceLimits()
+DEFAULT_LIMITS = ResourceLimits(
+    max_cpus=SLURM_MAX_CPUS,
+    max_memory_gb=SLURM_MAX_MEMORY_GB,
+    min_walltime_minutes=SLURM_MIN_WALLTIME_MINUTES,
+    max_walltime_minutes=SLURM_MAX_WALLTIME_MINUTES,
+    max_gpus=SLURM_MAX_GPUS,
+    allowed_partitions=SLURM_ALLOWED_PARTITIONS,
+    allowed_accounts=SLURM_ALLOWED_ACCOUNTS,
+)
 
 # Safe presets for common use cases
 SAFE_PRESETS: dict[str, dict] = {
-    "small": {"cpus": 4, "memory_gb": 16, "walltime": "04:00:00", "gpus": 0},
-    "medium": {"cpus": 16, "memory_gb": 64, "walltime": "12:00:00", "gpus": 0},
-    "large": {"cpus": 32, "memory_gb": 128, "walltime": "24:00:00", "gpus": 0},
-    "gpu_small": {"cpus": 8, "memory_gb": 32, "walltime": "08:00:00", "gpus": 1},
-    "gpu_large": {"cpus": 16, "memory_gb": 64, "walltime": "24:00:00", "gpus": 4},
+    "small": {"cpus": 4, "memory_gb": 16, "walltime": "48:00:00", "gpus": 0},
+    "medium": {"cpus": 16, "memory_gb": 64, "walltime": "48:00:00", "gpus": 0},
+    "large": {"cpus": 32, "memory_gb": 128, "walltime": "72:00:00", "gpus": 0},
+    "gpu_small": {"cpus": 8, "memory_gb": 32, "walltime": "48:00:00", "gpus": 1},
+    "gpu_large": {"cpus": 16, "memory_gb": 64, "walltime": "72:00:00", "gpus": 4},
 }
 
 

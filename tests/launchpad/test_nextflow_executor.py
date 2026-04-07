@@ -77,6 +77,16 @@ class TestGenerateConfig:
         assert 'accuracy = "hac"' in config
         assert "maxForks = 3  // Limit concurrent GPU tasks" in config
 
+    def test_default_gpu_concurrency_omits_maxforks(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-unbounded",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome="GRCh38",
+        )
+
+        assert "maxForks =" not in config
+
     def test_cdna_mode_disables_modifications(self):
         config = NextflowConfig.generate_config(
             sample_name="sample-d",
