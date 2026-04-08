@@ -52,6 +52,7 @@ from cortex.chat_stages import (  # noqa: E402, F401
     quick_exits,
     history,
     confirmation_detection,
+    early_overrides,
     context_prep,
     plan_detection,
     llm_first_pass,

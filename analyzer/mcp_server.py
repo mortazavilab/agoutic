@@ -34,9 +34,9 @@ async def _tools_schema_endpoint(request):
 # ==================== Register tools from TOOL_REGISTRY ====================
 
 @mcp.tool()
-async def list_job_files(work_dir: str | None = None, run_uuid: str | None = None, extensions: str | None = None, max_depth: int | None = None, name_pattern: str | None = None) -> Dict[str, Any]:
+async def list_job_files(work_dir: str | None = None, run_uuid: str | None = None, extensions: str | None = None, max_depth: int | None = None, name_pattern: str | None = None, allow_missing: bool = False) -> Dict[str, Any]:
     """List all files in a workflow directory with optional extension filtering."""
-    return await TOOL_REGISTRY["list_job_files"](work_dir=work_dir, run_uuid=run_uuid, extensions=extensions, max_depth=max_depth, name_pattern=name_pattern)
+    return await TOOL_REGISTRY["list_job_files"](work_dir=work_dir, run_uuid=run_uuid, extensions=extensions, max_depth=max_depth, name_pattern=name_pattern, allow_missing=allow_missing)
 
 @mcp.tool()
 async def find_file(file_name: str, work_dir: str | None = None, run_uuid: str | None = None) -> Dict[str, Any]:

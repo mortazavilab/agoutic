@@ -25,7 +25,7 @@ SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "")
 
 # Session configuration
 SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", os.urandom(32).hex())
-SESSION_EXPIRES_HOURS = int(os.getenv("SESSION_EXPIRES_HOURS", "24"))
+SESSION_EXPIRES_HOURS = int(os.getenv("SESSION_EXPIRES_HOURS", "72"))
 
 # Environment: "development" or "production"
 # Controls security flags like cookie secure attribute

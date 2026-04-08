@@ -222,6 +222,36 @@ async def logout(request: Request, response: Response):
     return response
 
 
+@router.post("/heartbeat")
+async def heartbeat(request: Request):
+    """
+    Extend the current session's expiry.
+
+    Called by the frontend while long-running jobs are active so the
+    session does not expire and force the user to log in again.
+    Returns the new ``expires_at`` timestamp.
+    """
+    session_id = request.cookies.get("session")
+    if not session_id:
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+
+    db = SessionLocal()
+    try:
+        result = db.execute(
+            select(SessionModel).where(SessionModel.id == session_id)
+        )
+        session_obj = result.scalar_one_or_none()
+        if not session_obj or not session_obj.is_valid:
+            return JSONResponse(status_code=401, content={"detail": "Invalid session"})
+
+        new_expiry = datetime.utcnow() + timedelta(hours=SESSION_EXPIRES_HOURS)
+        session_obj.expires_at = new_expiry
+        db.commit()
+        return {"status": "extended", "expires_at": new_expiry.isoformat()}
+    finally:
+        db.close()
+
+
 @router.get("/me")
 async def get_current_user_info(request: Request):
     """

@@ -639,6 +639,16 @@ def _render_chat():
     st.session_state["_has_running_job"] = _has_running_job
     st.session_state["_has_full_refresh_job"] = _has_full_refresh_job
 
+    # Keep session alive while jobs are running (heartbeat every 5 min)
+    if _has_running_job:
+        _last_hb = st.session_state.get("_last_heartbeat", 0)
+        if time.time() - _last_hb > 300:
+            try:
+                make_authenticated_request("POST", f"{API_URL}/auth/heartbeat", timeout=5)
+                st.session_state["_last_heartbeat"] = time.time()
+            except Exception:
+                pass
+
     # Show refresh indicator inside the fragment
     if _needs_auto_refresh:
         st.caption(
