@@ -23,6 +23,36 @@ class _FakeProcess:
         self.pid = pid
 
 
+def _fake_dogme_job():
+    return SimpleNamespace(
+        run_uuid="run-dogme",
+        status="PENDING",
+        execution_mode="local",
+        ssh_profile_id=None,
+        slurm_account=None,
+        slurm_partition=None,
+        slurm_cpus=None,
+        slurm_memory_gb=None,
+        slurm_walltime=None,
+        slurm_gpus=None,
+        slurm_gpu_type=None,
+        result_destination=None,
+        cache_preflight_json=None,
+        reference_cache_status=None,
+        data_cache_status=None,
+        reference_cache_path=None,
+        data_cache_path=None,
+        run_stage=None,
+        nextflow_process_id=None,
+        nextflow_work_dir=None,
+        log_file=None,
+        stderr_log=None,
+        report_json=None,
+        started_at=None,
+        workflow_folder_name=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_submit_script_job_success(monkeypatch, tmp_path):
     script_path = tmp_path / "run.py"
@@ -160,3 +190,116 @@ async def test_submit_script_job_failure_surfaces_error(monkeypatch, tmp_path):
 
     assert fake_job.status == launchpad_app.JobStatus.FAILED
     assert "spawn failed" in (fake_job.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_submit_dogme_job_explicit_null_gpu_limit_skips_default(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    fake_job = _fake_dogme_job()
+    executor_kwargs = {}
+
+    async def fake_create_job(*_args, **_kwargs):
+        return fake_job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_submit_job(**kwargs):
+        executor_kwargs.update(kwargs)
+        work_dir = tmp_path / "workflow1"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return ("run-dogme", work_dir)
+
+    async def fake_monitor_job(_run_uuid, _work_dir):
+        return None
+
+    async def fake_get_workflow_identity_for_path(*_args, **_kwargs):
+        return (None, None, None)
+
+    async def fake_get_next_workflow_index(*_args, **_kwargs):
+        return 1
+
+    def fake_create_task(coro):
+        coro.close()
+        return SimpleNamespace()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "create_job", fake_create_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "get_workflow_identity_for_path", fake_get_workflow_identity_for_path)
+    monkeypatch.setattr(launchpad_app, "get_next_workflow_index", fake_get_next_workflow_index)
+    monkeypatch.setattr(launchpad_app.executor, "submit_job", fake_submit_job)
+    monkeypatch.setattr(launchpad_app, "monitor_job", fake_monitor_job)
+    monkeypatch.setattr(launchpad_app.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(launchpad_app.uuid, "uuid4", lambda: "run-dogme")
+    monkeypatch.setattr(launchpad_app, "DEFAULT_MAX_GPU_TASKS", 3)
+
+    req = SubmitJobRequest(
+        project_id="proj-1",
+        sample_name="sample-a",
+        mode="DNA",
+        input_directory=str(tmp_path / "input"),
+        execution_mode="local",
+        max_gpu_tasks=None,
+    )
+
+    result = await launchpad_app.submit_job(req)
+
+    assert result["run_uuid"] == "run-dogme"
+    assert executor_kwargs["max_gpu_tasks"] is None
+
+
+@pytest.mark.asyncio
+async def test_submit_dogme_job_omitted_gpu_limit_uses_default(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    fake_job = _fake_dogme_job()
+    executor_kwargs = {}
+
+    async def fake_create_job(*_args, **_kwargs):
+        return fake_job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_submit_job(**kwargs):
+        executor_kwargs.update(kwargs)
+        work_dir = tmp_path / "workflow1"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return ("run-dogme", work_dir)
+
+    async def fake_monitor_job(_run_uuid, _work_dir):
+        return None
+
+    async def fake_get_workflow_identity_for_path(*_args, **_kwargs):
+        return (None, None, None)
+
+    async def fake_get_next_workflow_index(*_args, **_kwargs):
+        return 1
+
+    def fake_create_task(coro):
+        coro.close()
+        return SimpleNamespace()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "create_job", fake_create_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "get_workflow_identity_for_path", fake_get_workflow_identity_for_path)
+    monkeypatch.setattr(launchpad_app, "get_next_workflow_index", fake_get_next_workflow_index)
+    monkeypatch.setattr(launchpad_app.executor, "submit_job", fake_submit_job)
+    monkeypatch.setattr(launchpad_app, "monitor_job", fake_monitor_job)
+    monkeypatch.setattr(launchpad_app.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(launchpad_app.uuid, "uuid4", lambda: "run-dogme")
+    monkeypatch.setattr(launchpad_app, "DEFAULT_MAX_GPU_TASKS", 3)
+
+    req = SubmitJobRequest(
+        project_id="proj-1",
+        sample_name="sample-a",
+        mode="DNA",
+        input_directory=str(tmp_path / "input"),
+        execution_mode="local",
+    )
+
+    result = await launchpad_app.submit_job(req)
+
+    assert result["run_uuid"] == "run-dogme"
+    assert executor_kwargs["max_gpu_tasks"] == 3

@@ -1557,6 +1557,144 @@ class TestBrowsingToolBypass:
         assert resp.status_code == 200
         assert mock_mcp.call_tool.await_count == 1
 
+    def test_submit_dogme_job_injects_user_and_project_scope(self, SL, seed, tmp_path):
+        """Direct Launchpad submit calls should be repaired with missing identity scope."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            assert tool_name == "submit_dogme_job"
+            assert kwargs.get("user_id") == "u-plot"
+            assert kwargs.get("project_id") == "proj-plot"
+            return {"run_uuid": "run-1", "status": "PENDING"}
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "Submitting the remote run now.\n"
+                "[[DATA_CALL: service=launchpad, tool=submit_dogme_job, sample_name=Jamshid, mode=CDNA, execution_mode=slurm, ssh_profile_id=profile-123, remote_input_path=/share/input/Jamshid, reference_genome=mm39]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "run Jamshid remotely on hpc3", skill="remote_execution")
+        assert resp.status_code == 200
+        assert mock_mcp.call_tool.await_count == 1
+
+    def test_remote_run_without_saved_slurm_defaults_still_creates_gate(self, SL, seed, tmp_path):
+        """A saved SSH profile should still produce an approval gate even when SLURM defaults are absent."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            if tool_name == "list_ssh_profiles":
+                return [
+                    {
+                        "id": "profile-123",
+                        "nickname": "hpc3",
+                        "ssh_username": "seyedam",
+                        "remote_base_path": "/dfs9/seyedam-lab/share/agoutic/seyedam",
+                    }
+                ]
+            if tool_name == "get_slurm_defaults":
+                assert kwargs.get("profile_nickname") == "hpc3"
+                assert "ssh_profile_id" not in kwargs
+                return {
+                    "found": False,
+                    "source": "none",
+                    "ssh_profile_defaults": [
+                        {
+                            "ssh_profile_id": "profile-123",
+                            "nickname": "hpc3",
+                            "remote_base_path": "/dfs9/seyedam-lab/share/agoutic/seyedam",
+                            "default_slurm_account": None,
+                            "default_slurm_partition": None,
+                        }
+                    ],
+                    "message": "No saved defaults in slurm_defaults or SSH profile defaults.",
+                }
+            raise AssertionError(f"unexpected tool: {tool_name}")
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "I will prepare the remote submission.\n"
+                "[[DATA_CALL: service=launchpad, tool=list_ssh_profiles, user_id=<user_id>]]\n"
+                "[[DATA_CALL: service=launchpad, tool=get_slurm_defaults, ssh_profile_id=<profile_id>, user_id=<user_id>, project_id=<project_id>]]\n"
+                "[[DATA_CALL: service=launchpad, tool=submit_dogme_job, execution_mode=slurm, sample_name=igvfr_698-04, mode=RNA, remote_input_path=/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip, ssh_profile_id=<profile_id>]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch(
+                "cortex.remote_orchestration._resolve_ssh_profile_reference",
+                new=AsyncMock(return_value=("profile-123", "hpc3")),
+            ),
+            patch(
+                "cortex.remote_orchestration._list_user_ssh_profiles",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "profile-123",
+                            "nickname": "hpc3",
+                            "ssh_username": "seyedam",
+                            "remote_base_path": "/dfs9/seyedam-lab/share/agoutic/seyedam",
+                        }
+                    ]
+                ),
+            ),
+            patch(
+                "cortex.job_parameters.extract_job_parameters_from_conversation",
+                new=AsyncMock(
+                    return_value={
+                        "sample_name": "igvfr_698-04",
+                        "mode": "RNA",
+                        "remote_input_path": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+                        "input_directory": "remote:/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+                        "reference_genome": ["mm39"],
+                        "ssh_profile_nickname": "hpc3",
+                        "execution_mode": "slurm",
+                    }
+                ),
+            ),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "Analyze the mouse RNA sample igvfr_698-04 using remote data at /dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip on hpc3",
+            skill="welcome",
+        )
+
+        assert resp.status_code == 200
+        assert mock_mcp.call_tool.await_count == 2
+
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        assert payload.get("skill") == "remote_execution"
+        assert "no saved slurm defaults" in md.lower()
+        assert "review the remote submission parameters before approving" in md.lower()
+
+        gate = data.get("gate_block") or {}
+        gate_payload = gate.get("payload") or {}
+        assert gate_payload.get("skill") == "remote_execution"
+        assert gate_payload.get("gate_action") == "job"
+        extracted = gate_payload.get("extracted_params") or {}
+        assert extracted.get("sample_name") == "igvfr_698-04"
+        assert extracted.get("mode") == "RNA"
+        assert extracted.get("ssh_profile_id") == "profile-123"
+        assert extracted.get("remote_base_path") == "/dfs9/seyedam-lab/share/agoutic/seyedam"
+
     def test_remote_run_uses_profile_defaults_and_creates_job_approval(self, SL, seed, tmp_path):
         """Remote run intent should use SSH-profile defaults and create a job approval gate."""
         mock_mcp = AsyncMock()

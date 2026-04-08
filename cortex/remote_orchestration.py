@@ -314,10 +314,45 @@ async def _build_remote_stage_approval_context(
         ),
         None,
     )
-    if not defaults_data or not defaults_data.get("found"):
+    if not defaults_data:
         return None
 
-    selected_defaults = defaults_data.get("selected_profile_defaults") or {}
+    selected_defaults = dict(defaults_data.get("selected_profile_defaults") or {})
+    if not selected_defaults:
+        profile_defaults = defaults_data.get("ssh_profile_defaults") or []
+        if isinstance(profile_defaults, list) and profile_defaults:
+            selected_defaults = dict(profile_defaults[0] or {})
+
+    if not selected_defaults:
+        listed_profiles = next(
+            (
+                result.get("data")
+                for result in launchpad_results
+                if result.get("tool") == "list_ssh_profiles" and isinstance(result.get("data"), list)
+            ),
+            [],
+        )
+        wanted_nickname = (remote_request.get("ssh_profile_nickname") or "").strip().lower()
+        if wanted_nickname:
+            for profile in listed_profiles:
+                if not isinstance(profile, dict):
+                    continue
+                if (profile.get("nickname") or "").strip().lower() != wanted_nickname:
+                    continue
+                selected_defaults = {
+                    "ssh_profile_id": profile.get("id"),
+                    "nickname": profile.get("nickname"),
+                    "default_slurm_account": profile.get("default_slurm_account"),
+                    "default_slurm_partition": profile.get("default_slurm_partition"),
+                    "default_slurm_gpu_account": profile.get("default_slurm_gpu_account"),
+                    "default_slurm_gpu_partition": profile.get("default_slurm_gpu_partition"),
+                    "remote_base_path": profile.get("remote_base_path"),
+                }
+                break
+
+    if not selected_defaults:
+        return None
+
     params = await extract_params(session, project_id) or {}
     params = dict(params)
     params["execution_mode"] = "slurm"
@@ -376,10 +411,16 @@ async def _build_remote_stage_approval_context(
         if remote_input_path
         else f"📁 **Data Path:** {input_directory}\n"
     )
+    has_saved_defaults = bool(defaults_data.get("found"))
 
     if remote_request.get("stage_only"):
+        intro = (
+            "I found the saved remote defaults needed for staging."
+            if has_saved_defaults
+            else "I found the SSH profile, but no saved SLURM defaults. Review the staging parameters before approving."
+        )
         summary = (
-            "I found the saved remote defaults needed for staging.\n\n"
+            f"{intro}\n\n"
             f"📋 **Sample Name:** {sample_name}\n"
             f"{data_path_line}"
             f"🧬 **Data Type:** {mode}\n"
@@ -393,8 +434,13 @@ async def _build_remote_stage_approval_context(
             "[[APPROVAL_NEEDED]]"
         )
     else:
+        intro = (
+            "I found the saved remote defaults needed to submit this run."
+            if has_saved_defaults
+            else "I found the SSH profile, but no saved SLURM defaults. Review the remote submission parameters before approving."
+        )
         summary = (
-            "I found the saved remote defaults needed to submit this run.\n\n"
+            f"{intro}\n\n"
             f"📋 **Sample Name:** {sample_name}\n"
             f"{data_path_line}"
             f"🧬 **Data Type:** {mode}\n"
@@ -943,12 +989,18 @@ def _inject_launchpad_context_params(
     hydrated = dict(params or {})
 
     # Remote profile/default/listing tools require user scope in Launchpad MCP.
-    if tool_name in {"list_ssh_profiles", "get_slurm_defaults", "list_remote_files", "test_ssh_connection"}:
+    if tool_name in {
+        "list_ssh_profiles",
+        "get_slurm_defaults",
+        "list_remote_files",
+        "test_ssh_connection",
+        "submit_dogme_job",
+    }:
         if not hydrated.get("user_id"):
             hydrated["user_id"] = user_id
 
     # Defaults lookups are usually project-scoped in chat flows.
-    if tool_name == "get_slurm_defaults" and project_id and not hydrated.get("project_id"):
+    if tool_name in {"get_slurm_defaults", "submit_dogme_job"} and project_id and not hydrated.get("project_id"):
         hydrated["project_id"] = project_id
 
     return hydrated

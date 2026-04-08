@@ -6,11 +6,14 @@
   Launchpad now treats omitted `max_gpu_tasks` as "no maximum", so Dogme
   Nextflow configs no longer emit `maxForks` for GPU-bound processes unless an
   explicit limit is requested. Explicit per-run and environment-configured GPU
-  limits are now validated up to a maximum of 16, and the approval UI exposes
-  `No maximum` plus `1-16` as selectable values.
+  limits are now validated up to a maximum of 16, the approval UI exposes
+  `No maximum` plus `1-16` as selectable values, and the post-approval
+  submission path now preserves an explicit `null`/`None` limit instead of
+  reintroducing `max_gpu_tasks=1` before Launchpad receives the request.
   (`launchpad/config.py`, `launchpad/schemas.py`, `launchpad/app.py`,
   `launchpad/nextflow_executor.py`, `launchpad/backends/base.py`,
-  `launchpad/mcp_tools.py`, `ui/appui_block_part1.py`)
+  `launchpad/mcp_tools.py`, `ui/appui_block_part1.py`,
+  `cortex/workflow_submission.py`)
 
 - **SLURM walltime defaults and limits raised to 48-72 hours** — Dogme SLURM
   submissions now default to `48:00:00`, resource validation enforces a minimum
@@ -67,6 +70,18 @@
   `tests/launchpad/test_app_status_endpoint.py`,
   `tests/launchpad/test_slurm_backend.py`,
   `tests/cortex/test_auto_generate_data.py`)
+
+- **Remote SLURM intake now creates an approval gate for new submissions even
+  when profile defaults are incomplete** — remote execution no longer lets a
+  model-emitted `submit_dogme_job` fire before approval, `ssh_profile_id`
+  placeholders like `<profile_id>` are downgraded to nickname-based profile
+  lookup instead of being forwarded to Launchpad, and a saved SSH profile is
+  now sufficient to build a reviewable approval gate even when
+  `get_slurm_defaults` returns `found=false`. The approval summary now tells
+  the user that no saved SLURM defaults were found while still presenting the
+  derived remote submission parameters for approval.
+  (`cortex/tool_dispatch.py`, `cortex/remote_orchestration.py`,
+  `tests/cortex/test_chat_data_calls.py`)
 
 - **Cross-workflow reconcile now resolves owner paths correctly and no longer
   hard-fails when a workflow lacks an `annot/` directory** — project path

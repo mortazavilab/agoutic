@@ -758,6 +758,11 @@ async def submit_job(req: SubmitJobRequest):
         workflow_index = None
         workflow_alias = None
         workflow_folder_name = None
+        max_gpu_tasks = (
+            req.max_gpu_tasks
+            if "max_gpu_tasks" in req.model_fields_set
+            else DEFAULT_MAX_GPU_TASKS
+        )
         if run_type == "dogme":
             workflow_index, workflow_alias, workflow_folder_name = await get_workflow_identity_for_path(
                 session,
@@ -925,7 +930,7 @@ async def submit_job(req: SubmitJobRequest):
                         min_cov=req.min_cov,
                         per_mod=req.per_mod,
                         accuracy=req.accuracy,
-                        max_gpu_tasks=req.max_gpu_tasks if req.max_gpu_tasks is not None else DEFAULT_MAX_GPU_TASKS,
+                        max_gpu_tasks=max_gpu_tasks,
                         resume_from_dir=req.resume_from_dir,
                         parent_block_id=req.parent_block_id,
                         ssh_profile_id=req.ssh_profile_id,
@@ -968,7 +973,7 @@ async def submit_job(req: SubmitJobRequest):
                     min_cov=req.min_cov,
                     per_mod=req.per_mod,
                     accuracy=req.accuracy,
-                    max_gpu_tasks=req.max_gpu_tasks if req.max_gpu_tasks is not None else DEFAULT_MAX_GPU_TASKS,
+                    max_gpu_tasks=max_gpu_tasks,
                     workflow_index=workflow_index,
                     user_id=req.user_id,
                     project_id=req.project_id,

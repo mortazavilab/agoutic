@@ -229,6 +229,39 @@ _INVALID_NICK_TOKENS = frozenset({
 })
 
 
+def _looks_like_placeholder(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    return bool(stripped) and (
+        (stripped.startswith("<") and stripped.endswith(">"))
+        or (stripped.startswith("{") and stripped.endswith("}"))
+    )
+
+
+def _extract_remote_profile_nickname(user_message: str) -> str | None:
+    nickname = None
+    nick_match = re.search(r'\bnickname\s+([a-zA-Z0-9._-]+)\b', user_message, re.IGNORECASE)
+    if nick_match:
+        cand = nick_match.group(1).strip()
+        if cand.lower() not in _INVALID_NICK_TOKENS:
+            nickname = cand
+
+    if not nickname:
+        profile_match = re.search(r'\bprofile\s+([a-zA-Z0-9._-]+)\b', user_message, re.IGNORECASE)
+        if profile_match:
+            cand = profile_match.group(1).strip()
+            if cand.lower() not in _INVALID_NICK_TOKENS:
+                nickname = cand
+
+    if not nickname:
+        hpc_match = re.search(r'\b(hpc\d+)\b', user_message, re.IGNORECASE)
+        if hpc_match:
+            nickname = hpc_match.group(1)
+
+    return nickname
+
+
 # ---------------------------------------------------------------------------
 # Result container
 # ---------------------------------------------------------------------------
@@ -426,37 +459,65 @@ def _augment_remote_execution_calls(
     project_id: str | None,
 ) -> None:
     """If user asked about defaults/profiles, ensure get_slurm_defaults is included."""
+    launchpad_calls = calls_by_source.setdefault("launchpad", [])
+    nickname = _extract_remote_profile_nickname(user_message)
+
+    submit_calls = [c for c in launchpad_calls if c.get("tool") == "submit_dogme_job"]
+    if submit_calls:
+        launchpad_calls[:] = [c for c in launchpad_calls if c.get("tool") != "submit_dogme_job"]
+
+        has_list_profiles = any(c.get("tool") == "list_ssh_profiles" for c in launchpad_calls)
+        has_get_defaults = any(c.get("tool") == "get_slurm_defaults" for c in launchpad_calls)
+
+        if not has_list_profiles:
+            launchpad_calls.insert(0, {"tool": "list_ssh_profiles", "params": {"user_id": user_id}})
+
+        if not has_get_defaults:
+            defaults_params: dict[str, str] = {"user_id": user_id}
+            if project_id:
+                defaults_params["project_id"] = project_id
+            if nickname:
+                defaults_params["profile_nickname"] = nickname
+            launchpad_calls.append({"tool": "get_slurm_defaults", "params": defaults_params})
+
+        logger.info(
+            "Removed direct remote submit call and preserved pre-approval profile discovery",
+            user_id=user_id,
+            project_id=project_id,
+            profile_nickname=nickname,
+            removed_calls=len(submit_calls),
+        )
+
     if not re.search(
         r'\b(defaults?|account|partition|slurm|hpc\d+)\b',
         user_message, re.IGNORECASE,
     ):
+        for call in launchpad_calls:
+            if call.get("tool") != "get_slurm_defaults":
+                continue
+            params = dict(call.get("params") or {})
+            if _looks_like_placeholder(params.get("ssh_profile_id")):
+                params.pop("ssh_profile_id", None)
+                if nickname and not params.get("profile_nickname"):
+                    params["profile_nickname"] = nickname
+                call["params"] = params
         return
 
-    launchpad_calls = calls_by_source.setdefault("launchpad", [])
     has_list_profiles = any(c.get("tool") == "list_ssh_profiles" for c in launchpad_calls)
     has_get_defaults = any(c.get("tool") == "get_slurm_defaults" for c in launchpad_calls)
 
+    for call in launchpad_calls:
+        if call.get("tool") != "get_slurm_defaults":
+            continue
+        params = dict(call.get("params") or {})
+        if _looks_like_placeholder(params.get("ssh_profile_id")):
+            params.pop("ssh_profile_id", None)
+            if nickname and not params.get("profile_nickname"):
+                params["profile_nickname"] = nickname
+            call["params"] = params
+
     if not (has_list_profiles and not has_get_defaults):
         return
-
-    nickname = None
-    nick_match = re.search(r'\bnickname\s+([a-zA-Z0-9._-]+)\b', user_message, re.IGNORECASE)
-    if nick_match:
-        cand = nick_match.group(1).strip()
-        if cand.lower() not in _INVALID_NICK_TOKENS:
-            nickname = cand
-
-    if not nickname:
-        profile_match = re.search(r'\bprofile\s+([a-zA-Z0-9._-]+)\b', user_message, re.IGNORECASE)
-        if profile_match:
-            cand = profile_match.group(1).strip()
-            if cand.lower() not in _INVALID_NICK_TOKENS:
-                nickname = cand
-
-    if not nickname:
-        hpc_match = re.search(r'\b(hpc\d+)\b', user_message, re.IGNORECASE)
-        if hpc_match:
-            nickname = hpc_match.group(1)
 
     defaults_params: dict[str, str] = {"user_id": user_id}
     if project_id:

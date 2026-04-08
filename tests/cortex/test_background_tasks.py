@@ -1148,6 +1148,41 @@ class TestSubmitJobAfterApproval:
         assert submitted["ssh_profile_id"] == "profile-123"
 
     @pytest.mark.asyncio
+    async def test_remote_submission_preserves_null_max_gpu_tasks(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "edited_params": {
+                "sample_name": "remote-test",
+                "mode": "RNA",
+                "input_directory": "remote:/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+                "remote_input_path": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+                "reference_genome": ["mm39"],
+                "execution_mode": "slurm",
+                "ssh_profile_nickname": "hpc3",
+                "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                "max_gpu_tasks": None,
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "remote-uuid", "work_directory": "/work/remote",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["execution_mode"] == "slurm"
+        assert submitted["ssh_profile_id"] == "profile-123"
+        assert "max_gpu_tasks" in submitted
+        assert submitted["max_gpu_tasks"] is None
+
+    @pytest.mark.asyncio
     async def test_stage_only_remote_request_calls_stage_remote_sample(self, session_factory, seed_data):
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
             "gate_action": "remote_stage",
