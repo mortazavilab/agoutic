@@ -93,9 +93,15 @@
   nested below the workflow root. Pipeline progress totals now aggregate task
   families instead of treating a single active `X of Y` counter as the whole
   workflow, so earlier completed singleton tasks contribute to the displayed
-  completed/total counts. The UI now labels the stdout-derived task-name list
-  as a recent sample rather than implying it is the authoritative running-job
-  count.
+  completed/total counts. Retry-heavy runs now keep retry attempts out of the
+  unique pipeline total and remaining-task count: failed attempts that are
+  later retried no longer inflate `Failed`, `Remaining`, or the denominator,
+  while Nextflow's `retries: N` signal is surfaced as its own UI metric.
+  Family-level progress now takes precedence over the top-level executor count
+  when that executor count includes retried attempts, preventing `executor >
+  slurm (N)` from overstating the pipeline total. The UI now labels the
+  stdout-derived task-name list as a recent sample rather than implying it is
+  the authoritative running-job count.
   (`launchpad/backends/slurm_backend.py`, `ui/appui_block_part2.py`,
   `tests/launchpad/test_slurm_backend.py`,
   `tests/test_slurm_backend_cache_flow.py`)

@@ -834,6 +834,7 @@ def render_block_part2(
                         total = tasks.get("total", 0)
                         completed_count = tasks.get("completed_count", 0)
                         failed_count = tasks.get("failed_count", 0)
+                        retried_count = tasks.get("retried_count", 0)
                         remaining_count = tasks.get("remaining_count", 0)
                         scheduler_running_count = tasks.get("scheduler_running_count")
                         scheduler_pending_count = tasks.get("scheduler_pending_count")
@@ -851,6 +852,8 @@ def render_block_part2(
                             summary_metrics["Remaining"] = remaining_count
                         elif observed_running_count:
                             summary_metrics["Observed Active"] = observed_running_count
+                        if retried_count:
+                            summary_metrics["Retries"] = retried_count
                         summary_metrics["Failed"] = failed_count
                         progress_stats(summary_metrics)
                         

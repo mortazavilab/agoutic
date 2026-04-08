@@ -837,6 +837,55 @@ def test_parse_task_status_texts_stdout_failed_goes_to_failed():
     assert "mainWorkflow:softwareVTask" in tasks["completed"]
 
 
+def test_parse_task_status_texts_retry_attempts_do_not_count_as_terminal_failures():
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content=(
+            "task_id\thash\tnative_id\tname\tstatus\texit\n"
+            "1\taa/bb0011\t1001\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
+            "2\tcc/dd0022\t1002\tmainWorkflow:softwareVTask\tCOMPLETED\t0\n"
+            "3\tee/ff0033\t1003\tmainWorkflow:doradoTask (1)\tFAILED\t1\n"
+            "4\tgg/hh0044\t1004\tmainWorkflow:doradoTask (1)\tCOMPLETED\t0\n"
+        ),
+        stdout_content=(
+            "executor >  slurm (554)\n"
+            "[10/9019] mainWorkflow:doradoTask (695) | 611 of 729, retries: 68\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert progress == int((613 / 731) * 90)
+    assert tasks["completed_count"] == 613
+    assert tasks["total"] == 731
+    assert tasks["remaining_count"] == 118
+    assert tasks["failed_count"] == 0
+    assert tasks["retried_count"] == 68
+    assert message == "Pipeline: 613/731 completed, 118 remaining, 68 retries"
+
+
+def test_parse_task_status_texts_prefers_unique_family_totals_over_executor_attempt_count():
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content=(
+            "task_id\thash\tnative_id\tname\tstatus\texit\n"
+            "1\taa/bb0011\t1001\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
+            "2\tcc/dd0022\t1002\tmainWorkflow:softwareVTask\tCOMPLETED\t0\n"
+        ),
+        stdout_content=(
+            "executor >  slurm (796)\n"
+            "[f1/a17ed] mainWorkflow:doradoTask (693) | 626 of 729, retries: 68\n"
+            "[80/9041d1] mainWorkflow:softwareVTask | 1 of 1 ✔\n"
+            "[ae/d5c965] mainWorkflow:doradoDownloadTask | 1 of 1 ✔\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert progress == int((628 / 731) * 90)
+    assert tasks["completed_count"] == 628
+    assert tasks["total"] == 731
+    assert tasks["remaining_count"] == 103
+    assert tasks["retried_count"] == 68
+    assert message == "Pipeline: 628/731 completed, 103 remaining, 68 retries"
+
+
 def test_parse_task_status_texts_strips_ansi_escape_codes():
     """ANSI cursor-control codes in SLURM stdout must be stripped before parsing."""
     _, tasks, _ = SlurmBackend._parse_task_status_texts(

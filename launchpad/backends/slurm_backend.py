@@ -127,6 +127,7 @@ class SlurmBackend:
         completed_count = int(tasks.get("completed_count", 0) or 0)
         failed_count = int(tasks.get("failed_count", 0) or 0)
         remaining_count = int(tasks.get("remaining_count", 0) or 0)
+        retried_count = int(tasks.get("retried_count", 0) or 0)
         observed_running_count = int(
             tasks.get("observed_running_count", len(tasks.get("running", []) or [])) or 0
         )
@@ -154,6 +155,9 @@ class SlurmBackend:
 
         if failed_count > 0:
             parts.append(f"{failed_count} failed")
+
+        if retried_count > 0:
+            parts.append(f"{retried_count} retries")
 
         return f"Pipeline: {', '.join(parts)}" if parts else None
 
@@ -703,10 +707,12 @@ class SlurmBackend:
         failed_tasks: list[str] = []
         running_tasks: list[str] = []
         submitted_count = 0
+        retried_count = 0
 
         trace_lines = trace_content.splitlines() if trace_content else []
+        terminal_status_by_task: dict[str, tuple[int, str]] = {}
         if len(trace_lines) > 1:
-            for line in trace_lines[1:]:
+            for line_index, line in enumerate(trace_lines[1:], start=1):
                 if not line.strip():
                     continue
                 parts = line.split("\t")
@@ -716,9 +722,17 @@ class SlurmBackend:
                 task_status = parts[4].strip()
                 if ":" not in task_name:
                     continue
-                if task_status == "COMPLETED" and task_name not in completed_tasks:
+                if task_status in {"COMPLETED", "FAILED", "ABORTED"}:
+                    terminal_status_by_task[task_name] = (line_index, task_status)
+
+        if terminal_status_by_task:
+            for task_name, (_line_index, task_status) in sorted(
+                terminal_status_by_task.items(),
+                key=lambda item: item[1][0],
+            ):
+                if task_status == "COMPLETED":
                     completed_tasks.append(task_name)
-                elif task_status in {"FAILED", "ABORTED"} and task_name not in failed_tasks:
+                elif task_status in {"FAILED", "ABORTED"}:
                     failed_tasks.append(task_name)
 
         # Strip ANSI escape codes so cursor-control sequences from
@@ -733,6 +747,13 @@ class SlurmBackend:
                 try:
                     count_str = line.split("(", 1)[1].split(")", 1)[0]
                     submitted_count = max(submitted_count, int(count_str))
+                except Exception:
+                    pass
+
+            retry_match = re.search(r'retries:\s*(\d+)\b', line, flags=re.IGNORECASE)
+            if retry_match:
+                try:
+                    retried_count = max(retried_count, int(retry_match.group(1)))
                 except Exception:
                     pass
 
@@ -806,7 +827,12 @@ class SlurmBackend:
             family_key = _task_family_key(task_name)
             failed_by_family[family_key] = failed_by_family.get(family_key, 0) + 1
 
-        family_keys = set(family_progress) | set(completed_by_family) | set(failed_by_family)
+        running_by_family: dict[str, int] = {}
+        for task_name in running_tasks:
+            family_key = _task_family_key(task_name)
+            running_by_family[family_key] = running_by_family.get(family_key, 0) + 1
+
+        family_keys = set(family_progress) | set(completed_by_family) | set(failed_by_family) | set(running_by_family)
         aggregate_completed = 0
         aggregate_failed = 0
         aggregate_total = 0
@@ -814,25 +840,33 @@ class SlurmBackend:
             progress_state = family_progress.get(family_key, {"completed": 0, "total": 0})
             completed_terminal = completed_by_family.get(family_key, 0)
             failed_terminal = failed_by_family.get(family_key, 0)
+            running_terminal = running_by_family.get(family_key, 0)
             aggregate_completed += max(progress_state["completed"], completed_terminal)
             aggregate_failed += failed_terminal
             aggregate_total += max(
                 progress_state["total"],
-                completed_terminal + failed_terminal,
+                completed_terminal + failed_terminal + running_terminal,
             )
 
-        if aggregate_total > 0:
-            submitted_count = max(submitted_count, aggregate_total)
+        unique_total = 0
+        if family_progress:
+            unique_total = aggregate_total
+        elif aggregate_total > 0:
+            unique_total = max(submitted_count, aggregate_total)
+
+        if unique_total <= 0:
+            unique_total = max(submitted_count, completed_count + len(running_tasks) + failed_count)
+
         if aggregate_completed > 0:
             completed_count = max(completed_count, aggregate_completed)
         if aggregate_failed > 0:
             failed_count = max(failed_count, aggregate_failed)
 
         inferred_running_count = 0
-        if submitted_count > 0:
-            inferred_running_count = max(submitted_count - completed_count - failed_count, 0)
+        if unique_total > 0:
+            inferred_running_count = max(unique_total - completed_count - failed_count, 0)
 
-        total = max(submitted_count, completed_count + len(running_tasks) + failed_count)
+        total = unique_total
         if total <= 0 and not completed_tasks and not running_tasks and not failed_tasks:
             if scheduler_status == "RUNNING":
                 return 10, None, "Pipeline starting..."
@@ -846,6 +880,7 @@ class SlurmBackend:
             "total": total,
             "completed_count": completed_count,
             "failed_count": failed_count,
+            "retried_count": retried_count,
             "remaining_count": inferred_running_count,
             "observed_running_count": len(running_tasks),
         }
