@@ -44,6 +44,7 @@ from appui_services import (
     _find_related_workflow_plan as _find_related_workflow_plan_impl,
     _workflow_highlight_steps as _workflow_highlight_steps_impl,
     create_project_server_side as _create_project_server_side_impl,
+    get_cached_job_status as _get_cached_job_status_impl,
     get_job_debug_info as _get_job_debug_info_impl,
     load_user_ssh_profiles as _load_user_ssh_profiles_impl,
     launchpad_headers as _launchpad_headers_impl,
@@ -288,6 +289,15 @@ def get_job_debug_info(run_uuid):
     return data
 
 
+def get_cached_job_status(run_uuid: str):
+    return _get_cached_job_status_impl(
+        run_uuid,
+        api_url=API_URL,
+        request_fn=make_authenticated_request,
+        timeout_seconds=LIVE_JOB_STATUS_TIMEOUT_SECONDS,
+    )
+
+
 def _render_md_with_dataframes(md: str, block_id: str, section: str):
     return _render_md_with_dataframes_impl(md, block_id, section)
 
@@ -460,6 +470,7 @@ def render_block(block, expected_project_id: str = ""):
         API_URL=API_URL,
         LIVE_JOB_STATUS_TIMEOUT_SECONDS=LIVE_JOB_STATUS_TIMEOUT_SECONDS,
         make_authenticated_request=make_authenticated_request,
+        get_cached_job_status=get_cached_job_status,
         _render_md_with_dataframes=_render_md_with_dataframes,
         _render_embedded_dataframes=_render_embedded_dataframes,
         _find_related_workflow_plan=_find_related_workflow_plan,

@@ -40,6 +40,38 @@ def get_session_cookie() -> Optional[str]:
         return None
 
 
+def get_current_user_state(api_url: str) -> tuple:
+    """
+    Get the current user's information, distinguishing server errors from
+    actual unauthenticated state.
+
+    Returns:
+        (user_dict | None, error_message | None, server_unavailable: bool)
+    """
+    session_token = get_session_cookie()
+    if not session_token:
+        return None, None, False
+
+    try:
+        response = requests.get(
+            f"{api_url}/auth/me",
+            cookies={"session": session_token},
+            timeout=5,
+        )
+        if response.status_code == 200:
+            return response.json(), None, False
+        elif response.status_code == 403:
+            return response.json().get("user"), None, False
+        else:
+            return None, None, False
+    except (requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ReadTimeout) as e:
+        return None, str(e), True
+    except Exception as e:
+        return None, str(e), False
+
+
 def get_current_user(api_url: str) -> Optional[Dict]:
     """
     Get the current user's information from the API.
@@ -50,28 +82,10 @@ def get_current_user(api_url: str) -> Optional[Dict]:
     Returns:
         dict | None: User info dict, or None if not authenticated
     """
-    session_token = get_session_cookie()
-    
-    if not session_token:
-        return None
-    
-    try:
-        response = requests.get(
-            f"{api_url}/auth/me",
-            cookies={"session": session_token},
-            timeout=5
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        elif response.status_code == 403:
-            # User is authenticated but not active
-            return response.json().get("user")
-        else:
-            return None
-    except Exception as e:
-        st.error(f"Failed to get user info: {e}")
-        return None
+    user, error_message, server_unavailable = get_current_user_state(api_url)
+    if error_message and not server_unavailable:
+        st.error(f"Failed to get user info: {error_message}")
+    return user
 
 
 def require_auth(api_url: str) -> Dict:
@@ -91,7 +105,19 @@ def require_auth(api_url: str) -> Dict:
         >>> user = require_auth("http://localhost:8000")
         >>> st.write(f"Hello, {user['display_name']}!")
     """
-    user = get_current_user(api_url)
+    user, error_message, server_unavailable = get_current_user_state(api_url)
+
+    if server_unavailable:
+        st.error("⚠️ AGOUTIC server is not responding")
+        st.info(
+            "The server may be busy with a heavy workload (e.g. reconcile). "
+            "Your session is still valid — please wait and try again."
+        )
+        if error_message:
+            st.caption(f"Detail: {error_message}")
+        if st.button("🔄 Retry"):
+            st.rerun()
+        st.stop()
     
     if not user:
         st.error("🔒 You are not logged in")

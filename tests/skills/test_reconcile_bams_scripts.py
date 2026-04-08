@@ -315,6 +315,88 @@ def test_reconcile_script_preflight_ready_with_manual_gtf(tmp_path: Path):
     assert payload["execution_defaults"]["underlying_script_id"] == "reconcile_bams/reconcileBams"
 
 
+def test_reconcile_script_maps_remote_workflow_gtf_to_local_default(tmp_path: Path):
+    project_root = tmp_path / "project"
+    wf5 = project_root / "workflow5" / "annot"
+    wf6 = project_root / "workflow6" / "annot"
+    wf5.mkdir(parents=True)
+    wf6.mkdir(parents=True)
+
+    bam1 = wf5 / "sample1.GRCh38.annotated.bam"
+    bam2 = wf6 / "sample2.GRCh38.annotated.bam"
+    _write_annotated_bam(bam1, "sample1")
+    _write_annotated_bam(bam2, "sample2")
+
+    data_root = tmp_path / "data"
+    local_gtf = data_root / "references" / "GRCh38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    local_gtf.parent.mkdir(parents=True)
+    _write_minimal_gtf(local_gtf)
+
+    remote_gtf = "/share/crsp/lab/seyedam/share/agoutic/elnaz/ref/grch38/gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    config_text = (
+        "params.genome_annot_refs = [\\n"
+        f"    [name: 'GRCh38', genome: '/share/crsp/lab/seyedam/share/agoutic/elnaz/ref/grch38/GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta', annot: '{remote_gtf}']\\n"
+        "]\\n"
+    )
+    (project_root / "workflow5" / "nextflow.config").write_text(config_text, encoding="utf-8")
+    (project_root / "workflow6" / "nextflow.config").write_text(config_text, encoding="utf-8")
+
+    env = dict(os.environ)
+    env["AGOUTIC_DATA"] = str(data_root)
+
+    result = _run_script(
+        RECONCILE,
+        [
+            "--workflow-dir", str(project_root / "workflow5"),
+            "--workflow-dir", str(project_root / "workflow6"),
+            "--preflight-only",
+            "--json",
+        ],
+        env=env,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "preflight_ready"
+    assert payload["gtf"]["source"] == "workflow_config"
+    assert Path(payload["gtf"]["path"]) == local_gtf.resolve()
+    assert payload["annotation_evidence"]
+    assert payload["annotation_evidence"][0]["configured_annotation_gtf"] == remote_gtf
+
+
+def test_reconcile_script_maps_remote_manual_gtf_to_local_default(tmp_path: Path):
+    bam = tmp_path / "sample1.GRCh38.annotated.bam"
+    _write_annotated_bam(bam, "sample1")
+
+    data_root = tmp_path / "data"
+    local_gtf = data_root / "references" / "GRCh38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    local_gtf.parent.mkdir(parents=True)
+    _write_minimal_gtf(local_gtf)
+
+    env = dict(os.environ)
+    env["AGOUTIC_DATA"] = str(data_root)
+    remote_gtf = "/share/crsp/lab/seyedam/share/agoutic/elnaz/ref/grch38/gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+
+    result = _run_script(
+        RECONCILE,
+        [
+            "--input-bam",
+            str(bam),
+            "--annotation-gtf",
+            remote_gtf,
+            "--preflight-only",
+            "--json",
+        ],
+        env=env,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "preflight_ready"
+    assert payload["gtf"]["source"] == "manual"
+    assert Path(payload["gtf"]["path"]) == local_gtf.resolve()
+
+
 def test_reconcile_command_uses_unbuffered_python():
     module = _load_reconcile_module()
     command = module._build_reconcile_command(
@@ -404,3 +486,35 @@ def test_reconcile_script_json_mode_keeps_stdout_parseable(monkeypatch, tmp_path
     assert payload["status"] == "completed"
     assert payload["execution"]["stdout"] == "child stdout\n"
     assert payload["execution"]["stderr"] == "child stderr\n"
+
+
+# ── Thread cap helper tests ─────────────────────────────────────────────────
+
+def test_bounded_reconcile_threads_returns_default(monkeypatch):
+    module = _load_reconcile_module()
+    monkeypatch.delenv("RECONCILE_BAMS_DEFAULT_THREADS", raising=False)
+    monkeypatch.delenv("RECONCILE_BAMS_MAX_THREADS", raising=False)
+    assert module._bounded_reconcile_threads() == 4
+
+
+def test_bounded_reconcile_threads_caps_high_value(monkeypatch):
+    module = _load_reconcile_module()
+    monkeypatch.delenv("RECONCILE_BAMS_DEFAULT_THREADS", raising=False)
+    monkeypatch.delenv("RECONCILE_BAMS_MAX_THREADS", raising=False)
+    assert module._bounded_reconcile_threads(64) == 8
+
+
+def test_bounded_reconcile_threads_respects_env_vars(monkeypatch):
+    module = _load_reconcile_module()
+    monkeypatch.setenv("RECONCILE_BAMS_DEFAULT_THREADS", "2")
+    monkeypatch.setenv("RECONCILE_BAMS_MAX_THREADS", "6")
+    assert module._bounded_reconcile_threads() == 2
+    assert module._bounded_reconcile_threads(10) == 6
+
+
+def test_bounded_reconcile_threads_floor_is_one(monkeypatch):
+    module = _load_reconcile_module()
+    monkeypatch.delenv("RECONCILE_BAMS_DEFAULT_THREADS", raising=False)
+    monkeypatch.delenv("RECONCILE_BAMS_MAX_THREADS", raising=False)
+    assert module._bounded_reconcile_threads(0) == 1
+    assert module._bounded_reconcile_threads(-5) == 1

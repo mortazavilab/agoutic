@@ -42,6 +42,14 @@ REMOTE_STAGE_MCP_TIMEOUT = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
 logger = get_logger(__name__)
 
 
+def _bounded_reconcile_threads(raw_value: int | None = None) -> int:
+    """Return a safe thread count, clamped to env-configurable bounds."""
+    default = int(os.environ.get("RECONCILE_BAMS_DEFAULT_THREADS", "4"))
+    cap = int(os.environ.get("RECONCILE_BAMS_MAX_THREADS", "8"))
+    value = raw_value if raw_value is not None else default
+    return max(1, min(value, cap))
+
+
 def _build_reconcile_script_args(job_params: dict) -> list[str]:
     bam_inputs = job_params.get("bam_inputs") or []
     bam_paths = [
@@ -62,12 +70,15 @@ def _build_reconcile_script_args(job_params: dict) -> list[str]:
     for bam_path in bam_paths:
         script_args.extend(["--input-bam", bam_path])
 
+    raw_threads = job_params.get("threads")
+    clamped_threads = _bounded_reconcile_threads(int(raw_threads) if raw_threads not in (None, "") else None)
+    script_args.extend(["--threads", str(clamped_threads)])
+
     scalar_flags = [
         ("gene_prefix", "--gene_prefix"),
         ("tx_prefix", "--tx_prefix"),
         ("id_tag", "--id_tag"),
         ("gene_tag", "--gene_tag"),
-        ("threads", "--threads"),
         ("exon_merge_distance", "--exon_merge_distance"),
         ("min_tpm", "--min_tpm"),
         ("min_samples", "--min_samples"),

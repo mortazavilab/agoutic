@@ -1,4 +1,5 @@
 import datetime
+import time
 
 import streamlit as st
 
@@ -83,6 +84,62 @@ def get_job_debug_info(
     except Exception as exc:
         return None, str(exc)
     return None, None
+
+
+def get_cached_job_status(
+    run_uuid: str,
+    *,
+    api_url: str,
+    request_fn,
+    timeout_seconds: float,
+    cache_seconds: float = 2.0,
+):
+    """Fetch job status with a short-lived session-state cache for rerenders."""
+    if not run_uuid:
+        return {}, False
+
+    now = time.time()
+    cache_key = f"_job_status_cache_{run_uuid}"
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, dict):
+        fetched_at = float(cached.get("fetched_at") or 0.0)
+        cached_status = cached.get("job_status")
+        if isinstance(cached_status, dict) and (now - fetched_at) < cache_seconds:
+            return cached_status, True
+
+    timeout = float(timeout_seconds or 0) if timeout_seconds else 0.0
+    if timeout <= 0:
+        timeout = 1.5
+    timeout = min(timeout, 1.5)
+
+    try:
+        resp = request_fn(
+            "GET",
+            f"{api_url}/jobs/{run_uuid}/status",
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            job_status = resp.json()
+            if isinstance(job_status, dict):
+                st.session_state[cache_key] = {
+                    "fetched_at": now,
+                    "job_status": job_status,
+                }
+                transfer_state = str(job_status.get("transfer_state") or "").strip().lower()
+                if transfer_state:
+                    st.session_state[f"_transfer_state_{run_uuid}"] = transfer_state
+                st.session_state[f"_job_polled_at_{run_uuid}"] = (
+                    datetime.datetime.now(datetime.timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
+                return job_status, True
+    except Exception:
+        pass
+
+    if isinstance(cached, dict) and isinstance(cached.get("job_status"), dict):
+        return cached["job_status"], False
+    return {}, False
 
 
 def _workflow_highlight_steps(workflow_block: dict) -> list[dict]:

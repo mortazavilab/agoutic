@@ -418,6 +418,70 @@ class TestBlockRequiresFullRefresh:
         assert fn({"type": "EXECUTION_JOB", "status": "DONE"}) is False
 
 
+class TestCachedJobStatus:
+    def test_fetches_status_and_updates_session_cache(self):
+        fake_st = SimpleNamespace(session_state={})
+        fake_time = SimpleNamespace(time=lambda: 100.0)
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "status": "RUNNING",
+                "transfer_state": "downloading_outputs",
+                "message": "Syncing outputs",
+            },
+        )
+        request = MagicMock(return_value=response)
+        fn = _load_function(
+            "get_cached_job_status",
+            {
+                "st": fake_st,
+                "time": fake_time,
+                "make_authenticated_request": request,
+                "LIVE_JOB_STATUS_TIMEOUT_SECONDS": 60,
+            },
+        )
+
+        status, ok = fn("run-123")
+
+        assert ok is True
+        assert status["transfer_state"] == "downloading_outputs"
+        assert fake_st.session_state["_transfer_state_run-123"] == "downloading_outputs"
+        request.assert_called_once_with(
+            "GET",
+            "http://api.test/jobs/run-123/status",
+            timeout=1.5,
+        )
+
+    def test_reuses_recent_cached_status_without_refetch(self):
+        fake_now = {"value": 100.0}
+        fake_st = SimpleNamespace(session_state={})
+        fake_time = SimpleNamespace(time=lambda: fake_now["value"])
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"status": "RUNNING", "transfer_state": "downloading_outputs"},
+        )
+        request = MagicMock(return_value=response)
+        fn = _load_function(
+            "get_cached_job_status",
+            {
+                "st": fake_st,
+                "time": fake_time,
+                "make_authenticated_request": request,
+                "LIVE_JOB_STATUS_TIMEOUT_SECONDS": 60,
+            },
+        )
+
+        first_status, first_ok = fn("run-456")
+        fake_now["value"] = 101.0
+        request.reset_mock()
+        second_status, second_ok = fn("run-456")
+
+        assert first_ok is True
+        assert second_ok is True
+        assert second_status == first_status
+        request.assert_not_called()
+
+
 class TestFullPageRefreshBootstrapExpression:
     def test_expression_turns_on_when_flag_appears(self):
         auto_refresh = True

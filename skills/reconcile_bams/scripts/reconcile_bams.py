@@ -34,6 +34,14 @@ _INCLUDE_PATTERN = re.compile(r"includeConfig\s+['\"](?P<path>[^'\"]+)['\"]")
 _GTF_PATH_PATTERN = re.compile(r"['\"](?P<path>[^'\"]+\.gtf(?:\.gz)?)['\"]", re.IGNORECASE)
 
 
+def _bounded_reconcile_threads(raw_value: int | None = None) -> int:
+    """Return a safe thread count, clamped to env-configurable bounds."""
+    default = int(os.environ.get("RECONCILE_BAMS_DEFAULT_THREADS", "4"))
+    cap = int(os.environ.get("RECONCILE_BAMS_MAX_THREADS", "8"))
+    value = raw_value if raw_value is not None else default
+    return max(1, min(value, cap))
+
+
 class ReconcileInputError(Exception):
     pass
 
@@ -111,6 +119,29 @@ def _resolve_default_gtf(reference: str) -> Path | None:
     return gtf_path if gtf_path.exists() else None
 
 
+def _normalized_gtf_name(path_like: str | Path) -> str:
+    name = Path(str(path_like)).name.lower()
+    if name.endswith(".gz"):
+        name = name[:-3]
+    return name
+
+
+def _resolve_local_gtf_equivalent(raw_path: str | Path, reference: str) -> Path | None:
+    """Map a remote config/manual GTF to the local reference copy when safe.
+
+    Reconcile preflight runs locally, but workflow configs may point at the
+    remote Watson reference tree (for example `/share/.../GRCh38/...gtf`).
+    When that remote path names the same canonical GTF file as the local
+    reference catalog, use the local copy instead of forcing manual approval.
+    """
+    default_gtf = _resolve_default_gtf(reference)
+    if default_gtf is None:
+        return None
+    if _normalized_gtf_name(raw_path) == _normalized_gtf_name(default_gtf):
+        return default_gtf
+    return None
+
+
 def _manual_gtf_matches_reference(manual_gtf: Path, reference: str) -> bool:
     manual_lower = str(manual_gtf).lower()
     ref_lower = reference.lower()
@@ -171,13 +202,15 @@ def _collect_config_files(workflow_dir: Path) -> list[Path]:
     return ordered
 
 
-def _resolve_gtf_candidate(raw_path: str, base_dir: Path) -> Path | None:
+def _resolve_gtf_candidate(raw_path: str, base_dir: Path, reference: str) -> Path | None:
     candidate = Path(raw_path).expanduser()
     if not candidate.is_absolute():
         candidate = (base_dir / candidate).resolve()
     else:
         candidate = candidate.resolve()
-    return candidate if candidate.exists() and candidate.is_file() else None
+    if candidate.exists() and candidate.is_file():
+        return candidate
+    return _resolve_local_gtf_equivalent(raw_path, reference)
 
 
 def _discover_workflow_annotation_gtf(workflow_dirs: list[Path], reference: str) -> tuple[Path | None, list[dict], str | None]:
@@ -195,7 +228,7 @@ def _discover_workflow_annotation_gtf(workflow_dirs: list[Path], reference: str)
                 if ".gtf" not in raw_line.lower():
                     continue
                 for match in _GTF_PATH_PATTERN.finditer(raw_line):
-                    candidate = _resolve_gtf_candidate(match.group("path"), config_path.parent)
+                    candidate = _resolve_gtf_candidate(match.group("path"), config_path.parent, reference)
                     if candidate is None:
                         continue
                     workflow_candidates.add(candidate)
@@ -204,6 +237,7 @@ def _discover_workflow_annotation_gtf(workflow_dirs: list[Path], reference: str)
                             "workflow": str(workflow_dir.resolve()),
                             "file": str(config_path),
                             "line": line_no,
+                            "configured_annotation_gtf": match.group("path"),
                             "annotation_gtf": str(candidate),
                             "source": "workflow_config",
                         }
@@ -297,6 +331,10 @@ def _resolve_selected_gtf(
     """Return (selected_gtf, source, resolution_issue)."""
     if annotation_gtf:
         manual_gtf = Path(annotation_gtf).expanduser().resolve()
+        if (not manual_gtf.exists() or not manual_gtf.is_file()) and annotation_gtf:
+            mapped_gtf = _resolve_local_gtf_equivalent(annotation_gtf, reference)
+            if mapped_gtf is not None:
+                manual_gtf = mapped_gtf
         if not manual_gtf.exists() or not manual_gtf.is_file():
             return None, "manual", f"Manual annotation GTF does not exist or is not a file: {manual_gtf}"
         if not _manual_gtf_matches_reference(manual_gtf, reference):
@@ -425,8 +463,6 @@ def _run_reconcile_command(
     stderr_thread.join()
     return return_code, "".join(stdout_chunks), "".join(stderr_chunks)
 
-    return selected_gtf, gtf_source, None
-
 
 def _build_manual_gtf_needed_payload(
     *,
@@ -493,7 +529,7 @@ def main() -> int:
     parser.add_argument("--tx-prefix", "--tx_prefix", dest="tx_prefix", default="CONST", help="Consolidated novel transcript ID prefix.")
     parser.add_argument("--id-tag", "--id_tag", dest="id_tag", default="TX", help="BAM tag used for transcript IDs.")
     parser.add_argument("--gene-tag", "--gene_tag", dest="gene_tag", default="GX", help="BAM tag used for gene IDs.")
-    parser.add_argument("--threads", type=int, default=os.cpu_count() or 1, help="Number of worker threads for reconcileBams.py.")
+    parser.add_argument("--threads", type=int, default=_bounded_reconcile_threads(), help="Number of worker threads for reconcileBams.py (capped by RECONCILE_BAMS_MAX_THREADS).")
     parser.add_argument("--exon-merge-distance", "--exon_merge_distance", dest="exon_merge_distance", type=int, default=5, help="Merge exons separated by at most this many bases.")
     parser.add_argument("--min-tpm", "--min_tpm", dest="min_tpm", type=float, default=1.0, help="Minimum TPM required in a sample.")
     parser.add_argument("--min-samples", "--min_samples", dest="min_samples", type=int, default=2, help="Minimum number of samples that must meet min_tpm.")
@@ -502,6 +538,7 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
 
     args = parser.parse_args()
+    args.threads = _bounded_reconcile_threads(args.threads)
 
     try:
         project_dir = Path(args.project_dir).expanduser().resolve()

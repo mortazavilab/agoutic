@@ -16,6 +16,7 @@ def render_block_part1(
     API_URL,
     LIVE_JOB_STATUS_TIMEOUT_SECONDS,
     make_authenticated_request,
+    get_cached_job_status,
     _render_md_with_dataframes,
     _render_embedded_dataframes,
     _find_related_workflow_plan,
@@ -90,25 +91,16 @@ def render_block_part1(
             # ── Inline sync progress (visible right in the agent response) ──
             _sync_run_uuid = content.get("_sync_run_uuid", "")
             if _sync_run_uuid:
-                _sync_ts = ""
                 _sync_detail = ""
                 _sync_message = ""
-                _sync_state = "unknown"
-                try:
-                    _sync_resp = make_authenticated_request(
-                        "GET",
-                        f"{API_URL}/jobs/{_sync_run_uuid}/status",
-                        timeout=LIVE_JOB_STATUS_TIMEOUT_SECONDS,
-                    )
-                    if _sync_resp.status_code == 200:
-                        _sj = _sync_resp.json()
-                        _sync_state = (_sj.get("transfer_state") or "").strip().lower()
-                        _sync_detail = (_sj.get("transfer_detail") or "").strip()
-                        _sync_message = (_sj.get("message") or "").strip()
-                        # Cache so auto-refresh keeps running
-                        st.session_state[f"_transfer_state_{_sync_run_uuid}"] = _sync_state
-                except Exception:
-                    pass
+                _sync_state = (
+                    st.session_state.get(f"_transfer_state_{_sync_run_uuid}") or "downloading_outputs"
+                ).strip().lower()
+                _sj, _ = get_cached_job_status(_sync_run_uuid)
+                if isinstance(_sj, dict):
+                    _sync_state = (_sj.get("transfer_state") or _sync_state).strip().lower()
+                    _sync_detail = (_sj.get("transfer_detail") or "").strip()
+                    _sync_message = (_sj.get("message") or "").strip()
                 if _sync_state == "downloading_outputs":
                     st.info(f"📥 **Sync in progress** — {_sync_detail or 'transferring files…'}", icon="⏳")
                 elif _sync_state == "outputs_downloaded":
@@ -511,7 +503,9 @@ def render_block_part1(
                     tx_prefix_default = extracted_params.get("tx_prefix") or "CONST"
                     id_tag_default = extracted_params.get("id_tag") or "TX"
                     gene_tag_default = extracted_params.get("gene_tag") or "GX"
-                    threads_default = int(extracted_params.get("threads") or (os.cpu_count() or 1))
+                    _max_threads = int(os.environ.get("RECONCILE_BAMS_MAX_THREADS", "8"))
+                    _default_threads = int(os.environ.get("RECONCILE_BAMS_DEFAULT_THREADS", "4"))
+                    threads_default = min(int(extracted_params.get("threads") or _default_threads), _max_threads)
                     exon_merge_distance_default = int(extracted_params.get("exon_merge_distance") or 5)
                     min_tpm_default = float(extracted_params.get("min_tpm") if extracted_params.get("min_tpm") is not None else 1.0)
                     min_samples_default = int(extracted_params.get("min_samples") or 2)
@@ -535,7 +529,7 @@ def render_block_part1(
                         id_tag = col3.text_input("Transcript ID Tag", value=id_tag_default)
                         gene_tag = col4.text_input("Gene ID Tag", value=gene_tag_default)
                         col5, col6 = st.columns(2)
-                        threads = col5.number_input("Threads", min_value=1, value=threads_default, step=1)
+                        threads = col5.number_input("Threads", min_value=1, max_value=_max_threads, value=threads_default, step=1, help=f"Capped at {_max_threads} to avoid host starvation")
                         exon_merge_distance = col6.number_input("Exon Merge Distance", min_value=0, value=exon_merge_distance_default, step=1)
                         col7, col8 = st.columns(2)
                         min_tpm = col7.number_input("Min TPM", min_value=0.0, value=min_tpm_default, step=0.1, format="%.3f")
@@ -558,8 +552,14 @@ def render_block_part1(
                                     continue
                                 evidence_file = item.get("file") or "config"
                                 evidence_line = item.get("line")
+                                configured_gtf = item.get("configured_annotation_gtf") or ""
                                 evidence_gtf = item.get("annotation_gtf") or ""
-                                st.caption(f"{evidence_file}:{evidence_line} -> `{evidence_gtf}`")
+                                if configured_gtf and evidence_gtf and configured_gtf != evidence_gtf:
+                                    st.caption(
+                                        f"{evidence_file}:{evidence_line} -> `{configured_gtf}` mapped to `{evidence_gtf}`"
+                                    )
+                                else:
+                                    st.caption(f"{evidence_file}:{evidence_line} -> `{evidence_gtf}`")
 
                         message = preflight_summary.get("message") if isinstance(preflight_summary, dict) else None
                         if message:

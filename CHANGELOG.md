@@ -2,6 +2,23 @@
 
 ### Improvements
 
+- **Sync, browsing, and user-data prompts now bypass the wasted first LLM pass** —
+  Cortex now detects these intents earlier in the chat pipeline, skips the
+  first-pass/tag-parsing path when it is not needed, and emits immediate
+  progress for result-sync requests instead of making the UI wait through an
+  unnecessary model round trip. This improves responsiveness for commands such
+  as `sync workflow6 locally` and other direct override-style requests.
+  (`cortex/chat_stages/early_overrides.py`, `cortex/chat_stages/__init__.py`,
+  `tests/cortex/test_early_overrides.py`)
+
+- **Long-running jobs now keep user sessions alive more reliably** — session
+  expiry now defaults to 72 hours, Cortex exposes `POST /auth/heartbeat`, the
+  auth middleware renews sessions when they are past half-life, and the
+  Streamlit UI sends heartbeats while jobs are running. This reduces unwanted
+  logouts during long SLURM and sync activity without changing explicit logout
+  behavior.
+  (`cortex/config.py`, `cortex/auth.py`, `cortex/middleware.py`, `ui/appUI.py`)
+
 - **Dogme GPU task concurrency now defaults to no explicit Nextflow cap** —
   Launchpad now treats omitted `max_gpu_tasks` as "no maximum", so Dogme
   Nextflow configs no longer emit `maxForks` for GPU-bound processes unless an
@@ -26,6 +43,31 @@
   `docs/user_guide_execution_modes.md`, `README.md`)
 
 ### Bug Fixes
+
+- **Reconcile BAM preflight now treats matching remote Watson GTF paths as the
+  local canonical reference** — when workflow configs or manual approval input
+  point at a remote `annot:` GTF whose filename matches the local reference
+  catalog for the selected genome, reconcile now maps that path to the local
+  canonical GTF instead of forcing a manual correction. The approval UI also
+  shows the original configured path and the mapped local path so users can see
+  exactly what was resolved.
+  (`skills/reconcile_bams/scripts/reconcile_bams.py`,
+  `ui/appui_block_part1.py`, `tests/skills/test_reconcile_bams_scripts.py`)
+
+- **Reconcile approvals no longer default to all CPU cores, and auth timeouts
+  no longer masquerade as global logout** — reconcile thread counts are now
+  bounded in the wrapper script, underlying script, submission builder, and UI
+  approval form using env-configurable defaults/caps, which avoids host
+  starvation after approval. The Streamlit auth layer now distinguishes
+  `/auth/me` timeouts and connection failures from a real logged-out state, so
+  users see a server-unavailable/retry message instead of the misleading
+  `You are not logged in` prompt when the API is temporarily overloaded.
+  (`skills/reconcile_bams/scripts/reconcile_bams.py`,
+  `skills/reconcile_bams/scripts/reconcileBams.py`,
+  `cortex/workflow_submission.py`, `ui/appui_block_part1.py`, `ui/auth.py`,
+  `tests/skills/test_reconcile_bams_scripts.py`,
+  `tests/cortex/test_workflow_submission_reconcile_threads.py`,
+  `tests/ui/test_auth_helpers.py`)
 
 - **Project task lists now isolate the active workflow instead of mixing in
   older runs** — task sync now keeps only the latest active workflow plan (or,

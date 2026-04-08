@@ -10,6 +10,15 @@ import concurrent.futures
 
 __version__ = "1.1.5"
 
+
+def _bounded_reconcile_threads(raw_value: int | None = None) -> int:
+    """Return a safe thread count, clamped to env-configurable bounds."""
+    default = int(os.environ.get("RECONCILE_BAMS_DEFAULT_THREADS", "4"))
+    cap = int(os.environ.get("RECONCILE_BAMS_MAX_THREADS", "8"))
+    value = raw_value if raw_value is not None else default
+    return max(1, min(value, cap))
+
+
 # ==============================================================================
 # GTF Parsing
 # ==============================================================================
@@ -422,12 +431,13 @@ def main():
     ap.add_argument("--tx_prefix", default="CONST", help="Consolidated novel transcript ID prefix.")
     ap.add_argument("--id_tag", default="TX", help="BAM tag for transcript ID.")
     ap.add_argument("--gene_tag", default="GX", help="BAM tag for gene ID.")
-    ap.add_argument("--threads", type=int, default=os.cpu_count(), help="Number of threads to use.")
+    ap.add_argument("--threads", type=int, default=_bounded_reconcile_threads(), help="Number of threads to use (capped by RECONCILE_BAMS_MAX_THREADS).")
     ap.add_argument("--exon_merge_distance", type=int, default=5, help="Merge exon blocks that are <= this many nucleotides apart (default: 5).")
     ap.add_argument("--min_tpm", type=float, default=1.0, help="Minimum TPM (transcripts per million) required in a sample to count as expressed. Default 1.0.")
     ap.add_argument("--min_samples", type=int, default=2, help="Minimum number of samples that must meet the TPM threshold for a transcript to be retained (default: 2).")
     ap.add_argument("--filter_known", action='store_true', help="Also apply TPM filtering to known transcripts (by default only novel transcripts are filtered).")
     args = ap.parse_args()
+    args.threads = _bounded_reconcile_threads(args.threads)
     # Ensure min_samples is at least 2, unless explicitly set to 1
     if args.min_samples is None or args.min_samples < 1:
         args.min_samples = 2
