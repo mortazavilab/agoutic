@@ -178,6 +178,21 @@ class TestManualResultSyncCommand:
         assert calls[0]["tool"] == "sync_job_results"
         assert calls[0]["params"]["run_uuid"] == "11111111-1111-1111-1111-111111111111"
 
+    def test_sync_results_prefers_matched_run_uuid_even_with_project_id(self):
+        calls = _auto_generate_data_calls(
+            "sync results back to local for workflow1",
+            "analyze_job_results",
+            history_blocks=self._blocks_with_runs(),
+            project_dir="/tmp/proj",
+            project_id="proj-123",
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "sync_job_results"
+        assert calls[0]["params"] == {
+            "run_uuid": "11111111-1111-1111-1111-111111111111",
+        }
+
     def test_sync_results_force_retry_sets_force_param(self):
         calls = _auto_generate_data_calls(
             "retry sync outputs to local for workflow2",
@@ -190,6 +205,22 @@ class TestManualResultSyncCommand:
         assert calls[0]["tool"] == "sync_job_results"
         assert calls[0]["params"]["run_uuid"] == "22222222-2222-2222-2222-222222222222"
         assert calls[0]["params"]["force"] is True
+
+    def test_sync_results_falls_back_to_db_resolution_when_history_cannot_match_workflow(self):
+        calls = _auto_generate_data_calls(
+            "sync results back to local for workflow9",
+            "analyze_job_results",
+            history_blocks=self._blocks_with_runs(),
+            project_dir="/tmp/proj",
+            project_id="proj-123",
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "sync_job_results"
+        assert calls[0]["params"] == {
+            "project_id": "proj-123",
+            "workflow_label": "workflow9",
+        }
 
     def test_show_files(self):
         blocks = self._blocks_with_job("/tmp/proj/workflow1")

@@ -1110,18 +1110,25 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             backend = get_backend("slurm")
             get_transfer_detail = getattr(backend, "get_transfer_detail", None)
             transfer_detail = get_transfer_detail(run_uuid) if callable(get_transfer_detail) else None
+            transfer_state = job.transfer_state
+            transfer_failed = (transfer_state or "").strip().lower() == "transfer_failed"
+            transfer_message = transfer_detail or job.error_message
             return {
                 "run_uuid": run_uuid,
-                "status": "RUNNING",
-                "progress_percent": 99,
-                "message": "Copying results back to the local workflow...",
+                "status": "FAILED" if transfer_failed else "RUNNING",
+                "progress_percent": 0 if transfer_failed else 99,
+                "message": transfer_message or (
+                    "Remote job completed, but copying results back to the local workflow failed."
+                    if transfer_failed
+                    else "Copying results back to the local workflow..."
+                ),
                 "tasks": {},
                 "execution_mode": "slurm",
                 "run_stage": job.run_stage,
                 "slurm_job_id": job.slurm_job_id,
                 "slurm_state": job.slurm_state,
-                "transfer_state": job.transfer_state,
-                "transfer_detail": transfer_detail,
+                "transfer_state": transfer_state,
+                "transfer_detail": transfer_message,
                 "result_destination": job.result_destination,
                 "work_directory": _effective_job_work_directory(job),
                 **_job_timing_payload(job),
@@ -1145,6 +1152,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                         "slurm_job_id": job.slurm_job_id,
                         "slurm_state": job.slurm_state,
                         "transfer_state": job.transfer_state,
+                        "transfer_detail": job.error_message if (job.transfer_state or "").strip().lower() == "transfer_failed" else None,
                         "result_destination": job.result_destination,
                     }
                 )

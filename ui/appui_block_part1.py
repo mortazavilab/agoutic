@@ -92,6 +92,7 @@ def render_block_part1(
             if _sync_run_uuid:
                 _sync_ts = ""
                 _sync_detail = ""
+                _sync_message = ""
                 _sync_state = "unknown"
                 try:
                     _sync_resp = make_authenticated_request(
@@ -103,6 +104,7 @@ def render_block_part1(
                         _sj = _sync_resp.json()
                         _sync_state = (_sj.get("transfer_state") or "").strip().lower()
                         _sync_detail = (_sj.get("transfer_detail") or "").strip()
+                        _sync_message = (_sj.get("message") or "").strip()
                         # Cache so auto-refresh keeps running
                         st.session_state[f"_transfer_state_{_sync_run_uuid}"] = _sync_state
                 except Exception:
@@ -112,7 +114,13 @@ def render_block_part1(
                 elif _sync_state == "outputs_downloaded":
                     st.success("✅ Results synced successfully.")
                 elif _sync_state == "transfer_failed":
-                    st.error("❌ Sync failed. You can retry with **sync results locally with force**.")
+                    _detail = _sync_detail or _sync_message
+                    if _detail:
+                        st.error(
+                            f"❌ Sync failed: {_detail}\n\nYou can retry with **sync results locally with force**."
+                        )
+                    else:
+                        st.error("❌ Sync failed. You can retry with **sync results locally with force**.")
 
             _all_blocks = st.session_state.get("blocks", [])
             _related_workflow = _find_related_workflow_plan(block, _all_blocks)

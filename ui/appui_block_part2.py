@@ -493,6 +493,8 @@ def render_block_part2(
                 _transfer_detail = (job_status.get("transfer_detail") or "").strip()
                 if _transfer_detail and sync_state == "active":
                     info_callout(f"📥 {_transfer_detail}", kind="info")
+                elif _transfer_detail and sync_state == "failed":
+                    info_callout(f"❌ {_transfer_detail}", kind="error")
                 
                 # Status indicator
                 if status_str == "COMPLETED":

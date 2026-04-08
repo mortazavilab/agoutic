@@ -111,6 +111,47 @@ async def test_get_job_status_repolls_completed_slurm_job_while_local_copyback_p
 
 
 @pytest.mark.asyncio
+async def test_get_job_status_reports_transfer_failure_detail_for_completed_slurm_job(monkeypatch):
+    fake_session = _FakeSession()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        return SimpleNamespace(
+            run_uuid="run-fail",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.COMPLETED,
+            progress_percent=100,
+            error_message="No result artifacts found on remote at /remote/workflow5/output.",
+            run_stage="completed",
+            slurm_job_id="50052941",
+            slurm_state="COMPLETED",
+            transfer_state="transfer_failed",
+            result_destination="local",
+            nextflow_work_dir="/local/project/workflow5",
+            remote_work_dir="/remote/project/workflow5",
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+        )
+
+    class _FakeBackend:
+        def get_transfer_detail(self, run_uuid):
+            assert run_uuid == "run-fail"
+            return None
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", lambda mode: _FakeBackend())
+
+    payload = await launchpad_app.get_job_status("run-fail")
+
+    assert payload["status"] == "FAILED"
+    assert payload["transfer_state"] == "transfer_failed"
+    assert payload["transfer_detail"] == "No result artifacts found on remote at /remote/workflow5/output."
+    assert "No result artifacts found" in payload["message"]
+
+
+@pytest.mark.asyncio
 async def test_get_job_status_reports_live_reconcile_step_for_running_script(monkeypatch, tmp_path):
     fake_session = _FakeSession()
     stdout_log = tmp_path / "run-3.stdout.log"

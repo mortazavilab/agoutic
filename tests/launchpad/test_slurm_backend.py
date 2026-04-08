@@ -371,7 +371,7 @@ async def test_copy_selected_results_fails_fast_on_rsync_error(monkeypatch, tmp_
     local_root = Path(job.nextflow_work_dir)
     local_root.mkdir(parents=True, exist_ok=True)
 
-    async def fake_update(run_uuid, state):
+    async def fake_update(run_uuid, state, **kwargs):
         states.append(state)
 
     async def fake_discover(**kwargs):
@@ -430,7 +430,7 @@ async def test_copy_selected_results_uses_remote_output_dir_when_set(tmp_path, m
         discover_kwargs_received.update(kwargs)
         return {"directories": ["bams"], "files": []}
 
-    async def fake_update(run_uuid, state):
+    async def fake_update(run_uuid, state, **kwargs):
         pass
 
     async def fake_download_outputs(**kwargs):
@@ -481,7 +481,7 @@ async def test_copy_selected_results_derives_output_dir_for_legacy_jobs(tmp_path
         discover_kwargs_received.update(kwargs)
         return {"directories": ["stats"], "files": []}
 
-    async def fake_update(run_uuid, state):
+    async def fake_update(run_uuid, state, **kwargs):
         pass
 
     async def fake_download_outputs(**kwargs):
@@ -524,10 +524,13 @@ async def test_copy_selected_results_fails_on_empty_artifacts(tmp_path, monkeypa
     )
     states = []
 
-    async def fake_update(run_uuid, state):
+    async def fake_update(run_uuid, state, **kwargs):
         states.append(state)
 
+    discover_calls = []
+
     async def fake_discover(**kwargs):
+        discover_calls.append(kwargs.get("remote_output_dir"))
         return {"directories": [], "files": []}
 
     monkeypatch.setattr(backend, "_update_job_transfer_state", fake_update)
@@ -537,7 +540,66 @@ async def test_copy_selected_results_fails_on_empty_artifacts(tmp_path, monkeypa
 
     assert result["success"] is False
     assert "No result artifacts found" in result["message"]
+    assert discover_calls == ["/remote/workflow1/output", "/remote/workflow1"]
     assert states == ["downloading_outputs", "transfer_failed"]
+
+
+@pytest.mark.asyncio
+async def test_copy_selected_results_falls_back_to_workflow_root_when_output_dir_empty(tmp_path, monkeypatch):
+    backend = SlurmBackend()
+    job = SimpleNamespace(
+        nextflow_work_dir=str(tmp_path / "workflow1"),
+        remote_work_dir="/remote/workflow1",
+        remote_output_dir="/remote/workflow1/output",
+        input_directory=str(tmp_path / "input"),
+    )
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    local_root = Path(job.nextflow_work_dir)
+    local_root.mkdir(parents=True, exist_ok=True)
+
+    discover_calls = []
+    download_calls = []
+
+    async def fake_discover(**kwargs):
+        remote_dir = kwargs.get("remote_output_dir")
+        discover_calls.append(remote_dir)
+        if remote_dir == "/remote/workflow1/output":
+            return {"directories": [], "files": []}
+        return {"directories": ["bams"], "files": ["run.txt"]}
+
+    async def fake_update(run_uuid, state, **kwargs):
+        return None
+
+    async def fake_download_outputs(**kwargs):
+        download_calls.append(kwargs.get("remote_path"))
+        remote_path = kwargs.get("remote_path")
+        if remote_path == "/remote/workflow1/bams":
+            (local_root / "bams").mkdir(parents=True, exist_ok=True)
+        elif remote_path == "/remote/workflow1":
+            (local_root / "run.txt").write_text("ok")
+        return {"ok": True, "bytes_transferred": 42}
+
+    monkeypatch.setattr(backend, "_update_job_transfer_state", fake_update)
+    monkeypatch.setattr(backend, "_discover_remote_result_artifacts", fake_discover)
+    monkeypatch.setattr(backend._transfer_manager, "download_outputs", fake_download_outputs)
+
+    result = await backend._copy_selected_results_to_local(run_uuid="run-1", job=job, profile=profile)
+
+    assert result["success"] is True
+    assert discover_calls == ["/remote/workflow1/output", "/remote/workflow1"]
+    assert download_calls == ["/remote/workflow1/bams", "/remote/workflow1"]
 
 
 @pytest.mark.asyncio

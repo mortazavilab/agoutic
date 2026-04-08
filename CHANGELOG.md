@@ -48,30 +48,25 @@
   names that the analyzer cannot find.
   (`cortex/plan_params.py`, `tests/cortex/test_planner_cache_steps.py`)
 
-- **Result sync now searches the correct remote output directory** — SLURM
-  result synchronization was searching for result subdirectories (annot, bams,
-  etc.) in `remote_work_dir` instead of `remote_output_dir`, causing it to find
-  zero artifacts and report false "success" without copying any files. The sync
-  code now uses `remote_output_dir` (where Nextflow writes `--outdir` results
-  directly), and for pre-migration jobs with NULL `remote_output_dir`, derives
-  it as `remote_work_dir / "output"`. Added guard against empty-artifact
-  discovery to fail explicitly instead of silently succeeding with zero bytes.
-  (`launchpad/backends/slurm_backend.py`,
-  `tests/launchpad/test_slurm_backend.py`)
-
-- **Sync command resolves workflow UUIDs directly from database instead of
-  relying on conversation history** — when the user names a workflow like
-  "workflow8" and the UUID cannot be confidently matched from conversation
-  history, the sync command now passes `project_id` + `workflow_label` to
-  launchpad, which resolves the correct job by querying
-  `workflow_folder_name` and falls back to path suffix matching on remote/local
-  work directories. This ensures the right job is synced even when history
-  blocks are stale or incomplete. New endpoint: `POST
-  /jobs/sync-results-by-workflow`. Updated MCP tool parameters and
-  data-call-generator to prefer server-side resolution.
+- **Workflow result sync now resolves the right run, probes the right remote
+  location, and surfaces actionable failures** — manual sync now keeps using
+  the exact `run_uuid` when the named workflow is confidently matched from
+  conversation history, while still falling back to server-side
+  `project_id` + `workflow_label` resolution when history is stale or
+  incomplete. On the Launchpad side, artifact discovery now prefers
+  `remote_output_dir`, derives it as `remote_work_dir / "output"` for older
+  rows, and falls back to the workflow root when an existing `output/`
+  directory is empty but the actual result folders live directly under the
+  workflow directory. Sync failures now persist and return the real transfer or
+  artifact-discovery error so the UI shows a meaningful reason instead of a
+  generic retry message. New endpoint: `POST /jobs/sync-results-by-workflow`.
   (`launchpad/app.py`, `launchpad/db.py`, `launchpad/mcp_tools.py`,
-  `launchpad/mcp_server.py`, `cortex/data_call_generator.py`,
-  `cortex/chat_stages/overrides.py`)
+  `launchpad/mcp_server.py`, `launchpad/backends/slurm_backend.py`,
+  `cortex/data_call_generator.py`, `cortex/chat_stages/overrides.py`,
+  `ui/appui_block_part1.py`, `ui/appui_block_part2.py`,
+  `tests/launchpad/test_app_status_endpoint.py`,
+  `tests/launchpad/test_slurm_backend.py`,
+  `tests/cortex/test_auto_generate_data.py`)
 
 - **Cross-workflow reconcile now resolves owner paths correctly and no longer
   hard-fails when a workflow lacks an `annot/` directory** — project path

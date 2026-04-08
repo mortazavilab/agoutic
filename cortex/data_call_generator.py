@@ -248,12 +248,14 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
         _requested_workflow = _requested_workflow_match.group(1).lower() if _requested_workflow_match else ""
 
         _target_run_uuid = _requested_run_uuid or ""
+        _matched_requested_workflow_uuid = False
         if not _target_run_uuid and _requested_workflow and workflows:
             for _wf in reversed(workflows):
                 _wf_dir = (_wf.get("work_dir") or "").rstrip("/").lower()
                 _wf_uuid = _wf.get("run_uuid") or ""
                 if _wf_uuid and _wf_dir.endswith(f"/{_requested_workflow}"):
                     _target_run_uuid = _wf_uuid
+                    _matched_requested_workflow_uuid = True
                     break
 
         if not _target_run_uuid:
@@ -264,8 +266,13 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
         # the specific workflow the user named).  This avoids syncing the
         # wrong job when conversation history is stale.
         _params: dict = {}
-        if _target_run_uuid and (_target_run_uuid == _requested_run_uuid or not _requested_workflow):
-            # UUID was explicitly provided or no specific workflow was named
+        if _target_run_uuid and (
+            _target_run_uuid == _requested_run_uuid
+            or not _requested_workflow
+            or _matched_requested_workflow_uuid
+        ):
+            # UUID was explicitly provided, no specific workflow was named,
+            # or we matched the named workflow exactly from history.
             _params["run_uuid"] = _target_run_uuid
         elif _requested_workflow and project_id:
             # Let the server resolve the correct UUID from the DB

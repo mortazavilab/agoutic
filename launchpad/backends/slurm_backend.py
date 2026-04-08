@@ -729,6 +729,8 @@ class SlurmBackend:
         info = self._transfer_progress.get(run_uuid)
         if not info:
             return None
+        if info.get("error"):
+            return str(info.get("error"))
         parts: list[str] = []
         # Folder context: "bams/ (2/5 folders)"
         current_folder = info.get("current_folder", "")
@@ -774,16 +776,53 @@ class SlurmBackend:
                 "done_folders": [],
                 "current_file": "",
             }
-            artifacts = await self._discover_remote_result_artifacts(profile=profile, remote_output_dir=remote_output_dir)
+            artifact_root = remote_output_dir
+            artifacts = await self._discover_remote_result_artifacts(
+                profile=profile,
+                remote_output_dir=remote_output_dir,
+            )
+            if (
+                not artifacts.get("directories")
+                and not artifacts.get("files")
+                and remote_work_dir
+                and remote_output_dir
+                and PurePosixPath(remote_work_dir) != PurePosixPath(remote_output_dir)
+            ):
+                logger.warning(
+                    "No result artifacts found in remote output dir; falling back to workflow root",
+                    run_uuid=run_uuid,
+                    remote_output_dir=remote_output_dir,
+                    remote_work_dir=remote_work_dir,
+                )
+                self._transfer_progress[run_uuid] = {
+                    "current_folder": "discovering artifacts in workflow root",
+                    "folders_done": 0,
+                    "folders_total": 0,
+                    "done_folders": [],
+                    "current_file": "",
+                }
+                fallback_artifacts = await self._discover_remote_result_artifacts(
+                    profile=profile,
+                    remote_output_dir=remote_work_dir,
+                )
+                if fallback_artifacts.get("directories") or fallback_artifacts.get("files"):
+                    artifacts = fallback_artifacts
+                    artifact_root = remote_work_dir
+
             if not artifacts.get("directories") and not artifacts.get("files"):
+                searched_locations = [remote_output_dir]
+                if artifact_root != remote_work_dir and remote_work_dir:
+                    searched_locations.append(remote_work_dir)
+                searched_locations = [path for path in searched_locations if path]
                 raise RuntimeError(
-                    f"No result artifacts found on remote at {remote_output_dir}. "
+                    f"No result artifacts found on remote at {' or '.join(searched_locations)}. "
                     "The remote job may not have produced output yet."
                 )
             logger.info(
                 "Starting result sync (per-directory)",
                 run_uuid=run_uuid,
                 remote_output_dir=remote_output_dir,
+                artifact_root=artifact_root,
                 local_work_dir=local_work_dir,
                 remote_artifacts=artifacts,
             )
@@ -816,7 +855,7 @@ class SlurmBackend:
                 }
                 transfer = await self._transfer_manager.download_outputs(
                     profile=profile,
-                    remote_path=str(PurePosixPath(remote_output_dir) / dirname),
+                    remote_path=str(PurePosixPath(artifact_root) / dirname),
                     local_path=str(Path(local_work_dir) / dirname),
                     on_progress=_on_rsync_progress,
                 )
@@ -845,7 +884,7 @@ class SlurmBackend:
                 }
                 transfer = await self._transfer_manager.download_outputs(
                     profile=profile,
-                    remote_path=remote_output_dir,
+                    remote_path=artifact_root,
                     local_path=local_work_dir,
                     include_patterns=list(self._RESULT_SYNC_FILE_PATTERNS),
                     exclude_patterns=["*"],
@@ -880,18 +919,33 @@ class SlurmBackend:
                 "local_work_dir": local_work_dir,
             }
         except Exception as exc:
-            await self._update_job_transfer_state(run_uuid, "transfer_failed")
-            logger.error("Selective result copy-back failed", run_uuid=run_uuid, error=str(exc))
+            _error_message = str(exc)
+            self._transfer_progress[run_uuid] = {
+                "error": _error_message,
+                "current_folder": "sync failed",
+                "folders_done": 0,
+                "folders_total": 0,
+                "done_folders": [],
+                "current_file": "",
+            }
+            await self._update_job_transfer_state(
+                run_uuid,
+                "transfer_failed",
+                error_message=_error_message,
+            )
+            logger.error("Selective result copy-back failed", run_uuid=run_uuid, error=_error_message)
             return {
                 "success": False,
                 "status": "transfer_failed",
-                "message": str(exc),
+                "message": _error_message,
                 "run_uuid": run_uuid,
                 "remote_work_dir": remote_work_dir,
                 "local_work_dir": local_work_dir,
             }
         finally:
-            self._transfer_progress.pop(run_uuid, None)
+            _progress = self._transfer_progress.get(run_uuid)
+            if not (_progress and _progress.get("error")):
+                self._transfer_progress.pop(run_uuid, None)
             self._result_sync_tasks.pop(run_uuid, None)
 
     async def sync_results_to_local(self, *, run_uuid: str, force: bool = False) -> dict:
@@ -1470,10 +1524,22 @@ class SlurmBackend:
         from launchpad.db import update_job_field
         await update_job_field(run_uuid, "run_stage", stage.value)
 
-    async def _update_job_transfer_state(self, run_uuid: str, state: str) -> None:
-        """Update the transfer_state on the DogmeJob record."""
-        from launchpad.db import update_job_field
-        await update_job_field(run_uuid, "transfer_state", state)
+    async def _update_job_transfer_state(
+        self,
+        run_uuid: str,
+        state: str,
+        *,
+        error_message: str | None = None,
+    ) -> None:
+        """Update transfer state and optional transfer error detail."""
+        from launchpad.db import update_job_fields
+
+        fields = {"transfer_state": state}
+        if error_message is not None:
+            fields["error_message"] = error_message
+        elif state in {"downloading_outputs", "outputs_downloaded", "inputs_uploaded"}:
+            fields["error_message"] = None
+        await update_job_fields(run_uuid, fields)
 
     async def _update_job_slurm_info(
         self, run_uuid: str, slurm_job_id: str, remote_work: str, remote_output: str
