@@ -83,6 +83,23 @@
   (`cortex/tool_dispatch.py`, `cortex/remote_orchestration.py`,
   `tests/cortex/test_chat_data_calls.py`)
 
+- **Remote SLURM live status now reports scheduler concurrency and pipeline
+  totals more accurately** — Launchpad status polling now tails large
+  Nextflow trace files instead of reading them wholesale, falls back to stdout
+  progress hints when trace reads fail, and separates unfinished-task counts
+  from actual SLURM job counts in the UI. Scheduler metrics now count Nextflow
+  child jobs under the workflow subtree using real SLURM short states such as
+  `R` and `PD`, instead of dropping them when their working directories are
+  nested below the workflow root. Pipeline progress totals now aggregate task
+  families instead of treating a single active `X of Y` counter as the whole
+  workflow, so earlier completed singleton tasks contribute to the displayed
+  completed/total counts. The UI now labels the stdout-derived task-name list
+  as a recent sample rather than implying it is the authoritative running-job
+  count.
+  (`launchpad/backends/slurm_backend.py`, `ui/appui_block_part2.py`,
+  `tests/launchpad/test_slurm_backend.py`,
+  `tests/test_slurm_backend_cache_flow.py`)
+
 - **Cross-workflow reconcile now resolves owner paths correctly and no longer
   hard-fails when a workflow lacks an `annot/` directory** — project path
   resolution now prefers the project owner's username/UUID path instead of the

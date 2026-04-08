@@ -54,7 +54,7 @@ class _FakeStatusConn(_FakeConn):
             return SimpleNamespace(stdout=self.sacct_output, stderr="", exit_status=0)
         if "squeue -j" in command:
             return SimpleNamespace(stdout=self.squeue_output, stderr="", exit_status=0)
-        if "_trace.txt" in command and ("cat " in command or "find " in command):
+        if "tail -n 5000" in command and ("*_trace.txt" in command or "/trace.txt" in command):
             return SimpleNamespace(stdout=self.trace_output, stderr="", exit_status=0)
         if "tail -n 500" in command and "slurm-" in command and ".out" in command:
             return SimpleNamespace(stdout=self.slurm_out_output, stderr="", exit_status=0)
@@ -705,7 +705,7 @@ def test_parse_task_status_texts_excludes_numbered_tasks_already_completed_in_tr
     assert progress == 72
     assert tasks["completed_count"] == 4
     assert tasks["running"] == []
-    assert message == "Pipeline: 4/5 completed"
+    assert message == "Pipeline: 4/5 completed, 1 remaining"
 
 
 def test_parse_task_status_texts_no_double_count_across_naming_schemes():
@@ -754,7 +754,7 @@ def test_parse_task_status_texts_uses_latest_stdout_event_per_hash():
     assert tasks["completed"] == ["mainWorkflow:doradoTask (1)"]
     assert tasks["total"] == 2
     assert tasks["running"] == ["mainWorkflow:softwareVTask"]
-    assert message == "Pipeline: 1/2 completed, 1 running"
+    assert message == "Pipeline: 1/2 completed, 1 remaining"
 
 
 def test_parse_task_status_texts_stdout_only_no_trace():
@@ -774,6 +774,7 @@ def test_parse_task_status_texts_stdout_only_no_trace():
     assert tasks["completed_count"] == 1
     assert tasks["completed"] == ["mainWorkflow:doradoDownloadTask"]
     assert len(tasks["running"]) == 3
+    assert tasks["total"] == 5
     assert tasks["failed_count"] == 0
 
 
@@ -795,7 +796,7 @@ def test_parse_task_status_texts_slurm_submitted_process_format():
     assert "mainWorkflow:doradoTask (2)" in tasks["running"]
     assert "mainWorkflow:softwareVTask" in tasks["running"]
     assert "mainWorkflow:doradoTask (3)" in tasks["running"]
-    assert message == "Pipeline: 0/3 completed, 3 running"
+    assert message == "Pipeline: 0/3 completed, 3 remaining"
 
 
 def test_parse_task_status_texts_slurm_process_gt_completion():

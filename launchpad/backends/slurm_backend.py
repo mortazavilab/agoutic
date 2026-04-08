@@ -51,6 +51,113 @@ class SlurmBackend:
         self._transfer_manager = FileTransferManager()
 
     @staticmethod
+    def _parse_scheduler_queue_text(
+        *,
+        queue_output: str,
+        parent_job_id: str,
+        remote_work: str,
+    ) -> dict[str, int]:
+        scheduler_running_count = 0
+        scheduler_pending_count = 0
+        workflow_root = str(remote_work or "").rstrip("/")
+
+        for line in (queue_output or "").splitlines():
+            if not line.strip():
+                continue
+            parts = [part.strip() for part in line.split("|", 3)]
+            if len(parts) < 4:
+                continue
+            job_id, raw_state, job_name, work_dir = parts
+            if job_id == str(parent_job_id):
+                continue
+
+            normalized_job_name = str(job_name or "").strip()
+            normalized_work_dir = str(work_dir or "").rstrip("/")
+            if normalized_job_name and not normalized_job_name.startswith("nf-"):
+                continue
+
+            if workflow_root:
+                in_workflow_tree = (
+                    normalized_work_dir == workflow_root
+                    or normalized_work_dir.startswith(f"{workflow_root}/")
+                )
+                if not in_workflow_tree:
+                    continue
+
+            state = raw_state.upper().split()[0] if raw_state else "UNKNOWN"
+            if state in {"R", "RUNNING", "CG", "COMPLETING", "CF", "CONFIGURING", "STAGE_OUT"}:
+                scheduler_running_count += 1
+            elif state in {"PD", "PENDING"}:
+                scheduler_pending_count += 1
+
+        return {
+            "scheduler_running_count": scheduler_running_count,
+            "scheduler_pending_count": scheduler_pending_count,
+        }
+
+    async def _read_scheduler_job_counts(
+        self,
+        *,
+        conn,
+        remote_work: str,
+        slurm_job_id: str,
+        ssh_username: str | None,
+    ) -> dict[str, int] | None:
+        if not remote_work or not ssh_username:
+            return None
+
+        quoted_username = shlex.quote(str(ssh_username))
+        quoted_work = shlex.quote(str(remote_work))
+        result = await conn.run(
+            "squeue "
+            f"-u {quoted_username} "
+            "--noheader "
+            "--format='%i|%T|%j|%Z' "
+            "2>/dev/null"
+        )
+        return self._parse_scheduler_queue_text(
+            queue_output=result.stdout or "",
+            parent_job_id=slurm_job_id,
+            remote_work=remote_work,
+        )
+
+    @staticmethod
+    def _build_pipeline_message(*, tasks: dict, scheduler_status: str) -> str | None:
+        total = int(tasks.get("total", 0) or 0)
+        completed_count = int(tasks.get("completed_count", 0) or 0)
+        failed_count = int(tasks.get("failed_count", 0) or 0)
+        remaining_count = int(tasks.get("remaining_count", 0) or 0)
+        observed_running_count = int(
+            tasks.get("observed_running_count", len(tasks.get("running", []) or [])) or 0
+        )
+        scheduler_running_count = tasks.get("scheduler_running_count")
+        scheduler_pending_count = tasks.get("scheduler_pending_count")
+
+        parts: list[str] = []
+        if total > 0:
+            parts.append(f"{completed_count}/{total} completed")
+
+        if remaining_count > 0:
+            parts.append(f"{remaining_count} remaining")
+        elif observed_running_count > 0 and scheduler_status == "RUNNING":
+            parts.append(f"{observed_running_count} active")
+
+        if scheduler_running_count is not None:
+            scheduler_running_count = int(scheduler_running_count or 0)
+            if scheduler_running_count > 0 or scheduler_pending_count:
+                parts.append(f"{scheduler_running_count} SLURM running")
+
+        if scheduler_pending_count is not None:
+            scheduler_pending_count = int(scheduler_pending_count or 0)
+            if scheduler_pending_count > 0:
+                parts.append(f"{scheduler_pending_count} SLURM pending")
+
+        if failed_count > 0:
+            parts.append(f"{failed_count} failed")
+
+        return f"Pipeline: {', '.join(parts)}" if parts else None
+
+    @staticmethod
     def _compute_remote_input_fingerprint(remote_path: str) -> str:
         return hashlib.sha256(f"remote:{str(remote_path or '').strip()}".encode("utf-8")).hexdigest()
 
@@ -455,6 +562,19 @@ class SlurmBackend:
                         slurm_job_id=str(job.slurm_job_id),
                         scheduler_status=agoutic_status,
                     )
+                    if tasks and agoutic_status == "RUNNING":
+                        scheduler_counts = await self._read_scheduler_job_counts(
+                            conn=conn,
+                            remote_work=remote_work_dir,
+                            slurm_job_id=str(job.slurm_job_id),
+                            ssh_username=getattr(profile, "ssh_username", None),
+                        )
+                        if scheduler_counts:
+                            tasks.update(scheduler_counts)
+                            task_message = self._build_pipeline_message(
+                                tasks=tasks,
+                                scheduler_status=agoutic_status,
+                            )
                     if task_message and agoutic_status == "RUNNING":
                         message = task_message
                     elif task_message and agoutic_status == "FAILED":
@@ -524,14 +644,23 @@ class SlurmBackend:
     ) -> tuple[int, dict | None, str | None]:
         """Read remote trace/stdout files and derive task-level progress."""
         quoted_remote_work = shlex.quote(remote_work)
-        # Read the trace file directly by name, falling back to find.
-        # The config writes ${params.sample}_trace.txt in the work dir.
-        trace_result = await conn.run(
-            f"cat {quoted_remote_work}/*_trace.txt 2>/dev/null "
-            f"|| cat {quoted_remote_work}/trace.txt 2>/dev/null "
-            f"|| true"
-        )
-        trace_content = trace_result.stdout or ""
+        # Read only the tail of the trace file. Large Nextflow runs can make
+        # the full trace too large for a single SSH stdout payload.
+        trace_content = ""
+        try:
+            trace_result = await conn.run(
+                f"tail -n 5000 {quoted_remote_work}/*_trace.txt 2>/dev/null "
+                f"|| tail -n 5000 {quoted_remote_work}/trace.txt 2>/dev/null "
+                f"|| true"
+            )
+            trace_content = trace_result.stdout or ""
+        except Exception as exc:
+            logger.warning(
+                "Failed to read remote Nextflow trace tail; falling back to stdout-only task progress",
+                remote_work=remote_work,
+                slurm_job_id=slurm_job_id,
+                error=str(exc),
+            )
 
         stdout_path = f"{remote_work}/slurm-{slurm_job_id}.out"
         stdout_result = await conn.run(
@@ -560,6 +689,16 @@ class SlurmBackend:
         stdout_content: str,
         scheduler_status: str,
     ) -> tuple[int, dict | None, str | None]:
+        def _task_suffix(name: str) -> str:
+            """Return the last task segment for cross-prefix matching."""
+            parts = name.rsplit(":", 1)
+            return parts[-1] if parts else name
+
+        def _task_family_key(name: str) -> str:
+            """Return a family key that collapses numbered task instances."""
+            suffix = _task_suffix(name).strip()
+            return re.sub(r"\s*\(\d+\)$", "", suffix)
+
         completed_tasks: list[str] = []
         failed_tasks: list[str] = []
         running_tasks: list[str] = []
@@ -586,6 +725,7 @@ class SlurmBackend:
         # Nextflow's default ANSI log mode don't break line parsing.
         _ansi_escape = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\x1b\[\?[0-9;]*[A-Za-z]|\r')
         clean_stdout = _ansi_escape.sub('', stdout_content)
+        family_progress: dict[str, dict[str, int]] = {}
 
         task_events_by_hash: dict[str, tuple[str, bool]] = {}
         for line in clean_stdout.splitlines():
@@ -611,6 +751,20 @@ class SlurmBackend:
                 task_name = f"{task_name} {match.group(1)}"
             if not task_name:
                 continue
+
+            progress_match = re.search(r'\|\s*(\d+)\s+of\s+(\d+)\b', line)
+            if progress_match:
+                try:
+                    family_key = _task_family_key(task_name)
+                    progress_state = family_progress.setdefault(
+                        family_key,
+                        {"completed": 0, "total": 0},
+                    )
+                    progress_state["completed"] = max(progress_state["completed"], int(progress_match.group(1)))
+                    progress_state["total"] = max(progress_state["total"], int(progress_match.group(2)))
+                except Exception:
+                    pass
+
             is_completed_stdout = "✔" in line
             is_failed_stdout = not is_completed_stdout and "FAILED" in line.upper()
             task_events_by_hash[hash_part] = (task_name, is_completed_stdout, is_failed_stdout)
@@ -618,14 +772,6 @@ class SlurmBackend:
         # Use trace file as authoritative source for completed/failed.
         # Only fall back to stdout ✔/FAILED when trace has no results.
         trace_has_results = bool(completed_tasks or failed_tasks)
-
-        # Build suffix set for cross-name matching (trace uses full pipeline
-        # prefix like "basecall:basecallWorkflow:doradoTask" while stdout uses
-        # short names like "mainWorkflow:doradoTask").
-        def _task_suffix(name: str) -> str:
-            """Return 'lastSegment (N)' for matching across naming schemes."""
-            parts = name.rsplit(":", 1)
-            return parts[-1] if parts else name
 
         terminal_suffixes = {
             _task_suffix(t) for t in completed_tasks + failed_tasks
@@ -647,7 +793,46 @@ class SlurmBackend:
             if task_name not in running_tasks:
                 running_tasks.append(task_name)
 
-        total = max(submitted_count, len(completed_tasks) + len(running_tasks) + len(failed_tasks))
+        completed_count = len(completed_tasks)
+        failed_count = len(failed_tasks)
+
+        completed_by_family: dict[str, int] = {}
+        for task_name in completed_tasks:
+            family_key = _task_family_key(task_name)
+            completed_by_family[family_key] = completed_by_family.get(family_key, 0) + 1
+
+        failed_by_family: dict[str, int] = {}
+        for task_name in failed_tasks:
+            family_key = _task_family_key(task_name)
+            failed_by_family[family_key] = failed_by_family.get(family_key, 0) + 1
+
+        family_keys = set(family_progress) | set(completed_by_family) | set(failed_by_family)
+        aggregate_completed = 0
+        aggregate_failed = 0
+        aggregate_total = 0
+        for family_key in family_keys:
+            progress_state = family_progress.get(family_key, {"completed": 0, "total": 0})
+            completed_terminal = completed_by_family.get(family_key, 0)
+            failed_terminal = failed_by_family.get(family_key, 0)
+            aggregate_completed += max(progress_state["completed"], completed_terminal)
+            aggregate_failed += failed_terminal
+            aggregate_total += max(
+                progress_state["total"],
+                completed_terminal + failed_terminal,
+            )
+
+        if aggregate_total > 0:
+            submitted_count = max(submitted_count, aggregate_total)
+        if aggregate_completed > 0:
+            completed_count = max(completed_count, aggregate_completed)
+        if aggregate_failed > 0:
+            failed_count = max(failed_count, aggregate_failed)
+
+        inferred_running_count = 0
+        if submitted_count > 0:
+            inferred_running_count = max(submitted_count - completed_count - failed_count, 0)
+
+        total = max(submitted_count, completed_count + len(running_tasks) + failed_count)
         if total <= 0 and not completed_tasks and not running_tasks and not failed_tasks:
             if scheduler_status == "RUNNING":
                 return 10, None, "Pipeline starting..."
@@ -659,25 +844,22 @@ class SlurmBackend:
             "completed": completed_tasks,
             "running": running_tasks[-5:] if len(running_tasks) > 5 else running_tasks,
             "total": total,
-            "completed_count": len(completed_tasks),
-            "failed_count": len(failed_tasks),
+            "completed_count": completed_count,
+            "failed_count": failed_count,
+            "remaining_count": inferred_running_count,
+            "observed_running_count": len(running_tasks),
         }
 
         if scheduler_status == "COMPLETED":
-            return 100, tasks, f"Pipeline: {len(completed_tasks)}/{max(total, len(completed_tasks))} completed"
+            return 100, tasks, f"Pipeline: {completed_count}/{max(total, completed_count)} completed"
 
-        progress = int((len(completed_tasks) / total) * 90) if total > 0 else 10
+        progress = int((completed_count / total) * 90) if total > 0 else 10
         progress = max(progress, 10 if scheduler_status == "RUNNING" else progress)
 
-        msg_parts = []
-        if total > 0:
-            msg_parts.append(f"{len(completed_tasks)}/{total} completed")
-        if running_tasks:
-            msg_parts.append(f"{len(running_tasks)} running")
-        if failed_tasks:
-            msg_parts.append(f"{len(failed_tasks)} failed")
-
-        message = f"Pipeline: {', '.join(msg_parts)}" if msg_parts else None
+        message = SlurmBackend._build_pipeline_message(
+            tasks=tasks,
+            scheduler_status=scheduler_status,
+        )
         return progress, tasks, message
 
     @classmethod

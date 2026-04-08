@@ -20,6 +20,19 @@ class _FakeConn:
         self.closed = True
 
 
+class _FakeTaskStatusConn:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.run_calls = []
+
+    async def run(self, command, check=False):
+        self.run_calls.append((command, check))
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 class _FakeWriteConn:
     def __init__(self):
         self.mkdir_calls = []
@@ -343,6 +356,117 @@ def test_needs_local_result_copy_only_for_local_or_both_destinations():
     assert SlurmBackend._needs_local_result_copy(local_dest) is True
     assert SlurmBackend._needs_local_result_copy(both_dest) is True
     assert SlurmBackend._needs_local_result_copy(missing_local) is False
+
+
+def test_parse_task_status_texts_uses_stdout_progress_hint_when_trace_missing():
+    stdout = "\n".join(
+        [
+            "executor > slurm (729)",
+            "[bf/6ad31d] mainWorkflow:doradoTask(520) | 417 of 729",
+            "[80/9041d1] mainWorkflow:softwareVTask | 1 of 1 ✔",
+        ]
+    )
+
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content="",
+        stdout_content=stdout,
+        scheduler_status="RUNNING",
+    )
+
+    assert progress == int((417 / 729) * 90)
+    assert tasks["total"] == 730
+    assert tasks["completed_count"] == 418
+    assert tasks["remaining_count"] == 312
+    assert message == "Pipeline: 418/730 completed, 312 remaining"
+
+
+@pytest.mark.asyncio
+async def test_read_remote_task_status_falls_back_to_stdout_when_trace_read_fails():
+    backend = SlurmBackend()
+    fake_conn = _FakeTaskStatusConn(
+        responses=[
+            RuntimeError("Separator is found, but chunk is longer than limit"),
+            SimpleNamespace(
+                stdout="executor > slurm (729)\n[bf/6ad31d] mainWorkflow:doradoTask(520) | 417 of 729\n",
+                stderr="",
+                exit_status=0,
+            ),
+        ]
+    )
+
+    progress, tasks, message = await backend._read_remote_task_status(
+        conn=fake_conn,
+        remote_work="/remote/workflow9",
+        slurm_job_id="12345",
+        scheduler_status="RUNNING",
+    )
+
+    assert len(fake_conn.run_calls) == 2
+    assert fake_conn.run_calls[0][0].startswith("tail -n 5000 ")
+    assert fake_conn.run_calls[1][0] == "tail -n 500 /remote/workflow9/slurm-12345.out 2>/dev/null || true"
+    assert progress == int((417 / 729) * 90)
+    assert tasks["completed_count"] == 417
+    assert tasks["total"] == 729
+    assert tasks["remaining_count"] == 312
+    assert message == "Pipeline: 417/729 completed, 312 remaining"
+
+
+def test_parse_task_status_texts_adds_prior_completed_families_to_pipeline_total():
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content=(
+            "task_id\thash\tnative_id\tname\tstatus\texit\n"
+            "1\t71/22d996\t50052915\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
+            "2\td0/606400\t50052916\tmainWorkflow:softwareVTask\tCOMPLETED\t0\n"
+        ),
+        stdout_content=(
+            "executor >  slurm (554)\n"
+            "[d1/5209d5] mainWorkflow:doradoTask (553) | 452 of 729\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert progress == int((454 / 731) * 90)
+    assert tasks["completed_count"] == 454
+    assert tasks["total"] == 731
+    assert tasks["remaining_count"] == 277
+    assert message == "Pipeline: 454/731 completed, 277 remaining"
+
+
+def test_parse_scheduler_queue_text_counts_running_and_pending_jobs():
+    counts = SlurmBackend._parse_scheduler_queue_text(
+        queue_output=(
+            "50052939|RUNNING|agoutic-sample-abc123|/remote/workflow5\n"
+            "60000001|RUNNING|nf-mainW|/remote/workflow5/work/aa/bb\n"
+            "60000002|PENDING|nf-mainW|/remote/workflow5/work/cc/dd\n"
+            "60000003|COMPLETING|nf-mainW|/remote/workflow5/work/ee/ff\n"
+            "60000004|RUNNING|manual-copy|/remote/workflow5\n"
+            "60000005|RUNNING|nf-mainW|/remote/other-workflow/work/gg/hh\n"
+        ),
+        parent_job_id="50052939",
+        remote_work="/remote/workflow5",
+    )
+
+    assert counts == {
+        "scheduler_running_count": 2,
+        "scheduler_pending_count": 1,
+    }
+
+
+def test_parse_scheduler_queue_text_accepts_short_slurm_states():
+    counts = SlurmBackend._parse_scheduler_queue_text(
+        queue_output=(
+            "50052939|R|nf-mainW|/remote/workflow9/work/aa/bb\n"
+            "50052940|PD|nf-mainW|/remote/workflow9/work/cc/dd\n"
+            "50052941|CG|nf-mainW|/remote/workflow9/work/ee/ff\n"
+        ),
+        parent_job_id="99999999",
+        remote_work="/remote/workflow9",
+    )
+
+    assert counts == {
+        "scheduler_running_count": 2,
+        "scheduler_pending_count": 1,
+    }
 
 
 @pytest.mark.asyncio

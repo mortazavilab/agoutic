@@ -834,17 +834,31 @@ def render_block_part2(
                         total = tasks.get("total", 0)
                         completed_count = tasks.get("completed_count", 0)
                         failed_count = tasks.get("failed_count", 0)
+                        remaining_count = tasks.get("remaining_count", 0)
+                        scheduler_running_count = tasks.get("scheduler_running_count")
+                        scheduler_pending_count = tasks.get("scheduler_pending_count")
+                        observed_running_count = tasks.get("observed_running_count", len(running))
                         
                         # Summary metrics
-                        progress_stats({
+                        summary_metrics = {
                             "Completed": f"{completed_count}/{total}",
-                            "Running": len(running),
-                            "Failed": failed_count,
-                        })
+                        }
+                        if scheduler_running_count is not None:
+                            summary_metrics["SLURM Running"] = scheduler_running_count
+                        if scheduler_pending_count is not None:
+                            summary_metrics["SLURM Pending"] = scheduler_pending_count
+                        if remaining_count:
+                            summary_metrics["Remaining"] = remaining_count
+                        elif observed_running_count:
+                            summary_metrics["Observed Active"] = observed_running_count
+                        summary_metrics["Failed"] = failed_count
+                        progress_stats(summary_metrics)
                         
-                        # Show running tasks in Nextflow style
+                        # Show the last few active task names observed in stdout.
                         if running:
-                            st.write("**🏃 Currently Running:**")
+                            st.write("**🏃 Recently Observed Active Tasks:**")
+                            if scheduler_running_count is not None or scheduler_pending_count is not None:
+                                st.caption("Task names below come from the recent Nextflow stdout tail; the metrics above reflect actual SLURM job counts.")
                             for task in running[-5:]:  # Show last 5 running tasks
                                 # Format like: [7b/34a1] mainWorkflow:doradoDownloadTask (1) [100%]
                                 task_hash = task.split(':')[-1][:4] if ':' in task else "????"
@@ -852,7 +866,7 @@ def render_block_part2(
                         
                         # Show recently completed with grouping
                         if completed:
-                            with st.expander(f"✅ Recently Completed ({len(completed)} total)", expanded=False):
+                            with st.expander(f"✅ Recently Completed ({len(completed)} shown)", expanded=False):
                                 # Group tasks by base name
                                 task_groups = {}
                                 for task in completed:
