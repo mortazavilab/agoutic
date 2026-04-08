@@ -78,6 +78,7 @@ class OverrideDetectionStage:
                 ctx.conversation_history,
                 history_blocks=ctx.history_blocks,
                 project_dir=ctx.project_dir,
+                project_id=ctx.project_id,
             )
             if _browse_calls:
                 _browse_calls = [c for c in _browse_calls if c.get("source_key") == "analyzer"]
@@ -128,6 +129,7 @@ class OverrideDetectionStage:
             ctx.message, ctx.active_skill, ctx.conversation_history,
             history_blocks=ctx.history_blocks,
             project_dir=ctx.project_dir,
+            project_id=ctx.project_id,
         )
         if _sync_calls and any(c.get("tool") == "sync_job_results" for c in _sync_calls):
             ctx.is_sync_override = True
@@ -144,6 +146,7 @@ class OverrideDetectionStage:
                 ctx.message, ctx.active_skill, ctx.conversation_history,
                 history_blocks=ctx.history_blocks,
                 project_dir=ctx.project_dir,
+                project_id=ctx.project_id,
             )
             if ctx.auto_calls:
                 logger.warning("LLM failed to generate DATA_CALL tags, auto-generating",
@@ -273,6 +276,7 @@ def _validate_referential_accessions(ctx: ChatContext) -> None:
         ctx.auto_calls = _auto_generate_data_calls(
             ctx.message, ctx.active_skill, ctx.conversation_history,
             history_blocks=ctx.history_blocks, project_dir=ctx.project_dir,
+            project_id=ctx.project_id,
         )
         if ctx.auto_calls:
             ctx.data_call_matches = []

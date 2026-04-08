@@ -192,9 +192,23 @@ async def check_nextflow_status(run_uuid: str) -> str:
 
 
 @mcp.tool()
-async def sync_job_results(run_uuid: str, force: bool = False) -> str:
-    """Manually retry remote-to-local result synchronization for a SLURM run."""
-    result = await tools.sync_job_results(run_uuid=run_uuid, force=force)
+async def sync_job_results(
+    run_uuid: str = "",
+    force: bool = False,
+    project_id: str = "",
+    workflow_label: str = "",
+) -> str:
+    """Manually retry remote-to-local result synchronization for a SLURM run.
+
+    Provide either run_uuid, or project_id + workflow_label (e.g. "workflow8")
+    to let the server resolve the correct job from the database.
+    """
+    result = await tools.sync_job_results(
+        run_uuid=run_uuid,
+        force=force,
+        project_id=project_id,
+        workflow_label=workflow_label,
+    )
     return json.dumps(result, indent=2)
 
 @mcp.tool()

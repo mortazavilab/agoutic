@@ -180,6 +180,46 @@ async def get_job(session: AsyncSession, run_uuid: str) -> DogmeJob | None:
     )
     return result.scalar_one_or_none()
 
+
+async def resolve_job_by_workflow_label(
+    session: AsyncSession,
+    project_id: str,
+    workflow_label: str,
+) -> DogmeJob | None:
+    """Look up the most recent job for a project by workflow folder name.
+
+    Tries ``workflow_folder_name`` first (populated on newer jobs), then
+    falls back to matching the tail of ``remote_work_dir`` or
+    ``nextflow_work_dir`` for pre-migration rows that lack the column.
+    """
+    # 1. Direct match on workflow_folder_name
+    result = await session.execute(
+        select(DogmeJob)
+        .where(DogmeJob.project_id == project_id)
+        .where(DogmeJob.workflow_folder_name == workflow_label)
+        .order_by(DogmeJob.submitted_at.desc())
+        .limit(1)
+    )
+    job = result.scalar_one_or_none()
+    if job:
+        return job
+
+    # 2. Fallback: match path suffix on remote_work_dir / nextflow_work_dir
+    suffix = f"/{workflow_label}"
+    result = await session.execute(
+        select(DogmeJob)
+        .where(DogmeJob.project_id == project_id)
+        .where(
+            or_(
+                DogmeJob.remote_work_dir.endswith(suffix),
+                DogmeJob.nextflow_work_dir.endswith(suffix),
+            )
+        )
+        .order_by(DogmeJob.submitted_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
 async def update_job_status(
     session: AsyncSession,
     run_uuid: str,

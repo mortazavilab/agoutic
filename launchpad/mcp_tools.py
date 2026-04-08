@@ -482,18 +482,50 @@ class LaunchpadMCPTools:
         except Exception as e:
             raise RuntimeError(f"Failed to check status: {str(e)}")
 
-    async def sync_job_results(self, run_uuid: str, force: bool = False) -> dict:
-        """Trigger manual remote-to-local result synchronization for a SLURM run."""
+    async def sync_job_results(
+        self,
+        run_uuid: str = "",
+        force: bool = False,
+        project_id: str = "",
+        workflow_label: str = "",
+    ) -> dict:
+        """Trigger manual remote-to-local result synchronization for a SLURM run.
+
+        Either ``run_uuid`` or both ``project_id`` + ``workflow_label`` must be
+        provided.  When *workflow_label* is given the server resolves the UUID
+        from the database, avoiding reliance on conversation-history lookups.
+        """
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.server_url}/jobs/{run_uuid}/sync-results",
-                    params={"force": str(bool(force)).lower()},
-                    headers=self._headers(),
-                    timeout=self.sync_timeout,
-                )
-                if response.status_code == 404:
-                    raise RuntimeError(f"Job {run_uuid} not found")
+                if project_id and workflow_label and not run_uuid:
+                    # Resolve by workflow label on the server side
+                    response = await client.post(
+                        f"{self.server_url}/jobs/sync-results-by-workflow",
+                        params={
+                            "project_id": project_id,
+                            "workflow_label": workflow_label,
+                            "force": str(bool(force)).lower(),
+                        },
+                        headers=self._headers(),
+                        timeout=self.sync_timeout,
+                    )
+                    if response.status_code == 404:
+                        raise RuntimeError(
+                            f"No job found for project={project_id}, workflow={workflow_label}"
+                        )
+                else:
+                    if not run_uuid:
+                        raise RuntimeError(
+                            "sync_job_results requires either run_uuid or project_id+workflow_label"
+                        )
+                    response = await client.post(
+                        f"{self.server_url}/jobs/{run_uuid}/sync-results",
+                        params={"force": str(bool(force)).lower()},
+                        headers=self._headers(),
+                        timeout=self.sync_timeout,
+                    )
+                    if response.status_code == 404:
+                        raise RuntimeError(f"Job {run_uuid} not found")
                 response.raise_for_status()
                 return response.json()
         except httpx.ReadTimeout as e:
@@ -926,10 +958,12 @@ TOOL_REGISTRY = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "run_uuid": {"type": "string", "description": "Job UUID"},
+                "run_uuid": {"type": "string", "description": "Job UUID (optional if project_id + workflow_label provided)"},
                 "force": {"type": "boolean", "description": "Force a retry even if already synced or currently syncing", "default": False},
+                "project_id": {"type": "string", "description": "Project ID for server-side workflow resolution"},
+                "workflow_label": {"type": "string", "description": "Workflow folder name (e.g. workflow8) for server-side resolution"},
             },
-            "required": ["run_uuid"],
+            "required": [],
         },
     },
     "get_dogme_report": {

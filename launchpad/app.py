@@ -39,6 +39,7 @@ from launchpad.db import (
     get_job,
     infer_workflow_index_from_path,
     get_workflow_identity_for_path,
+    resolve_job_by_workflow_label,
     update_job_status,
     add_log_entry,
     get_job_logs,
@@ -1187,6 +1188,49 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             **_job_timing_payload(job),
         }
     
+    finally:
+        await session.close()
+
+
+@app.post("/jobs/sync-results-by-workflow", response_model=JobResultSyncResponse)
+async def sync_job_results_by_workflow_label(
+    project_id: str = Query(..., min_length=1),
+    workflow_label: str = Query(..., min_length=1),
+    force: bool = Query(False),
+):
+    """Resolve a job by project + workflow folder name, then trigger sync."""
+    session = SessionLocal()
+    try:
+        job = await resolve_job_by_workflow_label(session, project_id, workflow_label)
+        if not job:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No job found for project={project_id}, workflow={workflow_label}",
+            )
+        run_uuid = job.run_uuid
+        if (job.execution_mode or "local").strip().lower() != "slurm":
+            return {
+                "success": False,
+                "status": "not_applicable",
+                "message": "Manual result sync is only available for SLURM jobs.",
+                "run_uuid": run_uuid,
+                "remote_work_dir": getattr(job, "remote_work_dir", None),
+                "local_work_dir": getattr(job, "nextflow_work_dir", None),
+                "transfer_state": getattr(job, "transfer_state", None),
+            }
+        backend = get_backend("slurm")
+        result = await backend.sync_results_to_local(run_uuid=run_uuid, force=force)
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_describe_exception(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+    except Exception as exc:
+        logger.exception("Manual result sync by workflow label failed",
+                         project_id=project_id, workflow_label=workflow_label)
+        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
     finally:
         await session.close()
 

@@ -757,6 +757,11 @@ class SlurmBackend:
         local_work_dir = getattr(job, "nextflow_work_dir", None)
         remote_work_dir = getattr(job, "remote_work_dir", None)
         input_directory = getattr(job, "input_directory", None)
+        # Nextflow writes results to remote_output_dir (remote_work_dir/output).
+        # Pre-migration jobs may have NULL remote_output_dir; derive from remote_work_dir.
+        remote_output_dir = getattr(job, "remote_output_dir", None) or (
+            str(PurePosixPath(remote_work_dir) / "output") if remote_work_dir else None
+        )
         try:
             if not local_work_dir or not remote_work_dir:
                 raise RuntimeError("Missing local or remote workflow directory for result copy-back")
@@ -769,11 +774,16 @@ class SlurmBackend:
                 "done_folders": [],
                 "current_file": "",
             }
-            artifacts = await self._discover_remote_result_artifacts(profile=profile, remote_work_dir=remote_work_dir)
+            artifacts = await self._discover_remote_result_artifacts(profile=profile, remote_output_dir=remote_output_dir)
+            if not artifacts.get("directories") and not artifacts.get("files"):
+                raise RuntimeError(
+                    f"No result artifacts found on remote at {remote_output_dir}. "
+                    "The remote job may not have produced output yet."
+                )
             logger.info(
                 "Starting result sync (per-directory)",
                 run_uuid=run_uuid,
-                remote_work_dir=remote_work_dir,
+                remote_output_dir=remote_output_dir,
                 local_work_dir=local_work_dir,
                 remote_artifacts=artifacts,
             )
@@ -806,7 +816,7 @@ class SlurmBackend:
                 }
                 transfer = await self._transfer_manager.download_outputs(
                     profile=profile,
-                    remote_path=str(PurePosixPath(remote_work_dir) / dirname),
+                    remote_path=str(PurePosixPath(remote_output_dir) / dirname),
                     local_path=str(Path(local_work_dir) / dirname),
                     on_progress=_on_rsync_progress,
                 )
@@ -835,7 +845,7 @@ class SlurmBackend:
                 }
                 transfer = await self._transfer_manager.download_outputs(
                     profile=profile,
-                    remote_path=remote_work_dir,
+                    remote_path=remote_output_dir,
                     local_path=local_work_dir,
                     include_patterns=list(self._RESULT_SYNC_FILE_PATTERNS),
                     exclude_patterns=["*"],
@@ -951,17 +961,17 @@ class SlurmBackend:
             "transfer_state": "downloading_outputs",
         }
 
-    async def _discover_remote_result_artifacts(self, *, profile: SSHProfileData, remote_work_dir: str) -> dict[str, list[str]]:
+    async def _discover_remote_result_artifacts(self, *, profile: SSHProfileData, remote_output_dir: str) -> dict[str, list[str]]:
         conn = await self._ssh_manager.connect(profile)
         try:
             existing_dirs: list[str] = []
             for dirname in self._RESULT_SYNC_DIRS:
-                if await conn.path_exists(str(PurePosixPath(remote_work_dir) / dirname)):
+                if await conn.path_exists(str(PurePosixPath(remote_output_dir) / dirname)):
                     existing_dirs.append(dirname)
 
             file_predicate = " -o ".join(f"-name {shlex.quote(pattern)}" for pattern in self._RESULT_SYNC_FILE_PATTERNS)
             file_cmd = (
-                f"find {shlex.quote(remote_work_dir)} -maxdepth 1 -type f \\( {file_predicate} \\) "
+                f"find {shlex.quote(remote_output_dir)} -maxdepth 1 -type f \\( {file_predicate} \\) "
                 "-exec basename {} \\; | sort"
             )
             result = await conn.run(f"{file_cmd} 2>/dev/null || true")

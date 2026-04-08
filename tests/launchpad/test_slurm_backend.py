@@ -399,6 +399,148 @@ async def test_copy_selected_results_fails_fast_on_rsync_error(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_copy_selected_results_uses_remote_output_dir_when_set(tmp_path, monkeypatch):
+    """When the job has remote_output_dir set, discovery and rsync should use it directly."""
+    backend = SlurmBackend()
+    job = SimpleNamespace(
+        nextflow_work_dir=str(tmp_path / "workflow1"),
+        remote_work_dir="/remote/workflow1",
+        remote_output_dir="/remote/workflow1/output",
+        input_directory=str(tmp_path / "input"),
+    )
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    local_root = Path(job.nextflow_work_dir)
+    local_root.mkdir(parents=True, exist_ok=True)
+
+    discover_kwargs_received = {}
+
+    async def fake_discover(**kwargs):
+        discover_kwargs_received.update(kwargs)
+        return {"directories": ["bams"], "files": []}
+
+    async def fake_update(run_uuid, state):
+        pass
+
+    async def fake_download_outputs(**kwargs):
+        (local_root / "bams").mkdir(parents=True, exist_ok=True)
+        return {"ok": True, "bytes_transferred": 42}
+
+    monkeypatch.setattr(backend, "_update_job_transfer_state", fake_update)
+    monkeypatch.setattr(backend, "_discover_remote_result_artifacts", fake_discover)
+    monkeypatch.setattr(backend._transfer_manager, "download_outputs", fake_download_outputs)
+
+    result = await backend._copy_selected_results_to_local(run_uuid="run-1", job=job, profile=profile)
+
+    assert result["success"] is True
+    # Discovery should have received remote_output_dir, not remote_work_dir
+    assert discover_kwargs_received.get("remote_output_dir") == "/remote/workflow1/output"
+    assert "remote_work_dir" not in discover_kwargs_received
+
+
+@pytest.mark.asyncio
+async def test_copy_selected_results_derives_output_dir_for_legacy_jobs(tmp_path, monkeypatch):
+    """When remote_output_dir is None (pre-migration), derive it as remote_work_dir/output."""
+    backend = SlurmBackend()
+    job = SimpleNamespace(
+        nextflow_work_dir=str(tmp_path / "workflow1"),
+        remote_work_dir="/remote/workflow1",
+        input_directory=str(tmp_path / "input"),
+        # No remote_output_dir attribute — simulates pre-migration job
+    )
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    local_root = Path(job.nextflow_work_dir)
+    local_root.mkdir(parents=True, exist_ok=True)
+
+    discover_kwargs_received = {}
+
+    async def fake_discover(**kwargs):
+        discover_kwargs_received.update(kwargs)
+        return {"directories": ["stats"], "files": []}
+
+    async def fake_update(run_uuid, state):
+        pass
+
+    async def fake_download_outputs(**kwargs):
+        (local_root / "stats").mkdir(parents=True, exist_ok=True)
+        return {"ok": True, "bytes_transferred": 10}
+
+    monkeypatch.setattr(backend, "_update_job_transfer_state", fake_update)
+    monkeypatch.setattr(backend, "_discover_remote_result_artifacts", fake_discover)
+    monkeypatch.setattr(backend._transfer_manager, "download_outputs", fake_download_outputs)
+
+    result = await backend._copy_selected_results_to_local(run_uuid="run-1", job=job, profile=profile)
+
+    assert result["success"] is True
+    # Should have derived remote_output_dir = remote_work_dir + "/output"
+    assert discover_kwargs_received.get("remote_output_dir") == "/remote/workflow1/output"
+
+
+@pytest.mark.asyncio
+async def test_copy_selected_results_fails_on_empty_artifacts(tmp_path, monkeypatch):
+    """When remote has no result artifacts at all, sync should fail instead of silently succeeding."""
+    backend = SlurmBackend()
+    job = SimpleNamespace(
+        nextflow_work_dir=str(tmp_path / "workflow1"),
+        remote_work_dir="/remote/workflow1",
+        remote_output_dir="/remote/workflow1/output",
+        input_directory=str(tmp_path / "input"),
+    )
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    states = []
+
+    async def fake_update(run_uuid, state):
+        states.append(state)
+
+    async def fake_discover(**kwargs):
+        return {"directories": [], "files": []}
+
+    monkeypatch.setattr(backend, "_update_job_transfer_state", fake_update)
+    monkeypatch.setattr(backend, "_discover_remote_result_artifacts", fake_discover)
+
+    result = await backend._copy_selected_results_to_local(run_uuid="run-1", job=job, profile=profile)
+
+    assert result["success"] is False
+    assert "No result artifacts found" in result["message"]
+    assert states == ["downloading_outputs", "transfer_failed"]
+
+
+@pytest.mark.asyncio
 async def test_sync_results_to_local_returns_not_applicable_for_remote_only_destination(monkeypatch):
     backend = SlurmBackend()
     job = SimpleNamespace(

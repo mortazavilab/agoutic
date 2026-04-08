@@ -96,7 +96,8 @@ def _extract_modification_name(user_message: str) -> str | None:
 def _auto_generate_data_calls(user_message: str, skill_key: str,
                               conversation_history: list | None = None,
                               history_blocks: list | None = None,
-                              project_dir: str = "") -> list[dict]:
+                              project_dir: str = "",
+                              project_id: str = "") -> list[dict]:
     """
     Safety net: if the LLM failed to generate DATA_CALL tags, detect obvious
     patterns in the user's message and auto-generate the appropriate tool calls.
@@ -258,8 +259,22 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
         if not _target_run_uuid:
             _target_run_uuid = run_uuid
 
-        if _target_run_uuid:
-            _params = {"run_uuid": _target_run_uuid}
+        # Build params: prefer server-side resolution via project_id +
+        # workflow_label when the UUID came from a fallback (not matched to
+        # the specific workflow the user named).  This avoids syncing the
+        # wrong job when conversation history is stale.
+        _params: dict = {}
+        if _target_run_uuid and (_target_run_uuid == _requested_run_uuid or not _requested_workflow):
+            # UUID was explicitly provided or no specific workflow was named
+            _params["run_uuid"] = _target_run_uuid
+        elif _requested_workflow and project_id:
+            # Let the server resolve the correct UUID from the DB
+            _params["project_id"] = project_id
+            _params["workflow_label"] = _requested_workflow
+        elif _target_run_uuid:
+            _params["run_uuid"] = _target_run_uuid
+
+        if _params:
             if _force_sync:
                 _params["force"] = True
             calls.append(

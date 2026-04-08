@@ -48,6 +48,31 @@
   names that the analyzer cannot find.
   (`cortex/plan_params.py`, `tests/cortex/test_planner_cache_steps.py`)
 
+- **Result sync now searches the correct remote output directory** — SLURM
+  result synchronization was searching for result subdirectories (annot, bams,
+  etc.) in `remote_work_dir` instead of `remote_output_dir`, causing it to find
+  zero artifacts and report false "success" without copying any files. The sync
+  code now uses `remote_output_dir` (where Nextflow writes `--outdir` results
+  directly), and for pre-migration jobs with NULL `remote_output_dir`, derives
+  it as `remote_work_dir / "output"`. Added guard against empty-artifact
+  discovery to fail explicitly instead of silently succeeding with zero bytes.
+  (`launchpad/backends/slurm_backend.py`,
+  `tests/launchpad/test_slurm_backend.py`)
+
+- **Sync command resolves workflow UUIDs directly from database instead of
+  relying on conversation history** — when the user names a workflow like
+  "workflow8" and the UUID cannot be confidently matched from conversation
+  history, the sync command now passes `project_id` + `workflow_label` to
+  launchpad, which resolves the correct job by querying
+  `workflow_folder_name` and falls back to path suffix matching on remote/local
+  work directories. This ensures the right job is synced even when history
+  blocks are stale or incomplete. New endpoint: `POST
+  /jobs/sync-results-by-workflow`. Updated MCP tool parameters and
+  data-call-generator to prefer server-side resolution.
+  (`launchpad/app.py`, `launchpad/db.py`, `launchpad/mcp_tools.py`,
+  `launchpad/mcp_server.py`, `cortex/data_call_generator.py`,
+  `cortex/chat_stages/overrides.py`)
+
 - **Cross-workflow reconcile now resolves owner paths correctly and no longer
   hard-fails when a workflow lacks an `annot/` directory** — project path
   resolution now prefers the project owner's username/UUID path instead of the
