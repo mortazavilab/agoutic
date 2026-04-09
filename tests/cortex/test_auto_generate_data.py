@@ -524,6 +524,62 @@ class TestDogmeFileParsing:
         assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow2"
         assert calls[0]["params"]["file_name"] == "reconciled_novelty_by_sample.csv"
 
+    def test_parse_csv_in_workflow_suffix(self):
+        """'parse file.tsv in workflow10' rewrites to workflow-prefixed path."""
+        blocks = self._blocks_with_job("/tmp/proj/workflow9")
+        calls = _auto_generate_data_calls(
+            "parse reconciled_abundance.tsv in workflow10",
+            "analyze_job_results",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "find_file"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow10"
+        assert calls[0]["params"]["file_name"] == "reconciled_abundance.tsv"
+
+    def test_parse_csv_from_workflow_suffix(self):
+        """'parse file.csv from workflow10' rewrites to workflow-prefixed path."""
+        blocks = self._blocks_with_job("/tmp/proj/workflow9")
+        calls = _auto_generate_data_calls(
+            "parse reconciled_novelty_by_sample.csv from workflow10",
+            "analyze_job_results",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "find_file"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow10"
+        assert calls[0]["params"]["file_name"] == "reconciled_novelty_by_sample.csv"
+
+    def test_parse_csv_under_workflow_suffix(self):
+        """'read file.tsv under workflow5' rewrites to workflow-prefixed path."""
+        blocks = self._blocks_with_job("/tmp/proj/workflow1")
+        calls = _auto_generate_data_calls(
+            "read summary.tsv under workflow5",
+            "analyze_job_results",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "find_file"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow5"
+        assert calls[0]["params"]["file_name"] == "summary.tsv"
+
+    def test_explicit_workflow_prefix_not_doubled(self):
+        """'parse workflow10/file.tsv in workflow10' should not double the prefix."""
+        blocks = self._blocks_with_job("/tmp/proj/workflow9")
+        calls = _auto_generate_data_calls(
+            "parse workflow10/reconciled_abundance.tsv in workflow10",
+            "analyze_job_results",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "find_file"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow10"
+        assert calls[0]["params"]["file_name"] == "reconciled_abundance.tsv"
+
 
 # ---------------------------------------------------------------------------
 # analyze_job_results catch-all auto-generates get_analysis_summary

@@ -816,11 +816,44 @@ def _template_reconcile_bams(params: dict) -> dict:
     steps.append(s_run)
     idx += 1
 
+    # After the script finishes, locate the output files so the parse step
+    # can discover which tabular files (TSV/CSV) were produced.
+    _list_out_dir = output_directory or work_dir or ""
+    s_locate_out = _make_step(
+        "LOCATE_DATA",
+        "List reconcile output files for parsing",
+        idx,
+        depends_on=[s_run["id"]],
+        tool_calls=[
+            {
+                "source_key": "analyzer",
+                "tool": "list_job_files",
+                "params": {
+                    "work_dir": _list_out_dir,
+                    "extensions": ".tsv,.csv",
+                    "max_depth": 1,
+                    "allow_missing": True,
+                },
+            }
+        ],
+    )
+    steps.append(s_locate_out)
+    idx += 1
+
+    s_parse = _make_step(
+        "PARSE_OUTPUT_FILE",
+        "Parse reconcile result tables",
+        idx,
+        depends_on=[s_locate_out["id"]],
+    )
+    steps.append(s_parse)
+    idx += 1
+
     s_summary = _make_step(
         "WRITE_SUMMARY",
         "Summarize reconcile outputs and generated files",
         idx,
-        depends_on=[s_run["id"]],
+        depends_on=[s_parse["id"]],
     )
     steps.append(s_summary)
 

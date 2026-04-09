@@ -669,19 +669,36 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
         if any(kw in msg_lower for kw in parse_keywords):
             # Extract filename / relative path from user message.
             # Handles: "parse annot/File.csv", "parse workflow2/annot/File.csv",
-            #          "parse File.csv", "show me the file File.csv"
+            #          "parse File.csv", "show me the file File.csv",
+            #          "parse File.csv in workflow10", "parse File.csv from workflow10"
             file_pattern = (
                 r'(?:parse|show\s+me|read|open|display|view|get)'
                 r'\s+(?:the\s+)?(?:file\s+)?'
                 r'(\S+\.(?:csv|tsv|bed|txt|log|html))'
             )
+            # Secondary pattern: "parse FILE in/from workflowN"
+            _workflow_suffix_pattern = (
+                r'(?:parse|show\s+me|read|open|display|view|get)'
+                r'\s+(?:the\s+)?(?:file\s+)?'
+                r'(\S+\.(?:csv|tsv|bed|txt|log|html))'
+                r'\s+(?:in|from|under)\s+(workflow\d+)'
+            )
             file_match = re.search(file_pattern, msg_lower)
+            _wf_suffix_match = re.search(_workflow_suffix_pattern, msg_lower)
             if file_match:
                 filename = file_match.group(1)
                 # Grab the original-case version from the raw message
                 file_match_orig = re.search(file_pattern, user_message, re.IGNORECASE)
                 if file_match_orig:
                     filename = file_match_orig.group(1)
+
+                # If user said "... in workflow10" / "... from workflow10",
+                # prepend the workflow prefix so path resolution picks it up.
+                if _wf_suffix_match:
+                    _wf_suffix_orig = re.search(_workflow_suffix_pattern, user_message, re.IGNORECASE)
+                    _wf_name = (_wf_suffix_orig.group(2) if _wf_suffix_orig else _wf_suffix_match.group(2))
+                    if not re.match(r'^workflow\d+(?:/|\\)', filename, re.IGNORECASE):
+                        filename = f"{_wf_name}/{filename}"
 
                 # Resolve the path: could be just a filename, a subpath
                 # (annot/File.csv), or workflow-prefixed (workflow2/annot/File.csv).

@@ -74,6 +74,8 @@ def test_reconcile_bams_template_orders_preflight_before_approval_and_run():
         "CHECK_EXISTING",
         "REQUEST_APPROVAL",
         "RUN_SCRIPT",
+        "LOCATE_DATA",
+        "PARSE_OUTPUT_FILE",
         "WRITE_SUMMARY",
     ]
 
@@ -140,6 +142,38 @@ def test_reconcile_bams_template_defaults_output_directory_to_common_workflow_pa
     run_args = plan["steps"][3]["tool_calls"][0]["params"]["script_args"]
     assert ["--output-dir", "/tmp/project"] == preflight_args[preflight_args.index("--output-dir"):preflight_args.index("--output-dir") + 2]
     assert ["--output-dir", "/tmp/project"] == run_args[run_args.index("--output-dir"):run_args.index("--output-dir") + 2]
+
+
+def test_reconcile_bams_template_has_parse_step_before_summary():
+    """WRITE_SUMMARY should depend on PARSE_OUTPUT_FILE, which depends on a post-run LOCATE_DATA."""
+    plan = _template_reconcile_bams({
+        "work_dir": "/tmp/project",
+        "output_prefix": "reconciled",
+        "output_directory": "/tmp/project/workflow10",
+    })
+    kinds = [step["kind"] for step in plan["steps"]]
+
+    # The last three steps should be LOCATE_DATA → PARSE_OUTPUT_FILE → WRITE_SUMMARY
+    assert kinds[-3:] == ["LOCATE_DATA", "PARSE_OUTPUT_FILE", "WRITE_SUMMARY"]
+
+    locate_out = plan["steps"][-3]
+    parse_step = plan["steps"][-2]
+    summary_step = plan["steps"][-1]
+
+    # Post-run LOCATE_DATA lists the output directory for tsv/csv files
+    assert locate_out["tool_calls"][0]["tool"] == "list_job_files"
+    assert locate_out["tool_calls"][0]["params"]["work_dir"] == "/tmp/project/workflow10"
+    assert locate_out["tool_calls"][0]["params"]["extensions"] == ".tsv,.csv"
+
+    # PARSE_OUTPUT_FILE depends on the post-run LOCATE_DATA
+    assert locate_out["id"] in parse_step["depends_on"]
+
+    # WRITE_SUMMARY depends on PARSE_OUTPUT_FILE
+    assert parse_step["id"] in summary_step["depends_on"]
+
+    # Post-run LOCATE_DATA depends on RUN_SCRIPT
+    run_step = next(s for s in plan["steps"] if s["kind"] == "RUN_SCRIPT")
+    assert run_step["id"] in locate_out["depends_on"]
 
 
 def test_classify_request_marks_remote_stage_as_multistep():

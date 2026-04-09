@@ -11,6 +11,11 @@ import re
 from cortex.llm_validators import get_block_payload
 
 
+def _is_script_source_dir(path_value: str) -> bool:
+    """Return True if *path_value* looks like a skill's scripts source folder."""
+    return bool(path_value and "/skills/" in path_value and "/scripts" in path_value)
+
+
 # ---------------------------------------------------------------------------
 # _build_conversation_state
 # ---------------------------------------------------------------------------
@@ -135,9 +140,14 @@ def _build_conversation_state(
                     "run_type": _run_type,
                 })
         if state.workflows:
-            # Prefer pipeline workflows over utility scripts
+            # Prefer pipeline workflows over utility scripts whose work_dir
+            # points at a skills/scripts source folder.  Script runs that
+            # produced a real workflow output directory (e.g. reconcile_bams
+            # writing to workflowN) should NOT be deprioritized.
             pipeline_wfs = [
-                w for w in state.workflows if w.get("run_type") != "script"
+                w for w in state.workflows
+                if w.get("run_type") != "script"
+                or not _is_script_source_dir(w.get("work_dir", ""))
             ]
             latest = (pipeline_wfs or state.workflows)[-1]
             state.work_dir = latest.get("work_dir")
@@ -282,10 +292,13 @@ def _extract_job_context_from_history(
                 })
         if workflows:
             # Prefer the most recent pipeline (dogme) workflow over utility
-            # scripts (reconcile_bams, etc.) whose work_directory points at
-            # the skill's scripts folder rather than a project workflow dir.
+            # scripts whose work_directory points at the skill's scripts
+            # folder.  Script runs whose work_dir is a real output directory
+            # (e.g. workflowN) should NOT be deprioritized.
             pipeline_workflows = [
-                w for w in workflows if w.get("run_type") != "script"
+                w for w in workflows
+                if w.get("run_type") != "script"
+                or not _is_script_source_dir(w.get("work_dir", ""))
             ]
             latest = (pipeline_workflows or workflows)[-1]
             context["work_dir"] = latest["work_dir"]

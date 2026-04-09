@@ -146,6 +146,45 @@ class TestExtractJobContext:
         assert ctx["work_dir"] == "/opt/scripts/reconcile"
         assert ctx["run_uuid"] == "uuid-script"
 
+    def test_script_with_real_output_dir_not_deprioritised(self):
+        """Script runs whose work_dir is a real workflow dir should NOT be deprioritised."""
+        blocks = [
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow2",
+                "run_uuid": "uuid-dogme",
+                "run_type": "dogme",
+            }),
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow10",
+                "run_uuid": "uuid-reconcile",
+                "run_type": "script",
+            }),
+        ]
+        ctx = _extract_job_context_from_history(None, history_blocks=blocks)
+        # workflow10 is a real output dir → script should NOT be deprioritised
+        assert ctx["work_dir"] == "/data/proj/workflow10"
+        assert ctx["run_uuid"] == "uuid-reconcile"
+        assert len(ctx["workflows"]) == 2
+
+    def test_script_source_dir_still_deprioritised(self):
+        """Script runs pointing at skills/scripts dirs should still be deprioritised."""
+        blocks = [
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow9",
+                "run_uuid": "uuid-dogme",
+                "run_type": "dogme",
+            }),
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/opt/agoutic_code/skills/reconcile_bams/scripts",
+                "run_uuid": "uuid-script",
+                "run_type": "script",
+            }),
+        ]
+        ctx = _extract_job_context_from_history(None, history_blocks=blocks)
+        # skills/scripts dir → should still be deprioritised
+        assert ctx["work_dir"] == "/data/proj/workflow9"
+        assert ctx["run_uuid"] == "uuid-dogme"
+
 
 # ===========================================================================
 # _build_conversation_state — slow path
@@ -238,6 +277,49 @@ class TestBuildConvStateSlowPath:
         state = _build_conversation_state("ENCODE_Search", None, history_blocks=blocks)
         assert len(state.known_dataframes) == 2
         assert state.latest_dataframe == "DF2"
+
+    def test_script_with_real_output_dir_becomes_active(self):
+        """build_conversation_state should prefer a script run with a real
+        workflow dir over an older dogme run."""
+        blocks = [
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow9",
+                "run_uuid": "uuid-dogme",
+                "sample_name": "s1",
+                "mode": "RNA",
+                "run_type": "dogme",
+            }),
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow10",
+                "run_uuid": "uuid-reconcile",
+                "sample_name": "",
+                "mode": "",
+                "run_type": "script",
+            }),
+        ]
+        state = _build_conversation_state("analyze_job_results", None, history_blocks=blocks)
+        assert state.work_dir == "/data/proj/workflow10"
+
+    def test_script_source_dir_still_deprioritised_in_state(self):
+        """build_conversation_state should deprioritise scripts pointing at skills dirs."""
+        blocks = [
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow9",
+                "run_uuid": "uuid-dogme",
+                "sample_name": "s1",
+                "mode": "RNA",
+                "run_type": "dogme",
+            }),
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/opt/agoutic/skills/reconcile_bams/scripts",
+                "run_uuid": "uuid-script",
+                "sample_name": "",
+                "mode": "",
+                "run_type": "script",
+            }),
+        ]
+        state = _build_conversation_state("analyze_job_results", None, history_blocks=blocks)
+        assert state.work_dir == "/data/proj/workflow9"
 
 
 # ===========================================================================
