@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -14,7 +15,7 @@ from cortex.remote_orchestration import _launchpad_internal_headers, _launchpad_
 
 @dataclass
 class WorkflowCommand:
-    action: Literal["rerun", "delete", "rename"]
+    action: Literal["rerun", "delete", "rename", "use"]
     workflow_ref: str
     new_name: str = ""
 
@@ -22,10 +23,15 @@ class WorkflowCommand:
 _SLASH_RERUN = re.compile(r"^/rerun\s+(\S+)$", re.IGNORECASE)
 _SLASH_DELETE = re.compile(r"^/delete\s+(\S+)$", re.IGNORECASE)
 _SLASH_RENAME = re.compile(r"^/rename\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_SLASH_USE = re.compile(r"^/use\s+(\S+)$", re.IGNORECASE)
 
 _NL_RERUN = re.compile(r"^(?:please\s+)?rerun\s+(\S+)$", re.IGNORECASE)
 _NL_DELETE = re.compile(r"^(?:please\s+)?delete\s+(\S+)$", re.IGNORECASE)
 _NL_RENAME = re.compile(r"^(?:please\s+)?rename\s+(\S+)\s+(?:to\s+)?(.+)$", re.IGNORECASE | re.DOTALL)
+_NL_USE = re.compile(
+    r"^(?:please\s+)?(?:use|switch\s+to|set\s+(?:active\s+)?workflow(?:\s+to)?)\s+(\S+)$",
+    re.IGNORECASE,
+)
 
 
 def parse_workflow_command(message: str) -> WorkflowCommand | None:
@@ -48,6 +54,10 @@ def parse_workflow_command(message: str) -> WorkflowCommand | None:
             workflow_ref=match.group(1).strip(),
             new_name=match.group(2).strip(),
         )
+
+    match = _SLASH_USE.match(msg)
+    if match:
+        return WorkflowCommand(action="use", workflow_ref=match.group(1).strip())
 
     return None
 
@@ -72,6 +82,10 @@ def detect_workflow_intent(message: str) -> WorkflowCommand | None:
             workflow_ref=match.group(1).strip(),
             new_name=match.group(2).strip(),
         )
+
+    match = _NL_USE.match(msg)
+    if match:
+        return WorkflowCommand(action="use", workflow_ref=match.group(1).strip())
 
     return None
 
@@ -150,6 +164,41 @@ async def execute_workflow_command(
             return f"Rename failed for `{command.workflow_ref}`: {detail}"
         payload = resp.json() or {}
         return f"Renamed `{command.workflow_ref}` to `{payload.get('new_name') or command.new_name}`."
+
+
+def execute_use_workflow(
+    conv_state,
+    project_dir: str,
+    workflow_ref: str,
+) -> tuple[object, str]:
+    """Switch active workflow in *conv_state* and return (updated_state, markdown).
+
+    Resolution order:
+    1. Match against ``conv_state.workflows[i]["work_dir"]`` folder name.
+    2. Fall back to checking ``project_dir / workflow_ref`` on disk.
+
+    Returns the **mutated** conv_state and a user-facing markdown string.
+    """
+    ref = workflow_ref.strip().rstrip("/")
+
+    # 1. Try known workflows in conversation state
+    for idx, wf in enumerate(conv_state.workflows or []):
+        wd = wf.get("work_dir") or wf.get("work_directory") or ""
+        folder = wd.rstrip("/").rsplit("/", 1)[-1] if wd else ""
+        if folder and folder.lower() == ref.lower():
+            conv_state.work_dir = wd
+            conv_state.active_workflow_index = idx
+            return conv_state, f"Switched active workflow to **{ref}** (`{wd}`)."
+
+    # 2. Fall back to disk check
+    if project_dir:
+        candidate = os.path.join(project_dir, ref)
+        if os.path.isdir(candidate):
+            conv_state.work_dir = candidate
+            conv_state.active_workflow_index = None
+            return conv_state, f"Switched active workflow to **{ref}** (`{candidate}`)."
+
+    return conv_state, f"Could not find **{ref}** in known workflows or on disk."
 
 
 def _response_detail(resp: httpx.Response) -> str:

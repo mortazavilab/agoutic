@@ -25,6 +25,7 @@ from cortex.memory_commands import (
 )
 from cortex.workflow_commands import (
     detect_workflow_intent,
+    execute_use_workflow,
     execute_workflow_command,
     parse_workflow_command,
 )
@@ -224,7 +225,8 @@ class WorkflowCommandStage:
     priority = 235
 
     async def should_run(self, ctx: ChatContext) -> bool:
-        return parse_workflow_command(ctx.message) is not None
+        cmd = parse_workflow_command(ctx.message)
+        return cmd is not None and cmd.action != "use"
 
     async def run(self, ctx: ChatContext) -> None:
         workflow_cmd = parse_workflow_command(ctx.message)
@@ -256,7 +258,8 @@ class WorkflowIntentStage:
     priority = 238
 
     async def should_run(self, ctx: ChatContext) -> bool:
-        return detect_workflow_intent(ctx.message) is not None
+        cmd = detect_workflow_intent(ctx.message)
+        return cmd is not None and cmd.action != "use"
 
     async def run(self, ctx: ChatContext) -> None:
         workflow_cmd = detect_workflow_intent(ctx.message)
@@ -302,6 +305,42 @@ class MemoryIntentStage:
 
 
 register_stage(MemoryIntentStage())
+
+
+# ── 410  Use-workflow (needs conv_state from priority 400) ─────────────────
+
+class UseWorkflowStage:
+    name = "use_workflow"
+    priority = 410
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        cmd = parse_workflow_command(ctx.message) or detect_workflow_intent(ctx.message)
+        return cmd is not None and cmd.action == "use"
+
+    async def run(self, ctx: ChatContext) -> None:
+        cmd = parse_workflow_command(ctx.message) or detect_workflow_intent(ctx.message)
+        conv_state = ctx.conv_state
+        project_dir = ctx.project_dir or ""
+
+        updated_state, markdown = execute_use_workflow(
+            conv_state, project_dir, cmd.workflow_ref,
+        )
+        ctx.conv_state = updated_state
+
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="use_workflow",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(UseWorkflowStage())
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

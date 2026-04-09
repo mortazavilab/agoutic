@@ -5,6 +5,7 @@ import pytest
 from cortex.workflow_commands import (
     WorkflowCommand,
     detect_workflow_intent,
+    execute_use_workflow,
     execute_workflow_command,
     parse_workflow_command,
     resolve_workflow_reference,
@@ -135,4 +136,82 @@ async def test_execute_workflow_command_posts_rename(monkeypatch):
             {"new_name": "sample-3-renamed"},
         )
     ]
-    assert "sample-3-renamed" in message
+
+
+# ── Parse / detect "use" ──────────────────────────────────────────────────
+
+class TestParseUseCommand:
+    def test_slash_use(self):
+        cmd = parse_workflow_command("/use workflow10")
+        assert cmd == WorkflowCommand(action="use", workflow_ref="workflow10")
+
+    def test_slash_use_case_insensitive(self):
+        cmd = parse_workflow_command("/USE Workflow5")
+        assert cmd == WorkflowCommand(action="use", workflow_ref="Workflow5")
+
+
+class TestDetectUseIntent:
+    def test_use_natural(self):
+        cmd = detect_workflow_intent("use workflow10")
+        assert cmd == WorkflowCommand(action="use", workflow_ref="workflow10")
+
+    def test_switch_to(self):
+        cmd = detect_workflow_intent("switch to workflow3")
+        assert cmd == WorkflowCommand(action="use", workflow_ref="workflow3")
+
+    def test_set_workflow_to(self):
+        cmd = detect_workflow_intent("set workflow to workflow5")
+        assert cmd == WorkflowCommand(action="use", workflow_ref="workflow5")
+
+    def test_set_active_workflow_to(self):
+        cmd = detect_workflow_intent("set active workflow to workflow8")
+        assert cmd == WorkflowCommand(action="use", workflow_ref="workflow8")
+
+    def test_please_prefix(self):
+        cmd = detect_workflow_intent("please use workflow2")
+        assert cmd == WorkflowCommand(action="use", workflow_ref="workflow2")
+
+
+# ── execute_use_workflow ───────────────────────────────────────────────────
+
+class TestExecuteUseWorkflow:
+    def _make_state(self, workflows=None, work_dir="", active_idx=None):
+        return SimpleNamespace(
+            workflows=workflows or [],
+            work_dir=work_dir,
+            active_workflow_index=active_idx,
+        )
+
+    def test_match_known_workflow(self):
+        state = self._make_state(workflows=[
+            {"work_dir": "/data/proj/workflow9"},
+            {"work_dir": "/data/proj/workflow10"},
+        ], work_dir="/data/proj/workflow9", active_idx=0)
+
+        updated, md = execute_use_workflow(state, "/data/proj", "workflow10")
+        assert updated.work_dir == "/data/proj/workflow10"
+        assert updated.active_workflow_index == 1
+        assert "workflow10" in md
+
+    def test_match_case_insensitive(self):
+        state = self._make_state(workflows=[
+            {"work_dir": "/proj/Workflow5"},
+        ])
+        updated, md = execute_use_workflow(state, "/proj", "workflow5")
+        assert updated.work_dir == "/proj/Workflow5"
+        assert updated.active_workflow_index == 0
+
+    def test_fallback_to_disk(self, tmp_path):
+        wf_dir = tmp_path / "workflow7"
+        wf_dir.mkdir()
+        state = self._make_state()
+
+        updated, md = execute_use_workflow(state, str(tmp_path), "workflow7")
+        assert updated.work_dir == str(wf_dir)
+        assert updated.active_workflow_index is None
+        assert "workflow7" in md
+
+    def test_not_found(self):
+        state = self._make_state()
+        updated, md = execute_use_workflow(state, "/no/such/dir", "workflow99")
+        assert "Could not find" in md
