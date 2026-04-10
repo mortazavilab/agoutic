@@ -93,11 +93,20 @@ app = FastAPI(
 # Add request logging middleware FIRST (outermost)
 app.add_middleware(RequestLoggingMiddleware)
 
+_TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
+
+
+def _sanitize_work_directory(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = _TRAILING_PATH_JUNK.sub('', str(value).strip())
+    return cleaned or None
+
 
 def _effective_job_work_directory(job) -> str | None:
     result_destination = (getattr(job, "result_destination", "") or "").strip().lower()
-    local_work_dir = getattr(job, "nextflow_work_dir", None)
-    remote_work_dir = getattr(job, "remote_work_dir", None)
+    local_work_dir = _sanitize_work_directory(getattr(job, "nextflow_work_dir", None))
+    remote_work_dir = _sanitize_work_directory(getattr(job, "remote_work_dir", None))
     if result_destination in {"local", "both"} and local_work_dir:
         return local_work_dir
     return remote_work_dir or local_work_dir
@@ -382,9 +391,29 @@ def _parse_script_output_directory(stdout_text: str) -> str | None:
     working directory and should be used as the job's work_directory.
     """
     import re as _re
-    m = _re.search(r'Outputs are in:\s*(.+)', stdout_text)
-    if m:
-        candidate = m.group(1).strip()
+
+    try:
+        parsed = json.loads(stdout_text)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        workflow_payload = parsed.get("workflow") if isinstance(parsed.get("workflow"), dict) else {}
+        for candidate in (
+            workflow_payload.get("directory"),
+            workflow_payload.get("output_directory"),
+            parsed.get("work_directory"),
+            parsed.get("output_directory"),
+        ):
+            sanitized = _sanitize_work_directory(candidate)
+            if sanitized and os.path.isabs(sanitized):
+                return sanitized
+
+    for line in stdout_text.splitlines():
+        m = _re.search(r'Outputs are in:\s*(.+)', line)
+        if not m:
+            continue
+        candidate = _sanitize_work_directory(m.group(1))
         if candidate and os.path.isabs(candidate):
             return candidate
     return None
@@ -434,6 +463,11 @@ async def _monitor_script_job(
                 _script_output_dir = _parse_script_output_directory(stdout_tail)
                 if _script_output_dir:
                     job.nextflow_work_dir = _script_output_dir
+                    inferred_index = infer_workflow_index_from_path(_script_output_dir)
+                    if inferred_index is not None:
+                        job.workflow_index = inferred_index
+                        job.workflow_alias = workflow_alias_for_index(inferred_index)
+                        job.workflow_folder_name = Path(_script_output_dir).name
             await session.commit()
 
         await add_log_entry(
@@ -1097,7 +1131,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "run_stage": job.run_stage,
                 "current_step": live_status.get("current_step"),
                 "current_step_detail": live_status.get("current_step_detail"),
-                "work_directory": job.nextflow_work_dir,
+                "work_directory": _effective_job_work_directory(job),
                 **_job_timing_payload(job),
             }
         
@@ -1187,7 +1221,8 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         # Get detailed status including tasks from check_status
         executor = NextflowExecutor()
         # Use the actual work directory stored in DB (may be jailed path)
-        work_dir = Path(job.nextflow_work_dir) if job.nextflow_work_dir else executor.work_dir / run_uuid
+        effective_work_directory = _effective_job_work_directory(job)
+        work_dir = Path(effective_work_directory) if effective_work_directory else executor.work_dir / run_uuid
         status_data = await executor.check_status(run_uuid, work_dir)
         
         return {
@@ -1197,7 +1232,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             "message": status_data.get("message", job.error_message or f"Status: {job.status}"),
             "tasks": status_data.get("tasks", {}),
             "execution_mode": "local",
-            "work_directory": job.nextflow_work_dir,
+            "work_directory": effective_work_directory,
             **_job_timing_payload(job),
         }
     

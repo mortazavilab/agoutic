@@ -267,3 +267,200 @@ async def test_execute_step_run_de_pipeline_executes_tool_calls(monkeypatch):
     assert result.success is True
     assert payload["steps"][0]["status"] == "COMPLETED"
     assert result.data["results"][0]["tool"] == "load_data"
+
+
+@pytest.mark.asyncio
+async def test_execute_step_locate_data_uses_completed_run_script_work_directory(monkeypatch):
+    payload = {
+        "steps": [
+            {
+                "id": "run1",
+                "kind": "RUN_SCRIPT",
+                "title": "Run reconcile",
+                "status": "COMPLETED",
+                "work_directory": "/tmp/project/workflow5",
+            },
+            {
+                "id": "loc1",
+                "kind": "LOCATE_DATA",
+                "title": "Locate reconcile outputs",
+                "status": "PENDING",
+                "depends_on": ["run1"],
+                "tool_calls": [
+                    {
+                        "source_key": "analyzer",
+                        "tool": "list_job_files",
+                        "params": {"work_dir": "/tmp/project", "extensions": ".tsv,.csv"},
+                    }
+                ],
+            },
+        ]
+    }
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    async def _fake_call_mcp_tool(source, tool, params):
+        captured["source"] = source
+        captured["tool"] = tool
+        captured["params"] = dict(params)
+        return {"success": True, "work_dir": params.get("work_dir"), "files": []}
+
+    monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _fake_call_mcp_tool)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "loc1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    assert captured["source"] == "analyzer"
+    assert captured["tool"] == "list_job_files"
+    assert captured["params"]["work_dir"] == "/tmp/project/workflow5"
+
+
+@pytest.mark.asyncio
+async def test_execute_step_check_existing_uses_plan_work_dir_for_find_file(monkeypatch):
+    payload = {
+        "plan_type": "run_de_pipeline",
+        "work_dir": "/tmp/project/workflow6",
+        "steps": [
+            {
+                "id": "check1",
+                "kind": "CHECK_EXISTING",
+                "title": "Check for existing DE results",
+                "status": "PENDING",
+                "tool_calls": [
+                    {
+                        "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": {"file_name": "de_results"},
+                    }
+                ],
+            },
+        ],
+    }
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    async def _fake_call_mcp_tool(source, tool, params):
+        captured["source"] = source
+        captured["tool"] = tool
+        captured["params"] = dict(params)
+        return {"success": True, "paths": []}
+
+    monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _fake_call_mcp_tool)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "check1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    assert captured["source"] == "analyzer"
+    assert captured["tool"] == "find_file"
+    assert captured["params"]["work_dir"] == "/tmp/project/workflow6"
+
+
+@pytest.mark.asyncio
+async def test_execute_step_check_existing_missing_file_is_nonfatal(monkeypatch):
+    payload = {
+        "plan_type": "run_de_pipeline",
+        "work_dir": "/tmp/project/workflow6",
+        "steps": [
+            {
+                "id": "check1",
+                "kind": "CHECK_EXISTING",
+                "title": "Check for existing DE results",
+                "status": "PENDING",
+                "tool_calls": [
+                    {
+                        "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": {"file_name": "de_results"},
+                    }
+                ],
+            },
+        ],
+    }
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    async def _fake_call_mcp_tool(_source, _tool, params):
+        return {
+            "success": False,
+            "error": "File not found (checked result directories only, ignored work/ folder)",
+            "search_term": params.get("file_name"),
+            "work_dir": params.get("work_dir"),
+        }
+
+    monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _fake_call_mcp_tool)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "check1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    wrapper = result.data["results"][0]["result"]
+    assert wrapper["success"] is True
+    assert wrapper["file_count"] == 0
+    assert wrapper["paths"] == []
+    assert wrapper["not_found"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_step_save_results_uses_workflow_scoped_output_dir(monkeypatch):
+    payload = {
+        "plan_type": "run_de_pipeline",
+        "work_dir": "/tmp/project/workflow6",
+        "steps": [
+            {
+                "id": "save1",
+                "kind": "SAVE_RESULTS",
+                "title": "Save results",
+                "status": "PENDING",
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "save_results",
+                        "params": {"name": "ad_vs_control_gene", "format": "tsv"},
+                    }
+                ],
+            },
+        ],
+    }
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    async def _fake_call_mcp_tool(source, tool, params):
+        captured["source"] = source
+        captured["tool"] = tool
+        captured["params"] = dict(params)
+        return {"data": "ok"}
+
+    monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _fake_call_mcp_tool)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "save1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    assert captured["source"] == "edgepython"
+    assert captured["tool"] == "save_results"
+    assert captured["params"]["output_path"] == "/tmp/project/workflow6/de_results/de_results.tsv"

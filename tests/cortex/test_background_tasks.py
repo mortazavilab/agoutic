@@ -2047,7 +2047,7 @@ class TestPollJobStatus:
 
         mock_client = AsyncMock()
         mock_client.call_tool = AsyncMock(side_effect=[
-            {"status": "COMPLETED", "progress_percent": 100, "message": "Done"},
+            {"status": "COMPLETED", "progress_percent": 100, "message": "Done", "work_directory": "/work/workflow5\\n\","},
             {"logs": []},
         ])
 
@@ -2074,6 +2074,7 @@ class TestPollJobStatus:
         workflow_payload = get_block_payload(workflow)
         run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_reconcile")
         assert run_step["status"] == "COMPLETED"
+        assert run_step["work_directory"] == "/work/workflow5"
         sess.close()
 
     @pytest.mark.anyio
@@ -2143,67 +2144,74 @@ def test_resolved_job_work_directory_falls_back_to_existing_payload():
         {"status": "RUNNING"},
     ) == "/local/project/workflow1"
 
-    @pytest.mark.asyncio
-    async def test_handles_poll_errors_gracefully(self, session_factory, seed_data):
-        """Polling continues after non-fatal errors."""
-        sess = session_factory()
-        job_block = _create_block_internal(
-            sess, "proj-bg", "EXECUTION_JOB",
-            {
-                "run_uuid": "err-test",
-                "job_status": {"status": "PENDING"},
-                "logs": [],
-            },
-            status="RUNNING",
-            owner_id="u-bg",
-        )
-        sess.close()
+
+def test_resolved_job_work_directory_sanitizes_corrupted_status_path():
+    assert _resolved_job_work_directory(
+        None,
+        {"work_directory": "/local/project/workflow5\\n\","},
+    ) == "/local/project/workflow5"
+
+@pytest.mark.asyncio
+async def test_handles_poll_errors_gracefully(session_factory, seed_data):
+    """Polling continues after non-fatal errors."""
+    sess = session_factory()
+    job_block = _create_block_internal(
+        sess, "proj-bg", "EXECUTION_JOB",
+        {
+            "run_uuid": "err-test",
+            "job_status": {"status": "PENDING"},
+            "logs": [],
+        },
+        status="RUNNING",
+        owner_id="u-bg",
+    )
+    sess.close()
 
 
-        call_count = 0
+    call_count = 0
 
-        async def _side_effect(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 2:
-                raise ConnectionError("Network error")
-            # Third call onwards: return completed
-            if "check_nextflow_status" in str(args):
-                return {"status": "COMPLETED", "progress_percent": 100}
-            return {"logs": []}
+    async def _side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            raise ConnectionError("Network error")
+        # Third call onwards: return completed
+        if "check_nextflow_status" in str(args):
+            return {"status": "COMPLETED", "progress_percent": 100}
+        return {"logs": []}
 
-        mock_client = AsyncMock()
-        mock_client.call_tool = AsyncMock(side_effect=[
-            # First poll pair: error
-            ConnectionError("Network"),
-            # Second poll pair: success
-            {"status": "COMPLETED", "progress_percent": 100},
-            {"logs": []},
-        ])
-        # Make connect raise on first call, succeed on second
-        connect_count = [0]
-        original_connect = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(side_effect=[
+        # First poll pair: error
+        ConnectionError("Network"),
+        # Second poll pair: success
+        {"status": "COMPLETED", "progress_percent": 100},
+        {"logs": []},
+    ])
+    # Make connect raise on first call, succeed on second
+    connect_count = [0]
+    original_connect = AsyncMock()
 
-        async def connect_side_effect():
-            connect_count[0] += 1
-            if connect_count[0] == 1:
-                raise ConnectionError("First connect failure")
+    async def connect_side_effect():
+        connect_count[0] += 1
+        if connect_count[0] == 1:
+            raise ConnectionError("First connect failure")
 
-        # Actually, let's simplify - just have the first call_tool raise
-        mock_client.connect = AsyncMock()
-        mock_client.call_tool = AsyncMock(side_effect=[
-            ConnectionError("First poll error"),  # Will be caught
-        ])
+    # Actually, let's simplify - just have the first call_tool raise
+    mock_client.connect = AsyncMock()
+    mock_client.call_tool = AsyncMock(side_effect=[
+        ConnectionError("First poll error"),  # Will be caught
+    ])
 
-        with _patch_session(session_factory), \
-             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
-               patch("cortex.job_polling.asyncio") as mock_aio:
-            mock_aio.sleep = AsyncMock()
-            # This should not raise - errors are caught
-            await poll_job_status("proj-bg", job_block.id, "err-test")
+    with _patch_session(session_factory), \
+         patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+         patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+           patch("cortex.job_polling.asyncio") as mock_aio:
+        mock_aio.sleep = AsyncMock()
+        # This should not raise - errors are caught
+        await poll_job_status("proj-bg", job_block.id, "err-test")
 
-        # If we got here without exception, error handling works
+    # If we got here without exception, error handling works
 
 
 # ---------------------------------------------------------------------------

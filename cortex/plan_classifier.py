@@ -89,6 +89,15 @@ def classify_request(
             logger.info("classify_request: MULTI_STEP", pattern=pat.pattern[:60])
             return "MULTI_STEP"
 
+    detected_plan_type = _detect_plan_type(msg)
+    if detected_plan_type:
+        logger.info("classify_request: MULTI_STEP", plan_type=detected_plan_type)
+        return "MULTI_STEP"
+
+    if _is_summarize_results_request(msg, conv_state):
+        logger.info("classify_request: MULTI_STEP", reason="summarize_results")
+        return "MULTI_STEP"
+
     # 1b. Check skill-defined plan chains
     from cortex.plan_chains import load_chains_for_skill, match_chain
     chains = load_chains_for_skill(active_skill)

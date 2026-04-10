@@ -1,4 +1,4 @@
-## [Unreleased]
+## [3.5.3] - 2026-04-10
 
 ### Improvements
 
@@ -41,6 +41,28 @@
   `launchpad/backends/sbatch_generator.py`, `launchpad/models.py`,
   `ui/appui_block_part1.py`, `ui/components/slurm_form.py`,
   `docs/user_guide_execution_modes.md`, `README.md`)
+
+- **Grouped edgePython differential expression now runs directly from
+  reconciled abundance outputs and saved dataframes** — users can compare named
+  sample groups from the active workflow abundance table or a previously parsed
+  dataframe, Cortex prepares edgePython-ready counts and sample-info files in a
+  workflow-local DE staging directory, defaults two-group reconcile compares to
+  exact tests, saves full results and plots under the selected workflow, and
+  asks for clarification instead of guessing when the user has not named the
+  groups.
+  (`cortex/de_prep.py`, `cortex/plan_params.py`, `cortex/plan_templates.py`,
+  `cortex/plan_executor.py`, `cortex/chat_stages/plan_detection.py`,
+  `tests/cortex/test_de_prep.py`, `tests/cortex/test_planner_cache_steps.py`,
+  `tests/cortex/test_plan_executor_run_script.py`,
+  `tests/cortex/test_chat_entry.py`)
+
+- **The UI help surface now documents grouped DE prompts directly** — the
+  deterministic Streamlit help card, sidebar shortcuts, and canned Cortex help
+  response now show concrete prompts for comparing reconcile abundance samples
+  and dataframe-backed DE requests, so the new workflow is discoverable from
+  the UI without trial-and-error prompting.
+  (`ui/appui_state.py`, `ui/appui_sidebar.py`,
+  `cortex/chat_stages/quick_exits.py`, `README.md`, `ui/README.md`)
 
 ### Bug Fixes
 
@@ -159,34 +181,18 @@
   `tests/cortex/test_db_helpers.py`, `tests/analyzer/test_mcp_tools.py`,
   `tests/skills/test_reconcile_bams_scripts.py`)
 
----
-
-## [3.5.3] - 2026-04-09
-
-### Improvements
-
-- **Grouped edgePython differential expression now runs directly from
-  reconciled abundance outputs and saved dataframes** — users can compare named
-  sample groups from the active workflow abundance table or a previously parsed
-  dataframe, Cortex prepares edgePython-ready counts and sample-info files
-  locally, defaults two-group reconcile compares to exact tests, saves full
-  results, generates DE plots, and asks for clarification instead of guessing
-  when the user has not named the groups.
-  (`cortex/de_prep.py`, `cortex/plan_params.py`, `cortex/plan_templates.py`,
-  `cortex/plan_executor.py`, `cortex/chat_stages/plan_detection.py`,
-  `tests/cortex/test_de_prep.py`, `tests/cortex/test_planner_cache_steps.py`,
+- **Reconcile-driven DE follow-ups now keep using the selected workflow and no
+  longer stop on a missing prior `de_results` folder** — grouped DE
+  `CHECK_EXISTING` probes now treat `find_file` misses as an empty preflight
+  instead of a fatal error, reconcile output parsing and summaries stay on the
+  resolved reconcile workflow directory, and grouped DE prep plus saved
+  edgePython results/plots now remain workflow-local under the selected
+  workflow.
+  (`cortex/plan_executor.py`, `cortex/plan_replanner.py`,
+  `cortex/plan_params.py`, `cortex/tool_dispatch.py`,
   `tests/cortex/test_plan_executor_run_script.py`,
-  `tests/cortex/test_chat_entry.py`)
-
-- **The UI help surface now documents grouped DE prompts directly** — the
-  deterministic Streamlit help card, sidebar shortcuts, and canned Cortex help
-  response now show concrete prompts for comparing reconcile abundance samples
-  and dataframe-backed DE requests, so the new workflow is discoverable from
-  the UI without trial-and-error prompting.
-  (`ui/appui_state.py`, `ui/appui_sidebar.py`,
-  `cortex/chat_stages/quick_exits.py`, `README.md`, `ui/README.md`)
-
-### Bug Fixes
+  `tests/cortex/test_plan_executor_concurrency.py`,
+  `tests/cortex/test_planner_cache_steps.py`)
 
 - **Workflow switching now persists across turns and no longer reuses corrupted
   work directories** — the new chat-level workflow selector now stores the

@@ -72,6 +72,16 @@ def _dedup_slug(session, owner_id: str, slug: str, exclude_project_id: str | Non
     raise HTTPException(status_code=500, detail="Could not generate unique slug")
 
 
+_TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
+
+
+def _sanitize_work_dir(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = _TRAILING_PATH_JUNK.sub('', str(value).strip())
+    return cleaned or None
+
+
 # --- Project CRUD Endpoints ---
 
 @router.post("/projects")
@@ -505,7 +515,7 @@ async def get_project_stats(project_id: str, request: Request):
             submitted_at = row[4]
             started_at = row[5]
             completed_at = row[6]
-            work_dir = row[7] or row[8]
+            work_dir = _sanitize_work_dir(row[7] or row[8])
             duration_seconds = None
             start_dt = started_at or submitted_at
             end_dt = completed_at or datetime.datetime.utcnow()
@@ -515,8 +525,8 @@ async def get_project_stats(project_id: str, request: Request):
                 except Exception:
                     duration_seconds = None
 
-            workflow_alias = row[11] if _has_wf_cols else None
-            workflow_folder_name = row[13] if _has_wf_cols else None
+            workflow_alias = _sanitize_work_dir(row[11]) if _has_wf_cols else None
+            workflow_folder_name = _sanitize_work_dir(row[13]) if _has_wf_cols else None
             workflow_display_name = row[14] if _has_wf_cols else None
             workflow_label = workflow_alias or workflow_folder_name
             if not workflow_label and work_dir:

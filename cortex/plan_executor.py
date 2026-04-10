@@ -112,7 +112,21 @@ def _parse_candidate_priority(file_info: dict) -> tuple[int, str]:
     return (10, path)
 
 
-def _extract_located_tabular_files(step_result: Any) -> tuple[str | None, list[str]]:
+def _reconcile_parse_candidate_priority(file_info: dict) -> tuple[int, str]:
+    name = str(file_info.get("name") or file_info.get("path") or "").lower()
+    path = str(file_info.get("path") or file_info.get("name") or "")
+    if name.endswith("_abundance.tsv") or name.endswith("_abundance.csv"):
+        return (0, path)
+    if name.endswith("_novelty_by_sample.csv"):
+        return (1, path)
+    if name.endswith(".inputs.tsv"):
+        return (2, path)
+    if name.endswith(".mapping.tsv"):
+        return (3, path)
+    return (20, path)
+
+
+def _extract_located_files(step_result: Any) -> tuple[str | None, list[dict[str, Any]]]:
     work_dir: str | None = None
     file_entries: list[dict[str, Any]] = []
 
@@ -128,11 +142,21 @@ def _extract_located_tabular_files(step_result: Any) -> tuple[str | None, list[s
         if isinstance(files, list):
             file_entries.extend(entry for entry in files if isinstance(entry, dict))
 
+    return work_dir, file_entries
+
+
+def _extract_located_tabular_files(
+    step_result: Any,
+    *,
+    priority_fn=_parse_candidate_priority,
+) -> tuple[str | None, list[str]]:
+    work_dir, file_entries = _extract_located_files(step_result)
+
     tabular = [
         entry for entry in file_entries
         if str(entry.get("extension") or "").lower() in {".csv", ".tsv"}
     ]
-    ordered = sorted(tabular, key=_parse_candidate_priority)
+    ordered = sorted(tabular, key=priority_fn)
     file_paths = [str(entry.get("path")) for entry in ordered if entry.get("path")]
     if len(file_paths) > 5:
         file_paths = file_paths[:5]
@@ -142,6 +166,11 @@ def _extract_located_tabular_files(step_result: Any) -> tuple[str | None, list[s
 def _derive_parse_tool_calls(plan_payload: dict, step: dict) -> list[dict]:
     steps = plan_payload.get("steps", []) if isinstance(plan_payload, dict) else []
     dependency_ids = step.get("depends_on") if isinstance(step.get("depends_on"), list) else []
+    priority_fn = (
+        _reconcile_parse_candidate_priority
+        if plan_payload.get("plan_type") == "reconcile_bams"
+        else _parse_candidate_priority
+    )
 
     candidate_locates: list[dict] = []
     for dep_id in dependency_ids:
@@ -158,7 +187,10 @@ def _derive_parse_tool_calls(plan_payload: dict, step: dict) -> list[dict]:
     work_dir: str | None = None
     file_paths: list[str] = []
     for locate_step in candidate_locates:
-        locate_work_dir, located_files = _extract_located_tabular_files(locate_step.get("result"))
+        locate_work_dir, located_files = _extract_located_tabular_files(
+            locate_step.get("result"),
+            priority_fn=priority_fn,
+        )
         work_dir = work_dir or locate_work_dir
         for file_path in located_files:
             if file_path not in file_paths:
@@ -178,6 +210,116 @@ def _derive_parse_tool_calls(plan_payload: dict, step: dict) -> list[dict]:
         }
         for file_path in file_paths
     ]
+
+
+def _extract_step_work_directory(step: dict[str, Any]) -> str | None:
+    for key in ("work_directory", "work_dir", "output_directory"):
+        candidate = step.get(key)
+        if isinstance(candidate, str) and Path(candidate).is_absolute():
+            return candidate
+
+    for item in _coerce_step_result_items(step.get("result")):
+        payload = item.get("result") if "result" in item else item
+        if not isinstance(payload, dict):
+            continue
+
+        for key in ("work_directory", "work_dir", "output_directory"):
+            candidate = payload.get(key)
+            if isinstance(candidate, str) and Path(candidate).is_absolute():
+                return candidate
+
+        workflow_payload = payload.get("workflow")
+        if isinstance(workflow_payload, dict):
+            for key in ("directory", "output_directory"):
+                candidate = workflow_payload.get(key)
+                if isinstance(candidate, str) and Path(candidate).is_absolute():
+                    return candidate
+
+    return None
+
+
+def _resolve_runtime_work_directory(plan_payload: dict, step: dict) -> str | None:
+    for dep_step in _iter_dependency_steps(plan_payload, step):
+        if dep_step.get("kind") != "RUN_SCRIPT":
+            continue
+        candidate = _extract_step_work_directory(dep_step)
+        if candidate:
+            return candidate
+    return None
+
+
+def _apply_runtime_tool_call_overrides(
+    plan_payload: dict,
+    step: dict,
+    tool_calls: list[dict],
+) -> list[dict]:
+    runtime_work_dir = _resolve_runtime_work_directory(plan_payload, step)
+    plan_work_dir = plan_payload.get("work_dir")
+    if not isinstance(plan_work_dir, str) or not Path(plan_work_dir).is_absolute():
+        plan_work_dir = None
+
+    overridden: list[dict] = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            overridden.append(tool_call)
+            continue
+
+        updated = dict(tool_call)
+        params = dict(updated.get("params") or {})
+        if (
+            step.get("kind") == "LOCATE_DATA"
+            and runtime_work_dir
+            and updated.get("source_key") == "analyzer"
+            and updated.get("tool") == "list_job_files"
+        ):
+            params["work_dir"] = runtime_work_dir
+        if (
+            step.get("kind") == "CHECK_EXISTING"
+            and updated.get("source_key") == "analyzer"
+            and updated.get("tool") == "find_file"
+            and not params.get("work_dir")
+            and plan_work_dir
+        ):
+            params["work_dir"] = plan_work_dir
+        updated["params"] = params
+        overridden.append(updated)
+
+    return overridden
+
+
+def _resolve_de_storage_root(
+    plan_payload: dict,
+    step: dict,
+    project_dir_path: Path | None,
+) -> Path | None:
+    for candidate in (
+        step.get("work_dir"),
+        plan_payload.get("work_dir"),
+    ):
+        if isinstance(candidate, str) and Path(candidate).is_absolute():
+            return Path(candidate)
+    return project_dir_path
+
+
+def _is_check_existing_not_found_result(kind: str, tool_name: str, result: Any) -> bool:
+    if kind != "CHECK_EXISTING" or tool_name != "find_file" or not isinstance(result, dict):
+        return False
+    error_text = str(result.get("error") or "")
+    return error_text.startswith("File not found")
+
+
+def _normalize_check_existing_result(params: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(result)
+    normalized.pop("error", None)
+    normalized["success"] = True
+    normalized["file_count"] = 0
+    normalized["paths"] = []
+    normalized["primary_path"] = None
+    normalized["search_term"] = normalized.get("search_term") or params.get("file_name") or ""
+    normalized["not_found"] = True
+    if params.get("work_dir") and not normalized.get("work_dir"):
+        normalized["work_dir"] = params.get("work_dir")
+    return normalized
 
 
 def _iter_dependency_steps(plan_payload: dict, step: dict) -> list[dict]:
@@ -267,6 +409,115 @@ def _extract_all_dependency_tables(plan_payload: dict, step: dict) -> list[dict[
                 seen_paths.add(file_path)
                 tables.append(table)
     return tables
+
+
+def _has_dependency_kind(plan_payload: dict, step: dict, kind: str) -> bool:
+    return any(dep_step.get("kind") == kind for dep_step in _iter_dependency_steps(plan_payload, step))
+
+
+def _extract_latest_located_files(
+    plan_payload: dict,
+    step: dict,
+    *,
+    prefer_dependency_kind: str | None = None,
+) -> tuple[str | None, list[dict[str, Any]]]:
+    steps = plan_payload.get("steps", []) if isinstance(plan_payload, dict) else []
+    candidates: list[tuple[str | None, list[dict[str, Any]]]] = []
+
+    for candidate in steps:
+        if candidate is step:
+            break
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("kind") != "LOCATE_DATA" or candidate.get("status") != "COMPLETED":
+            continue
+        if prefer_dependency_kind and not _has_dependency_kind(plan_payload, candidate, prefer_dependency_kind):
+            continue
+        work_dir, files = _extract_located_files(candidate.get("result"))
+        if files:
+            candidates.append((work_dir, files))
+
+    if candidates:
+        return candidates[-1]
+    if prefer_dependency_kind:
+        return _extract_latest_located_files(plan_payload, step)
+    return None, []
+
+
+def _format_file_list(names: list[str], *, limit: int = 3) -> str:
+    labels = [Path(name).name or name for name in names[:limit]]
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    summary = ", ".join(labels[:-1])
+    return f"{summary}, and {labels[-1]}"
+
+
+def _build_reconcile_interpretation(plan_payload: dict, step: dict) -> str:
+    work_dir, located_files = _extract_latest_located_files(
+        plan_payload,
+        step,
+        prefer_dependency_kind="RUN_SCRIPT",
+    )
+    output_files = []
+    for entry in located_files:
+        path = str(entry.get("path") or "")
+        name = str(entry.get("name") or path)
+        if not path or path.endswith("/") or name.endswith("/"):
+            continue
+        output_files.append(path)
+
+    abundance_files = [path for path in output_files if path.lower().endswith(("_abundance.tsv", "_abundance.csv"))]
+    novelty_files = [path for path in output_files if path.lower().endswith("_novelty_by_sample.csv")]
+    manifest_files = [path for path in output_files if path.lower().endswith(".inputs.tsv")]
+    mapping_files = [path for path in output_files if path.lower().endswith(".mapping.tsv")]
+    bam_files = [path for path in output_files if path.lower().endswith(".bam")]
+    gtf_files = [path for path in output_files if path.lower().endswith(".gtf")]
+    report_files = [path for path in output_files if path.lower().endswith("_summary.txt")]
+
+    observations: list[str] = []
+    workflow_name = Path(work_dir).name if work_dir else ""
+    if workflow_name:
+        observations.append(f"Reconcile outputs were written to {workflow_name}.")
+    if output_files:
+        observations.append(f"Located {len(output_files)} top-level output file(s).")
+
+    key_tables: list[str] = []
+    if abundance_files:
+        key_tables.append(abundance_files[0])
+    if novelty_files:
+        key_tables.append(novelty_files[0])
+    if manifest_files:
+        key_tables.append(manifest_files[0])
+    if key_tables:
+        observations.append(f"Key tables: {_format_file_list(key_tables, limit=3)}.")
+
+    if bam_files:
+        observations.append(
+            f"Generated {len(bam_files)} reconciled BAM file(s): {_format_file_list(bam_files, limit=3)}."
+        )
+    if mapping_files:
+        observations.append(f"Produced {len(mapping_files)} transcript remapping table(s).")
+    if gtf_files:
+        observations.append(f"Merged annotation written to {Path(gtf_files[0]).name}.")
+    if report_files:
+        observations.append(f"Summary report: {Path(report_files[0]).name}.")
+
+    if not observations:
+        tables = _extract_all_dependency_tables(plan_payload, step)
+        if not tables:
+            return "No reconcile outputs were available to summarize."
+        labels = [str(table.get("label") or "results") for table in tables[:4]]
+        extra_count = max(0, len(tables) - len(labels))
+        label_summary = ", ".join(labels)
+        if extra_count:
+            label_summary = f"{label_summary}, and {extra_count} more"
+        return f"Parsed {len(tables)} reconcile result table(s): {label_summary}."
+
+    return " ".join(observations)
 
 
 def _table_plot_priority(table: dict[str, Any]) -> tuple[int, int, str]:
@@ -439,6 +690,9 @@ def _build_qc_interpretation(plan_payload: dict, step: dict) -> str:
             lines.append(de_outputs["plots"][-1])
         return "\n".join(line for line in lines if line)
 
+    if plan_payload.get("plan_type") == "reconcile_bams":
+        return _build_reconcile_interpretation(plan_payload, step)
+
     tables = _extract_all_dependency_tables(plan_payload, step)
     if not tables:
         return "No parsed result tables were available to interpret."
@@ -501,7 +755,12 @@ def _build_qc_interpretation(plan_payload: dict, step: dict) -> str:
             )
 
     if not observations:
-        lead = f"Parsed {len(tables)} result table(s) and generated a plot from the most informative one."
+        labels = [str(table.get("label") or "results") for table in tables[:4]]
+        extra_count = max(0, len(tables) - len(labels))
+        label_summary = ", ".join(labels)
+        if extra_count:
+            label_summary = f"{label_summary}, and {extra_count} more"
+        lead = f"Parsed {len(tables)} result table(s): {label_summary}."
     else:
         lead = " ".join(observations)
 
@@ -640,6 +899,7 @@ async def execute_step(
         defaults = STEP_TOOL_DEFAULTS.get(kind)
         if defaults:
             tool_calls = defaults
+    tool_calls = _apply_runtime_tool_call_overrides(plan_payload, step, tool_calls)
 
     # Special handling for kinds that are not simple MCP calls
     if kind == "REQUEST_APPROVAL":
@@ -710,10 +970,10 @@ async def execute_step(
                 ).scalars().all()
                 source = _find_dataframe_payload(int(df_id), history_blocks)
 
+            de_storage_root = _resolve_de_storage_root(plan_payload, step, project_dir_path)
             default_output_dir = (
-                str(project_dir_path / "de_inputs")
-                if project_dir_path is not None
-                else step.get("output_dir")
+                step.get("output_dir")
+                or (str(de_storage_root / "de_inputs") if de_storage_root is not None else "")
                 or str(Path(step.get("work_dir") or ".") / "de_inputs")
             )
             prepared = prepare_de_inputs(
@@ -806,12 +1066,16 @@ async def execute_step(
             logger.warning("Skipping empty tool call in step", step_id=step_id)
             continue
 
-        if source_key == "edgepython" and project_dir_path is not None:
+        if source_key == "edgepython":
             from cortex.tool_dispatch import _inject_edgepython_output_path
 
-            _inject_edgepython_output_path(tool_name, params, project_dir_path)
+            de_storage_root = _resolve_de_storage_root(plan_payload, step, project_dir_path)
+            if de_storage_root is not None:
+                _inject_edgepython_output_path(tool_name, params, de_storage_root)
 
         result = await _call_mcp_tool(source_key, tool_name, params)
+        if _is_check_existing_not_found_result(kind, tool_name, result):
+            result = _normalize_check_existing_result(params, result)
         all_results.append({
             "tool": tool_name,
             "source_key": source_key,
@@ -1211,6 +1475,8 @@ async def _execute_parallel_safe_step(step: dict) -> StepResult:
             return StepResult(success=False, error="Empty source_key or tool in tool call")
 
         result = await _call_mcp_tool(source_key, tool_name, params)
+        if _is_check_existing_not_found_result(kind, tool_name, result):
+            result = _normalize_check_existing_result(params, result)
         all_results.append({
             "tool": tool_name,
             "source_key": source_key,

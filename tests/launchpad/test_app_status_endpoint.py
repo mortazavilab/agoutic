@@ -202,6 +202,58 @@ async def test_get_job_status_reports_live_reconcile_step_for_running_script(mon
     assert "Finished rewriting sample1.GRCh38.annotated.bam" in payload["message"]
 
 
+def test_parse_script_output_directory_prefers_workflow_directory_from_json_stdout():
+    stdout_text = json.dumps(
+        {
+            "message": "Outputs are in: /local/project/workflow5\\n\",",
+            "workflow": {
+                "directory": "/local/project/workflow5",
+                "output_directory": "/local/project/workflow5",
+            },
+        },
+        indent=2,
+    )
+
+    assert launchpad_app._parse_script_output_directory(stdout_text) == "/local/project/workflow5"
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_sanitizes_work_directory_for_running_script(monkeypatch):
+    fake_session = _FakeSession()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-5"
+        return SimpleNamespace(
+            run_uuid="run-5",
+            execution_mode="local",
+            status=launchpad_app.JobStatus.RUNNING,
+            progress_percent=0,
+            error_message=None,
+            run_stage="SCRIPT_RUNNING",
+            nextflow_work_dir="/local/project/workflow5\\n\",",
+            log_file=None,
+            stderr_log=None,
+            report_json=json.dumps(
+                {
+                    "run_type": "script",
+                    "script_id": "reconcile_bams/reconcile_bams",
+                }
+            ),
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+        )
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+
+    payload = await launchpad_app.get_job_status("run-5")
+
+    assert payload["work_directory"] == "/local/project/workflow5"
+
+
 @pytest.mark.asyncio
 async def test_get_job_logs_returns_live_script_output_while_running(monkeypatch, tmp_path):
     fake_session = _FakeSession()

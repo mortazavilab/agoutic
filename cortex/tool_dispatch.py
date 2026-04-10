@@ -852,7 +852,7 @@ def _inject_edgepython_output_path(
     params: dict,
     project_dir_path: Path,
 ) -> None:
-    """Redirect edgepython output files into the project's de_results folder."""
+    """Redirect edgepython output files into the provided root's de_results folder."""
     ep_output_dir = project_dir_path / "de_results"
     if tool_name == "generate_plot" and not params.get("output_path"):
         ep_output_dir.mkdir(parents=True, exist_ok=True)

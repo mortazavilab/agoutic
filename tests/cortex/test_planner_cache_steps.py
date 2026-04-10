@@ -171,10 +171,11 @@ def test_reconcile_bams_template_has_parse_step_before_summary():
     parse_step = plan["steps"][-2]
     summary_step = plan["steps"][-1]
 
-    # Post-run LOCATE_DATA lists the output directory for tsv/csv files
+    # Post-run LOCATE_DATA lists the top-level workflow output directory only
     assert locate_out["tool_calls"][0]["tool"] == "list_job_files"
     assert locate_out["tool_calls"][0]["params"]["work_dir"] == "/tmp/project/workflow10"
-    assert locate_out["tool_calls"][0]["params"]["extensions"] == ".tsv,.csv"
+    assert locate_out["tool_calls"][0]["params"]["max_depth"] == 1
+    assert "extensions" not in locate_out["tool_calls"][0]["params"]
 
     # PARSE_OUTPUT_FILE depends on the post-run LOCATE_DATA
     assert locate_out["id"] in parse_step["depends_on"]
@@ -231,6 +232,20 @@ def test_classify_request_marks_reconcile_the_bams_as_multistep():
     ) == "MULTI_STEP"
 
 
+def test_classify_request_marks_grouped_de_compare_as_multistep():
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    assert classify_request(
+        "compare the AD samples exc and jbh to the control samples gko and lwf2",
+        "analyze_job_results",
+        state,
+    ) == "MULTI_STEP"
+
+
 def test_extract_plan_params_keeps_remote_stage_sample_name_and_path():
     params = _extract_plan_params(
         "Stage the mouse cDNA sample called Jamshid at /data/pod5 on hpc3",
@@ -283,7 +298,7 @@ def test_extract_plan_params_grouped_de_from_active_workflow():
     assert params["method"] == "exact_test"
     assert params["level"] == "gene"
     assert params["work_dir"] == "/tmp/project/workflow10"
-    assert params["prep_output_dir"] == "/tmp/project/de_inputs"
+    assert params["prep_output_dir"] == "/tmp/project/workflow10/de_inputs"
 
 
 def test_extract_plan_params_grouped_de_from_dataframe_transcript_level():
@@ -360,6 +375,8 @@ def test_run_de_pipeline_template_adds_prepare_and_save_steps_for_grouped_abunda
     assert "exact_test" in tool_names
     assert "get_top_genes" in tool_names
     assert "test_contrast" not in tool_names
+    assert plan["work_dir"] == "/tmp/project/workflow10"
+    assert plan["steps"][0]["tool_calls"][0]["params"]["work_dir"] == "/tmp/project/workflow10"
 
 
 def test_extract_plan_params_reconcile_named_workflows_from_state():

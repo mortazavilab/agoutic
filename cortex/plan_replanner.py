@@ -210,17 +210,25 @@ def _is_empty_result(results: list | dict) -> bool:
                     return True
                 if result_data.get("count") == 0:
                     return True
+                if result_data.get("file_count") == 0:
+                    return True
                 data = result_data.get("data")
                 if isinstance(data, list) and len(data) == 0:
                     return True
                 files = result_data.get("files")
                 if isinstance(files, list) and len(files) == 0:
                     return True
+                paths = result_data.get("paths")
+                if isinstance(paths, list) and len(paths) == 0:
+                    return True
     elif isinstance(results, dict):
-        if results.get("total") == 0 or results.get("count") == 0:
+        if results.get("total") == 0 or results.get("count") == 0 or results.get("file_count") == 0:
             return True
         data = results.get("data")
         if isinstance(data, list) and len(data) == 0:
+            return True
+        paths = results.get("paths")
+        if isinstance(paths, list) and len(paths) == 0:
             return True
     return False
 
@@ -238,17 +246,28 @@ def _has_existing_files(results: list | dict) -> bool:
                 files = result_data.get("files")
                 if isinstance(files, list) and len(files) > 0:
                     return True
+                if result_data.get("file_count", 0) > 0:
+                    return True
+                paths = result_data.get("paths")
+                if isinstance(paths, list) and len(paths) > 0:
+                    return True
+                if result_data.get("primary_path"):
+                    return True
                 if result_data.get("found"):
                     return True
                 if result_data.get("path"):
                     return True
-        # Non-empty list of results is a positive signal
-        return bool(results)
+        return False
     if isinstance(results, dict):
-        if results.get("found") or results.get("path"):
+        if results.get("found") or results.get("path") or results.get("primary_path"):
             return True
         files = results.get("files")
         if isinstance(files, list) and len(files) > 0:
+            return True
+        if results.get("file_count", 0) > 0:
+            return True
+        paths = results.get("paths")
+        if isinstance(paths, list) and len(paths) > 0:
             return True
     return False
 

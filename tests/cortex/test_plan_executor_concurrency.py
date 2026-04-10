@@ -729,3 +729,296 @@ async def test_parse_output_file_uses_located_csv_results(session_factory, monke
         "annot/JamshidW.mm39_final_stats.csv",
     ]
     assert all(call[1]["work_dir"] == "/tmp/workflow2" for call in parse_calls)
+
+
+@pytest.mark.asyncio
+async def test_parse_output_file_prioritizes_reconcile_outputs(session_factory, monkeypatch):
+    from cortex import plan_executor
+
+    payload = {
+        "title": "Parse reconcile outputs",
+        "project_id": "proj-reconcile-parse",
+        "plan_type": "reconcile_bams",
+        "plan_instance_id": "pi-reconcile-parse",
+        "steps": [
+            {
+                "id": "s_loc",
+                "order_index": 0,
+                "kind": "LOCATE_DATA",
+                "title": "Locate reconcile outputs",
+                "depends_on": [],
+                "requires_approval": False,
+                "tool_calls": [
+                    {
+                        "source_key": "analyzer",
+                        "tool": "list_job_files",
+                        "params": {"work_dir": "/tmp/workflow6", "max_depth": 1},
+                    }
+                ],
+            },
+            {
+                "id": "s_parse",
+                "order_index": 1,
+                "kind": "PARSE_OUTPUT_FILE",
+                "title": "Parse reconcile tables",
+                "depends_on": ["s_loc"],
+                "requires_approval": False,
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-reconcile-parse",
+        owner_id="owner-reconcile-parse",
+        payload=payload,
+    )
+
+    parse_calls: list[tuple[str, dict]] = []
+
+    async def _fake_call(_source_key, tool_name, params):
+        if tool_name == "list_job_files":
+            return {
+                "success": True,
+                "work_dir": "/tmp/workflow6",
+                "file_count": 7,
+                "files": [
+                    {"path": "annot/lwf2.GRCh38_qc_summary.csv", "name": "lwf2.GRCh38_qc_summary.csv", "extension": ".csv"},
+                    {"path": "reconciled_abundance.tsv", "name": "reconciled_abundance.tsv", "extension": ".tsv"},
+                    {"path": "reconciled_novelty_by_sample.csv", "name": "reconciled_novelty_by_sample.csv", "extension": ".csv"},
+                    {"path": "reconciled.inputs.tsv", "name": "reconciled.inputs.tsv", "extension": ".tsv"},
+                    {"path": "exc.reconciled.mapping.tsv", "name": "exc.reconciled.mapping.tsv", "extension": ".tsv"},
+                    {"path": "gko.reconciled.mapping.tsv", "name": "gko.reconciled.mapping.tsv", "extension": ".tsv"},
+                    {"path": "qc_summary.csv", "name": "qc_summary.csv", "extension": ".csv"},
+                ],
+            }
+        if tool_name == "parse_csv_file":
+            parse_calls.append((tool_name, dict(params)))
+            return {
+                "success": True,
+                "work_dir": params.get("work_dir"),
+                "file_path": params.get("file_path"),
+                "columns": ["metric", "value"],
+                "row_count": 2,
+                "preview_rows": 2,
+                "data": [{"metric": "reads", "value": 1}],
+                "metadata": {},
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-reconcile-parse")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    parse_step = next(step for step in final_payload["steps"] if step["id"] == "s_parse")
+
+    assert parse_step["status"] == "COMPLETED"
+    assert [call[1].get("file_path") for call in parse_calls] == [
+        "reconciled_abundance.tsv",
+        "reconciled_novelty_by_sample.csv",
+        "reconciled.inputs.tsv",
+        "exc.reconciled.mapping.tsv",
+        "gko.reconciled.mapping.tsv",
+    ]
+    assert all(call[1]["work_dir"] == "/tmp/workflow6" for call in parse_calls)
+
+
+@pytest.mark.asyncio
+async def test_write_summary_reports_reconcile_outputs(session_factory):
+    payload = {
+        "title": "Summarize reconcile outputs",
+        "project_id": "proj-reconcile-summary",
+        "plan_type": "reconcile_bams",
+        "plan_instance_id": "pi-reconcile-summary",
+        "steps": [
+            {
+                "id": "run",
+                "order_index": 0,
+                "kind": "RUN_SCRIPT",
+                "title": "Run reconcile",
+                "depends_on": [],
+                "requires_approval": False,
+                "status": "COMPLETED",
+                "work_directory": "/tmp/project/workflow6",
+            },
+            {
+                "id": "loc",
+                "order_index": 1,
+                "kind": "LOCATE_DATA",
+                "title": "Locate reconcile outputs",
+                "depends_on": ["run"],
+                "requires_approval": False,
+                "status": "COMPLETED",
+                "result": [{
+                    "tool": "list_job_files",
+                    "source_key": "analyzer",
+                    "result": {
+                        "success": True,
+                        "work_dir": "/tmp/project/workflow6",
+                        "files": [
+                            {"path": "reconciled_abundance.tsv", "name": "reconciled_abundance.tsv", "extension": ".tsv"},
+                            {"path": "reconciled_novelty_by_sample.csv", "name": "reconciled_novelty_by_sample.csv", "extension": ".csv"},
+                            {"path": "reconciled.inputs.tsv", "name": "reconciled.inputs.tsv", "extension": ".tsv"},
+                            {"path": "exc.reconciled.bam", "name": "exc.reconciled.bam", "extension": ".bam"},
+                            {"path": "jbh.reconciled.bam", "name": "jbh.reconciled.bam", "extension": ".bam"},
+                            {"path": "reconciled.gtf", "name": "reconciled.gtf", "extension": ".gtf"},
+                            {"path": "reconciled_summary.txt", "name": "reconciled_summary.txt", "extension": ".txt"},
+                        ],
+                    },
+                }],
+            },
+            {
+                "id": "parse",
+                "order_index": 2,
+                "kind": "PARSE_OUTPUT_FILE",
+                "title": "Parse reconcile tables",
+                "depends_on": ["loc"],
+                "requires_approval": False,
+                "status": "COMPLETED",
+                "result": [
+                    {
+                        "tool": "parse_csv_file",
+                        "source_key": "analyzer",
+                        "result": {
+                            "success": True,
+                            "work_dir": "/tmp/project/workflow6",
+                            "file_path": "reconciled_abundance.tsv",
+                            "columns": ["gene_ID", "exc", "jbh"],
+                            "row_count": 2,
+                            "data": [{"gene_ID": "GENE1", "exc": 10, "jbh": 12}],
+                        },
+                    },
+                    {
+                        "tool": "parse_csv_file",
+                        "source_key": "analyzer",
+                        "result": {
+                            "success": True,
+                            "work_dir": "/tmp/project/workflow6",
+                            "file_path": "reconciled_novelty_by_sample.csv",
+                            "columns": ["sample", "KNOWN", "NOVEL"],
+                            "row_count": 2,
+                            "data": [{"sample": "exc", "KNOWN": 100, "NOVEL": 5}],
+                        },
+                    },
+                ],
+            },
+            {
+                "id": "summary",
+                "order_index": 3,
+                "kind": "WRITE_SUMMARY",
+                "title": "Summarize reconcile outputs",
+                "depends_on": ["parse"],
+                "requires_approval": False,
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-reconcile-summary",
+        owner_id="owner-reconcile-summary",
+        payload=payload,
+    )
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-reconcile-summary")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    summary_step = next(step for step in final_payload["steps"] if step["id"] == "summary")
+
+    assert summary_step["status"] == "COMPLETED"
+    markdown = summary_step["result"]["markdown"]
+    assert "workflow6" in markdown
+    assert "reconciled_abundance.tsv" in markdown
+    assert "reconciled_novelty_by_sample.csv" in markdown
+    assert "2 reconciled BAM file(s)" in markdown
+    assert "reconciled.gtf" in markdown
+
+
+@pytest.mark.asyncio
+async def test_run_de_plan_continues_after_check_existing_miss(session_factory, monkeypatch, tmp_path):
+    from cortex import plan_executor
+
+    abundance_path = tmp_path / "reconciled_abundance.tsv"
+    abundance_path.write_text(
+        "gene_ID\ttranscript_ID\texc\tjbh\tgko\tlwf2\n"
+        "GENE1\tTX1\t10\t12\t4\t5\n",
+        encoding="utf-8",
+    )
+
+    payload = {
+        "title": "Grouped DE from reconcile workflow",
+        "project_id": "proj-de-followup",
+        "plan_type": "run_de_pipeline",
+        "work_dir": str(tmp_path),
+        "plan_instance_id": "pi-de-followup",
+        "steps": [
+            {
+                "id": "check1",
+                "order_index": 0,
+                "kind": "CHECK_EXISTING",
+                "title": "Check for existing DE results",
+                "depends_on": [],
+                "requires_approval": False,
+                "tool_calls": [
+                    {
+                        "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": {"file_name": "de_results", "work_dir": str(tmp_path)},
+                    }
+                ],
+            },
+            {
+                "id": "prep1",
+                "order_index": 1,
+                "kind": "PREPARE_DE_INPUT",
+                "title": "Prepare DE inputs",
+                "depends_on": ["check1"],
+                "requires_approval": False,
+                "counts_path": "",
+                "work_dir": str(tmp_path),
+                "group_a_label": "AD",
+                "group_a_samples": ["exc", "jbh"],
+                "group_b_label": "control",
+                "group_b_samples": ["gko", "lwf2"],
+                "level": "gene",
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-de-followup",
+        owner_id="owner-de-followup",
+        payload=payload,
+    )
+
+    async def _fake_call(_source_key, tool_name, params):
+        if tool_name == "find_file":
+            return {
+                "success": False,
+                "error": "File not found (checked result directories only, ignored work/ folder)",
+                "search_term": params.get("file_name"),
+                "work_dir": params.get("work_dir"),
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-de-followup")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    check_step = next(step for step in final_payload["steps"] if step["id"] == "check1")
+    prep_step = next(step for step in final_payload["steps"] if step["id"] == "prep1")
+
+    assert final_payload["status"] == "COMPLETED"
+    assert check_step["status"] == "COMPLETED"
+    assert check_step["result"][0]["result"]["file_count"] == 0
+    assert prep_step["status"] == "COMPLETED"
+    assert prep_step["result"]["counts_path"].startswith(str(tmp_path / "de_inputs"))

@@ -263,7 +263,7 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             params["method"] = "exact_test"
 
         if project_dir or conv_state.work_dir:
-            prep_base = project_dir or conv_state.work_dir or "."
+            prep_base = conv_state.work_dir or project_dir or "."
             params["prep_output_dir"] = os.path.join(prep_base, "de_inputs")
 
         return params

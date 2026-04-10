@@ -409,6 +409,7 @@ def _template_run_de_pipeline(params: dict) -> dict:
     group_b_samples = params.get("group_b_samples") or []
     use_prep = bool(group_a_samples and group_b_samples)
     method = params.get("method") or ("exact_test" if use_prep else "glm")
+    work_dir = str(params.get("work_dir") or "").strip()
     result_name = params.get("result_name") or f"{re.sub(r'[^a-zA-Z0-9]+', '_', str(group_a_label)).strip('_').lower() or 'group1'}_vs_{re.sub(r'[^a-zA-Z0-9]+', '_', str(group_b_label)).strip('_').lower() or 'group2'}_{params.get('level', 'gene')}"
 
     steps = []
@@ -416,7 +417,10 @@ def _template_run_de_pipeline(params: dict) -> dict:
 
     s_check = _make_step("CHECK_EXISTING", "Check for existing DE results", idx,
                          tool_calls=[{"source_key": "analyzer", "tool": "find_file",
-                                      "params": {"file_name": "de_results"}}])
+                                      "params": {
+                                          "file_name": "de_results",
+                                          **({"work_dir": work_dir} if work_dir else {}),
+                                      } }])
     steps.append(s_check)
     idx += 1
 
@@ -520,6 +524,7 @@ def _template_run_de_pipeline(params: dict) -> dict:
         "auto_execute_safe_steps": True,
         "status": "PENDING",
         "current_step_id": steps[0]["id"],
+        "work_dir": work_dir,
         "steps": steps,
         "artifacts": [],
     }
@@ -884,7 +889,6 @@ def _template_reconcile_bams(params: dict) -> dict:
                 "tool": "list_job_files",
                 "params": {
                     "work_dir": _list_out_dir,
-                    "extensions": ".tsv,.csv",
                     "max_depth": 1,
                     "allow_missing": True,
                 },

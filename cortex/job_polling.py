@@ -19,6 +19,15 @@ from cortex.task_service import sync_project_tasks
 
 logger = get_logger(__name__)
 
+_TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
+
+
+def _sanitize_work_directory(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = _TRAILING_PATH_JUNK.sub('', str(value).strip())
+    return cleaned or None
+
 
 async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
     """
@@ -67,8 +76,11 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                 if block:
                     # Create new payload dict to ensure SQLAlchemy detects the change
                     payload = get_block_payload(block)
-                    payload["job_status"] = status_data
                     resolved_work_directory = _resolved_job_work_directory(payload.get("work_directory"), status_data)
+                    if resolved_work_directory:
+                        status_data = dict(status_data)
+                        status_data["work_directory"] = resolved_work_directory
+                    payload["job_status"] = status_data
                     if resolved_work_directory:
                         payload["work_directory"] = resolved_work_directory
                     payload["logs"] = logs
@@ -109,7 +121,11 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                                 workflow_block,
                                 run_step_id or "run_dogme",
                                 "COMPLETED" if job_status == "COMPLETED" else "FAILED",
-                                extra={"run_uuid": run_uuid, "block_id": block_id},
+                                extra={
+                                    "run_uuid": run_uuid,
+                                    "block_id": block_id,
+                                    **({"work_directory": resolved_work_directory} if resolved_work_directory else {}),
+                                },
                             )
 
                         # On completion, auto-trigger analysis
@@ -170,20 +186,21 @@ def _completed_job_results_ready(status_data: dict | None) -> bool:
 
 
 def _resolved_job_work_directory(existing_work_directory: str | None, status_data: dict | None) -> str | None:
+    sanitized_existing = _sanitize_work_directory(existing_work_directory)
     if isinstance(status_data, dict):
-        status_work_directory = (status_data.get("work_directory") or "").strip()
+        status_work_directory = _sanitize_work_directory(status_data.get("work_directory") or "")
         if status_work_directory:
             # Don't let a script-cwd value from Launchpad overwrite a
             # better output directory that cortex already resolved.
             if (
-                existing_work_directory
+                sanitized_existing
                 and "/skills/" in status_work_directory
                 and "/scripts" in status_work_directory
-                and "/skills/" not in existing_work_directory
+                and "/skills/" not in sanitized_existing
             ):
-                return existing_work_directory
+                return sanitized_existing
             return status_work_directory
-    return existing_work_directory or None
+    return sanitized_existing or None
 
 
 async def _auto_trigger_analysis(
