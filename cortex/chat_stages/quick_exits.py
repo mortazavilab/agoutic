@@ -16,7 +16,7 @@ from cortex.chat_sync_handler import (
     _render_list_dfs,
 )
 from cortex.db import row_to_dict
-from cortex.db_helpers import _create_block_internal
+from cortex.db_helpers import _create_block_internal, save_conversation_message
 from cortex.memory_commands import (
     detect_memory_intent,
     execute_memory_command,
@@ -327,17 +327,42 @@ class UseWorkflowStage:
         )
         ctx.conv_state = updated_state
 
-        resp = await _create_prompt_response(
+        model_name = ctx.model or "default"
+        payload = {
+            "markdown": markdown,
+            "skill": ctx.active_skill or ctx.skill or "welcome",
+            "model": model_name,
+            "state": updated_state.to_dict(),
+            "tokens": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "model": model_name,
+            },
+        }
+        agent_block = _create_block_internal(
             ctx.session,
-            _req_shim(ctx),
-            ctx.user_block,
-            ctx.user.id,
-            ctx.active_skill,
-            ctx.model or "default",
-            markdown,
-            prompt_type="use_workflow",
+            ctx.project_id,
+            "AGENT_PLAN",
+            payload,
+            status="DONE",
+            owner_id=ctx.user.id,
         )
-        ctx.short_circuit(resp)
+        await save_conversation_message(
+            ctx.session,
+            ctx.project_id,
+            ctx.user.id,
+            "assistant",
+            markdown,
+            token_data=payload["tokens"],
+            model_name=model_name,
+        )
+        ctx.short_circuit({
+            "status": "ok",
+            "user_block": row_to_dict(ctx.user_block),
+            "agent_block": row_to_dict(agent_block),
+            "gate_block": None,
+        })
 
 
 register_stage(UseWorkflowStage())

@@ -10,6 +10,14 @@ import re
 
 from cortex.llm_validators import get_block_payload
 
+# Regex to strip trailing non-path characters (e.g. \n", from corrupted JSON).
+_TRAILING_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
+
+
+def _sanitize_path(raw: str) -> str:
+    """Strip whitespace and any trailing non-path characters from a raw value."""
+    return _TRAILING_JUNK.sub('', raw.strip()) if raw else ""
+
 
 def _is_script_source_dir(path_value: str) -> bool:
     """Return True if *path_value* looks like a skill's scripts source folder."""
@@ -128,8 +136,8 @@ def _build_conversation_state(
             if blk.type != "EXECUTION_JOB":
                 continue
             _pl = get_block_payload(blk)
-            _wd = (_pl.get("work_directory") or "").strip()
-            _uuid = (_pl.get("run_uuid") or "").strip()
+            _wd = _sanitize_path(_pl.get("work_directory") or "")
+            _uuid = _sanitize_path(_pl.get("run_uuid") or "")
             _run_type = _pl.get("run_type", "dogme")
             if _wd or _uuid:
                 state.workflows.append({
@@ -279,8 +287,8 @@ def _extract_job_context_from_history(
             if blk.type != "EXECUTION_JOB":
                 continue
             _pl = get_block_payload(blk)
-            _wd = (_pl.get("work_directory") or "").strip()
-            _uuid = (_pl.get("run_uuid") or "").strip()
+            _wd = _sanitize_path(_pl.get("work_directory") or "")
+            _uuid = _sanitize_path(_pl.get("run_uuid") or "")
             _run_type = _pl.get("run_type", "dogme")
             if _wd or _uuid:
                 workflows.append({

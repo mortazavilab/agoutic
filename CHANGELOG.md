@@ -44,6 +44,16 @@
 
 ### Bug Fixes
 
+- **Workflow switching now persists across turns and no longer reuses corrupted
+  work directories** — the new chat-level workflow selector now stores the
+  updated conversation state in the AGENT_PLAN cache so follow-up requests like
+  listing files keep using the chosen workflow, and conversation-state rebuilds
+  now sanitize trailing junk such as literal `\\n",` suffixes from cached
+  `work_directory` / `run_uuid` values before Analyzer tools use them.
+  (`cortex/chat_stages/quick_exits.py`, `cortex/conversation_state.py`,
+  `tests/cortex/test_workflow_commands.py`,
+  `tests/cortex/test_build_conv_state.py`)
+
 - **Reconcile BAM preflight now treats matching remote Watson GTF paths as the
   local canonical reference** — when workflow configs or manual approval input
   point at a remote `annot:` GTF whose filename matches the local reference

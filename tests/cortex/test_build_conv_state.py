@@ -14,7 +14,7 @@ import json
 import pytest
 from unittest.mock import MagicMock
 
-from cortex.conversation_state import _build_conversation_state, _extract_job_context_from_history
+from cortex.conversation_state import _build_conversation_state, _extract_job_context_from_history, _sanitize_path
 
 
 # ---------------------------------------------------------------------------
@@ -393,3 +393,37 @@ class TestBuildConvStateFastPath:
         ]
         state = _build_conversation_state("run_dogme_dna", None, history_blocks=blocks)
         assert state.work_dir == "/new"
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_path — strip trailing non-path junk
+# ---------------------------------------------------------------------------
+
+class TestSanitizePath:
+    def test_clean_path_unchanged(self):
+        assert _sanitize_path("/data/proj/workflow10") == "/data/proj/workflow10"
+
+    def test_strips_trailing_newline_quote_comma(self):
+        assert _sanitize_path('/data/proj/workflow10\n",') == "/data/proj/workflow10"
+
+    def test_strips_whitespace_and_junk(self):
+        assert _sanitize_path('  /data/proj/workflow9\n  ') == "/data/proj/workflow9"
+
+    def test_empty_string(self):
+        assert _sanitize_path("") == ""
+
+    def test_none_like(self):
+        assert _sanitize_path(None) == ""
+
+    def test_trailing_backslash_n_literal(self):
+        # literal backslash + n + quote + comma (as seen in the corruption)
+        assert _sanitize_path('/data/proj/workflow10\\n",') == "/data/proj/workflow10"
+
+    def test_workflow_dir_extraction_uses_sanitize(self):
+        """Verify the full pipeline strips junk from work_directory."""
+        blocks = [_make_block("EXECUTION_JOB", {
+            "work_directory": '/data/proj/workflow10\n",',
+            "run_uuid": "uuid-1",
+        })]
+        state = _build_conversation_state("analyze_job_results", None, history_blocks=blocks)
+        assert state.work_dir == "/data/proj/workflow10"
