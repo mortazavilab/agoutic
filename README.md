@@ -3,63 +3,6 @@
 **Version:** 3.5.3
 **Status:** Active Prototype 
 
-## Latest Updates (2026-04-09)
-
-- **Grouped DE from reconcile abundance tables and dataframes** — AGOUTIC can
-  now run edgePython directly from the active workflow's
-  `reconciled_abundance.tsv` output or a parsed in-chat dataframe. You can name
-  sample groups in natural language or use `/de`, and AGOUTIC will ask for
-  clarification instead of guessing when groups are missing.
-
-- **Help UI now shows grouped DE prompts** — the sidebar help shortcuts and
-  deterministic help response include examples for comparing reconcile samples
-  from the current workflow or from a dataframe.
-
-- **Chat dataframe guide and help refresh** — added a dedicated
-  `docs/DATAFRAMES.md` guide, expanded deterministic UI help with dataframe
-  commands and plotting examples, and updated the quick reference so dataframe
-  inspection and transform workflows are documented in one place.
-
-- **Pending dataframe action controls** — saved dataframe transforms can now
-  be applied or dismissed directly from their chat block instead of relying on
-  a free-text confirmation.
-
-- **Broader in-memory dataframe actions** — AGOUTIC now auto-routes more
-  natural dataframe requests such as subset, rename, summarize, and grouped
-  plotting from existing conversation dataframes.
-
-- **Unified token/context budget** — new `ContextBudgetManager` allocates the
-  LLM context window across system prompt, skills, memory, tool schemas, and
-  conversation history using tiktoken for accurate token counting. Conversation
-  history is now automatically trimmed (oldest-first) to prevent context
-  overflow.
-
-- **Skill capability manifest** — replaced the flat `SKILLS_REGISTRY` dict
-  with declarative `SkillManifest` dataclasses declaring expected inputs,
-  output types, required MCP services, estimated runtime, and sample type
-  compatibility. Enables smarter planner routing and runtime availability
-  checks.
-
-- **Chat pipeline decomposition** — replaced the monolithic `chat_with_agent`
-  function (1,637 lines) with a 16-stage registry-based pipeline.
-  `cortex/app.py` reduced from 2,348 → 805 lines.
-
-- **Project rename syncs local folder** — renaming a project auto-generates
-  a new slug and renames the on-disk directory so the UI name, database slug,
-  and filesystem folder always stay in sync. Each rename is recorded as a
-  `finding` memory for auditability.
-
-- **Slug hints in sidebar** — projects with suffixed slugs (e.g.
-  `project-2026-03-27-2`) now show a `(slug)` hint in the sidebar and in
-  creation/rename toasts so you always know the actual folder name.
-
-- **Dual-scope memory system** — persistent memory with user-global and
-  per-project scopes (`result`, `sample_annotation`, `pipeline_step`,
-  `preference`, `finding`, `custom`). Slash commands, NL detection,
-  soft-delete, pinning, token-budget context injection, and Memories UI.
-
-See [CHANGELOG.md](CHANGELOG.md) for the full release history.
-
 ## 🧬 Overview
 
 AGOUTIC is a general-purpose agent for analyzing and interpreting long-read genomic data (Nanopore/PacBio). It uses a **Dual Interface** architecture (REST + MCP) to allow both human users and AI agents to orchestrate complex bioinformatics pipelines.
