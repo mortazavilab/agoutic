@@ -56,6 +56,22 @@
   `tests/cortex/test_plan_executor_run_script.py`,
   `tests/cortex/test_chat_entry.py`)
 
+- **Differential-expression histories now capture comparisons, result files,
+  and volcano plots directly into project memory, and workflow results can show
+  the volcano plot inline** — successful DE prep, test, save, and plot steps
+  now auto-record compared sample groups, DEG counts, saved result-table
+  artifacts, and volcano-plot artifacts as project memories as soon as each
+  step completes, so the record survives downstream failures. DE workflow
+  summaries and volcano-plot step payloads now carry structured artifact
+  metadata plus inline image payloads, and the UI also recognizes legacy
+  text-only `Volcano plot saved to: ...` results when rendering workflow
+  highlights.
+  (`cortex/memory_service.py`, `cortex/plan_executor.py`,
+  `ui/appui_renderers.py`, `tests/cortex/test_memory_service.py`,
+  `tests/cortex/test_plan_executor_concurrency.py`,
+  `tests/cortex/test_plan_executor_run_script.py`,
+  `tests/ui/test_app_source_helpers.py`)
+
 - **The UI help surface now documents grouped DE prompts directly** — the
   deterministic Streamlit help card, sidebar shortcuts, and canned Cortex help
   response now show concrete prompts for comparing reconcile abundance samples
@@ -193,6 +209,21 @@
   `tests/cortex/test_plan_executor_run_script.py`,
   `tests/cortex/test_plan_executor_concurrency.py`,
   `tests/cortex/test_planner_cache_steps.py`)
+
+- **Each grouped DE compare now gets its own fresh `workflowN` instead of
+  reusing the source workflow directory** — runtime DE execution now reserves
+  the next project workflow number using the same numbering logic as Nextflow
+  jobs and reconcile runs, writes prepared DE inputs under
+  `workflowN/de_inputs`, and saves edgePython result tables plus plots under
+  `workflowN/de_results`, which prevents repeated compares from colliding with
+  source-workflow artifacts.
+  (`common/workflow_paths.py`, `cortex/plan_executor.py`,
+  `launchpad/nextflow_executor.py`,
+  `skills/reconcile_bams/scripts/reconcile_bams.py`,
+  `tests/cortex/test_plan_executor_concurrency.py`,
+  `tests/cortex/test_plan_executor_run_script.py`,
+  `tests/launchpad/test_nextflow_executor.py`,
+  `tests/skills/test_reconcile_bams_scripts.py`)
 
 - **Workflow switching now persists across turns and no longer reuses corrupted
   work directories** — the new chat-level workflow selector now stores the

@@ -1,5 +1,6 @@
 import re
 from collections import defaultdict
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
@@ -692,8 +693,58 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str, plotly_te
 
 def _render_workflow_plot_payload(payload: dict, block_id: str, step_suffix: str, plotly_template: str):
     """Render workflow-local plots embedded in a step result payload."""
-    charts = payload.get("charts", []) if isinstance(payload, dict) else []
-    dfs = payload.get("_dataframes", {}) if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return
+
+    image_files = payload.get("image_files", []) if isinstance(payload.get("image_files"), list) else []
+    if not image_files:
+        legacy_text = ""
+        if isinstance(payload.get("data"), str):
+            legacy_text = str(payload.get("data") or "")
+        elif isinstance(payload.get("message"), str):
+            legacy_text = str(payload.get("message") or "")
+        artifact_path = ""
+        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+        if isinstance(artifacts.get("volcano_plot"), str):
+            artifact_path = str(artifacts.get("volcano_plot") or "").strip()
+        if not artifact_path and legacy_text:
+            match = re.search(r"Volcano plot saved to:\s*(.+\.(?:png|jpg|jpeg|gif|webp))", legacy_text)
+            if match:
+                artifact_path = match.group(1).strip()
+        if artifact_path:
+            image_files = [{
+                "path": artifact_path,
+                "caption": "Volcano plot",
+            }]
+
+    if isinstance(image_files, list):
+        for image_idx, image in enumerate(image_files):
+            image_path = ""
+            image_b64 = ""
+            if isinstance(image, dict):
+                image_path = str(image.get("path") or "").strip()
+                image_b64 = str(image.get("data_b64") or "").strip()
+                caption = str(image.get("caption") or image.get("label") or "Plot").strip() or "Plot"
+            else:
+                caption = "Plot"
+                if isinstance(image, str):
+                    image_path = image.strip()
+            if not image_path and not image_b64:
+                continue
+            if image_b64:
+                import base64
+
+                image_bytes = base64.b64decode(image_b64)
+                st.image(image_bytes, caption=caption, use_container_width=True)
+                continue
+            if not Path(image_path).exists():
+                st.caption(f"{caption}: {image_path}")
+                continue
+            _safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"wf_img_{block_id}_{step_suffix}_{image_idx}")
+            st.image(image_path, caption=caption, use_container_width=True)
+
+    charts = payload.get("charts", [])
+    dfs = payload.get("_dataframes", {})
     if not charts or not isinstance(dfs, dict):
         return
 

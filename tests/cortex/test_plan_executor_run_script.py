@@ -1,4 +1,5 @@
 import pytest
+import base64
 
 from cortex.plan_executor import STEP_TOOL_DEFAULTS, execute_step, should_auto_execute
 
@@ -464,3 +465,216 @@ async def test_execute_step_save_results_uses_workflow_scoped_output_dir(monkeyp
     assert captured["source"] == "edgepython"
     assert captured["tool"] == "save_results"
     assert captured["params"]["output_path"] == "/tmp/project/workflow6/de_results/de_results.tsv"
+
+
+@pytest.mark.asyncio
+async def test_execute_step_save_results_prefers_dedicated_de_workflow_dir(monkeypatch):
+    payload = {
+        "plan_type": "run_de_pipeline",
+        "work_dir": "/tmp/project/workflow6",
+        "de_work_dir": "/tmp/project/workflow8",
+        "steps": [
+            {
+                "id": "save1",
+                "kind": "SAVE_RESULTS",
+                "title": "Save results",
+                "status": "PENDING",
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "save_results",
+                        "params": {"name": "ad_vs_control_gene", "format": "tsv"},
+                    }
+                ],
+            },
+        ],
+    }
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    async def _fake_call_mcp_tool(source, tool, params):
+        captured["source"] = source
+        captured["tool"] = tool
+        captured["params"] = dict(params)
+        return {"data": "ok"}
+
+    monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _fake_call_mcp_tool)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "save1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    assert captured["source"] == "edgepython"
+    assert captured["tool"] == "save_results"
+    assert captured["params"]["output_path"] == "/tmp/project/workflow8/de_results/de_results.tsv"
+
+
+@pytest.mark.asyncio
+async def test_execute_step_generate_de_plot_embeds_inline_image_payload(monkeypatch, tmp_path):
+    plot_path = tmp_path / "workflow8" / "de_results" / "volcano_ad_vs_control_gene.png"
+    plot_path.parent.mkdir(parents=True)
+    plot_path.write_bytes(b"fake-png")
+
+    payload = {
+        "plan_type": "run_de_pipeline",
+        "work_dir": str(tmp_path / "workflow6"),
+        "de_work_dir": str(tmp_path / "workflow8"),
+        "steps": [
+            {
+                "id": "prep1",
+                "kind": "PREPARE_DE_INPUT",
+                "title": "Prepare DE inputs",
+                "status": "COMPLETED",
+                "result": {
+                    "group_a_label": "AD",
+                    "group_a_samples": ["exc", "jbh"],
+                    "group_b_label": "control",
+                    "group_b_samples": ["gko", "lwf2"],
+                },
+            },
+            {
+                "id": "plot1",
+                "kind": "GENERATE_DE_PLOT",
+                "title": "Generate volcano plot",
+                "status": "PENDING",
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "generate_plot",
+                        "params": {"plot_type": "volcano", "result_name": "ad_vs_control_gene"},
+                    }
+                ],
+            },
+        ],
+    }
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    async def _fake_call_mcp_tool(_source, _tool, _params):
+        return {"data": f"Volcano plot saved to: {plot_path}"}
+
+    monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _fake_call_mcp_tool)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "plot1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    step_result = payload["steps"][1]["result"]
+    assert step_result["artifacts"]["volcano_plot"] == str(plot_path)
+    assert step_result["image_files"][0]["path"] == str(plot_path)
+    assert step_result["image_files"][0]["data_b64"] == base64.b64encode(b"fake-png").decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_execute_step_write_summary_records_de_comparison_and_volcano_plot(monkeypatch):
+    payload = {
+        "plan_type": "run_de_pipeline",
+        "workflow_type": "de_analysis",
+        "work_dir": "/tmp/project/workflow7",
+        "de_work_dir": "/tmp/project/workflow8",
+        "de_workflow_alias": "workflow8",
+        "steps": [
+            {
+                "id": "prep1",
+                "kind": "PREPARE_DE_INPUT",
+                "title": "Prepare DE inputs",
+                "status": "COMPLETED",
+                "result": {
+                    "group_a_label": "AD",
+                    "group_a_samples": ["exc", "jbh"],
+                    "group_b_label": "control",
+                    "group_b_samples": ["gko", "lwf2"],
+                    "result_name": "ad_vs_control_gene",
+                    "source_label": "reconciled_abundance.tsv",
+                },
+            },
+            {
+                "id": "de1",
+                "kind": "RUN_DE_PIPELINE",
+                "title": "Run DE",
+                "status": "COMPLETED",
+                "depends_on": ["prep1"],
+                "result": [
+                    {
+                        "tool": "exact_test",
+                        "source_key": "edgepython",
+                        "result": "Test: Exact\nDE genes (FDR < 0.05): 12 up, 4 down, 100 NS",
+                    },
+                    {
+                        "tool": "get_top_genes",
+                        "source_key": "edgepython",
+                        "result": "Top genes by FDR\nGENE1\nGENE2",
+                    },
+                ],
+            },
+            {
+                "id": "save1",
+                "kind": "SAVE_RESULTS",
+                "title": "Save results",
+                "status": "COMPLETED",
+                "depends_on": ["de1"],
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "save_results",
+                        "params": {"name": "ad_vs_control_gene", "format": "tsv"},
+                    }
+                ],
+                "result": "Saved results to: /tmp/project/workflow8/de_results/de_results.tsv",
+            },
+            {
+                "id": "plot1",
+                "kind": "GENERATE_DE_PLOT",
+                "title": "Generate volcano plot",
+                "status": "COMPLETED",
+                "depends_on": ["de1"],
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "generate_plot",
+                        "params": {"plot_type": "volcano", "result_name": "ad_vs_control_gene"},
+                    }
+                ],
+                "result": "Volcano plot saved to: /tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png",
+            },
+            {
+                "id": "summary1",
+                "kind": "WRITE_SUMMARY",
+                "title": "Write DE analysis summary",
+                "status": "PENDING",
+                "depends_on": ["save1", "plot1"],
+            },
+        ],
+    }
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "summary1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    summary = payload["steps"][-1]["result"]
+    assert "Compared AD (exc, jbh) against control (gko, lwf2)." in summary["markdown"]
+    assert "Read abundance values from workflow7 and wrote DE artifacts to workflow8." in summary["markdown"]
+    assert "Significant genes at FDR < 0.05: 16 total (12 up, 4 down, 100 not significant)." in summary["markdown"]
+    assert summary["comparison"]["group_a_samples"] == ["exc", "jbh"]
+    assert summary["deg_summary"]["n_significant"] == 16
+    assert summary["artifacts"]["results_table"] == "/tmp/project/workflow8/de_results/de_results.tsv"
+    assert summary["artifacts"]["volcano_plot"] == "/tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png"
+    assert summary["image_files"][0]["path"] == "/tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png"

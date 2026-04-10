@@ -27,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from launchpad.config import REFERENCE_GENOMES
+from common.workflow_paths import next_workflow_number, workflow_dir_name
 
 
 _BAM_PATTERN = re.compile(r"^(?P<sample>.+)\.(?P<reference>[^.]+)\.annotated\.bam$")
@@ -154,19 +155,11 @@ def _manual_gtf_matches_reference(manual_gtf: Path, reference: str) -> bool:
 
 
 def _next_workflow_number(project_dir: Path) -> int:
-    max_n = 0
-    if project_dir.exists():
-        for child in project_dir.iterdir():
-            if child.is_dir() and child.name.startswith("workflow"):
-                try:
-                    max_n = max(max_n, int(child.name[len("workflow"):]))
-                except ValueError:
-                    continue
-    return max_n + 1
+    return next_workflow_number(project_dir)
 
 
 def _ensure_reconcile_workflow_dir(output_root: Path) -> Path:
-    workflow_dir = output_root / f"workflow{_next_workflow_number(output_root)}"
+    workflow_dir = output_root / workflow_dir_name(_next_workflow_number(output_root))
     input_dir = workflow_dir / "input"
     output_dir = workflow_dir / "output"
     input_dir.mkdir(parents=True, exist_ok=False)

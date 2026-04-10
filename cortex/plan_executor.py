@@ -8,8 +8,10 @@ The LLM does NOT improvise execution — code controls it.
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from common import MCPHttpClient
 from common.logging_config import get_logger
+from common.workflow_paths import next_workflow_number, workflow_dir_name
 from sqlalchemy import select
 from cortex.config import get_service_url
 from cortex.plan_validation import PlanValidationError, validate_plan
@@ -152,9 +155,18 @@ def _extract_located_tabular_files(
 ) -> tuple[str | None, list[str]]:
     work_dir, file_entries = _extract_located_files(step_result)
 
+    def _entry_extension(entry: dict[str, Any]) -> str:
+        explicit_extension = str(entry.get("extension") or "").lower()
+        if explicit_extension:
+            return explicit_extension
+        candidate = str(entry.get("path") or entry.get("name") or "")
+        if candidate.endswith("/"):
+            return ""
+        return Path(candidate).suffix.lower()
+
     tabular = [
         entry for entry in file_entries
-        if str(entry.get("extension") or "").lower() in {".csv", ".tsv"}
+        if _entry_extension(entry) in {".csv", ".tsv"}
     ]
     ordered = sorted(tabular, key=priority_fn)
     file_paths = [str(entry.get("path")) for entry in ordered if entry.get("path")]
@@ -212,6 +224,70 @@ def _derive_parse_tool_calls(plan_payload: dict, step: dict) -> list[dict]:
     ]
 
 
+def _resolve_latest_completed_run_script_work_directory(
+    plan_payload: dict,
+    step: dict,
+) -> str | None:
+    steps = plan_payload.get("steps", []) if isinstance(plan_payload, dict) else []
+    latest_work_dir: str | None = None
+    for candidate in steps:
+        if candidate is step:
+            break
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("kind") != "RUN_SCRIPT" or candidate.get("status") != "COMPLETED":
+            continue
+        resolved = _extract_step_work_directory(candidate)
+        if resolved:
+            latest_work_dir = resolved
+    return latest_work_dir
+
+
+async def _derive_runtime_parse_tool_calls(plan_payload: dict, step: dict) -> list[dict]:
+    priority_fn = (
+        _reconcile_parse_candidate_priority
+        if plan_payload.get("plan_type") == "reconcile_bams"
+        else _parse_candidate_priority
+    )
+    runtime_work_dir = (
+        _resolve_runtime_work_directory(plan_payload, step)
+        or _resolve_latest_completed_run_script_work_directory(plan_payload, step)
+    )
+    if not runtime_work_dir:
+        return []
+
+    locate_result = await _call_mcp_tool(
+        "analyzer",
+        "list_job_files",
+        {
+            "work_dir": runtime_work_dir,
+            "max_depth": 1,
+            "allow_missing": True,
+        },
+    )
+    if not isinstance(locate_result, dict) or locate_result.get("error"):
+        return []
+
+    located_work_dir, file_paths = _extract_located_tabular_files(
+        locate_result,
+        priority_fn=priority_fn,
+    )
+    if not file_paths:
+        return []
+
+    return [
+        {
+            "source_key": "analyzer",
+            "tool": "parse_csv_file",
+            "params": {
+                "file_path": file_path,
+                "work_dir": located_work_dir or runtime_work_dir,
+            },
+        }
+        for file_path in file_paths
+    ]
+
+
 def _extract_step_work_directory(step: dict[str, Any]) -> str | None:
     for key in ("work_directory", "work_dir", "output_directory"):
         candidate = step.get(key)
@@ -254,6 +330,7 @@ def _apply_runtime_tool_call_overrides(
     tool_calls: list[dict],
 ) -> list[dict]:
     runtime_work_dir = _resolve_runtime_work_directory(plan_payload, step)
+    de_workflow_dir = _resolve_de_storage_root(plan_payload, step, None)
     plan_work_dir = plan_payload.get("work_dir")
     if not isinstance(plan_work_dir, str) or not Path(plan_work_dir).is_absolute():
         plan_work_dir = None
@@ -277,10 +354,11 @@ def _apply_runtime_tool_call_overrides(
             step.get("kind") == "CHECK_EXISTING"
             and updated.get("source_key") == "analyzer"
             and updated.get("tool") == "find_file"
-            and not params.get("work_dir")
-            and plan_work_dir
         ):
-            params["work_dir"] = plan_work_dir
+            if de_workflow_dir is not None:
+                params["work_dir"] = str(de_workflow_dir)
+            elif not params.get("work_dir") and plan_work_dir:
+                params["work_dir"] = plan_work_dir
         updated["params"] = params
         overridden.append(updated)
 
@@ -293,6 +371,8 @@ def _resolve_de_storage_root(
     project_dir_path: Path | None,
 ) -> Path | None:
     for candidate in (
+        step.get("de_work_dir"),
+        plan_payload.get("de_work_dir"),
         step.get("work_dir"),
         plan_payload.get("work_dir"),
     ):
@@ -305,7 +385,59 @@ def _is_check_existing_not_found_result(kind: str, tool_name: str, result: Any) 
     if kind != "CHECK_EXISTING" or tool_name != "find_file" or not isinstance(result, dict):
         return False
     error_text = str(result.get("error") or "")
-    return error_text.startswith("File not found")
+    return error_text.startswith("File not found") or error_text == "Work directory not found"
+
+
+def _ensure_de_workflow_context(
+    plan_payload: dict,
+    project_dir_path: Path | None,
+) -> Path | None:
+    if plan_payload.get("plan_type") != "run_de_pipeline":
+        return None
+
+    existing_work_dir = plan_payload.get("de_work_dir")
+    if isinstance(existing_work_dir, str) and Path(existing_work_dir).is_absolute():
+        de_workflow_dir = Path(existing_work_dir)
+        de_workflow_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        if project_dir_path is None:
+            return None
+        project_dir_path.mkdir(parents=True, exist_ok=True)
+        while True:
+            workflow_index = next_workflow_number(project_dir_path)
+            de_workflow_dir = project_dir_path / workflow_dir_name(workflow_index)
+            try:
+                de_workflow_dir.mkdir(parents=True, exist_ok=False)
+                break
+            except FileExistsError:
+                continue
+        plan_payload["de_workflow_index"] = workflow_index
+        plan_payload["de_workflow_alias"] = de_workflow_dir.name
+        plan_payload["de_work_dir"] = str(de_workflow_dir)
+
+    plan_payload.setdefault("de_workflow_alias", de_workflow_dir.name)
+    plan_payload.setdefault("de_work_dir", str(de_workflow_dir))
+
+    for candidate in plan_payload.get("steps", []):
+        if not isinstance(candidate, dict):
+            continue
+        kind = candidate.get("kind")
+        if kind == "PREPARE_DE_INPUT":
+            candidate["de_work_dir"] = str(de_workflow_dir)
+            candidate["output_dir"] = str(de_workflow_dir / "de_inputs")
+        elif kind == "CHECK_EXISTING":
+            candidate["de_work_dir"] = str(de_workflow_dir)
+        elif kind in {
+            "RUN_DE_PIPELINE",
+            "SAVE_RESULTS",
+            "ANNOTATE_RESULTS",
+            "GENERATE_DE_PLOT",
+            "INTERPRET_RESULTS",
+            "WRITE_SUMMARY",
+        }:
+            candidate["de_work_dir"] = str(de_workflow_dir)
+
+    return de_workflow_dir
 
 
 def _normalize_check_existing_result(params: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -343,6 +475,28 @@ def _iter_dependency_steps(plan_payload: dict, step: dict) -> list[dict]:
         if candidate is step:
             step_index = idx
             break
+
+    if step_index is None:
+        return []
+    return [candidate for candidate in steps[:step_index] if isinstance(candidate, dict)]
+
+
+def _iter_prior_steps(plan_payload: dict, step: dict) -> list[dict]:
+    steps = plan_payload.get("steps", []) if isinstance(plan_payload, dict) else []
+    if not isinstance(steps, list):
+        return []
+
+    step_index = None
+    for idx, candidate in enumerate(steps):
+        if candidate is step:
+            step_index = idx
+            break
+
+    if step_index is None and isinstance(step.get("id"), str):
+        for idx, candidate in enumerate(steps):
+            if isinstance(candidate, dict) and candidate.get("id") == step.get("id"):
+                step_index = idx
+                break
 
     if step_index is None:
         return []
@@ -477,6 +631,13 @@ def _build_reconcile_interpretation(plan_payload: dict, step: dict) -> str:
     bam_files = [path for path in output_files if path.lower().endswith(".bam")]
     gtf_files = [path for path in output_files if path.lower().endswith(".gtf")]
     report_files = [path for path in output_files if path.lower().endswith("_summary.txt")]
+
+    runtime_work_dir = (
+        _resolve_runtime_work_directory(plan_payload, step)
+        or _resolve_latest_completed_run_script_work_directory(plan_payload, step)
+    )
+    if runtime_work_dir and (not work_dir or not output_files):
+        work_dir = runtime_work_dir
 
     observations: list[str] = []
     workflow_name = Path(work_dir).name if work_dir else ""
@@ -644,6 +805,92 @@ def _normalize_table_rows(table: dict[str, Any]) -> Iterable[dict[str, Any]]:
     return []
 
 
+def _extract_text_result(result_payload: Any) -> str | None:
+    if isinstance(result_payload, str):
+        text = result_payload.strip()
+        return text or None
+    if isinstance(result_payload, dict) and isinstance(result_payload.get("data"), str):
+        text = str(result_payload.get("data") or "").strip()
+        return text or None
+    return None
+
+
+def _extract_de_comparison_context(plan_payload: dict, step: dict) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "group_a_label": "",
+        "group_a_samples": [],
+        "group_b_label": "",
+        "group_b_samples": [],
+        "result_name": "",
+        "level": "",
+        "source_label": "",
+        "source_work_dir": "",
+        "source_workflow": "",
+        "output_work_dir": "",
+        "output_workflow": "",
+    }
+
+    prior_steps = _iter_prior_steps(plan_payload, step)
+
+    for dep_step in reversed(prior_steps):
+        if dep_step.get("kind") != "PREPARE_DE_INPUT":
+            continue
+        for candidate in (dep_step.get("result"), dep_step):
+            if not isinstance(candidate, dict):
+                continue
+            if not context["group_a_label"] and candidate.get("group_a_label"):
+                context["group_a_label"] = str(candidate.get("group_a_label") or "")
+            if not context["group_a_samples"] and isinstance(candidate.get("group_a_samples"), list):
+                context["group_a_samples"] = [str(item) for item in candidate.get("group_a_samples") or []]
+            if not context["group_b_label"] and candidate.get("group_b_label"):
+                context["group_b_label"] = str(candidate.get("group_b_label") or "")
+            if not context["group_b_samples"] and isinstance(candidate.get("group_b_samples"), list):
+                context["group_b_samples"] = [str(item) for item in candidate.get("group_b_samples") or []]
+            if not context["result_name"] and candidate.get("result_name"):
+                context["result_name"] = str(candidate.get("result_name") or "")
+            if not context["level"] and candidate.get("level"):
+                context["level"] = str(candidate.get("level") or "")
+            if not context["source_label"] and candidate.get("source_label"):
+                context["source_label"] = str(candidate.get("source_label") or "")
+        break
+
+    source_work_dir = plan_payload.get("work_dir")
+    if isinstance(source_work_dir, str) and source_work_dir:
+        context["source_work_dir"] = source_work_dir
+        context["source_workflow"] = Path(source_work_dir).name
+
+    output_work_dir = plan_payload.get("de_work_dir") or plan_payload.get("work_dir")
+    if isinstance(output_work_dir, str) and output_work_dir:
+        context["output_work_dir"] = output_work_dir
+        context["output_workflow"] = Path(output_work_dir).name
+
+    if not context["group_a_label"] or not context["group_b_label"]:
+        for dep_step in reversed(prior_steps):
+            if dep_step.get("kind") != "RUN_DE_PIPELINE":
+                continue
+            for tool_call in dep_step.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                params = tool_call.get("params") if isinstance(tool_call.get("params"), dict) else {}
+                if tool_call.get("tool") == "exact_test":
+                    pair = params.get("pair") if isinstance(params.get("pair"), list) else []
+                    if len(pair) >= 2:
+                        context["group_a_label"] = context["group_a_label"] or str(pair[0])
+                        context["group_b_label"] = context["group_b_label"] or str(pair[1])
+                    context["result_name"] = context["result_name"] or str(params.get("name") or "")
+                elif tool_call.get("tool") == "test_contrast":
+                    contrast = str(params.get("contrast") or "")
+                    if contrast and (not context["group_a_label"] or not context["group_b_label"]):
+                        parts = [part.strip() for part in contrast.split("-")]
+                        if len(parts) >= 2:
+                            context["group_a_label"] = context["group_a_label"] or parts[0]
+                            context["group_b_label"] = context["group_b_label"] or parts[1]
+                    context["result_name"] = context["result_name"] or str(params.get("name") or "")
+            break
+
+    return context
+
+
 def _extract_edgepython_dependency_outputs(plan_payload: dict, step: dict) -> dict[str, list[str]]:
     outputs = {
         "top_genes": [],
@@ -651,15 +898,20 @@ def _extract_edgepython_dependency_outputs(plan_payload: dict, step: dict) -> di
         "saved": [],
         "plots": [],
     }
-    for dep_step in _iter_dependency_steps(plan_payload, step):
-        for item in _coerce_step_result_items(dep_step.get("result")):
+    for dep_step in _iter_prior_steps(plan_payload, step):
+        step_result_items = _coerce_step_result_items(dep_step.get("result"))
+        if not step_result_items:
+            tool_calls = dep_step.get("tool_calls") if isinstance(dep_step.get("tool_calls"), list) else []
+            if len(tool_calls) == 1 and isinstance(tool_calls[0], dict):
+                step_result_items = [{
+                    "tool": tool_calls[0].get("tool"),
+                    "result": dep_step.get("result"),
+                }]
+
+        for item in step_result_items:
             tool_name = item.get("tool") if isinstance(item, dict) else None
             result_payload = item.get("result") if isinstance(item, dict) else None
-            result_text = None
-            if isinstance(result_payload, str):
-                result_text = result_payload
-            elif isinstance(result_payload, dict) and isinstance(result_payload.get("data"), str):
-                result_text = result_payload.get("data")
+            result_text = _extract_text_result(result_payload)
             if not isinstance(tool_name, str) or not isinstance(result_text, str):
                 continue
             if tool_name == "get_top_genes":
@@ -673,18 +925,207 @@ def _extract_edgepython_dependency_outputs(plan_payload: dict, step: dict) -> di
     return outputs
 
 
+def _extract_de_test_summary(de_outputs: dict[str, list[str]]) -> dict[str, Any]:
+    test_text = de_outputs.get("tests", [])[-1] if de_outputs.get("tests") else ""
+    if not test_text:
+        return {}
+
+    summary: dict[str, Any] = {
+        "raw_text": test_text,
+    }
+    test_name_match = re.search(r"^Test:\s*(.+)$", test_text, re.MULTILINE)
+    if test_name_match:
+        summary["test_name"] = test_name_match.group(1).strip()
+
+    count_match = re.search(
+        r"DE genes \(FDR < 0\.05\):\s*(\d+)\s+up,\s*(\d+)\s+down(?:,\s*(\d+)\s+NS|\s*\((\d+)\s+total\))?",
+        test_text,
+    )
+    if not count_match:
+        return summary
+
+    n_up = int(count_match.group(1))
+    n_down = int(count_match.group(2))
+    n_ns = count_match.group(3)
+    explicit_total = count_match.group(4)
+    summary["n_up"] = n_up
+    summary["n_down"] = n_down
+    summary["n_significant"] = int(explicit_total) if explicit_total else n_up + n_down
+    if n_ns is not None:
+        summary["n_ns"] = int(n_ns)
+    return summary
+
+
+def _extract_saved_output_path(messages: list[str], *, prefix: str) -> str | None:
+    for message in reversed(messages):
+        if not isinstance(message, str):
+            continue
+        for line in reversed(message.splitlines()):
+            if line.startswith(prefix):
+                path = line.split(":", 1)[1].strip()
+                return path or None
+    return None
+
+
+def _build_inline_image_entry(path_value: str, caption: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "path": path_value,
+        "caption": caption,
+    }
+    try:
+        image_path = Path(path_value)
+        if image_path.exists() and image_path.is_file():
+            entry["data_b64"] = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    except Exception:
+        pass
+    return entry
+
+
+def _build_de_interpretation(plan_payload: dict, step: dict) -> str:
+    de_outputs = _extract_edgepython_dependency_outputs(plan_payload, step)
+    summary = _extract_de_test_summary(de_outputs)
+
+    lines: list[str] = []
+    if summary.get("n_significant") is not None:
+        test_name = str(summary.get("test_name") or "DE test")
+        line = (
+            f"{test_name} found {int(summary['n_significant'])} significant genes at FDR < 0.05 "
+            f"({int(summary['n_up'])} up, {int(summary['n_down'])} down"
+        )
+        if summary.get("n_ns") is not None:
+            line += f", {int(summary['n_ns'])} not significant"
+        line += ")."
+        lines.append(line)
+    elif de_outputs["tests"]:
+        lines.append(de_outputs["tests"][-1])
+
+    if de_outputs["top_genes"]:
+        if lines:
+            lines.append("")
+        lines.append(de_outputs["top_genes"][-1])
+
+    return "\n".join(line for line in lines if line)
+
+
+def _build_de_summary_payload(plan_payload: dict, step: dict) -> dict[str, Any]:
+    comparison = _extract_de_comparison_context(plan_payload, step)
+    de_outputs = _extract_edgepython_dependency_outputs(plan_payload, step)
+    deg_summary = _extract_de_test_summary(de_outputs)
+    result_path = _extract_saved_output_path(de_outputs.get("saved", []), prefix="Saved results to:")
+    plot_path = _extract_saved_output_path(de_outputs.get("plots", []), prefix="Volcano plot saved to:")
+    interpretation = _build_de_interpretation(plan_payload, step)
+
+    def _format_group(label: str, samples: list[str]) -> str:
+        if samples:
+            return f"{label} ({', '.join(samples)})"
+        return label
+
+    summary_sections: list[str] = []
+    group_a_label = str(comparison.get("group_a_label") or "group 1")
+    group_b_label = str(comparison.get("group_b_label") or "group 2")
+    summary_sections.append(
+        f"Compared {_format_group(group_a_label, comparison.get('group_a_samples', []))} against "
+        f"{_format_group(group_b_label, comparison.get('group_b_samples', []))}."
+    )
+
+    output_workflow = str(comparison.get("output_workflow") or "")
+    source_workflow = str(comparison.get("source_workflow") or "")
+    source_label = str(comparison.get("source_label") or "")
+    workflow_parts: list[str] = []
+    if source_label:
+        workflow_parts.append(f"Source table: {source_label}.")
+    if source_workflow and output_workflow and source_workflow != output_workflow:
+        workflow_parts.append(
+            f"Read abundance values from {source_workflow} and wrote DE artifacts to {output_workflow}."
+        )
+    elif output_workflow:
+        workflow_parts.append(f"Artifacts were written to {output_workflow}.")
+    if workflow_parts:
+        summary_sections.append(" ".join(workflow_parts))
+
+    if deg_summary.get("n_significant") is not None:
+        counts_line = (
+            f"Significant genes at FDR < 0.05: {int(deg_summary['n_significant'])} total "
+            f"({int(deg_summary['n_up'])} up, {int(deg_summary['n_down'])} down"
+        )
+        if deg_summary.get("n_ns") is not None:
+            counts_line += f", {int(deg_summary['n_ns'])} not significant"
+        counts_line += ")."
+        summary_sections.append(counts_line)
+    elif interpretation:
+        summary_sections.append(interpretation)
+
+    artifact_lines: list[str] = []
+    artifacts: dict[str, str] = {}
+    if result_path:
+        artifacts["results_table"] = result_path
+        artifact_lines.append(f"Results table: {result_path}")
+    if plot_path:
+        artifacts["volcano_plot"] = plot_path
+        artifact_lines.append(f"Volcano plot: {plot_path}")
+    if artifact_lines:
+        summary_sections.append("\n".join(artifact_lines))
+
+    top_genes_text = de_outputs.get("top_genes", [])[-1] if de_outputs.get("top_genes") else ""
+    if top_genes_text:
+        summary_sections.append(top_genes_text)
+
+    payload: dict[str, Any] = {
+        "markdown": "\n\n".join(section for section in summary_sections if section).strip(),
+        "comparison": comparison,
+    }
+    if deg_summary:
+        payload["deg_summary"] = deg_summary
+    if artifacts:
+        payload["artifacts"] = artifacts
+    if plot_path:
+        payload["image_files"] = [
+            _build_inline_image_entry(
+                plot_path,
+                f"Volcano plot · {group_a_label} vs {group_b_label}",
+            )
+        ]
+    return payload
+
+
+def _build_de_plot_step_payload(plan_payload: dict, step: dict, result_payload: Any) -> Any:
+    result_text = _extract_text_result(result_payload)
+    if not result_text:
+        return result_payload
+
+    plot_path = _extract_saved_output_path([result_text], prefix="Volcano plot saved to:")
+    if not plot_path:
+        return result_payload
+
+    comparison = _extract_de_comparison_context(plan_payload, step)
+    group_a_label = str(comparison.get("group_a_label") or "group 1")
+    group_b_label = str(comparison.get("group_b_label") or "group 2")
+
+    if isinstance(result_payload, dict):
+        payload = dict(result_payload)
+    else:
+        payload = {"data": result_text}
+    payload["artifacts"] = {
+        **(payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}),
+        "volcano_plot": plot_path,
+    }
+    payload["image_files"] = [
+        _build_inline_image_entry(
+            plot_path,
+            f"Volcano plot · {group_a_label} vs {group_b_label}",
+        )
+    ]
+    return payload
+
+
 def _build_qc_interpretation(plan_payload: dict, step: dict) -> str:
     de_outputs = _extract_edgepython_dependency_outputs(plan_payload, step)
     if any(de_outputs.values()):
+        interpretation = _build_de_interpretation(plan_payload, step)
+        if interpretation:
+            return interpretation
         lines: list[str] = []
-        if de_outputs["tests"]:
-            lines.append(de_outputs["tests"][-1])
-        if de_outputs["top_genes"]:
-            if lines:
-                lines.append("")
-            lines.append(de_outputs["top_genes"][-1])
         if de_outputs["saved"]:
-            lines.append("")
             lines.append(de_outputs["saved"][-1])
         if de_outputs["plots"]:
             lines.append(de_outputs["plots"][-1])
@@ -887,6 +1328,12 @@ async def execute_step(
         except Exception:
             logger.debug("Failed to resolve project directory for plan execution", exc_info=True)
 
+    if plan_payload.get("plan_type") == "run_de_pipeline":
+        try:
+            _ensure_de_workflow_context(plan_payload, project_dir_path)
+        except Exception:
+            logger.debug("Failed to initialize DE workflow directory", exc_info=True)
+
     # Mark step as running
     step["status"] = "RUNNING"
     step["started_at"] = datetime.datetime.utcnow().isoformat() + "Z"
@@ -1002,8 +1449,10 @@ async def execute_step(
     if kind == "PARSE_OUTPUT_FILE" and not explicit_tool_calls:
         tool_calls = _derive_parse_tool_calls(plan_payload, step)
         if not tool_calls:
+            tool_calls = await _derive_runtime_parse_tool_calls(plan_payload, step)
+        if not tool_calls:
             step["status"] = "FAILED"
-            step["error"] = "Could not determine result files to parse from prior locate step output."
+            step["error"] = "Could not determine result files to parse from prior locate step output or runtime workflow listing."
             step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
             _persist_step_update(session, workflow_block, plan_payload)
             return StepResult(success=False, error=step["error"])
@@ -1024,9 +1473,12 @@ async def execute_step(
         return StepResult(success=True, data=plot_result)
 
     if kind in {"INTERPRET_RESULTS", "WRITE_SUMMARY", "RECOMMEND_NEXT"}:
-        summary_text = _build_qc_interpretation(plan_payload, step)
+        if plan_payload.get("plan_type") == "run_de_pipeline" and kind == "WRITE_SUMMARY":
+            summary_payload = _build_de_summary_payload(plan_payload, step)
+        else:
+            summary_payload = {"markdown": _build_qc_interpretation(plan_payload, step)}
         step["status"] = "COMPLETED"
-        step["result"] = {"markdown": summary_text}
+        step["result"] = summary_payload
         step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
         _persist_step_update(session, workflow_block, plan_payload)
         return StepResult(success=True, data=step["result"])
@@ -1092,7 +1544,10 @@ async def execute_step(
 
     # All tool calls succeeded
     step["status"] = "COMPLETED"
-    step["result"] = all_results[0]["result"] if len(all_results) == 1 else all_results
+    final_result = all_results[0]["result"] if len(all_results) == 1 else all_results
+    if kind == "GENERATE_DE_PLOT" and len(all_results) == 1:
+        final_result = _build_de_plot_step_payload(plan_payload, step, final_result)
+    step["result"] = final_result
     step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
     _persist_step_update(session, workflow_block, plan_payload)
 
@@ -1125,6 +1580,21 @@ async def execute_plan(
     from cortex.plan_replanner import replan_on_failure, replan_with_new_info
 
     plan_payload = get_block_payload(workflow_block)
+
+    project_dir_path = None
+    if project_id and user is not None:
+        try:
+            from cortex.db_helpers import _resolve_project_dir
+
+            project_dir_path = _resolve_project_dir(session, user, project_id)
+        except Exception:
+            logger.debug("Failed to resolve project directory for plan execution", exc_info=True)
+
+    if plan_payload.get("plan_type") == "run_de_pipeline":
+        try:
+            _ensure_de_workflow_context(plan_payload, project_dir_path)
+        except Exception:
+            logger.debug("Failed to initialize DE workflow directory", exc_info=True)
 
     try:
         validate_plan(
@@ -1195,7 +1665,7 @@ async def execute_plan(
                               f"Running batch: {', '.join(batch_ids)}")
 
             batch_results = await asyncio.gather(
-                *[_execute_parallel_safe_step(step) for step in batch_ordered],
+                *[_execute_parallel_safe_step(step, plan_payload=plan_payload) for step in batch_ordered],
                 return_exceptions=True,
             )
 
@@ -1448,7 +1918,7 @@ def _ordered_ready_steps(steps: list[dict]) -> list[dict]:
     return _ordered_steps(ready)
 
 
-async def _execute_parallel_safe_step(step: dict) -> StepResult:
+async def _execute_parallel_safe_step(step: dict, *, plan_payload: dict | None = None) -> StepResult:
     """Execute a parallel-safe step without mutating shared payload/session."""
     kind = str(step.get("kind", ""))
     tool_calls = step.get("tool_calls") or []
@@ -1462,6 +1932,9 @@ async def _execute_parallel_safe_step(step: dict) -> StepResult:
 
     if not tool_calls:
         return StepResult(success=True, data={"note": "No tool calls for this step"})
+
+    if isinstance(plan_payload, dict):
+        tool_calls = _apply_runtime_tool_call_overrides(plan_payload, step, tool_calls)
 
     all_results = []
     for tc in tool_calls:

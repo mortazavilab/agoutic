@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from common.database import Base
 from cortex.db_helpers import _create_block_internal
-from cortex.models import ProjectBlock, ProjectTask
+from cortex.models import Memory, ProjectBlock, ProjectTask
 from cortex.plan_executor import execute_plan
 
 
@@ -827,6 +827,121 @@ async def test_parse_output_file_prioritizes_reconcile_outputs(session_factory, 
 
 
 @pytest.mark.asyncio
+async def test_parse_output_file_falls_back_to_run_script_work_directory_for_reconcile(session_factory, monkeypatch):
+    from cortex import plan_executor
+
+    payload = {
+        "title": "Parse reconcile outputs from runtime workflow",
+        "project_id": "proj-reconcile-runtime-parse",
+        "plan_type": "reconcile_bams",
+        "plan_instance_id": "pi-reconcile-runtime-parse",
+        "steps": [
+            {
+                "id": "run",
+                "order_index": 0,
+                "kind": "RUN_SCRIPT",
+                "title": "Run reconcile",
+                "depends_on": [],
+                "requires_approval": False,
+                "status": "COMPLETED",
+                "work_directory": "/tmp/project/workflow7",
+            },
+            {
+                "id": "loc",
+                "order_index": 1,
+                "kind": "LOCATE_DATA",
+                "title": "Locate reconcile outputs",
+                "depends_on": ["run"],
+                "requires_approval": False,
+                "status": "COMPLETED",
+                "result": [
+                    {
+                        "tool": "list_job_files",
+                        "source_key": "analyzer",
+                        "result": {
+                            "success": True,
+                            "work_dir": "/tmp/project",
+                            "file_count": 3,
+                            "files": [
+                                {"path": "workflow5/", "name": "workflow5/", "size": 0},
+                                {"path": "workflow6/", "name": "workflow6/", "size": 0},
+                                {"path": "workflow7/", "name": "workflow7/", "size": 0},
+                            ],
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "parse",
+                "order_index": 2,
+                "kind": "PARSE_OUTPUT_FILE",
+                "title": "Parse reconcile tables",
+                "depends_on": ["loc"],
+                "requires_approval": False,
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-reconcile-runtime-parse",
+        owner_id="owner-reconcile-runtime-parse",
+        payload=payload,
+    )
+
+    parse_calls: list[tuple[str, dict]] = []
+    locate_calls: list[dict] = []
+
+    async def _fake_call(_source_key, tool_name, params):
+        if tool_name == "list_job_files":
+            locate_calls.append(dict(params))
+            return {
+                "success": True,
+                "work_dir": "/tmp/project/workflow7",
+                "file_count": 3,
+                "files": [
+                    {"path": "reconciled_abundance.tsv", "name": "reconciled_abundance.tsv", "size": 128},
+                    {"path": "reconciled_novelty_by_sample.csv", "name": "reconciled_novelty_by_sample.csv", "size": 64},
+                    {"path": "output/", "name": "output/", "size": 0},
+                ],
+            }
+        if tool_name == "parse_csv_file":
+            parse_calls.append((tool_name, dict(params)))
+            return {
+                "success": True,
+                "work_dir": params.get("work_dir"),
+                "file_path": params.get("file_path"),
+                "columns": ["metric", "value"],
+                "row_count": 2,
+                "preview_rows": 2,
+                "data": [{"metric": "reads", "value": 1}],
+                "metadata": {},
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-reconcile-runtime-parse")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    parse_step = next(step for step in final_payload["steps"] if step["id"] == "parse")
+
+    assert parse_step["status"] == "COMPLETED"
+    assert locate_calls == [{
+        "work_dir": "/tmp/project/workflow7",
+        "max_depth": 1,
+        "allow_missing": True,
+    }]
+    assert [call[1].get("file_path") for call in parse_calls] == [
+        "reconciled_abundance.tsv",
+        "reconciled_novelty_by_sample.csv",
+    ]
+    assert all(call[1]["work_dir"] == "/tmp/project/workflow7" for call in parse_calls)
+
+
+@pytest.mark.asyncio
 async def test_write_summary_reports_reconcile_outputs(session_factory):
     payload = {
         "title": "Summarize reconcile outputs",
@@ -1022,3 +1137,282 @@ async def test_run_de_plan_continues_after_check_existing_miss(session_factory, 
     assert check_step["result"][0]["result"]["file_count"] == 0
     assert prep_step["status"] == "COMPLETED"
     assert prep_step["result"]["counts_path"].startswith(str(tmp_path / "de_inputs"))
+
+
+@pytest.mark.asyncio
+async def test_run_de_plan_allocates_next_project_workflow_for_outputs(session_factory, monkeypatch, tmp_path):
+    from cortex import plan_executor
+
+    source_workflow = tmp_path / "workflow7"
+    source_workflow.mkdir(parents=True)
+    (tmp_path / "workflow1").mkdir()
+    abundance_path = source_workflow / "reconciled_abundance.tsv"
+    abundance_path.write_text(
+        "gene_ID\ttranscript_ID\texc\tjbh\tgko\tlwf2\n"
+        "GENE1\tTX1\t10\t12\t4\t5\n",
+        encoding="utf-8",
+    )
+
+    payload = {
+        "title": "Grouped DE allocates a new workflow",
+        "project_id": "proj-de-next-workflow",
+        "plan_type": "run_de_pipeline",
+        "work_dir": str(source_workflow),
+        "plan_instance_id": "pi-de-next-workflow",
+        "steps": [
+            {
+                "id": "check1",
+                "order_index": 0,
+                "kind": "CHECK_EXISTING",
+                "title": "Check for existing DE results",
+                "depends_on": [],
+                "requires_approval": False,
+                "tool_calls": [
+                    {
+                        "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": {"file_name": "de_results", "work_dir": str(source_workflow)},
+                    }
+                ],
+            },
+            {
+                "id": "prep1",
+                "order_index": 1,
+                "kind": "PREPARE_DE_INPUT",
+                "title": "Prepare DE inputs",
+                "depends_on": ["check1"],
+                "requires_approval": False,
+                "counts_path": "",
+                "work_dir": str(source_workflow),
+                "group_a_label": "AD",
+                "group_a_samples": ["exc", "jbh"],
+                "group_b_label": "control",
+                "group_b_samples": ["gko", "lwf2"],
+                "level": "gene",
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-de-next-workflow",
+        owner_id="owner-de-next-workflow",
+        payload=payload,
+    )
+
+    captured_find_work_dirs: list[str] = []
+
+    async def _fake_call(_source_key, tool_name, params):
+        if tool_name == "find_file":
+            captured_find_work_dirs.append(str(params.get("work_dir") or ""))
+            return {
+                "success": False,
+                "error": "File not found (checked result directories only, ignored work/ folder)",
+                "search_term": params.get("file_name"),
+                "work_dir": params.get("work_dir"),
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+    monkeypatch.setattr("cortex.db_helpers._resolve_project_dir", lambda *_args, **_kwargs: tmp_path)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    user_stub = type("UserStub", (), {"id": "owner-de-next-workflow"})()
+    await execute_plan(session, wf, project_id="proj-de-next-workflow", user=user_stub)
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    prep_step = next(step for step in final_payload["steps"] if step["id"] == "prep1")
+
+    assert final_payload["status"] == "COMPLETED"
+    assert final_payload["de_workflow_alias"] == "workflow8"
+    assert final_payload["de_work_dir"] == str(tmp_path / "workflow8")
+    assert (tmp_path / "workflow8").is_dir()
+    assert captured_find_work_dirs == [str(tmp_path / "workflow8")]
+    assert prep_step["status"] == "COMPLETED"
+    assert prep_step["result"]["counts_path"].startswith(str(tmp_path / "workflow8" / "de_inputs"))
+
+
+@pytest.mark.asyncio
+async def test_run_de_autocaptures_memories_before_downstream_failure(session_factory, monkeypatch, tmp_path):
+    from cortex import plan_executor
+
+    source_workflow = tmp_path / "workflow7"
+    output_workflow = tmp_path / "workflow8"
+    source_workflow.mkdir(parents=True)
+    output_workflow.mkdir(parents=True)
+    abundance_path = source_workflow / "reconciled_abundance.tsv"
+    abundance_path.write_text(
+        "gene_ID\ttranscript_ID\texc\tjbh\tgko\tlwf2\n"
+        "GENE1\tTX1\t10\t12\t4\t5\n",
+        encoding="utf-8",
+    )
+
+    payload = {
+        "title": "Grouped DE captures memory before failure",
+        "project_id": "proj-de-memory",
+        "plan_type": "run_de_pipeline",
+        "workflow_type": "de_analysis",
+        "work_dir": str(source_workflow),
+        "de_work_dir": str(output_workflow),
+        "steps": [
+            {
+                "id": "check1",
+                "order_index": 0,
+                "kind": "CHECK_EXISTING",
+                "title": "Check for existing DE results",
+                "depends_on": [],
+                "requires_approval": False,
+                "tool_calls": [
+                    {
+                        "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": {"file_name": "de_results", "work_dir": str(output_workflow)},
+                    }
+                ],
+            },
+            {
+                "id": "prep1",
+                "order_index": 1,
+                "kind": "PREPARE_DE_INPUT",
+                "title": "Prepare DE inputs",
+                "depends_on": ["check1"],
+                "requires_approval": False,
+                "counts_path": "",
+                "work_dir": str(source_workflow),
+                "output_dir": str(output_workflow / "de_inputs"),
+                "group_a_label": "AD",
+                "group_a_samples": ["exc", "jbh"],
+                "group_b_label": "control",
+                "group_b_samples": ["gko", "lwf2"],
+                "level": "gene",
+            },
+            {
+                "id": "run1",
+                "order_index": 2,
+                "kind": "RUN_DE_PIPELINE",
+                "title": "Run DE analysis",
+                "depends_on": ["prep1"],
+                "requires_approval": False,
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "load_data",
+                        "params": {"counts_path": "", "sample_info_path": "", "group_column": "group"},
+                    },
+                    {
+                        "source_key": "edgepython",
+                        "tool": "exact_test",
+                        "params": {"pair": ["AD", "control"], "name": "placeholder"},
+                    },
+                    {
+                        "source_key": "edgepython",
+                        "tool": "get_top_genes",
+                        "params": {"name": "placeholder", "n": 20, "fdr_threshold": 0.05},
+                    },
+                ],
+            },
+            {
+                "id": "save1",
+                "order_index": 3,
+                "kind": "SAVE_RESULTS",
+                "title": "Save full DE results",
+                "depends_on": ["run1"],
+                "requires_approval": False,
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "save_results",
+                        "params": {"name": "placeholder", "format": "tsv"},
+                    }
+                ],
+            },
+            {
+                "id": "plot1",
+                "order_index": 4,
+                "kind": "GENERATE_DE_PLOT",
+                "title": "Generate volcano plot",
+                "depends_on": ["run1"],
+                "requires_approval": False,
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "generate_plot",
+                        "params": {"plot_type": "volcano", "result_name": "placeholder"},
+                    }
+                ],
+            },
+            {
+                "id": "fail1",
+                "order_index": 5,
+                "kind": "CHECK_EXISTING",
+                "title": "Fail after artifacts",
+                "depends_on": ["save1", "plot1"],
+                "requires_approval": False,
+                "tool_calls": [
+                    {
+                        "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": {"file_name": "must_fail", "work_dir": str(output_workflow)},
+                    }
+                ],
+            },
+        ],
+    }
+    block = _create_workflow_block(
+        session_factory,
+        project_id="proj-de-memory",
+        owner_id="owner-de-memory",
+        payload=payload,
+    )
+
+    async def _fake_call(_source_key, tool_name, params):
+        if tool_name == "find_file":
+            if params.get("file_name") == "de_results":
+                return {
+                    "success": False,
+                    "error": "File not found (checked result directories only, ignored work/ folder)",
+                    "search_term": params.get("file_name"),
+                    "work_dir": params.get("work_dir"),
+                }
+            return {"error": "forced downstream failure"}
+        if tool_name == "load_data":
+            return {"data": "loaded"}
+        if tool_name == "exact_test":
+            return "Test: Exact\nDE genes (FDR < 0.05): 12 up, 4 down, 100 NS"
+        if tool_name == "get_top_genes":
+            return "Top genes by FDR\nGENE1\nGENE2"
+        if tool_name == "save_results":
+            return f"Saved results to: {output_workflow / 'de_results' / 'de_results.tsv'}"
+        if tool_name == "generate_plot":
+            return f"Volcano plot saved to: {output_workflow / 'de_results' / 'volcano_ad_vs_control_gene.png'}"
+        return {"success": True}
+
+    monkeypatch.setattr(plan_executor, "_call_mcp_tool", _fake_call)
+
+    session = session_factory()
+    wf = session.execute(select(ProjectBlock).where(ProjectBlock.id == block.id)).scalar_one()
+    await execute_plan(session, wf, project_id="proj-de-memory")
+    session.close()
+
+    _final_block, final_payload = _load_payload(session_factory, block.id)
+    assert final_payload["status"] == "FAILED"
+
+    verify_session = session_factory()
+    memories = list(
+        verify_session.execute(
+            select(Memory).where(Memory.project_id == "proj-de-memory").order_by(Memory.created_at)
+        ).scalars().all()
+    )
+    verify_session.close()
+
+    assert any("Prepared DE comparison for AD (exc, jbh) vs control (gko, lwf2)" in mem.content for mem in memories)
+    assert any("DE result summary recorded for AD (exc, jbh) vs control (gko, lwf2)" in mem.content for mem in memories)
+    assert any("DE results table saved for AD (exc, jbh) vs control (gko, lwf2)" in mem.content for mem in memories)
+    assert any("Volcano plot saved for AD (exc, jbh) vs control (gko, lwf2)" in mem.content for mem in memories)
+
+    structured_payloads = [json.loads(mem.structured_data) for mem in memories if mem.structured_data]
+    assert any(payload.get("capture_type") == "de_comparison" for payload in structured_payloads)
+    assert any(payload.get("capture_type") == "de_result_summary" for payload in structured_payloads)
+    assert any(payload.get("capture_type") == "de_result_file" for payload in structured_payloads)
+    assert any(payload.get("capture_type") == "de_plot" for payload in structured_payloads)

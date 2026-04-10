@@ -264,6 +264,134 @@ class TestAutoCapture:
         )
         assert mem1.id == mem2.id  # Deduplication
 
+    def test_auto_capture_step_records_de_comparison_details(self, db_session, user_id, project_id):
+        step = {
+            "id": "prep1",
+            "title": "Prepare DE inputs",
+            "kind": "PREPARE_DE_INPUT",
+            "result": {
+                "group_a_label": "AD",
+                "group_a_samples": ["exc", "jbh"],
+                "group_b_label": "control",
+                "group_b_samples": ["gko", "lwf2"],
+                "result_name": "ad_vs_control_gene",
+                "source_label": "reconciled_abundance.tsv",
+            },
+        }
+        plan = {
+            "plan_type": "run_de_pipeline",
+            "workflow_type": "de_analysis",
+            "work_dir": "/tmp/project/workflow7",
+            "de_work_dir": "/tmp/project/workflow8",
+            "steps": [step],
+        }
+
+        mem = auto_capture_step(
+            db_session,
+            user_id=user_id,
+            project_id=project_id,
+            step=step,
+            plan_payload=plan,
+            block_id="block-de-1",
+        )
+
+        structured = json.loads(mem.structured_data)
+        assert mem.category == "pipeline_step"
+        assert "Prepared DE comparison for AD (exc, jbh) vs control (gko, lwf2)" in mem.content
+        assert structured["capture_type"] == "de_comparison"
+        assert structured["comparison"]["group_a_samples"] == ["exc", "jbh"]
+        assert structured["comparison"]["output_workflow"] == "workflow8"
+
+    def test_auto_capture_step_records_de_results_and_plot_memories(self, db_session, user_id, project_id):
+        prep_step = {
+            "id": "prep1",
+            "title": "Prepare DE inputs",
+            "kind": "PREPARE_DE_INPUT",
+            "result": {
+                "group_a_label": "AD",
+                "group_a_samples": ["exc", "jbh"],
+                "group_b_label": "control",
+                "group_b_samples": ["gko", "lwf2"],
+                "result_name": "ad_vs_control_gene",
+                "source_label": "reconciled_abundance.tsv",
+            },
+        }
+        run_step = {
+            "id": "run1",
+            "title": "Run DE",
+            "kind": "RUN_DE_PIPELINE",
+            "result": [
+                {
+                    "tool": "exact_test",
+                    "result": "Test: Exact\nDE genes (FDR < 0.05): 12 up, 4 down, 100 NS",
+                },
+                {
+                    "tool": "get_top_genes",
+                    "result": "Top genes by FDR\nGENE1\nGENE2",
+                },
+            ],
+        }
+        save_step = {
+            "id": "save1",
+            "title": "Save full DE results",
+            "kind": "SAVE_RESULTS",
+            "result": "Saved results to: /tmp/project/workflow8/de_results/de_results.tsv",
+        }
+        plot_step = {
+            "id": "plot1",
+            "title": "Generate volcano plot",
+            "kind": "GENERATE_DE_PLOT",
+            "result": "Volcano plot saved to: /tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png",
+        }
+        plan = {
+            "plan_type": "run_de_pipeline",
+            "workflow_type": "de_analysis",
+            "work_dir": "/tmp/project/workflow7",
+            "de_work_dir": "/tmp/project/workflow8",
+            "steps": [prep_step, run_step, save_step, plot_step],
+        }
+
+        auto_capture_step(
+            db_session,
+            user_id=user_id,
+            project_id=project_id,
+            step=run_step,
+            plan_payload=plan,
+            block_id="block-de-2",
+        )
+        auto_capture_step(
+            db_session,
+            user_id=user_id,
+            project_id=project_id,
+            step=save_step,
+            plan_payload=plan,
+            block_id="block-de-2",
+        )
+        auto_capture_step(
+            db_session,
+            user_id=user_id,
+            project_id=project_id,
+            step=plot_step,
+            plan_payload=plan,
+            block_id="block-de-2",
+        )
+
+        result_mems = list_memories(db_session, user_id, project_id=project_id, category="result")
+        plot_mems = list_memories(db_session, user_id, project_id=project_id, category="plot")
+
+        assert len(result_mems) == 2
+        assert any("DE result summary recorded for AD (exc, jbh) vs control (gko, lwf2)" in mem.content for mem in result_mems)
+        assert any("DE results table saved for AD (exc, jbh) vs control (gko, lwf2)" in mem.content for mem in result_mems)
+        result_payloads = [json.loads(mem.structured_data) for mem in result_mems]
+        assert any(payload.get("deg_summary", {}).get("n_significant") == 16 for payload in result_payloads)
+        assert any(payload.get("result_path") == "/tmp/project/workflow8/de_results/de_results.tsv" for payload in result_payloads)
+
+        assert len(plot_mems) == 1
+        plot_payload = json.loads(plot_mems[0].structured_data)
+        assert plot_payload["plot_type"] == "volcano"
+        assert plot_payload["plot_path"] == "/tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png"
+        assert plot_payload["comparison"]["group_b_samples"] == ["gko", "lwf2"]
+
     def test_auto_capture_result(self, db_session, user_id, project_id):
         mem = auto_capture_result(
             db_session, user_id=user_id, project_id=project_id,

@@ -11,6 +11,7 @@ from typing import Optional
 import uuid
 
 from common.logging_config import get_logger
+from common.workflow_paths import next_workflow_number, workflow_dir_name
 from launchpad.config import (
     DOGME_REPO,
     NEXTFLOW_BIN,
@@ -322,20 +323,11 @@ class NextflowExecutor:
     @staticmethod
     def _next_workflow_number(project_dir: Path) -> int:
         """Compute the next workflow number by scanning existing workflow* dirs."""
-        max_n = 0
-        if project_dir.exists():
-            for child in project_dir.iterdir():
-                if child.is_dir() and child.name.startswith("workflow"):
-                    try:
-                        n = int(child.name[len("workflow"):])
-                        max_n = max(max_n, n)
-                    except ValueError:
-                        continue
-        return max_n + 1
+        return next_workflow_number(project_dir)
 
     @staticmethod
     def workflow_dir_name(workflow_index: int) -> str:
-        return f"workflow{workflow_index}"
+        return workflow_dir_name(workflow_index)
 
     @staticmethod
     def prepare_rerun_directory(work_dir: Path, sample_names: list[str] | None = None) -> dict[str, str]:

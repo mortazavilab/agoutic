@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import uuid
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select, and_, or_, func, desc
@@ -514,6 +516,368 @@ def _parse_created_at(m: Memory) -> datetime.datetime | None:
 # ---------------------------------------------------------------------------
 
 
+def _find_existing_auto_memory(
+    db: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    category: str,
+    block_id: str | None,
+    step_id: str,
+    capture_type: str | None = None,
+) -> Memory | None:
+    conditions = [
+        Memory.user_id == user_id,
+        Memory.project_id == project_id,
+        Memory.category == category,
+        Memory.is_deleted == False,  # noqa: E712
+        Memory.structured_data.ilike(f'%"step_id": "{step_id}"%'),
+    ]
+    if block_id:
+        conditions.append(Memory.related_block_id == block_id)
+    if capture_type:
+        conditions.append(Memory.structured_data.ilike(f'%"capture_type": "{capture_type}"%'))
+    return db.execute(select(Memory).where(and_(*conditions))).scalar_one_or_none()
+
+
+def _extract_text_result(value: Any) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, dict):
+        for key in ("data", "markdown"):
+            if isinstance(value.get(key), str):
+                text = str(value.get(key) or "").strip()
+                if text:
+                    return text
+    return None
+
+
+def _extract_de_comparison_context(plan_payload: dict, step: dict) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "group_a_label": "",
+        "group_a_samples": [],
+        "group_b_label": "",
+        "group_b_samples": [],
+        "result_name": "",
+        "source_label": "",
+        "source_work_dir": "",
+        "source_workflow": "",
+        "output_work_dir": "",
+        "output_workflow": "",
+    }
+
+    steps = plan_payload.get("steps", []) if isinstance(plan_payload.get("steps"), list) else []
+    for candidate_step in reversed(steps):
+        if not isinstance(candidate_step, dict) or candidate_step.get("kind") != "PREPARE_DE_INPUT":
+            continue
+        for candidate in (candidate_step.get("result"), candidate_step):
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("group_a_label") and not context["group_a_label"]:
+                context["group_a_label"] = str(candidate.get("group_a_label") or "")
+            if isinstance(candidate.get("group_a_samples"), list) and not context["group_a_samples"]:
+                context["group_a_samples"] = [str(item) for item in candidate.get("group_a_samples") or []]
+            if candidate.get("group_b_label") and not context["group_b_label"]:
+                context["group_b_label"] = str(candidate.get("group_b_label") or "")
+            if isinstance(candidate.get("group_b_samples"), list) and not context["group_b_samples"]:
+                context["group_b_samples"] = [str(item) for item in candidate.get("group_b_samples") or []]
+            if candidate.get("result_name") and not context["result_name"]:
+                context["result_name"] = str(candidate.get("result_name") or "")
+            if candidate.get("source_label") and not context["source_label"]:
+                context["source_label"] = str(candidate.get("source_label") or "")
+        break
+
+    if (not context["group_a_label"] or not context["group_b_label"]) and isinstance(step, dict):
+        for candidate in (step.get("result"), step):
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("group_a_label") and not context["group_a_label"]:
+                context["group_a_label"] = str(candidate.get("group_a_label") or "")
+            if isinstance(candidate.get("group_a_samples"), list) and not context["group_a_samples"]:
+                context["group_a_samples"] = [str(item) for item in candidate.get("group_a_samples") or []]
+            if candidate.get("group_b_label") and not context["group_b_label"]:
+                context["group_b_label"] = str(candidate.get("group_b_label") or "")
+            if isinstance(candidate.get("group_b_samples"), list) and not context["group_b_samples"]:
+                context["group_b_samples"] = [str(item) for item in candidate.get("group_b_samples") or []]
+
+    if not context["group_a_label"] or not context["group_b_label"]:
+        for candidate_step in reversed(steps):
+            if not isinstance(candidate_step, dict) or candidate_step.get("kind") != "RUN_DE_PIPELINE":
+                continue
+            tool_calls = candidate_step.get("tool_calls") if isinstance(candidate_step.get("tool_calls"), list) else []
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                params = tool_call.get("params") if isinstance(tool_call.get("params"), dict) else {}
+                if tool_call.get("tool") == "exact_test":
+                    pair = params.get("pair") if isinstance(params.get("pair"), list) else []
+                    if len(pair) >= 2:
+                        context["group_a_label"] = context["group_a_label"] or str(pair[0])
+                        context["group_b_label"] = context["group_b_label"] or str(pair[1])
+                    context["result_name"] = context["result_name"] or str(params.get("name") or "")
+                elif tool_call.get("tool") == "test_contrast":
+                    contrast = str(params.get("contrast") or "")
+                    if contrast:
+                        parts = [part.strip() for part in contrast.split("-")]
+                        if len(parts) >= 2:
+                            context["group_a_label"] = context["group_a_label"] or parts[0]
+                            context["group_b_label"] = context["group_b_label"] or parts[1]
+                    context["result_name"] = context["result_name"] or str(params.get("name") or "")
+            break
+
+    source_work_dir = plan_payload.get("work_dir")
+    if isinstance(source_work_dir, str) and source_work_dir:
+        context["source_work_dir"] = source_work_dir
+        context["source_workflow"] = Path(source_work_dir).name
+
+    output_work_dir = plan_payload.get("de_work_dir") or plan_payload.get("work_dir")
+    if isinstance(output_work_dir, str) and output_work_dir:
+        context["output_work_dir"] = output_work_dir
+        context["output_workflow"] = Path(output_work_dir).name
+
+    return context
+
+
+def _extract_de_result_summary(plan_payload: dict) -> dict[str, Any]:
+    steps = plan_payload.get("steps", []) if isinstance(plan_payload.get("steps"), list) else []
+    for candidate_step in reversed(steps):
+        if not isinstance(candidate_step, dict) or candidate_step.get("kind") != "RUN_DE_PIPELINE":
+            continue
+        results = candidate_step.get("result") if isinstance(candidate_step.get("result"), list) else []
+        for item in results:
+            if not isinstance(item, dict) or item.get("tool") not in {"exact_test", "test_contrast"}:
+                continue
+            text = _extract_text_result(item.get("result"))
+            if not text:
+                continue
+            summary: dict[str, Any] = {"raw_text": text}
+            test_match = re.search(r"^Test:\s*(.+)$", text, re.MULTILINE)
+            if test_match:
+                summary["test_name"] = test_match.group(1).strip()
+            count_match = re.search(
+                r"DE genes \(FDR < 0\.05\):\s*(\d+)\s+up,\s*(\d+)\s+down(?:,\s*(\d+)\s+NS|\s*\((\d+)\s+total\))?",
+                text,
+            )
+            if count_match:
+                n_up = int(count_match.group(1))
+                n_down = int(count_match.group(2))
+                n_ns = count_match.group(3)
+                explicit_total = count_match.group(4)
+                summary["n_up"] = n_up
+                summary["n_down"] = n_down
+                summary["n_significant"] = int(explicit_total) if explicit_total else n_up + n_down
+                if n_ns is not None:
+                    summary["n_ns"] = int(n_ns)
+            return summary
+    return {}
+
+
+def _extract_de_artifact_path(step: dict, prefix: str) -> str | None:
+    text = _extract_text_result(step.get("result"))
+    if not text:
+        return None
+    for line in reversed(text.splitlines()):
+        if line.startswith(prefix):
+            path = line.split(":", 1)[1].strip()
+            return path or None
+    return None
+
+
+def _format_de_comparison(context: dict[str, Any]) -> str:
+    def _group(label: str, samples: list[str]) -> str:
+        if samples:
+            return f"{label} ({', '.join(samples)})"
+        return label
+
+    group_a = _group(str(context.get("group_a_label") or "group 1"), list(context.get("group_a_samples") or []))
+    group_b = _group(str(context.get("group_b_label") or "group 2"), list(context.get("group_b_samples") or []))
+    return f"{group_a} vs {group_b}"
+
+
+def _create_de_result_memory(
+    db: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    block_id: str | None,
+    step_id: str,
+    capture_type: str,
+    content: str,
+    structured_data: dict[str, Any],
+) -> Memory | None:
+    existing = _find_existing_auto_memory(
+        db,
+        user_id=user_id,
+        project_id=project_id,
+        category="result",
+        block_id=block_id,
+        step_id=step_id,
+        capture_type=capture_type,
+    )
+    if existing:
+        return existing
+    return create_memory(
+        db,
+        user_id=user_id,
+        content=content,
+        category="result",
+        project_id=project_id,
+        structured_data=structured_data,
+        source="auto_result",
+        related_block_id=block_id,
+        deduplicate=False,
+    )
+
+
+def _create_de_plot_memory(
+    db: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    block_id: str | None,
+    step_id: str,
+    content: str,
+    structured_data: dict[str, Any],
+    tags: dict[str, Any],
+) -> Memory | None:
+    existing = _find_existing_auto_memory(
+        db,
+        user_id=user_id,
+        project_id=project_id,
+        category="plot",
+        block_id=block_id,
+        step_id=step_id,
+        capture_type="de_plot",
+    )
+    if existing:
+        return existing
+    return create_memory(
+        db,
+        user_id=user_id,
+        content=content,
+        category="plot",
+        project_id=project_id,
+        structured_data=structured_data,
+        source="system",
+        related_block_id=block_id,
+        tags=tags,
+        deduplicate=False,
+    )
+
+
+def _auto_capture_de_memories(
+    db: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    step: dict,
+    plan_payload: dict,
+    block_id: str | None,
+) -> None:
+    if plan_payload.get("plan_type") != "run_de_pipeline":
+        return
+
+    step_id = str(step.get("id") or "")
+    if not step_id:
+        return
+
+    comparison = _extract_de_comparison_context(plan_payload, step)
+    comparison_label = _format_de_comparison(comparison)
+    workflow_type = plan_payload.get("workflow_type", "")
+
+    if step.get("kind") == "RUN_DE_PIPELINE":
+        summary = _extract_de_result_summary(plan_payload)
+        if not summary:
+            return
+        counts_line = None
+        if summary.get("n_significant") is not None:
+            counts_line = (
+                f"{int(summary['n_significant'])} significant genes at FDR < 0.05 "
+                f"({int(summary['n_up'])} up, {int(summary['n_down'])} down"
+            )
+            if summary.get("n_ns") is not None:
+                counts_line += f", {int(summary['n_ns'])} not significant"
+            counts_line += ")"
+        content = f"DE result summary recorded for {comparison_label}"
+        if counts_line:
+            content += f" - {counts_line}"
+        _create_de_result_memory(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            block_id=block_id,
+            step_id=step_id,
+            capture_type="de_result_summary",
+            content=content,
+            structured_data={
+                "capture_type": "de_result_summary",
+                "step_id": step_id,
+                "plan_id": block_id,
+                "workflow_type": workflow_type,
+                "comparison": comparison,
+                "deg_summary": summary,
+                "result_name": comparison.get("result_name"),
+            },
+        )
+        return
+
+    if step.get("kind") == "SAVE_RESULTS":
+        result_path = _extract_de_artifact_path(step, "Saved results to:")
+        if not result_path:
+            return
+        summary = _extract_de_result_summary(plan_payload)
+        content = f"DE results table saved for {comparison_label} - {result_path}"
+        _create_de_result_memory(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            block_id=block_id,
+            step_id=step_id,
+            capture_type="de_result_file",
+            content=content,
+            structured_data={
+                "capture_type": "de_result_file",
+                "step_id": step_id,
+                "plan_id": block_id,
+                "workflow_type": workflow_type,
+                "comparison": comparison,
+                "deg_summary": summary,
+                "result_name": comparison.get("result_name"),
+                "result_path": result_path,
+            },
+        )
+        return
+
+    if step.get("kind") == "GENERATE_DE_PLOT":
+        plot_path = _extract_de_artifact_path(step, "Volcano plot saved to:")
+        if not plot_path:
+            return
+        content = f"Volcano plot saved for {comparison_label} - {plot_path}"
+        _create_de_plot_memory(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            block_id=block_id,
+            step_id=step_id,
+            content=content,
+            structured_data={
+                "capture_type": "de_plot",
+                "step_id": step_id,
+                "plan_id": block_id,
+                "workflow_type": workflow_type,
+                "comparison": comparison,
+                "plot_type": "volcano",
+                "plot_path": plot_path,
+            },
+            tags={
+                "plot_type": "volcano",
+                "path": plot_path,
+                "workflow": comparison.get("output_workflow") or comparison.get("source_workflow") or "",
+            },
+        )
+
+
 def auto_capture_step(
     db: Session,
     *,
@@ -534,17 +898,23 @@ def auto_capture_step(
 
     # Dedup check
     if block_id and step_id:
-        existing = db.execute(
-            select(Memory).where(
-                Memory.user_id == user_id,
-                Memory.project_id == project_id,
-                Memory.category == "pipeline_step",
-                Memory.related_block_id == block_id,
-                Memory.is_deleted == False,  # noqa: E712
-                Memory.structured_data.ilike(f'%"step_id": "{step_id}"%'),
-            )
-        ).scalar_one_or_none()
+        existing = _find_existing_auto_memory(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            category="pipeline_step",
+            block_id=block_id,
+            step_id=step_id,
+        )
         if existing:
+            _auto_capture_de_memories(
+                db,
+                user_id=user_id,
+                project_id=project_id,
+                step=step,
+                plan_payload=plan_payload,
+                block_id=block_id,
+            )
             return existing
 
     content = f"Step '{step_title}' completed"
@@ -559,7 +929,29 @@ def auto_capture_step(
         "workflow_type": plan_payload.get("workflow_type", ""),
     }
 
-    return create_memory(
+    if plan_payload.get("plan_type") == "run_de_pipeline":
+        comparison = _extract_de_comparison_context(plan_payload, step)
+        if any(comparison.values()):
+            structured["comparison"] = comparison
+        if step.get("kind") == "PREPARE_DE_INPUT":
+            structured["capture_type"] = "de_comparison"
+            content = f"Prepared DE comparison for {_format_de_comparison(comparison)}"
+            if comparison.get("source_label"):
+                content += f" using {comparison['source_label']}"
+        elif step.get("kind") == "RUN_DE_PIPELINE":
+            summary = _extract_de_result_summary(plan_payload)
+            if summary:
+                structured["deg_summary"] = summary
+        elif step.get("kind") == "SAVE_RESULTS":
+            result_path = _extract_de_artifact_path(step, "Saved results to:")
+            if result_path:
+                structured["result_path"] = result_path
+        elif step.get("kind") == "GENERATE_DE_PLOT":
+            plot_path = _extract_de_artifact_path(step, "Volcano plot saved to:")
+            if plot_path:
+                structured["plot_path"] = plot_path
+
+    memory = create_memory(
         db,
         user_id=user_id,
         content=content,
@@ -569,6 +961,17 @@ def auto_capture_step(
         source="auto_step",
         related_block_id=block_id,
     )
+
+    _auto_capture_de_memories(
+        db,
+        user_id=user_id,
+        project_id=project_id,
+        step=step,
+        plan_payload=plan_payload,
+        block_id=block_id,
+    )
+
+    return memory
 
 
 def auto_capture_result(

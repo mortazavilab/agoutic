@@ -1,6 +1,7 @@
 """Tests for helper functions extracted directly from ui/appUI.py source."""
 
 import ast
+import base64
 import datetime as dt
 import re as _re_module
 from pathlib import Path
@@ -415,6 +416,80 @@ class TestWorkflowHighlightSteps:
         highlights = fn(workflow_block)
 
         assert [step["kind"] for step in highlights] == ["GENERATE_PLOT", "INTERPRET_RESULTS"]
+
+
+class TestRenderWorkflowPlotPayload:
+    def test_renders_saved_image_artifacts(self, tmp_path):
+        image_path = tmp_path / "volcano.png"
+        image_path.write_bytes(b"fake-png")
+        fake_st = SimpleNamespace(
+            image=MagicMock(),
+            caption=MagicMock(),
+            warning=MagicMock(),
+            plotly_chart=MagicMock(),
+        )
+        fn = _load_function(
+            "_render_workflow_plot_payload",
+            {
+                "st": fake_st,
+                "Path": Path,
+            },
+        )
+
+        fn(
+            {
+                "image_files": [
+                    {
+                        "path": str(image_path),
+                        "caption": "Volcano plot · AD vs control",
+                    }
+                ]
+            },
+            "block-1",
+            "step_1",
+        )
+
+        fake_st.image.assert_called_once_with(
+            str(image_path),
+            caption="Volcano plot · AD vs control",
+            use_container_width=True,
+        )
+        fake_st.caption.assert_not_called()
+
+    def test_renders_inline_base64_image_artifacts(self):
+        fake_st = SimpleNamespace(
+            image=MagicMock(),
+            caption=MagicMock(),
+            warning=MagicMock(),
+            plotly_chart=MagicMock(),
+        )
+        fn = _load_function(
+            "_render_workflow_plot_payload",
+            {
+                "st": fake_st,
+                "Path": Path,
+            },
+        )
+
+        fn(
+            {
+                "image_files": [
+                    {
+                        "data_b64": base64.b64encode(b"fake-png").decode("ascii"),
+                        "caption": "Volcano plot · AD vs control",
+                    }
+                ]
+            },
+            "block-1",
+            "step_1",
+        )
+
+        fake_st.image.assert_called_once_with(
+            b"fake-png",
+            caption="Volcano plot · AD vs control",
+            use_container_width=True,
+        )
+        fake_st.caption.assert_not_called()
 
 
 class TestBlockRequiresFullRefresh:
