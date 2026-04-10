@@ -44,16 +44,6 @@
 
 ### Bug Fixes
 
-- **Workflow switching now persists across turns and no longer reuses corrupted
-  work directories** — the new chat-level workflow selector now stores the
-  updated conversation state in the AGENT_PLAN cache so follow-up requests like
-  listing files keep using the chosen workflow, and conversation-state rebuilds
-  now sanitize trailing junk such as literal `\\n",` suffixes from cached
-  `work_directory` / `run_uuid` values before Analyzer tools use them.
-  (`cortex/chat_stages/quick_exits.py`, `cortex/conversation_state.py`,
-  `tests/cortex/test_workflow_commands.py`,
-  `tests/cortex/test_build_conv_state.py`)
-
 - **Reconcile BAM preflight now treats matching remote Watson GTF paths as the
   local canonical reference** — when workflow configs or manual approval input
   point at a remote `annot:` GTF whose filename matches the local reference
@@ -168,6 +158,45 @@
   `analyzer/mcp_tools.py`, `skills/reconcile_bams/scripts/reconcile_bams.py`,
   `tests/cortex/test_db_helpers.py`, `tests/analyzer/test_mcp_tools.py`,
   `tests/skills/test_reconcile_bams_scripts.py`)
+
+---
+
+## [3.5.3] - 2026-04-09
+
+### Improvements
+
+- **Grouped edgePython differential expression now runs directly from
+  reconciled abundance outputs and saved dataframes** — users can compare named
+  sample groups from the active workflow abundance table or a previously parsed
+  dataframe, Cortex prepares edgePython-ready counts and sample-info files
+  locally, defaults two-group reconcile compares to exact tests, saves full
+  results, generates DE plots, and asks for clarification instead of guessing
+  when the user has not named the groups.
+  (`cortex/de_prep.py`, `cortex/plan_params.py`, `cortex/plan_templates.py`,
+  `cortex/plan_executor.py`, `cortex/chat_stages/plan_detection.py`,
+  `tests/cortex/test_de_prep.py`, `tests/cortex/test_planner_cache_steps.py`,
+  `tests/cortex/test_plan_executor_run_script.py`,
+  `tests/cortex/test_chat_entry.py`)
+
+- **The UI help surface now documents grouped DE prompts directly** — the
+  deterministic Streamlit help card, sidebar shortcuts, and canned Cortex help
+  response now show concrete prompts for comparing reconcile abundance samples
+  and dataframe-backed DE requests, so the new workflow is discoverable from
+  the UI without trial-and-error prompting.
+  (`ui/appui_state.py`, `ui/appui_sidebar.py`,
+  `cortex/chat_stages/quick_exits.py`, `README.md`, `ui/README.md`)
+
+### Bug Fixes
+
+- **Workflow switching now persists across turns and no longer reuses corrupted
+  work directories** — the new chat-level workflow selector now stores the
+  updated conversation state in the AGENT_PLAN cache so follow-up requests like
+  listing files keep using the chosen workflow, and conversation-state rebuilds
+  now sanitize trailing junk such as literal `\\n",` suffixes from cached
+  `work_directory` / `run_uuid` values before Analyzer tools use them.
+  (`cortex/chat_stages/quick_exits.py`, `cortex/conversation_state.py`,
+  `tests/cortex/test_workflow_commands.py`,
+  `tests/cortex/test_build_conv_state.py`)
 
 ---
 

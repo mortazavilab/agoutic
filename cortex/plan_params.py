@@ -42,6 +42,93 @@ def _select_plot_type(message: str) -> str:
     return "bar"
 
 
+_DE_TRAILING_CONTEXT = (
+    r"(?=(?:\s+(?:from|using|on|in)\b"
+    r"|\s+(?:at|by)\s+(?:gene|transcript)\s+level\b"
+    r"|\s+(?:with|using)\s+(?:exact[_ ]test|qlf|glm|quasi)\b"
+    r"|$))"
+)
+
+_DE_LABELED_GROUP_RE = re.compile(
+    rf"compare\s+(?:the\s+)?([A-Za-z][\w.-]*)\s+samples?\s+(.+?)\s+"
+    rf"(?:to|vs?\.?|versus|against)\s+(?:the\s+)?([A-Za-z][\w.-]*)\s+samples?\s+(.+?){_DE_TRAILING_CONTEXT}",
+    re.I,
+)
+_DE_UNLABELED_GROUP_RE = re.compile(
+    rf"compare\s+(.+?)\s+(?:to|vs?\.?|versus|against)\s+(.+?){_DE_TRAILING_CONTEXT}",
+    re.I,
+)
+_DE_SLASH_LABELED_RE = re.compile(
+    r"^/de\s+([A-Za-z][\w.-]*)\s*=\s*([^=]+?)\s+(?:to|vs?\.?|versus|against)\s+([A-Za-z][\w.-]*)\s*=\s*(.+)$",
+    re.I,
+)
+
+
+def _split_de_samples(raw: str) -> list[str]:
+    cleaned = re.sub(r"\b(?:the|samples?|sample|group|groups)\b", " ", raw, flags=re.I)
+    parts = re.split(r"\s*(?:,|and|&)\s*", cleaned)
+    values = [part.strip().strip(".,;:!?") for part in parts if part.strip().strip(".,;:!?")]
+    return values
+
+
+def _resolve_de_source_path(path_value: str, conv_state: "ConversationState") -> str:
+    resolved = path_value.rstrip(".,;:!?")
+    if resolved and not os.path.isabs(resolved) and conv_state.work_dir:
+        return os.path.join(conv_state.work_dir, resolved)
+    return resolved
+
+
+def build_de_group_clarification(
+    message: str,
+    conv_state: "ConversationState",
+    params: dict,
+) -> str | None:
+    msg_lower = message.lower()
+    has_explicit_groups = bool(params.get("group_a_samples") and params.get("group_b_samples"))
+    has_sample_info = bool(params.get("sample_info_path"))
+    if has_explicit_groups or has_sample_info:
+        return None
+
+    requests_de = (
+        message.strip().lower().startswith("/de")
+        or "compare" in msg_lower
+        or "edgepython" in msg_lower
+        or "differential expression" in msg_lower
+        or re.search(r"\bde\b", msg_lower) is not None
+    )
+    if not requests_de:
+        return None
+
+    has_source = bool(
+        params.get("df_id")
+        or params.get("counts_path")
+        or params.get("work_dir")
+        or "dataframe" in msg_lower
+        or "abundance" in msg_lower
+        or "reconcile" in msg_lower
+    )
+    if not has_source:
+        return None
+
+    if params.get("df_id"):
+        source_desc = f"from DF{params['df_id']}"
+    elif params.get("counts_path"):
+        source_desc = f"from {os.path.basename(str(params['counts_path']))}"
+    elif conv_state.work_dir:
+        source_desc = "from the current workflow's abundance table"
+    else:
+        source_desc = "for this DE request"
+
+    return (
+        f"I can run edgePython {source_desc}, but I need the two sample groups. "
+        "Please either provide a sample metadata file, or name which sample columns belong to each group.\n\n"
+        "Examples:\n"
+        "- compare the AD samples exc and jbh to the control samples gko and lwf\n"
+        "- compare exc and jbh to gko and lwf from DF1\n"
+        "- /de AD=exc,jbh vs control=gko,lwf"
+    )
+
+
 # ---------------------------------------------------------------------------
 # _extract_plan_params
 # ---------------------------------------------------------------------------
@@ -98,19 +185,87 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         return params
 
     if plan_type == "run_de_pipeline":
+        msg = message.strip()
+        msg_lower = msg.lower()
+
         # Extract counts path and sample info path from message
         m = re.search(r"counts?\s+(?:at|in|from|path)?\s*[=:]?\s*(\S+\.(?:csv|tsv|txt))", message, re.I)
         if m:
             params["counts_path"] = m.group(1)
+        else:
+            m = re.search(r"(?:from|using|on)\s+(\S*(?:abundance|counts?|matrix)\S*\.(?:csv|tsv|txt))", message, re.I)
+            if m:
+                params["counts_path"] = _resolve_de_source_path(m.group(1), conv_state)
+            else:
+                m = re.search(r"\b(reconciled_abundance\.(?:csv|tsv)|abundance\.(?:csv|tsv))\b", message, re.I)
+                if m:
+                    params["counts_path"] = _resolve_de_source_path(m.group(1), conv_state)
+
         m = re.search(r"(?:sample[_ ]?info|metadata|design)\s+(?:at|in|from|path)?\s*[=:]?\s*(\S+\.(?:csv|tsv|txt))", message, re.I)
         if m:
             params["sample_info_path"] = m.group(1)
+
         m = re.search(r"(?:group|condition)\s+(?:column)?\s*[=:]?\s*(\w+)", message, re.I)
         if m:
             params["group_column"] = m.group(1)
+
         m = re.search(r"(\w+)\s+(?:vs?\.?|versus|compared?\s+to)\s+(\w+)", message, re.I)
         if m:
             params["contrast"] = f"{m.group(1)} - {m.group(2)}"
+
+        slash_match = _DE_SLASH_LABELED_RE.match(msg)
+        if slash_match:
+            params["group_a_label"] = slash_match.group(1)
+            params["group_a_samples"] = _split_de_samples(slash_match.group(2))
+            params["group_b_label"] = slash_match.group(3)
+            params["group_b_samples"] = _split_de_samples(slash_match.group(4))
+        else:
+            labeled_match = _DE_LABELED_GROUP_RE.search(msg)
+            if labeled_match:
+                params["group_a_label"] = labeled_match.group(1)
+                params["group_a_samples"] = _split_de_samples(labeled_match.group(2))
+                params["group_b_label"] = labeled_match.group(3)
+                params["group_b_samples"] = _split_de_samples(labeled_match.group(4))
+            else:
+                unlabeled_match = _DE_UNLABELED_GROUP_RE.search(msg)
+                if unlabeled_match and re.search(r"(?:from|using|on)\s+(?:df\s*\d+|\S*(?:abundance|counts?|matrix)\S*\.(?:csv|tsv|txt))", msg, re.I):
+                    params["group_a_label"] = params.get("group_a_label") or "group1"
+                    params["group_a_samples"] = _split_de_samples(unlabeled_match.group(1))
+                    params["group_b_label"] = params.get("group_b_label") or "group2"
+                    params["group_b_samples"] = _split_de_samples(unlabeled_match.group(2))
+
+        df_match = re.search(r"\bDF\s*(\d+)\b", msg, re.I)
+        if df_match and (re.search(r"\b(?:from|using|on)\s+DF\s*\d+\b", msg, re.I) or "dataframe" in msg_lower or "df" in msg_lower):
+            params["df_id"] = int(df_match.group(1))
+        elif "dataframe" in msg_lower and conv_state.latest_dataframe:
+            latest_match = re.search(r"(\d+)", conv_state.latest_dataframe, re.I)
+            if latest_match:
+                params["df_id"] = int(latest_match.group(1))
+
+        if not params.get("counts_path") and conv_state.work_dir:
+            params["work_dir"] = conv_state.work_dir
+
+        if params.get("group_a_samples") and params.get("group_b_samples"):
+            params["contrast"] = (
+                f"{params.get('group_a_label', 'group1')} - {params.get('group_b_label', 'group2')}"
+            )
+
+        if re.search(r"(?:at|by)\s+transcript\s+level", msg, re.I):
+            params["level"] = "transcript"
+        else:
+            params.setdefault("level", "gene")
+
+        if re.search(r"(?:exact[_ ]test|exact\s+test)", msg, re.I):
+            params["method"] = "exact_test"
+        elif re.search(r"(?:qlf|glm|quasi|contrast)", msg, re.I):
+            params["method"] = "glm"
+        elif params.get("group_a_samples") and params.get("group_b_samples"):
+            params["method"] = "exact_test"
+
+        if project_dir or conv_state.work_dir:
+            prep_base = project_dir or conv_state.work_dir or "."
+            params["prep_output_dir"] = os.path.join(prep_base, "de_inputs")
+
         return params
 
     if plan_type == "run_enrichment":

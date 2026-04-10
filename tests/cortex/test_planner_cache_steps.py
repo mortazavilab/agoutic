@@ -1,9 +1,11 @@
 """Planner tests for local and remote staging workflow plan steps."""
 
 from cortex.schemas import ConversationState
+from cortex.plan_params import build_de_group_clarification
 from cortex.planner import (
     _detect_plan_type,
     _extract_plan_params,
+    _template_run_de_pipeline,
     _template_reconcile_bams,
     _template_remote_stage_workflow,
     _template_run_workflow,
@@ -62,6 +64,15 @@ def test_detect_plan_type_matches_reconcile_bams_request():
 
 def test_detect_plan_type_matches_reconcile_the_bams_request():
     assert _detect_plan_type("I want to reconcile the bams of C2C12r1 and C2C12r3") == "reconcile_bams"
+
+
+def test_detect_plan_type_matches_grouped_de_compare_request():
+    assert (
+        _detect_plan_type(
+            "compare the AD samples exc and jbh to the control samples gko and lwf"
+        )
+        == "run_de_pipeline"
+    )
 
 
 def test_reconcile_bams_template_orders_preflight_before_approval_and_run():
@@ -250,6 +261,105 @@ def test_extract_plan_params_reconcile_annotation_gtf():
     )
 
     assert params["annotation_gtf"] == "/tmp/manual.GRCh38.annotation.gtf"
+
+
+def test_extract_plan_params_grouped_de_from_active_workflow():
+    params = _extract_plan_params(
+        "compare the AD samples exc and jbh to the control samples gko and lwf",
+        ConversationState(
+            active_skill="analyze_job_results",
+            active_project="proj-1",
+            work_dir="/tmp/project/workflow10",
+        ),
+        "run_de_pipeline",
+        project_dir="/tmp/project",
+    )
+
+    assert params["group_a_label"] == "AD"
+    assert params["group_a_samples"] == ["exc", "jbh"]
+    assert params["group_b_label"] == "control"
+    assert params["group_b_samples"] == ["gko", "lwf"]
+    assert params["contrast"] == "AD - control"
+    assert params["method"] == "exact_test"
+    assert params["level"] == "gene"
+    assert params["work_dir"] == "/tmp/project/workflow10"
+    assert params["prep_output_dir"] == "/tmp/project/de_inputs"
+
+
+def test_extract_plan_params_grouped_de_from_dataframe_transcript_level():
+    params = _extract_plan_params(
+        "compare exc and jbh to gko and lwf from DF1 at transcript level",
+        ConversationState(
+            active_skill="differential_expression",
+            active_project="proj-1",
+            latest_dataframe="DF1",
+        ),
+        "run_de_pipeline",
+    )
+
+    assert params["df_id"] == 1
+    assert params["group_a_samples"] == ["exc", "jbh"]
+    assert params["group_b_samples"] == ["gko", "lwf"]
+    assert params["level"] == "transcript"
+
+
+def test_build_de_group_clarification_when_groups_are_missing():
+    state = ConversationState(
+        active_skill="differential_expression",
+        active_project="proj-1",
+        latest_dataframe="DF1",
+        work_dir="/tmp/project/workflow10",
+    )
+    params = _extract_plan_params(
+        "run differential expression on the current workflow abundance table",
+        state,
+        "run_de_pipeline",
+        project_dir="/tmp/project",
+    )
+
+    clarification = build_de_group_clarification(
+        "run differential expression on the current workflow abundance table",
+        state,
+        params,
+    )
+
+    assert clarification is not None
+    assert "need the two sample groups" in clarification
+    assert "AD samples exc and jbh" in clarification
+
+
+def test_run_de_pipeline_template_adds_prepare_and_save_steps_for_grouped_abundance_de():
+    plan = _template_run_de_pipeline(
+        {
+            "goal": "compare grouped samples",
+            "work_dir": "/tmp/project/workflow10",
+            "group_a_label": "AD",
+            "group_a_samples": ["exc", "jbh"],
+            "group_b_label": "control",
+            "group_b_samples": ["gko", "lwf"],
+            "level": "gene",
+            "prep_output_dir": "/tmp/project/de_inputs",
+        }
+    )
+
+    kinds = [step["kind"] for step in plan["steps"]]
+    assert kinds == [
+        "CHECK_EXISTING",
+        "PREPARE_DE_INPUT",
+        "RUN_DE_PIPELINE",
+        "SAVE_RESULTS",
+        "ANNOTATE_RESULTS",
+        "GENERATE_DE_PLOT",
+        "INTERPRET_RESULTS",
+        "WRITE_SUMMARY",
+    ]
+
+    run_step = plan["steps"][2]
+    tool_names = [tool_call["tool"] for tool_call in run_step["tool_calls"]]
+    assert run_step["requires_approval"] is False
+    assert "exact_test" in tool_names
+    assert "get_top_genes" in tool_names
+    assert "test_contrast" not in tool_names
 
 
 def test_extract_plan_params_reconcile_named_workflows_from_state():

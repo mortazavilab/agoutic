@@ -8,6 +8,8 @@ from fastapi.concurrency import run_in_threadpool
 
 from common.logging_config import get_logger
 from cortex.chat_context import ChatContext
+from cortex.plan_classifier import _detect_plan_type
+from cortex.plan_params import _extract_plan_params, build_de_group_clarification
 from cortex.chat_stages import register_stage
 from cortex.chat_sync_handler import _emit_progress, _is_cancelled
 from cortex.db import row_to_dict
@@ -70,6 +72,63 @@ class PlanDetectionStage:
 
         # ── MULTI_STEP: generate plan & return ────────────────────────
         if _request_class == "MULTI_STEP":
+            _plan_type = _detect_plan_type(ctx.message)
+            if _plan_type == "run_de_pipeline":
+                _plan_params = _extract_plan_params(
+                    ctx.message,
+                    ctx.conv_state,
+                    _plan_type,
+                    project_dir=ctx.project_dir,
+                )
+                _clarification = build_de_group_clarification(
+                    ctx.message,
+                    ctx.conv_state,
+                    _plan_params,
+                )
+                if _clarification:
+                    _emit_progress(ctx.request_id, "planning", "Need DE group clarification")
+                    _payload = {
+                        "markdown": _clarification,
+                        "skill": ctx.active_skill or ctx.skill or "welcome",
+                        "model": ctx.engine.model_name,
+                        "state": ctx.conv_state.to_dict(),
+                        "tokens": {
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "model": ctx.engine.model_name,
+                        },
+                        "_debug": {
+                            "clarification_type": "de_groups",
+                            "requested_skill": ctx.skill,
+                            "active_skill": ctx.active_skill,
+                        },
+                    }
+                    _agent_block = _create_block_internal(
+                        ctx.session,
+                        ctx.project_id,
+                        "AGENT_PLAN",
+                        _payload,
+                        status="DONE",
+                        owner_id=ctx.user.id,
+                    )
+                    await save_conversation_message(
+                        ctx.session,
+                        ctx.project_id,
+                        ctx.user.id,
+                        "assistant",
+                        _clarification,
+                        token_data=_payload["tokens"],
+                        model_name=ctx.engine.model_name,
+                    )
+                    ctx.short_circuit({
+                        "status": "ok",
+                        "user_block": row_to_dict(ctx.user_block),
+                        "agent_block": row_to_dict(_agent_block),
+                        "gate_block": None,
+                    })
+                    return
+
             _emit_progress(ctx.request_id, "planning",
                            "Generating execution plan...")
             _plan_payload = await run_in_threadpool(

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from common import MCPHttpClient
 from common.logging_config import get_logger
+from sqlalchemy import select
 from cortex.config import get_service_url
 from cortex.plan_validation import PlanValidationError, validate_plan
 
@@ -46,6 +47,7 @@ class StepResult:
 _SAFE_STEP_KINDS = frozenset({
     "LOCATE_DATA",
     "VALIDATE_INPUTS",
+    "PREPARE_DE_INPUT",
     "PARSE_OUTPUT_FILE",
     "SUMMARIZE_QC",
     "GENERATE_PLOT",
@@ -55,6 +57,7 @@ _SAFE_STEP_KINDS = frozenset({
     "INTERPRET_RESULTS",
     "RECOMMEND_NEXT",
     "ANNOTATE_RESULTS",
+    "SAVE_RESULTS",
     "FILTER_DE_GENES",
     "RUN_GO_ENRICHMENT",
     "RUN_PATHWAY_ENRICHMENT",
@@ -390,7 +393,52 @@ def _normalize_table_rows(table: dict[str, Any]) -> Iterable[dict[str, Any]]:
     return []
 
 
+def _extract_edgepython_dependency_outputs(plan_payload: dict, step: dict) -> dict[str, list[str]]:
+    outputs = {
+        "top_genes": [],
+        "tests": [],
+        "saved": [],
+        "plots": [],
+    }
+    for dep_step in _iter_dependency_steps(plan_payload, step):
+        for item in _coerce_step_result_items(dep_step.get("result")):
+            tool_name = item.get("tool") if isinstance(item, dict) else None
+            result_payload = item.get("result") if isinstance(item, dict) else None
+            result_text = None
+            if isinstance(result_payload, str):
+                result_text = result_payload
+            elif isinstance(result_payload, dict) and isinstance(result_payload.get("data"), str):
+                result_text = result_payload.get("data")
+            if not isinstance(tool_name, str) or not isinstance(result_text, str):
+                continue
+            if tool_name == "get_top_genes":
+                outputs["top_genes"].append(result_text)
+            elif tool_name in {"exact_test", "test_contrast"}:
+                outputs["tests"].append(result_text)
+            elif tool_name == "save_results":
+                outputs["saved"].append(result_text)
+            elif tool_name == "generate_plot":
+                outputs["plots"].append(result_text)
+    return outputs
+
+
 def _build_qc_interpretation(plan_payload: dict, step: dict) -> str:
+    de_outputs = _extract_edgepython_dependency_outputs(plan_payload, step)
+    if any(de_outputs.values()):
+        lines: list[str] = []
+        if de_outputs["tests"]:
+            lines.append(de_outputs["tests"][-1])
+        if de_outputs["top_genes"]:
+            if lines:
+                lines.append("")
+            lines.append(de_outputs["top_genes"][-1])
+        if de_outputs["saved"]:
+            lines.append("")
+            lines.append(de_outputs["saved"][-1])
+        if de_outputs["plots"]:
+            lines.append(de_outputs["plots"][-1])
+        return "\n".join(line for line in lines if line)
+
     tables = _extract_all_dependency_tables(plan_payload, step)
     if not tables:
         return "No parsed result tables were available to interpret."
@@ -472,6 +520,7 @@ STEP_TOOL_DEFAULTS: dict[str, list[dict] | None] = {
     "DOWNLOAD_DATA": None,          # handled via existing download flow
     "SUBMIT_WORKFLOW": None,        # handled via existing submit/approval flow
     "MONITOR_WORKFLOW": [{"source_key": "launchpad", "tool": "check_nextflow_status"}],
+    "PREPARE_DE_INPUT": None,       # local preprocessing into edgepython-ready inputs
     "PARSE_OUTPUT_FILE": [{"source_key": "analyzer", "tool": "parse_csv_file"}],
     "SUMMARIZE_QC": [{"source_key": "analyzer", "tool": "get_analysis_summary"}],
     "RUN_DE_ANALYSIS": None,        # multi-call edgepython pipeline
@@ -498,6 +547,7 @@ STEP_TOOL_DEFAULTS: dict[str, list[dict] | None] = {
     "INTERPRET_RESULTS": None,      # LLM call (special handling)
     "RECOMMEND_NEXT": None,         # LLM call (special handling)
     "ANNOTATE_RESULTS": [{"source_key": "edgepython", "tool": "annotate_genes"}],
+    "SAVE_RESULTS": [{"source_key": "edgepython", "tool": "save_results"}],
     # Enrichment analysis step kinds:
     "FILTER_DE_GENES": [{"source_key": "edgepython", "tool": "filter_de_genes"}],
     "RUN_GO_ENRICHMENT": [{"source_key": "edgepython", "tool": "run_go_enrichment"}],
@@ -569,6 +619,15 @@ async def execute_step(
     kind = step.get("kind", "")
     logger.info("Executing plan step", step_id=step_id, kind=kind, title=step.get("title"))
 
+    project_dir_path = None
+    if project_id and user is not None:
+        try:
+            from cortex.db_helpers import _resolve_project_dir
+
+            project_dir_path = _resolve_project_dir(session, user, project_id)
+        except Exception:
+            logger.debug("Failed to resolve project directory for plan execution", exc_info=True)
+
     # Mark step as running
     step["status"] = "RUNNING"
     step["started_at"] = datetime.datetime.utcnow().isoformat() + "Z"
@@ -634,6 +693,52 @@ async def execute_step(
         _persist_step_update(session, workflow_block, plan_payload)
         return StepResult(success=True, data={"action": "special_handling", "kind": kind})
 
+    if kind == "PREPARE_DE_INPUT":
+        from cortex.dataframe_actions import _find_dataframe_payload
+        from cortex.de_prep import prepare_de_inputs
+        from cortex.models import ProjectBlock
+
+        try:
+            source: str | dict[str, Any] | None = step.get("counts_path") or None
+            df_id = step.get("df_id")
+            if df_id not in (None, ""):
+                history_blocks = session.execute(
+                    select(ProjectBlock)
+                    .where(ProjectBlock.project_id == project_id)
+                    .where(ProjectBlock.type == "AGENT_PLAN")
+                    .order_by(ProjectBlock.seq.asc())
+                ).scalars().all()
+                source = _find_dataframe_payload(int(df_id), history_blocks)
+
+            default_output_dir = (
+                str(project_dir_path / "de_inputs")
+                if project_dir_path is not None
+                else step.get("output_dir")
+                or str(Path(step.get("work_dir") or ".") / "de_inputs")
+            )
+            prepared = prepare_de_inputs(
+                source,
+                output_dir=step.get("output_dir") or default_output_dir,
+                group_a_label=str(step.get("group_a_label") or "group1"),
+                group_a_samples=list(step.get("group_a_samples") or []),
+                group_b_label=str(step.get("group_b_label") or "group2"),
+                group_b_samples=list(step.get("group_b_samples") or []),
+                level=str(step.get("level") or "gene"),
+                work_dir=step.get("work_dir") or plan_payload.get("work_dir"),
+            )
+            _apply_prepared_de_inputs(plan_payload, step_id, prepared)
+            step["status"] = "COMPLETED"
+            step["result"] = prepared
+            step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+            _persist_step_update(session, workflow_block, plan_payload)
+            return StepResult(success=True, data=prepared)
+        except Exception as exc:
+            step["status"] = "FAILED"
+            step["error"] = str(exc)
+            step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+            _persist_step_update(session, workflow_block, plan_payload)
+            return StepResult(success=False, error=str(exc))
+
     if kind == "PARSE_OUTPUT_FILE" and not explicit_tool_calls:
         tool_calls = _derive_parse_tool_calls(plan_payload, step)
         if not tool_calls:
@@ -667,7 +772,7 @@ async def execute_step(
         return StepResult(success=True, data=step["result"])
 
     if kind in ("SUBMIT_WORKFLOW", "DOWNLOAD_DATA", "RUN_DE_ANALYSIS",
-                "COMPARE_SAMPLES", "RUN_DE_PIPELINE", "RUN_SCRIPT"):
+                "COMPARE_SAMPLES", "RUN_SCRIPT"):
         # These kinds need special orchestration — mark as needing attention
         # and return a marker so the caller can handle them
         step["status"] = "WAITING_APPROVAL" if step.get("requires_approval") else "PENDING"
@@ -700,6 +805,11 @@ async def execute_step(
         if not source_key or not tool_name:
             logger.warning("Skipping empty tool call in step", step_id=step_id)
             continue
+
+        if source_key == "edgepython" and project_dir_path is not None:
+            from cortex.tool_dispatch import _inject_edgepython_output_path
+
+            _inject_edgepython_output_path(tool_name, params, project_dir_path)
 
         result = await _call_mcp_tool(source_key, tool_name, params)
         all_results.append({
@@ -997,6 +1107,45 @@ def _find_step(steps: list[dict], step_id: str) -> dict | None:
         if s.get("id") == step_id:
             return s
     return None
+
+
+def _apply_prepared_de_inputs(plan_payload: dict, completed_step_id: str, prepared: dict[str, Any]) -> None:
+    for step in plan_payload.get("steps", []):
+        if (
+            completed_step_id not in (step.get("depends_on") or [])
+            and step.get("kind") not in {"SAVE_RESULTS", "GENERATE_DE_PLOT"}
+        ):
+            continue
+
+        if step.get("kind") == "RUN_DE_PIPELINE":
+            for tool_call in step.get("tool_calls", []):
+                params = tool_call.get("params") if isinstance(tool_call.get("params"), dict) else None
+                if not params:
+                    continue
+                if tool_call.get("tool") == "load_data":
+                    params["counts_path"] = prepared["counts_path"]
+                    params["sample_info_path"] = prepared["sample_info_path"]
+                    params["group_column"] = prepared["group_column"]
+                elif tool_call.get("tool") == "exact_test":
+                    params["pair"] = prepared["pair"]
+                    params["name"] = prepared["result_name"]
+                elif tool_call.get("tool") == "test_contrast":
+                    params["contrast"] = prepared["contrast"]
+                    params["name"] = prepared["result_name"]
+                elif tool_call.get("tool") == "get_top_genes":
+                    params["name"] = prepared["result_name"]
+
+        if step.get("kind") == "SAVE_RESULTS":
+            for tool_call in step.get("tool_calls", []):
+                params = tool_call.get("params") if isinstance(tool_call.get("params"), dict) else None
+                if params and tool_call.get("tool") == "save_results":
+                    params["name"] = prepared["result_name"]
+
+        if step.get("kind") == "GENERATE_DE_PLOT":
+            for tool_call in step.get("tool_calls", []):
+                params = tool_call.get("params") if isinstance(tool_call.get("params"), dict) else None
+                if params and tool_call.get("tool") == "generate_plot":
+                    params["result_name"] = prepared["result_name"]
 
 
 def _ordered_steps(steps: list[dict]) -> list[dict]:

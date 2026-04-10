@@ -162,7 +162,7 @@ def replan_with_new_info(
 
         has_files = _has_existing_files(results_data)
         if has_files:
-            _EXPENSIVE_KINDS = {"SUBMIT_WORKFLOW", "DOWNLOAD_DATA", "RUN_DE_PIPELINE", "RUN_DE_ANALYSIS"}
+            _EXPENSIVE_KINDS = {"SUBMIT_WORKFLOW", "DOWNLOAD_DATA", "RUN_DE_ANALYSIS"}
             for s in steps:
                 if (s.get("kind") in _EXPENSIVE_KINDS
                         and completed_step_id in s.get("depends_on", [])

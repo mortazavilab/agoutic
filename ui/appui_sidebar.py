@@ -46,6 +46,13 @@ def render_sidebar(
             st.caption("`head DF5`  ·  `head DF5 20`  ·  `head c2c12DF`")
             st.caption("`subset DF3 to columns sample, reads`  ·  `rename DF2 columns old to new`")
             st.caption("`summarize DF4 by sample and sum reads`  ·  `plot DF5 color by sample`")
+            st.caption("**Differential Expression**")
+            if st.button("how do I compare reconcile samples", key="help_prompt_reconcile_de", width="stretch"):
+                st.session_state["_help_prompt"] = "how do i compare reconcile samples"
+                st.rerun()
+            st.caption("`compare the AD samples exc and jbh to the control samples gko and lwf`")
+            st.caption("`compare exc and jbh to gko and lwf from DF1 at transcript level`")
+            st.caption("`/de AD=exc,jbh vs control=gko,lwf`")
             st.caption("**Memory**")
             if st.button("/memories", key="help_prompt_memories", width="stretch"):
                 st.session_state["_help_prompt"] = "/memories"

@@ -89,6 +89,7 @@ def _is_help_intent(message: str) -> bool:
         "how do i run a workflow",
         "how do i use remote slurm",
         "how do i use dataframes",
+        "how do i compare reconcile samples",
         "show dataframe commands",
     }
     return q in deterministic
@@ -97,7 +98,7 @@ def _is_help_intent(message: str) -> bool:
 def _render_local_help_response() -> None:
     section_header("Help", "Quick operational guide for AGOUTIC", icon="❓")
     with st.container(border=True):
-        metadata_row({"Focus": "Workflow + DataFrames + Remote HPC", "Mode": "Deterministic Help"})
+        metadata_row({"Focus": "Workflow + DataFrames + DE + Remote HPC", "Mode": "Deterministic Help"})
         st.divider()
         with st.expander("Getting Started", expanded=True):
             st.markdown("1. Pick or create a project in the sidebar.")
@@ -108,6 +109,7 @@ def _render_local_help_response() -> None:
             st.markdown("- stage sample to remote slurm profile hpc3")
             st.markdown("- show job status and next steps")
             st.markdown("- parse results for run UUID")
+            st.markdown("- compare reconcile abundance samples with edgePython")
         with st.expander("Execution Modes", expanded=False):
             st.markdown("- Local: run on AGOUTIC host")
             st.markdown("- SLURM: submit via remote profile and queue")
@@ -122,6 +124,12 @@ def _render_local_help_response() -> None:
             st.markdown("- Ask naturally: `plot DF5 by assay`, `make a bar chart of DF3 by sample`, `color by sample`")
             st.markdown("- Wide sample tables can auto-melt when you ask for grouped plots such as `color by sample`")
             st.markdown("- Histogram, scatter, bar, box, heatmap, and pie charts render inline in chat")
+        with st.expander("Differential Expression From Reconcile Outputs", expanded=False):
+            st.markdown("- Use the current workflow abundance table directly: `compare the AD samples exc and jbh to the control samples gko and lwf`")
+            st.markdown("- Run the same comparison from a dataframe: `compare exc and jbh to gko and lwf from DF1 at transcript level`")
+            st.markdown("- Slash form is also supported: `/de AD=exc,jbh vs control=gko,lwf`")
+            st.markdown("- If you omit the groups, AGOUTIC will ask which sample columns belong to each side instead of guessing")
+            st.markdown("- Default behavior is gene-level aggregation from `reconciled_abundance.tsv`; ask for transcript level when you want transcript-wise testing")
         with st.expander("Status Guide", expanded=False):
             st.markdown("- pending: waiting for action")
             st.markdown("- running: task active")

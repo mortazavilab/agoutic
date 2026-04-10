@@ -285,6 +285,18 @@ class TestHasPendingDestructiveConfirmation:
         assert fn() is False
 
 
+class TestHelpIntent:
+    def test_recognizes_grouped_de_help_shortcut(self):
+        fn = _load_function("_is_help_intent")
+
+        assert fn("how do i compare reconcile samples") is True
+
+    def test_does_not_treat_actual_de_request_as_help(self):
+        fn = _load_function("_is_help_intent")
+
+        assert fn("compare the AD samples exc and jbh to the control samples gko and lwf") is False
+
+
 class TestResolveDfById:
     def test_returns_latest_matching_dataframe(self):
         fn = _load_function("_resolve_df_by_id")

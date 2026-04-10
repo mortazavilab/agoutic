@@ -127,3 +127,143 @@ def test_run_script_is_not_auto_executed_by_default():
     step = {"kind": "RUN_SCRIPT", "requires_approval": False}
     assert should_auto_execute(step) is False
     assert STEP_TOOL_DEFAULTS["RUN_SCRIPT"] is None
+
+
+@pytest.mark.asyncio
+async def test_execute_step_prepare_de_input_updates_follow_up_de_steps(monkeypatch, tmp_path):
+    abundance_path = tmp_path / "reconciled_abundance.tsv"
+    abundance_path.write_text(
+        "gene_ID\ttranscript_ID\tgko\tjbh\tlwf\texc\n"
+        "GENE1\tTX1\t10\t30\t20\t40\n"
+        "GENE1\tTX2\t1\t3\t2\t4\n",
+        encoding="utf-8",
+    )
+    payload = {
+        "steps": [
+            {
+                "id": "prep1",
+                "kind": "PREPARE_DE_INPUT",
+                "title": "Prepare DE inputs",
+                "status": "PENDING",
+                "depends_on": [],
+                "counts_path": str(abundance_path),
+                "output_dir": str(tmp_path / "de_inputs"),
+                "group_a_label": "AD",
+                "group_a_samples": ["exc", "jbh"],
+                "group_b_label": "control",
+                "group_b_samples": ["gko", "lwf"],
+                "level": "gene",
+            },
+            {
+                "id": "run1",
+                "kind": "RUN_DE_PIPELINE",
+                "title": "Run DE",
+                "status": "PENDING",
+                "depends_on": ["prep1"],
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "load_data",
+                        "params": {"counts_path": "", "sample_info_path": "", "group_column": "condition"},
+                    },
+                    {
+                        "source_key": "edgepython",
+                        "tool": "exact_test",
+                        "params": {"pair": ["x", "y"], "name": "placeholder"},
+                    },
+                    {
+                        "source_key": "edgepython",
+                        "tool": "get_top_genes",
+                        "params": {"name": "placeholder", "n": 20, "fdr_threshold": 0.05},
+                    },
+                ],
+            },
+            {
+                "id": "save1",
+                "kind": "SAVE_RESULTS",
+                "title": "Save results",
+                "status": "PENDING",
+                "depends_on": ["run1"],
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "save_results",
+                        "params": {"name": "placeholder", "format": "tsv"},
+                    }
+                ],
+            },
+            {
+                "id": "plot1",
+                "kind": "GENERATE_DE_PLOT",
+                "title": "Plot",
+                "status": "PENDING",
+                "depends_on": ["run1"],
+                "tool_calls": [
+                    {
+                        "source_key": "edgepython",
+                        "tool": "generate_plot",
+                        "params": {"plot_type": "volcano", "result_name": "placeholder"},
+                    }
+                ],
+            },
+        ]
+    }
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "prep1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    assert payload["steps"][0]["status"] == "COMPLETED"
+    assert payload["steps"][1]["tool_calls"][0]["params"]["counts_path"].endswith("_counts.tsv")
+    assert payload["steps"][1]["tool_calls"][0]["params"]["sample_info_path"].endswith("_sample_info.csv")
+    assert payload["steps"][1]["tool_calls"][1]["params"]["pair"] == ["AD", "control"]
+    assert payload["steps"][2]["tool_calls"][0]["params"]["name"].startswith("ad_vs_control")
+    assert payload["steps"][3]["tool_calls"][0]["params"]["result_name"].startswith("ad_vs_control")
+
+
+@pytest.mark.asyncio
+async def test_execute_step_run_de_pipeline_executes_tool_calls(monkeypatch):
+    payload = {
+        "steps": [
+            {
+                "id": "de1",
+                "kind": "RUN_DE_PIPELINE",
+                "title": "Run DE",
+                "status": "PENDING",
+                "requires_approval": False,
+                "depends_on": [],
+                "tool_calls": [
+                    {"source_key": "edgepython", "tool": "load_data", "params": {"counts_path": "/tmp/counts.tsv"}},
+                    {"source_key": "edgepython", "tool": "get_top_genes", "params": {"name": "demo"}},
+                ],
+            }
+        ]
+    }
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+    async def _fake_call_mcp_tool(_source, _tool, _params):
+        return {"data": "ok"}
+
+    monkeypatch.setattr(
+        "cortex.plan_executor._call_mcp_tool",
+        _fake_call_mcp_tool,
+    )
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "de1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    assert payload["steps"][0]["status"] == "COMPLETED"
+    assert result.data["results"][0]["tool"] == "load_data"

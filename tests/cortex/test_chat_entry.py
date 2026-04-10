@@ -224,6 +224,7 @@ class TestCapabilitiesResponse:
         assert resp.status_code == 200
         payload = resp.json()["agent_block"]["payload"]
         assert "differential expression" in payload["markdown"].lower()
+        assert "reconciled abundance" in payload["markdown"].lower()
 
 
 class TestPromptInspectionResponse:
@@ -261,6 +262,45 @@ class TestPromptInspectionResponse:
         payload = data["agent_block"]["payload"]
         assert "Second-pass system prompt" in payload["markdown"]
         assert "Rendered second_pass prompt for welcome" in payload["markdown"]
+        client.mock_engine.think.assert_not_called()
+
+
+class TestDEClarification:
+    def test_de_request_without_groups_returns_clarification(self, client, session_factory):
+        sess = session_factory()
+        sess.add(
+            ProjectBlock(
+                id="exec-1",
+                project_id="proj-chat",
+                owner_id="u-chat",
+                seq=1,
+                type="EXECUTION_JOB",
+                status="DONE",
+                payload_json=json.dumps(
+                    {
+                        "work_directory": "/tmp/project/workflow10",
+                        "run_uuid": "run-1",
+                        "sample_name": "workflow10",
+                    }
+                ),
+            )
+        )
+        sess.commit()
+        sess.close()
+
+        resp = client.post(
+            "/chat",
+            json={
+                "project_id": "proj-chat",
+                "message": "run differential expression on the current workflow abundance table",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = data["agent_block"]["payload"]
+        assert "need the two sample groups" in payload["markdown"]
+        assert payload["_debug"]["clarification_type"] == "de_groups"
         client.mock_engine.think.assert_not_called()
 
 

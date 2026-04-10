@@ -1,6 +1,6 @@
 # AGOUTIC UI
 
-**Version:** 3.5.1  
+**Version:** 3.5.3  
 **Status:** Active Development
 
 ## Overview
@@ -18,7 +18,7 @@ The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUT
 - 🔑 **Admin panel** for user approval and role management
 - 📈 **Interactive Plotly charts** — the agent can generate histogram, scatter, bar, box, heatmap, and pie charts from any DataFrame in the conversation; rendered inline as `AGENT_PLOT` blocks
 - 🧮 **Pending dataframe actions** — saved in-memory dataframe transforms can be reviewed and applied or dismissed directly from chat via `PENDING_ACTION` blocks
-- 📋 **Built-in dataframe help** — sidebar and deterministic help responses include dataframe inspection, transform, and plotting examples
+- 📋 **Built-in dataframe + grouped DE help** — sidebar and deterministic help responses include dataframe inspection, transform, plotting, and reconcile-abundance differential-expression examples
 
 ## Getting Started
 
@@ -69,6 +69,7 @@ The UI follows a strict **single-gateway** pattern: every request goes through C
 - Model selection (default / fast / smart)
 - `AGENT_PLOT` blocks: inline Plotly charts triggered by the agent using `[[PLOT:...]]` tags; supports histogram, scatter, bar, box, heatmap, and pie chart types
 - `PENDING_ACTION` blocks: block-specific Apply / Dismiss controls for saved dataframe transforms
+- Deterministic help shortcuts for grouped differential expression from reconcile abundance outputs or saved dataframes
 
 ### Results ([pages/results.py](pages/results.py))
 - Browse completed job files (CSV, BED, text)

@@ -397,12 +397,19 @@ def _template_summarize_results(params: dict) -> dict:
 def _template_run_de_pipeline(params: dict) -> dict:
     """
     Deterministic plan for full differential expression analysis.
-    Steps: CHECK_EXISTING → RUN_DE_PIPELINE → ANNOTATE_RESULTS → GENERATE_DE_PLOT → INTERPRET_RESULTS → WRITE_SUMMARY
+    Steps: CHECK_EXISTING → PREPARE_DE_INPUT? → RUN_DE_PIPELINE → SAVE_RESULTS → ANNOTATE_RESULTS → GENERATE_DE_PLOT → INTERPRET_RESULTS → WRITE_SUMMARY
     """
     counts_path = params.get("counts_path", "counts.csv")
     sample_info = params.get("sample_info_path", "sample_info.csv")
     group_col = params.get("group_column", "condition")
     contrast = params.get("contrast", "treated - control")
+    group_a_label = params.get("group_a_label", "group1")
+    group_b_label = params.get("group_b_label", "group2")
+    group_a_samples = params.get("group_a_samples") or []
+    group_b_samples = params.get("group_b_samples") or []
+    use_prep = bool(group_a_samples and group_b_samples)
+    method = params.get("method") or ("exact_test" if use_prep else "glm")
+    result_name = params.get("result_name") or f"{re.sub(r'[^a-zA-Z0-9]+', '_', str(group_a_label)).strip('_').lower() or 'group1'}_vs_{re.sub(r'[^a-zA-Z0-9]+', '_', str(group_b_label)).strip('_').lower() or 'group2'}_{params.get('level', 'gene')}"
 
     steps = []
     idx = 0
@@ -413,26 +420,73 @@ def _template_run_de_pipeline(params: dict) -> dict:
     steps.append(s_check)
     idx += 1
 
+    de_depends = [s_check["id"]]
+    if use_prep:
+        s_prep = _make_step(
+            "PREPARE_DE_INPUT",
+            f"Prepare DE inputs ({group_a_label} vs {group_b_label})",
+            idx,
+            depends_on=[s_check["id"]],
+        )
+        s_prep["counts_path"] = params.get("counts_path", "")
+        s_prep["work_dir"] = params.get("work_dir", "")
+        s_prep["df_id"] = params.get("df_id")
+        s_prep["output_dir"] = params.get("prep_output_dir", "")
+        s_prep["group_a_label"] = group_a_label
+        s_prep["group_a_samples"] = list(group_a_samples)
+        s_prep["group_b_label"] = group_b_label
+        s_prep["group_b_samples"] = list(group_b_samples)
+        s_prep["level"] = params.get("level", "gene")
+        steps.append(s_prep)
+        idx += 1
+        de_depends.append(s_prep["id"])
+        sample_info = params.get("sample_info_path", "")
+        group_col = "group"
+        contrast = f"{group_a_label} - {group_b_label}"
+
+    de_tool_calls = [
+        {"source_key": "edgepython", "tool": "load_data",
+         "params": {"counts_path": counts_path, "sample_info_path": sample_info,
+                    "group_column": group_col}},
+        {"source_key": "edgepython", "tool": "filter_genes",
+         "params": {"min_count": 10, "min_total_count": 15}},
+        {"source_key": "edgepython", "tool": "normalize",
+         "params": {"method": "TMM"}},
+    ]
+    if method == "exact_test":
+        de_tool_calls.extend([
+            {"source_key": "edgepython", "tool": "estimate_dispersion",
+             "params": {"robust": True}},
+            {"source_key": "edgepython", "tool": "exact_test",
+             "params": {"pair": [group_a_label, group_b_label], "name": result_name}},
+        ])
+    else:
+        de_tool_calls.extend([
+            {"source_key": "edgepython", "tool": "set_design",
+             "params": {"formula": "~ 0 + group"}},
+            {"source_key": "edgepython", "tool": "estimate_dispersion",
+             "params": {"robust": True}},
+            {"source_key": "edgepython", "tool": "fit_model",
+             "params": {"robust": True}},
+            {"source_key": "edgepython", "tool": "test_contrast",
+             "params": {"contrast": contrast, "name": result_name}},
+        ])
+    de_tool_calls.append(
+        {"source_key": "edgepython", "tool": "get_top_genes",
+         "params": {"name": result_name, "n": 20, "fdr_threshold": 0.05}}
+    )
+
     s_de = _make_step("RUN_DE_PIPELINE", f"Run DE analysis ({contrast})", idx,
-                      requires_approval=True, depends_on=[s_check["id"]],
-                      tool_calls=[
-                          {"source_key": "edgepython", "tool": "load_data",
-                           "params": {"counts_path": counts_path, "sample_info_path": sample_info,
-                                      "group_column": group_col}},
-                          {"source_key": "edgepython", "tool": "filter_genes",
-                           "params": {"min_count": 10, "min_total_count": 15}},
-                          {"source_key": "edgepython", "tool": "normalize",
-                           "params": {"method": "TMM"}},
-                          {"source_key": "edgepython", "tool": "set_design",
-                           "params": {"formula": "~ 0 + group"}},
-                          {"source_key": "edgepython", "tool": "estimate_dispersion",
-                           "params": {"robust": True}},
-                          {"source_key": "edgepython", "tool": "fit_model",
-                           "params": {"robust": True}},
-                          {"source_key": "edgepython", "tool": "test_contrast",
-                           "params": {"contrast": contrast}},
-                      ])
+                      requires_approval=False, depends_on=de_depends,
+                      tool_calls=de_tool_calls)
     steps.append(s_de)
+    idx += 1
+
+    s_save = _make_step("SAVE_RESULTS", "Save full DE results", idx,
+                        depends_on=[s_de["id"]],
+                        tool_calls=[{"source_key": "edgepython", "tool": "save_results",
+                                     "params": {"name": result_name, "format": "tsv"}}])
+    steps.append(s_save)
     idx += 1
 
     s_annotate = _make_step("ANNOTATE_RESULTS", "Annotate gene symbols", idx,
@@ -445,7 +499,7 @@ def _template_run_de_pipeline(params: dict) -> dict:
     s_plot = _make_step("GENERATE_DE_PLOT", "Generate volcano plot", idx,
                         depends_on=[s_annotate["id"]],
                         tool_calls=[{"source_key": "edgepython", "tool": "generate_plot",
-                                     "params": {"plot_type": "volcano"}}])
+                                     "params": {"plot_type": "volcano", "result_name": result_name}}])
     steps.append(s_plot)
     idx += 1
 
@@ -455,7 +509,7 @@ def _template_run_de_pipeline(params: dict) -> dict:
     idx += 1
 
     s_summary = _make_step("WRITE_SUMMARY", "Write DE analysis summary", idx,
-                           depends_on=[s_plot["id"], s_interpret["id"]])
+                           depends_on=[s_save["id"], s_plot["id"], s_interpret["id"]])
     steps.append(s_summary)
 
     return {

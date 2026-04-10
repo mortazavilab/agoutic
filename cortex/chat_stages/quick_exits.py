@@ -58,8 +58,10 @@ class CapabilitiesStage:
             "3. **Download files from URLs** — Grab files from any URL into your project\n"
             "4. **Check results from a completed job** — View QC reports, alignment "
             "stats, modification calls, and expression data\n"
-            "5. **Differential expression analysis** — Run DE analysis on count "
-            "matrices using edgePython (bulk, single-cell, DTU, ChIP-seq)\n\n"
+            "5. **Differential expression analysis** — Run edgePython on count "
+            "matrices, reconciled abundance tables, or saved dataframes; compare "
+            "named groups like AD samples `exc` and `jbh` versus control samples "
+            "`gko` and `lwf`\n\n"
             "What would you like to do?\n"
         )
         agent_block = _create_block_internal(

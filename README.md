@@ -1,9 +1,19 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.5.2
+**Version:** 3.5.3
 **Status:** Active Prototype 
 
-## Latest Updates (2026-04-06)
+## Latest Updates (2026-04-09)
+
+- **Grouped DE from reconcile abundance tables and dataframes** — AGOUTIC can
+  now run edgePython directly from the active workflow's
+  `reconciled_abundance.tsv` output or a parsed in-chat dataframe. You can name
+  sample groups in natural language or use `/de`, and AGOUTIC will ask for
+  clarification instead of guessing when groups are missing.
+
+- **Help UI now shows grouped DE prompts** — the sidebar help shortcuts and
+  deterministic help response include examples for comparing reconcile samples
+  from the current workflow or from a dataframe.
 
 - **Chat dataframe guide and help refresh** — added a dedicated
   `docs/DATAFRAMES.md` guide, expanded deterministic UI help with dataframe
@@ -125,6 +135,8 @@ AGOUTIC is designed to help users:
 
 - **Differential analysis**
   - Run bulk and single-cell RNA-seq differential expression through edgePython
+  - Compare grouped samples directly from reconciled workflow abundance tables
+    or saved dataframes
   - Use the stateful DE flow: load → filter → normalize → design → fit → test → results
   - Filter by FDR/logFC and report annotated top genes for interpretation
 
@@ -188,6 +200,9 @@ The analysis layer returns:
 - `Parse the bedMethyl output and summarize methylation patterns`
 - `Show the top expressed genes from this result file`
 - `Run differential expression between control and treatment`
+- `Compare the AD samples exc and jbh to the control samples gko and lwf`
+- `Compare exc and jbh to gko and lwf from DF1 at transcript level`
+- `/de AD=exc,jbh vs control=gko,lwf`
 - `Annotate these Ensembl IDs`
 - `Run GO enrichment on the upregulated genes`
 - `Compare workflow1 and workflow2 outputs`

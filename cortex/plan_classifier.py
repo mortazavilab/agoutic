@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _MULTI_STEP_PATTERNS: list[re.Pattern] = [
+    re.compile(r"^/de\b", re.I),
     # Reconcile annotated BAMs
     re.compile(r"(?:reconcile|merge|combine)\s+(?:the\s+)?(?:annotated\s+)?bams?", re.I),
     re.compile(r"cross[-\s]?workflow\s+bam\s+reconcil", re.I),
@@ -109,6 +110,15 @@ def classify_request(
 # ---------------------------------------------------------------------------
 
 _DE_PATTERNS = [
+    re.compile(r"^/de\b", re.I),
+    re.compile(
+        r"compare\s+(?:the\s+)?[a-zA-Z0-9_.-]+\s+samples?\s+.+?\s+(?:to|vs?\.?|versus|against)\s+(?:the\s+)?[a-zA-Z0-9_.-]+\s+samples?\s+.+",
+        re.I,
+    ),
+    re.compile(
+        r"compare\s+.+?\s+(?:to|vs?\.?|versus|against)\s+.+?\s+(?:from|using|on)\s+(?:df\s*\d+|\S*(?:abundance|counts?|matrix)\S*\.(?:csv|tsv|txt))",
+        re.I,
+    ),
     re.compile(r"(?:run|do|perform)\s+(?:a\s+)?(?:differential\s+expression|DE\s+analysis)", re.I),
     re.compile(r"(?:differential\s+expression|DE)\s+(?:on|for|analysis)", re.I),
     re.compile(r"edger?\s+(?:analysis|pipeline)", re.I),
