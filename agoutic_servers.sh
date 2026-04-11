@@ -37,6 +37,7 @@ ANALYZER_MCP_PORT="${ANALYZER_MCP_PORT:-8005}"
 ENCODE_MCP_PORT="${ENCODE_MCP_PORT:-8006}"
 EDGEPYTHON_MCP_PORT="${EDGEPYTHON_MCP_PORT:-8007}"
 XGENEPY_MCP_PORT="${XGENEPY_MCP_PORT:-8008}"
+IGVF_MCP_PORT="${IGVF_MCP_PORT:-8009}"
 UI_PORT="${UI_PORT:-8501}"
 
 # Map service names to ports
@@ -48,6 +49,7 @@ declare -A PORT_MAP=(
     ["encode-mcp"]=$ENCODE_MCP_PORT
     ["edgepython-mcp"]=$EDGEPYTHON_MCP_PORT
     ["xgenepy-mcp"]=$XGENEPY_MCP_PORT
+    ["igvf-mcp"]=$IGVF_MCP_PORT
     ["cortex"]=$CORTEX_PORT
 )
 
@@ -397,6 +399,10 @@ cmd_start() {
     start_process "xgenepy-mcp" \
         "python -m xgenepy_mcp.launch_xgenepy --host 0.0.0.0 --port $XGENEPY_MCP_PORT"
 
+    # IGVF MCP Server (consortium)
+    start_process "igvf-mcp" \
+        "python -m atlas.launch_igvf --host 0.0.0.0 --port $IGVF_MCP_PORT"
+
     # Cortex - Main orchestrator (start last)
     start_process "cortex" \
         "python -m uvicorn cortex.app:app --host 0.0.0.0 --port $CORTEX_PORT"
@@ -409,6 +415,7 @@ cmd_start() {
     echo "  Analyzer (Analysis REST):  http://localhost:$ANALYZER_PORT"
     echo "  Analyzer (Analysis MCP):   http://localhost:$ANALYZER_MCP_PORT"
     echo "  ENCODE (Consortium MCP):   http://localhost:$ENCODE_MCP_PORT"
+    echo "  IGVF (Consortium MCP):     http://localhost:$IGVF_MCP_PORT"
     echo "  edgePython (DE MCP):       http://localhost:$EDGEPYTHON_MCP_PORT"
     echo "  XgenePy (Cis/Trans MCP):   http://localhost:$XGENEPY_MCP_PORT"
     echo ""
@@ -424,6 +431,7 @@ cmd_stop() {
     stop_process "cortex"
     stop_process "xgenepy-mcp"
     stop_process "edgepython-mcp"
+    stop_process "igvf-mcp"
     stop_process "encode-mcp"
     stop_process "analyzer-mcp"
     stop_process "analyzer-rest"
@@ -438,8 +446,8 @@ cmd_status() {
     log "AGOUTIC server status:"
     echo ""
 
-    local services=("launchpad-rest" "launchpad-mcp" "analyzer-rest" "analyzer-mcp" "encode-mcp" "edgepython-mcp" "xgenepy-mcp" "cortex")
-    local labels=("Launchpad REST" "Launchpad MCP" "Analyzer REST" "Analyzer MCP" "ENCODE MCP" "edgePython MCP" "XgenePy MCP" "Cortex")
+    local services=("launchpad-rest" "launchpad-mcp" "analyzer-rest" "analyzer-mcp" "encode-mcp" "igvf-mcp" "edgepython-mcp" "xgenepy-mcp" "cortex")
+    local labels=("Launchpad REST" "Launchpad MCP" "Analyzer REST" "Analyzer MCP" "ENCODE MCP" "IGVF MCP" "edgePython MCP" "XgenePy MCP" "Cortex")
 
     for i in "${!services[@]}"; do
         local name="${services[$i]}"

@@ -281,6 +281,21 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
         if re.search(r'ENCSR[A-Z0-9]{6}', user_message, re.IGNORECASE):
             return "ENCODE_Search"
 
+    # --- Signals for IGVF_Search ---
+    _igvf_words = ["igvf", "igvf portal", "igvf data", "igvf dataset"]
+    _igvf_search_words = ["search", "how many", "datasets", "measurement sets",
+                          "prediction sets", "analysis sets", "accession",
+                          "samples", "files", "genes"]
+    _has_igvf = any(w in msg_lower for w in _igvf_words)
+    _has_igvf_search = any(w in msg_lower for w in _igvf_search_words)
+
+    if current_skill != "IGVF_Search":
+        if _has_igvf and _has_igvf_search:
+            return "IGVF_Search"
+        # Strong signal: IGVF accession pattern
+        if re.search(r'IGVF(?:DS|FI)[A-Z0-9]{4,8}', user_message):
+            return "IGVF_Search"
+
     # --- Signals for analyze_job_results ---
     _results_words = [
         "qc report", "quality control", "parse the",

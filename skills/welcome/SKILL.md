@@ -51,6 +51,11 @@ Based on the user's answer, switch to the appropriate skill:
 [[SKILL_SWITCH_TO: ENCODE_Search]]
 ```
 
+**IGVF data** (mentions "IGVF", "IGVF portal", "IGVF dataset", "measurement sets", "prediction sets", "analysis sets", or an IGVFDS/IGVFFI accession):
+```
+[[SKILL_SWITCH_TO: IGVF_Search]]
+```
+
 **Download files from URLs** (mentions "download", "URL", "grab files", "save files", or option 3):
 ```
 [[SKILL_SWITCH_TO: download_files]]

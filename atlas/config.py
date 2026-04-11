@@ -129,11 +129,116 @@ CONSORTIUM_REGISTRY = {
         },
     },
 
+    "igvf": {
+        # Connection
+        "url": os.getenv("IGVF_MCP_URL", "http://localhost:8009"),
+
+        # Display
+        "display_name": "IGVF Portal",
+        "emoji": "🔬",
+
+        # Result formatting
+        "table_columns": [
+            ("Accession", "accession"),
+            ("Assay", "assay"),
+            ("Summary", "summary"),
+            ("Status", "status"),
+        ],
+        "count_field": "assay",
+        "count_label": "assay type",
+
+        # Skills that belong to this consortium
+        "skills": ["IGVF_Search"],
+
+        # Tool name aliases: fix LLM-hallucinated tool names
+        "tool_aliases": {
+            "search_datasets": "search_measurement_sets",
+            "search_experiments": "search_measurement_sets",
+            "search_igvf": "search_measurement_sets",
+            "search": "search_measurement_sets",
+            "get_experiment": "get_dataset",
+            "get_measurement_set": "get_dataset",
+            "file_metadata": "get_file_metadata",
+            "file_download": "get_file_download_url",
+            "download_file": "get_file_download_url",
+            "get_files": "get_files_for_dataset",
+            "files_for_dataset": "get_files_for_dataset",
+            "gene_search": "search_genes",
+            "find_gene": "search_genes",
+            "sample_search": "search_samples",
+            "find_samples": "search_samples",
+            "server_info": "get_server_info",
+        },
+
+        # Parameter name aliases
+        "param_aliases": {
+            "search_by_sample": {
+                "biosample": "sample_term",
+                "biosample_name": "sample_term",
+                "cell_line": "sample_term",
+                "sample": "sample_term",
+                "search_term": "sample_term",
+                "tissue": "sample_term",
+            },
+            "search_by_assay": {
+                "assay": "assay_title",
+                "assay_name": "assay_title",
+                "assay_type": "assay_title",
+            },
+            "search_measurement_sets": {
+                "biosample": "sample",
+                "cell_line": "sample",
+                "search_term": "sample",
+                "tissue": "sample",
+                "assay_title": "assay",
+                "assay_type": "assay",
+            },
+            "search_genes": {
+                "gene_symbol": "query",
+                "gene_name": "query",
+                "gene": "query",
+                "symbol": "query",
+            },
+            "get_gene": {
+                "query": "gene_id",
+                "gene_symbol": "gene_id",
+                "symbol": "gene_id",
+                "gene_name": "gene_id",
+            },
+            "get_files_for_dataset": {
+                "dataset_accession": "accession",
+                "dataset": "accession",
+                "file_set": "accession",
+            },
+            "get_file_metadata": {
+                "accession": "file_accession",
+                "file_id": "file_accession",
+            },
+            "get_file_download_url": {
+                "accession": "file_accession",
+                "file_id": "file_accession",
+            },
+        },
+
+        # Fallback patterns
+        "fallback_patterns": {
+            r'Get Dataset\s*\(([^)]+)\)': r'[[DATA_CALL: consortium=igvf, tool=get_dataset, \1]]',
+            r'Search Measurement Sets\s*\(([^)]+)\)': r'[[DATA_CALL: consortium=igvf, tool=search_measurement_sets, \1]]',
+            r'Search IGVF\s*\(([^)]+)\)': r'[[DATA_CALL: consortium=igvf, tool=search_measurement_sets, \1]]',
+            r'Search By Sample\s*\(([^)]+)\)': r'[[DATA_CALL: consortium=igvf, tool=search_by_sample, \1]]',
+            r'Search By Assay\s*\(([^)]+)\)': r'[[DATA_CALL: consortium=igvf, tool=search_by_assay, \1]]',
+            r'Search Genes\s*\(([^)]+)\)': r'[[DATA_CALL: consortium=igvf, tool=search_genes, \1]]',
+            r'Get Gene\s*\(([^)]+)\)': r'[[DATA_CALL: consortium=igvf, tool=get_gene, \1]]',
+            r'Get File Metadata\s*\(([^)]+)\)': r'[[DATA_CALL: consortium=igvf, tool=get_file_metadata, \1]]',
+            r'Get Server Info\s*\(\)': r'[[DATA_CALL: consortium=igvf, tool=get_server_info]]',
+        },
+    },
+
     # --- TEMPLATE FOR ADDING NEW CONSORTIA ---
     # "geo": {
-    #     "url": os.getenv("GEO_MCP_URL", "http://localhost:8007"),
+    #     "url": os.getenv("GEO_MCP_URL", "http://localhost:8010"),
     #     "display_name": "GEO (Gene Expression Omnibus)",
-    #     "emoji": "🔬",
+    #     "emoji": "📊",
     #     "table_columns": [
     #         ("Accession", "accession"),
     #         ("Title", "title"),

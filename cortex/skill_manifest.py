@@ -122,6 +122,19 @@ _register(
         sample_types=(SampleType.ANY,),
     ),
 
+    # ── IGVF ──────────────────────────────────────────────────────────
+    SkillManifest(
+        key="IGVF_Search",
+        skill_file="IGVF_Search/SKILL.md",
+        display_name="IGVF Search",
+        description="Search the IGVF Data Portal for measurement sets, analysis sets, samples, genes, and files.",
+        category="data_retrieval",
+        required_services=("igvf",),
+        expected_inputs=("sample_term", "assay_title", "accession", "gene_symbol"),
+        output_types=(OutputType.DATAFRAME,),
+        sample_types=(SampleType.ANY,),
+    ),
+
     # ── Dogme interpretation (analysis-only) ──────────────────────────
     SkillManifest(
         key="run_dogme_dna",

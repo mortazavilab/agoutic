@@ -1,3 +1,84 @@
+## [3.6.0] - 2026-04-10
+
+### Features
+
+- **IGVF Data Portal MCP server** — a new consortium MCP server provides 14
+  tools for querying the Impact of Genomic Variation on Function (IGVF) Data
+  Portal at `api.data.igvf.org`. Covers MeasurementSets, AnalysisSets,
+  PredictionSets, files, genes, and samples with search, lookup, and download
+  URL generation. The server runs on port 8009 and integrates with Cortex via
+  the existing consortium registry, DATA_CALL tag parsing, tool/param alias
+  correction, result formatting, and skill routing.
+  (`atlas/igvf_client.py`, `atlas/igvf_mcp_server.py`,
+  `atlas/igvf_tool_schemas.py`, `atlas/launch_igvf.py`,
+  `atlas/config.py`, `cortex/skill_manifest.py`,
+  `skills/IGVF_Search/SKILL.md`, `agoutic_servers.sh`)
+
+  Tools: `search_measurement_sets`, `search_analysis_sets`,
+  `search_prediction_sets`, `search_by_sample`, `search_by_assay`,
+  `search_files`, `get_dataset`, `get_file_metadata`,
+  `get_file_download_url`, `get_files_for_dataset`, `search_genes`,
+  `get_gene`, `search_samples`, `get_server_info`.
+
+  Integration includes 16 tool-name aliases (`search_datasets` →
+  `search_measurement_sets`, etc.), parameter aliases for 7 tools
+  (`biosample` → `sample_term`, `gene_symbol` → `query`, etc.), 9 fallback
+  regex patterns for LLM hallucination repair, and an `IGVF_Search`
+  SkillManifest registered in `cortex/skill_manifest.py`.
+
+  The IGVF HTTP client handles the Snovault API quirk where empty search
+  results return HTTP 404 with valid JSON, treating those as normal
+  zero-result responses instead of errors.
+
+- **IGVF plain-language routing** — added IGVF keyword signals to
+  `_auto_detect_skill_switch()` so that queries mentioning "IGVF", "IGVF
+  portal", "measurement sets", "prediction sets", "analysis sets", or IGVF
+  accessions (IGVFDS/IGVFFI) auto-route to the IGVF_Search skill without
+  manual skill selection. Also added an IGVF_Search routing entry to the
+  welcome skill's decision table.
+  (`cortex/llm_validators.py`, `skills/welcome/SKILL.md`)
+
+### Bug Fixes
+
+- **IGVF negative limit guard** — negative `limit` values passed to
+  `IGVFClient.search()` are now clamped to 0, preventing a 500 Internal
+  Server Error from the IGVF API. (`atlas/igvf_client.py`)
+
+- **IGVF gene search exact-match priority** — `search_genes` now promotes
+  exact symbol matches to the top of results (the IGVF API ranks partial
+  matches like BRCA1P1 above BRCA1). `get_gene` now tries an exact `symbol=`
+  filter before falling back to free-text `query=`, and fetches the full
+  object via `@id` so all fields (taxa, locations) are populated.
+  (`atlas/igvf_mcp_server.py`)
+
+### Tests
+
+- **IGVF plain-language routing tests** — 32 tests verifying auto-detect
+  skill switching for IGVF queries (positive/negative/accession cases),
+  welcome skill routing presence, and DATA_CALL tag parsing for all 14 IGVF
+  tools. (`tests/igvf_plain_language_test.py`)
+
+- **IGVF Q&A validation tests** — 26 tests simulating real user questions
+  ("How many ATAC-seq datasets does IGVF have?", "Search IGVF for K562",
+  "Tell me about gene BRCA1", etc.), verifying auto-routing, tool
+  dispatch, answer correctness via cross-validation against the live IGVF
+  API, multi-step consistency (dataset → files → file metadata), negative
+  cases, and count accuracy for all dataset types.
+  (`tests/igvf_qa_validation_test.py`)
+
+- **Comprehensive IGVF test suite** — 161 tests across 25 suites covering
+  pagination & boundary values, SQL/XSS injection safety, Unicode & special
+  characters, parameter type coercion, cache behavior & key isolation,
+  schema–tool signature alignment, Cortex dispatch config validation (tool
+  aliases, param aliases, fallback patterns), `/tools/schema` endpoint,
+  DATA_CALL tag parsing, cross-tool workflows (search → dataset → files →
+  download), server-down error handling, concurrent request handling,
+  response format consistency, data integrity spot-checks, and real LLM
+  hallucination scenarios.
+  (`tests/igvf_comprehensive_test.py`, `tests/igvf_integration_test.py`)
+
+---
+
 ## [3.5.3] - 2026-04-10
 
 ### Improvements

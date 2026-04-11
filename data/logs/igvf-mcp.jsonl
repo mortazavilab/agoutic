@@ -1,0 +1,594 @@
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T01:13:21.485577Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T01:13:22.060038Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:13:22.991220Z"}
+{"event": "Created new transport with session ID: 8d56b6864a2046beaebd781b953d9068", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:32:21.907806Z"}
+{"event": "Created new transport with session ID: 4b53598679254d5f96e6096e26d51e82", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:32:26.828850Z"}
+{"event": "Created new transport with session ID: e54af67ab8eb4575b60bc26d2864b9f0", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:32:31.923027Z"}
+{"event": "Created new transport with session ID: c8ab0fcd8aab4a8b81ae438f9fc1eb38", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:32:39.597637Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:32:39.618760Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:32:47.724431Z"}
+{"event": "StreamableHTTP session manager shutting down", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:32:51.781830Z"}
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T01:41:58.118616Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T01:41:58.750587Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:41:58.796384Z"}
+{"event": "Created new transport with session ID: 39906d84b54c4cc38f17f06e7d0e8bc8", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:43:33.263018Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:43:33.271427Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:43:33.277042Z"}
+{"event": "StreamableHTTP session manager shutting down", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:46:26.934786Z"}
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T01:48:22.750525Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T01:48:23.313074Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:48:23.365155Z"}
+{"event": "Created new transport with session ID: 679cd925c6bb49c78db174ff5b8e78a5", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:48:49.749103Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:48:49.757352Z"}
+{"event": "StreamableHTTP session manager shutting down", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:50:28.216297Z"}
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T01:50:29.478992Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T01:50:30.019643Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:50:30.051788Z"}
+{"event": "Created new transport with session ID: ebf988f390e3464ca3b10ca55dbb63d7", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:50:49.064314Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:50:49.080215Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:50:49.270681Z"}
+{"event": "StreamableHTTP session manager shutting down", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:51:10.109125Z"}
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T01:51:11.280819Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T01:51:11.860689Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:51:11.893325Z"}
+{"event": "Created new transport with session ID: d96e3a025dee4f3a8e97b462b86ce254", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:51:48.330797Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:51:48.338112Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:51:48.539289Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:51:48.603537Z"}
+{"event": "StreamableHTTP session manager shutting down", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:52:13.840519Z"}
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T01:54:36.321477Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T01:54:36.903095Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:54:36.940814Z"}
+{"event": "Created new transport with session ID: 4edf53e67e694a4ba6e95cbba15ce006", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:55:45.595293Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:45.608569Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:45.617247Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:45.928565Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:46.022660Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:46.116194Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:46.226225Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:46.295374Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:46.384241Z"}
+{"event": "Created new transport with session ID: 1c150690a1df47258f16912c02739ec7", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:55:55.364691Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:55.367699Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:55.370230Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:55.372924Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:55.375719Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:55.556871Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:55:55.559819Z"}
+{"event": "Created new transport with session ID: 36eb5829e79b4b3f8c027ad18a6124d2", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:56:19.430798Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:56:19.437432Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:56:19.657695Z"}
+{"event": "Created new transport with session ID: 12f32ce59d25478bb202a2ab9e7736e0", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:56:58.304527Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:56:58.312817Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:56:58.319358Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:56:58.595247Z"}
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T01:57:34.111963Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T01:57:34.683773Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:57:34.717148Z"}
+{"event": "Created new transport with session ID: 62e3fa6ac6b84882b97cc2a76c299dbf", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T01:59:24.843199Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:59:24.852892Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:59:25.098560Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:59:25.413196Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:59:25.526667Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:59:25.820098Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:59:26.578993Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:59:26.737046Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:59:26.791590Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:59:26.838566Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T01:59:26.960951Z"}
+{"event": "Created new transport with session ID: abbcde10b985455cbf84ad545d433e92", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:00:02.144094Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:00:02.146933Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:00:02.556729Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:00:02.812423Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:00:02.960313Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:00:03.070804Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:00:03.263214Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:00:03.334910Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:00:03.502214Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:00:03.679530Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:00:04.907338Z"}
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T02:06:05.800841Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T02:06:06.381193Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:06:06.413386Z"}
+{"event": "StreamableHTTP session manager shutting down", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:06:06.413837Z"}
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T02:06:19.533098Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T02:06:20.054873Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:06:20.081176Z"}
+{"event": "Created new transport with session ID: 6fa0392589594db28f95912f6776ee42", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:08:54.150135Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:54.163830Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:54.458732Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:54.548900Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:55.268925Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:55.311947Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:55.410935Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:55.523140Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:55.632999Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:55.702928Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:55.866647Z"}
+{"event": "Tool 'nonexistent_tool_xxx' not listed, no validation will be performed", "level": "warning", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:55.867568Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:55.871553Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:08:55.875557Z"}
+{"event": "Created new transport with session ID: 9bd1a0c8b32748af8efc39d9f17a872f", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:09:04.428262Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:09:04.431655Z"}
+{"event": "Created new transport with session ID: b0e75e1fd7f245bc891c0a2be5c4e50d", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:11:25.500988Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:25.507076Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:25.512638Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:25.809687Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:25.835466Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:25.851170Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:25.939653Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.102165Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.162044Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.214981Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.271453Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.326547Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.377148Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.448766Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.525534Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.568224Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.570675Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.612900Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.653214Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:26.693494Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:27.024323Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:27.173305Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:27.179117Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:27.332049Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:27.458683Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:28.287199Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:28.480966Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.177369Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.182803Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.187147Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.191208Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.307371Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.371105Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.455091Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.538716Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.612962Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.692713Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.781189Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.835895Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.893769Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:29.957342Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.052187Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.099271Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.196146Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.278082Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.362881Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.412615Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.479142Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.570232Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.653122Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.656501Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.657403Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.658312Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.658596Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.952198Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.953802Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.955495Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.957328Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:30.958106Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:31.230630Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:31.235967Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:31.351535Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:31.418026Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:31.498840Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:31.581174Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:32.211751Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:32.218895Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:32.224480Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:32.372111Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:33.103891Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:33.158380Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:33.259917Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:33.353445Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:33.490159Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:33.558870Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:33.627777Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:11:33.757473Z"}
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T02:12:02.142434Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T02:12:02.698610Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:12:02.730463Z"}
+{"event": "Created new transport with session ID: 7076157a25f9419091ea2bc19933cee8", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:12:43.453844Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:43.460067Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:43.678882Z"}
+{"event": "Created new transport with session ID: 925458a945af422dbd8e89242bdf381a", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:12:48.275759Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:48.278525Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:48.281066Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:48.428972Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.335222Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.353826Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.356631Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.528447Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.585426Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.641690Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.701398Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.758964Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.820958Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.938981Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.958674Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.997672Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:49.999905Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:50.040037Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:50.128562Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:50.167116Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:50.486851Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:50.645275Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:50.649522Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:50.804330Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:50.938606Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:51.623330Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:51.832490Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:52.525690Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:52.635569Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:52.641148Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:52.750656Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:52.917205Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:52.986552Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.079036Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.169987Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.250864Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.337285Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.428924Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.483186Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.539988Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.599702Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.697536Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.746747Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.845712Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:53.976183Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.061098Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.112845Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.188741Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.281560Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.372786Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.375641Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.376511Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.377083Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.377589Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.664892Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.666199Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.667587Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.669363Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.670073Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.896198Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:54.902313Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:55.012538Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:55.083726Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:55.173877Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:55.259856Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:55.884463Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:55.891011Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:55.896096Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:56.050907Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:56.769774Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:56.825047Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:56.936290Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:57.036276Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:57.128312Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:57.198004Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:57.266730Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:12:57.398339Z"}
+{"event": "Created new transport with session ID: 3d6fea7570d840018ff406e86f344267", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:13:14.176389Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.181154Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.188289Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.190694Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.206320Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.220989Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.223484Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.225851Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.228163Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.230434Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.232459Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.234857Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.237063Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.414539Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.432319Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.525288Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.528100Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.567048Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.606409Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.645644Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:14.968228Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.127386Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.134280Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.138859Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.142761Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.146777Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.151294Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.155005Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.158176Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.162083Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.165340Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.168330Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.172337Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.176603Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.180438Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.184655Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.187312Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.189816Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.192947Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.195572Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.198177Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.242971Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.245354Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.247853Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.250148Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.252689Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.254901Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.257152Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.259580Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.333574Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.337328Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.338041Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.338510Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.339211Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.344796Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.345434Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.346718Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.347624Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.347874Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.351992Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.354445Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.356788Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.359388Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.361812Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.364425Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.366771Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.369074Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.371371Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.373766Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.376884Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.379364Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.474658Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.565251Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.658528Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.661651Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.664255Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:13:15.666837Z"}
+{"event": "Created new transport with session ID: 52f1554e78a14377b951d0de5c45fadd", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:20:31.380694Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:31.417096Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:31.439507Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:31.763888Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:31.883730Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:31.948272Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.104253Z"}
+{"event": "Created new transport with session ID: fd15bcc03d6c4cb390764d58ae30da10", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:20:32.238144Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.241309Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.244283Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.359901Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.498318Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.503487Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.558270Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.604174Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.686567Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.839081Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:32.937679Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:33.047162Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:33.051395Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:33.251933Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:33.340673Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:33.344901Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:33.348317Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:34.298129Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:34.303370Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:34.308455Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:34.362722Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:34.365553Z"}
+{"event": "Created new transport with session ID: e04aedda643942dca7584cd170ac571e", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:20:56.395536Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.410627Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.418524Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.426492Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.434175Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.437913Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.442485Z"}
+{"event": "Created new transport with session ID: fcccbaa407734c2ea1552bfd0d2739df", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:20:56.463605Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.469247Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.473217Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.476529Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.482820Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.488800Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.491956Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.496073Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.500297Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.503338Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.509433Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.514107Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.518026Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.521630Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.525195Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.527960Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:56.532501Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:57.575821Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:57.579966Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:57.583331Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:57.586172Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:20:57.589557Z"}
+{"event": "Created new transport with session ID: 189a12c3da7b47b2ae4f5ca7569db7e8", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:21:02.550468Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:02.552838Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:02.745076Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:02.748157Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:03.519107Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:03.896072Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:03.901657Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.066386Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.118393Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.180467Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.232124Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.283496Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.335140Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.408003Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.425804Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.468531Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.470873Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.511521Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.552863Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.593645Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:04.922763Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:05.077252Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:05.085938Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:05.235258Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:05.373044Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:06.104935Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:06.303195Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.039380Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.044737Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.048350Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.052131Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.187601Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.254835Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.342226Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.424521Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.499123Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.578924Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.667285Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.719393Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.776086Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.845688Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.892042Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:07.936936Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.034218Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.108890Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.192205Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.243315Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.310135Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.405308Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.492751Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.494833Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.496405Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.496728Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.496953Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.788036Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.790010Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.791894Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.792532Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:08.793335Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:09.015857Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:09.022892Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:09.137425Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:09.205019Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:09.209946Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:09.291174Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:09.930161Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:09.938610Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:09.945243Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:10.091992Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:10.734519Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:10.790850Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:10.889438Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:11.030338Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:11.128419Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:11.197161Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:11.267270Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:21:11.397276Z"}
+{"server": "igvf-mcp", "log_level": "INFO", "per_server_log": "/Users/eli/code/agoutic/data/logs/igvf-mcp.jsonl", "unified_log": "/Users/eli/code/agoutic/data/logs/agoutic.jsonl", "event": "Logging initialised", "level": "info", "logger": "agoutic.logging", "timestamp": "2026-04-11T02:46:52.293298Z"}
+{"host": "0.0.0.0", "port": 8009, "event": "IGVF MCP server starting", "server": "igvf-mcp", "level": "info", "logger": "__main__", "timestamp": "2026-04-11T02:46:52.880570Z"}
+{"event": "StreamableHTTP session manager started", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:46:52.922579Z"}
+{"event": "StreamableHTTP session manager shutting down", "server": "igvf-mcp", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:46:52.924263Z"}
+{"event": "Created new transport with session ID: c51274dc5da8444b941cf66da862ca19", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:52:56.870810Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:56.942425Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:57.207319Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:57.368684Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.258670Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.279516Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.283525Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.443946Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.497991Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.553281Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.609711Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.667738Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.725457Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.857393Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.874426Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.914812Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.917215Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.956422Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:58.997059Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:59.034741Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:59.369553Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:59.541741Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:59.554195Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:59.706964Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:52:59.828622Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:00.486446Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:00.692112Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:01.425418Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:01.542355Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:01.548631Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:01.675924Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:01.817880Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:01.909085Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.058468Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.151738Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.234880Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.321039Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.426841Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.487627Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.552242Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.617399Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.721610Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.780483Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.885078Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:02.963565Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.049301Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.100765Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.219249Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.318915Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.447758Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.452293Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.459002Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.459826Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.461052Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.813107Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.817740Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.820176Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:03.826680Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:04.098315Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:04.552896Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:04.683572Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:04.801903Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:04.869069Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:04.949432Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:05.034133Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:05.669020Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:05.676607Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:05.679653Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:05.824044Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:06.451267Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:06.508404Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:06.621057Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:06.714760Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:06.809958Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:06.878200Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:06.948825Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:07.077118Z"}
+{"event": "Created new transport with session ID: 785238501da04cd88b093c44a1bda855", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:53:12.506979Z"}
+{"event": "Processing request of type ListToolsRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:12.514996Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:12.518363Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:12.521353Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:12.746670Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:12.800871Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:12.946424Z"}
+{"event": "Created new transport with session ID: a63b5823da644fd8b06c3870300a4244", "level": "info", "logger": "mcp.server.streamable_http_manager", "timestamp": "2026-04-11T02:53:12.963597Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:12.966814Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:12.969446Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:12.971984Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.113111Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.118411Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.172553Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.219805Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.223507Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.368875Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.466371Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.580895Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.586427Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.819855Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.906362Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.910247Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:13.913639Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:14.807911Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:14.812965Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:14.817417Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:14.820569Z"}
+{"event": "Processing request of type CallToolRequest", "level": "info", "logger": "mcp.server.lowlevel.server", "timestamp": "2026-04-11T02:53:14.824137Z"}
