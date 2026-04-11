@@ -25,6 +25,7 @@ from appui_state import (
 )
 from appui_tasks import (
     apply_task_action as _apply_task_action,
+    prepare_project_task_sections_for_dock as _prepare_project_task_sections_for_dock_impl,
     get_project_tasks as _get_project_tasks,
     get_sanitized_blocks as _get_sanitized_blocks,
     render_project_tasks as _render_project_tasks,
@@ -199,6 +200,19 @@ def render_project_tasks(project_id: str, *, sections: dict | None = None, docke
         TASK_SECTION_ORDER,
         sections=sections,
         docked=docked,
+    )
+
+
+def prepare_project_task_sections_for_dock(
+    sections: dict,
+    section_order: list[tuple[str, str]] | None = None,
+    *,
+    stale_hide_hours: float | None = None,
+) -> tuple[dict, int]:
+    return _prepare_project_task_sections_for_dock_impl(
+        sections,
+        section_order or TASK_SECTION_ORDER,
+        stale_hide_hours=stale_hide_hours,
     )
 
 # Check if we're creating a new project (flag set by New Project button)
@@ -676,12 +690,17 @@ def _render_task_dock():
     """Render an inline task pane only when the project has tasks."""
     _active_id = st.session_state.active_project_id
     sections = get_project_tasks(_active_id)
+    sections, hidden_stale = prepare_project_task_sections_for_dock(sections)
     total_tasks = _count_project_tasks(sections)
     st.session_state["_show_task_dock"] = total_tasks > 0
     if total_tasks == 0:
         return
 
     with st.container(border=True, height=TASK_DOCK_HEIGHT_PX, key="task_dock"):
+        if hidden_stale:
+            st.caption(
+                f"Hidden {hidden_stale} stale task(s) older than 48h from this project view."
+            )
         render_project_tasks(_active_id, sections=sections, docked=True)
 
 

@@ -209,6 +209,10 @@ def render_sidebar(
             pass
 
         st.divider()
+        st.page_link("pages/tasks.py", label="🗂️ Task Center")
+        st.caption("Running, recovered, and follow-up work across projects")
+
+        st.divider()
 
         st.subheader("💬 History")
         try:

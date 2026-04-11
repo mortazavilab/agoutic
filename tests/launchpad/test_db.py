@@ -10,16 +10,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from launchpad.db import (
     add_log_entry,
     create_job,
+    delete_staging_task,
     get_job,
     get_job_logs,
     get_next_workflow_index,
     get_remote_input_cache_entry,
     get_remote_reference_cache_entry,
     get_remote_staged_sample,
+    get_staging_task_record,
     get_workflow_identity_for_path,
     infer_workflow_index_from_path,
     job_to_dict,
     list_remote_staged_samples,
+    staging_task_record_to_dict,
+    upsert_staging_task,
     upsert_remote_input_cache_entry,
     upsert_remote_reference_cache_entry,
     upsert_remote_staged_sample,
@@ -27,6 +31,7 @@ from launchpad.db import (
 )
 from common.database import Base
 from launchpad.models import DogmeJob, JobLog, RemoteStagedSample
+from launchpad.backends.staging_worker import StagingTaskState
 
 
 @pytest.fixture()
@@ -360,3 +365,43 @@ class TestRemoteCacheHelpers:
         assert entry.remote_data_path == "/remote/u1/agoutic/data/fp-1"
         assert entry.remote_reference_paths_json == {"mm39": "/remote/u1/agoutic/ref/mm39"}
         assert len(rows) == 1
+
+
+class TestStagingTaskPersistence:
+    @pytest.mark.asyncio
+    async def test_upsert_and_get_staging_task_record(self, async_session):
+        task = StagingTaskState(
+            task_id="stg-1",
+            status="running",
+            progress={"file_percent": 25},
+            params={"sample_name": "sample-a", "project_id": "proj-1"},
+            created_at=100.0,
+            updated_at=105.0,
+        )
+
+        await upsert_staging_task(task, session=async_session)
+        record = await get_staging_task_record("stg-1", session=async_session)
+
+        assert record is not None
+        assert record.status == "running"
+        assert record.progress_json == {"file_percent": 25}
+        assert record.params_json == {"sample_name": "sample-a", "project_id": "proj-1"}
+        assert staging_task_record_to_dict(record)["updated_at"] == 105.0
+
+    @pytest.mark.asyncio
+    async def test_delete_staging_task_removes_row(self, async_session):
+        task = StagingTaskState(
+            task_id="stg-2",
+            status="failed",
+            error="network error",
+            params={"sample_name": "sample-b"},
+            created_at=200.0,
+            updated_at=210.0,
+        )
+
+        await upsert_staging_task(task, session=async_session)
+        deleted = await delete_staging_task("stg-2", session=async_session)
+        record = await get_staging_task_record("stg-2", session=async_session)
+
+        assert deleted is True
+        assert record is None

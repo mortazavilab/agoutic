@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import uuid
 
 from sqlalchemy import select, update
@@ -19,6 +20,14 @@ _ANALYSIS_SKILLS = {
     "run_dogme_dna",
     "run_dogme_rna",
     "run_dogme_cdna",
+}
+_RUNNING_TASK_STALE_HOURS = float(os.getenv("TASK_RUNNING_STALE_HOURS", "24"))
+_DERIVED_METADATA_KEYS = {
+    "source_updated_at",
+    "is_stale",
+    "stale_reason",
+    "stale_age_seconds",
+    "stale_original_status",
 }
 
 
@@ -40,10 +49,90 @@ def _task_metadata(task: ProjectTask) -> dict:
         return {}
 
 
-def task_to_dict(task: ProjectTask) -> dict:
+def _utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _parse_timestamp(value) -> datetime.datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime.datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=datetime.timezone.utc)
+        return value.astimezone(datetime.timezone.utc)
+    raw_value = str(value).strip()
+    if not raw_value:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _task_activity_at(*candidates) -> datetime.datetime | None:
+    for candidate in candidates:
+        parsed = _parse_timestamp(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _stale_threshold_label() -> str:
+    if _RUNNING_TASK_STALE_HOURS.is_integer():
+        return f"{int(_RUNNING_TASK_STALE_HOURS)} hours"
+    return f"{_RUNNING_TASK_STALE_HOURS:g} hours"
+
+
+def _decorate_task_spec(spec: dict, *, activity_at: datetime.datetime | None) -> dict:
+    updated = dict(spec)
+    metadata = dict(updated.get("metadata", {}))
+    if activity_at is not None:
+        metadata["source_updated_at"] = _iso(activity_at)
+
+    if updated.get("status") == "RUNNING" and activity_at is not None and _RUNNING_TASK_STALE_HOURS > 0:
+        age = _utc_now() - activity_at
+        stale_cutoff = datetime.timedelta(hours=_RUNNING_TASK_STALE_HOURS)
+        if age >= stale_cutoff:
+            metadata["is_stale"] = True
+            metadata["stale_reason"] = f"No update recorded for more than {_stale_threshold_label()}."
+            metadata["stale_age_seconds"] = max(int(age.total_seconds()), 0)
+            metadata["stale_original_status"] = updated["status"]
+            updated["status"] = "FOLLOW_UP"
+            updated["priority"] = "high"
+
+    updated["metadata"] = metadata
+    return updated
+
+
+def _block_activity_at(block: ProjectBlock, payload: dict, *extra_candidates) -> datetime.datetime | None:
+    return _task_activity_at(*extra_candidates, payload.get("last_updated"), payload.get("updated_at"), block.created_at)
+
+
+def _step_activity_at(block: ProjectBlock, payload: dict, step: dict) -> datetime.datetime | None:
+    return _task_activity_at(
+        step.get("updated_at"),
+        step.get("completed_at"),
+        payload.get("last_updated"),
+        block.created_at,
+    )
+
+
+def task_to_dict(
+    task: ProjectTask,
+    *,
+    project_name: str | None = None,
+    project_slug: str | None = None,
+    project_is_archived: bool | None = None,
+) -> dict:
     return {
         "id": task.id,
         "project_id": task.project_id,
+        "project_name": project_name,
+        "project_slug": project_slug,
+        "project_is_archived": project_is_archived,
         "kind": task.kind,
         "title": task.title,
         "status": task.status,
@@ -65,6 +154,8 @@ def task_to_dict(task: ProjectTask) -> dict:
 
 def _merged_metadata(task: ProjectTask | None, spec: dict) -> dict:
     merged = _task_metadata(task) if task is not None else {}
+    for key in _DERIVED_METADATA_KEYS:
+        merged.pop(key, None)
     merged.update(spec.get("metadata", {}))
     return merged
 
@@ -188,7 +279,7 @@ def _iter_workflow_plan_specs(project_id: str, parent_task_id: str, block: Proje
     next_step = payload.get("next_step")
     for index, step in enumerate(payload.get("steps", [])):
         action_label, action_target = _workflow_action_for_step(step)
-        yield {
+        yield _decorate_task_spec({
             "project_id": project_id,
             "source_key": f"workflow-step:{block.id}:{step.get('id', index)}",
             "kind": step.get("kind") or "workflow_step",
@@ -210,13 +301,14 @@ def _iter_workflow_plan_specs(project_id: str, parent_task_id: str, block: Proje
                 "staged_input_directory": step.get("staged_input_directory"),
                 "run_uuid": step.get("run_uuid"),
             },
-        }
+        }, activity_at=_step_activity_at(block, payload, step))
 
 
 def _iter_workflow_stage_specs(project_id: str, parent_task_id: str, block: ProjectBlock, payload: dict, *, run_uuid: str, sample_name: str):
     tasks = payload.get("job_status", {}).get("tasks", {})
     completed_names = tasks.get("completed", []) if isinstance(tasks, dict) else []
     running_names = tasks.get("running", []) if isinstance(tasks, dict) else []
+    activity_at = _block_activity_at(block, payload)
 
     seen: set[str] = set()
     for stage_name in completed_names:
@@ -224,7 +316,7 @@ def _iter_workflow_stage_specs(project_id: str, parent_task_id: str, block: Proj
             continue
         seen.add(stage_name)
         stage_key = f"workflow-stage:{run_uuid or block.id}:{_normalize_name(stage_name)}"
-        yield {
+        yield _decorate_task_spec({
             "project_id": project_id,
             "source_key": stage_key,
             "kind": "workflow_stage",
@@ -241,14 +333,14 @@ def _iter_workflow_stage_specs(project_id: str, parent_task_id: str, block: Proj
                 "sample_name": sample_name,
                 "stage_name": stage_name,
             },
-        }
+        }, activity_at=activity_at)
 
     for stage_name in running_names:
         if not stage_name or stage_name in seen:
             continue
         seen.add(stage_name)
         stage_key = f"workflow-stage:{run_uuid or block.id}:{_normalize_name(stage_name)}"
-        yield {
+        yield _decorate_task_spec({
             "project_id": project_id,
             "source_key": stage_key,
             "kind": "workflow_stage",
@@ -265,13 +357,14 @@ def _iter_workflow_stage_specs(project_id: str, parent_task_id: str, block: Proj
                 "sample_name": sample_name,
                 "stage_name": stage_name,
             },
-        }
+        }, activity_at=activity_at)
 
 
 def _iter_download_file_specs(project_id: str, parent_task_id: str, block: ProjectBlock, payload: dict):
     files = payload.get("files", []) or []
     downloaded = int(payload.get("downloaded", 0) or 0)
     current_file = payload.get("current_file") or ""
+    activity_at = _block_activity_at(block, payload)
 
     for idx, file_info in enumerate(files):
         filename = file_info.get("filename") or file_info.get("url", "file")
@@ -286,7 +379,7 @@ def _iter_download_file_specs(project_id: str, parent_task_id: str, block: Proje
         else:
             child_status = "PENDING"
 
-        yield {
+        yield _decorate_task_spec({
             "project_id": project_id,
             "source_key": file_key,
             "kind": "download_file",
@@ -303,7 +396,7 @@ def _iter_download_file_specs(project_id: str, parent_task_id: str, block: Proje
                 "url": file_info.get("url"),
                 "download_index": idx,
             },
-        }
+        }, activity_at=activity_at)
 
 
 def _collect_analysis_state(blocks: list[ProjectBlock]) -> tuple[set[str], set[str]]:
@@ -387,9 +480,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 continue
             source_key = f"workflow-plan:{block.id}"
             seen_sources.add(source_key)
-            plan_task = _upsert_task(
-                session,
-                existing_by_source,
+            workflow_plan_spec = _decorate_task_spec(
                 {
                     "project_id": project_id,
                     "source_key": source_key,
@@ -407,6 +498,12 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                         "next_step": payload.get("next_step"),
                     },
                 },
+                activity_at=_block_activity_at(block, payload),
+            )
+            plan_task = _upsert_task(
+                session,
+                existing_by_source,
+                workflow_plan_spec,
                 owner_id=owner_id,
             )
             workflow_parent_ids[block.id] = plan_task.id
@@ -437,24 +534,27 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             _upsert_task(
                 session,
                 existing_by_source,
-                {
-                    "project_id": project_id,
-                    "source_key": source_key,
-                    "kind": "approval",
-                    "title": label,
-                    "status": task_status,
-                    "priority": "high",
-                    "source_type": "block",
-                    "source_id": block.id,
-                    "parent_task_id": workflow_parent_ids.get(block.parent_id) if block.parent_id else None,
-                    "action_label": action_label,
-                    "action_target": _build_target("block", block_id=block.id),
-                    "metadata": {
-                        "block_type": block.type,
-                        "block_status": block.status,
-                        "gate_action": gate_action,
+                _decorate_task_spec(
+                    {
+                        "project_id": project_id,
+                        "source_key": source_key,
+                        "kind": "approval",
+                        "title": label,
+                        "status": task_status,
+                        "priority": "high",
+                        "source_type": "block",
+                        "source_id": block.id,
+                        "parent_task_id": workflow_parent_ids.get(block.parent_id) if block.parent_id else None,
+                        "action_label": action_label,
+                        "action_target": _build_target("block", block_id=block.id),
+                        "metadata": {
+                            "block_type": block.type,
+                            "block_status": block.status,
+                            "gate_action": gate_action,
+                        },
                     },
-                },
+                    activity_at=_block_activity_at(block, payload),
+                ),
                 owner_id=owner_id,
             )
             continue
@@ -472,23 +572,26 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             download_task = _upsert_task(
                 session,
                 existing_by_source,
-                {
-                    "project_id": project_id,
-                    "source_key": source_key,
-                    "kind": "download",
-                    "title": f"Download {total_files} file{'s' if total_files != 1 else ''}",
-                    "status": task_status,
-                    "priority": "high" if task_status == "FAILED" else "normal",
-                    "source_type": "block",
-                    "source_id": block.id,
-                    "action_label": _action_for_status(task_status, pending_label="Open task", completed_label="Downloaded"),
-                    "action_target": _build_target("block", block_id=block.id),
-                    "metadata": {
-                        "download_id": payload.get("download_id"),
-                        "downloaded": payload.get("downloaded", 0),
-                        "total_files": total_files,
+                _decorate_task_spec(
+                    {
+                        "project_id": project_id,
+                        "source_key": source_key,
+                        "kind": "download",
+                        "title": f"Download {total_files} file{'s' if total_files != 1 else ''}",
+                        "status": task_status,
+                        "priority": "high" if task_status == "FAILED" else "normal",
+                        "source_type": "block",
+                        "source_id": block.id,
+                        "action_label": _action_for_status(task_status, pending_label="Open task", completed_label="Downloaded"),
+                        "action_target": _build_target("block", block_id=block.id),
+                        "metadata": {
+                            "download_id": payload.get("download_id"),
+                            "downloaded": payload.get("downloaded", 0),
+                            "total_files": total_files,
+                        },
                     },
-                },
+                    activity_at=_block_activity_at(block, payload),
+                ),
                 owner_id=owner_id,
             )
             for child_spec in _iter_download_file_specs(project_id, download_task.id, block, payload):
@@ -511,24 +614,27 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             _upsert_task(
                 session,
                 existing_by_source,
-                {
-                    "project_id": project_id,
-                    "source_key": source_key,
-                    "kind": "stage_transfer",
-                    "title": f"Stage remote input for {payload.get('sample_name') or 'sample'}",
-                    "status": task_status,
-                    "priority": "high" if task_status == "FAILED" else "normal",
-                    "source_type": "block",
-                    "source_id": block.id,
-                    "action_label": _action_for_status(task_status, pending_label="View transfer", completed_label="Staged"),
-                    "action_target": _build_target("block", block_id=block.id),
-                    "metadata": {
-                        "sample_name": payload.get("sample_name"),
-                        "mode": payload.get("mode"),
-                        "progress_percent": payload.get("progress_percent", 0),
-                        "remote_data_path": payload.get("remote_data_path"),
+                _decorate_task_spec(
+                    {
+                        "project_id": project_id,
+                        "source_key": source_key,
+                        "kind": "stage_transfer",
+                        "title": f"Stage remote input for {payload.get('sample_name') or 'sample'}",
+                        "status": task_status,
+                        "priority": "high" if task_status == "FAILED" else "normal",
+                        "source_type": "block",
+                        "source_id": block.id,
+                        "action_label": _action_for_status(task_status, pending_label="View transfer", completed_label="Staged"),
+                        "action_target": _build_target("block", block_id=block.id),
+                        "metadata": {
+                            "sample_name": payload.get("sample_name"),
+                            "mode": payload.get("mode"),
+                            "progress_percent": payload.get("progress_percent", 0),
+                            "remote_data_path": payload.get("remote_data_path"),
+                        },
                     },
-                },
+                    activity_at=_block_activity_at(block, payload),
+                ),
                 owner_id=owner_id,
             )
             continue
@@ -552,27 +658,31 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             "FAILED": "FAILED",
         }.get(block.status, "PENDING")
         seen_sources.add(source_key)
+        run_activity_at = _block_activity_at(block, payload)
         run_task = _upsert_task(
             session,
             existing_by_source,
-            {
-                "project_id": project_id,
-                "source_key": source_key,
-                "kind": "run",
-                "title": f"Run analysis for {sample_name}",
-                "status": task_status,
-                "priority": "high" if task_status == "FAILED" else "normal",
-                "source_type": "block",
-                "source_id": block.id,
-                "action_label": _action_for_status(task_status, pending_label="View progress", completed_label="View run"),
-                "action_target": _build_target("block", block_id=block.id, run_uuid=run_uuid),
-                "metadata": {
-                    "run_uuid": run_uuid,
-                    "sample_name": sample_name,
-                    "mode": payload.get("mode"),
-                    "progress_percent": payload.get("job_status", {}).get("progress_percent", 0),
+            _decorate_task_spec(
+                {
+                    "project_id": project_id,
+                    "source_key": source_key,
+                    "kind": "run",
+                    "title": f"Run analysis for {sample_name}",
+                    "status": task_status,
+                    "priority": "high" if task_status == "FAILED" else "normal",
+                    "source_type": "block",
+                    "source_id": block.id,
+                    "action_label": _action_for_status(task_status, pending_label="View progress", completed_label="View run"),
+                    "action_target": _build_target("block", block_id=block.id, run_uuid=run_uuid),
+                    "metadata": {
+                        "run_uuid": run_uuid,
+                        "sample_name": sample_name,
+                        "mode": payload.get("mode"),
+                        "progress_percent": payload.get("job_status", {}).get("progress_percent", 0),
+                    },
                 },
-            },
+                activity_at=run_activity_at,
+            ),
             owner_id=owner_id,
         )
 
@@ -594,23 +704,26 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             _upsert_task(
                 session,
                 existing_by_source,
-                {
-                    "project_id": project_id,
-                    "source_key": analysis_source,
-                    "kind": "analysis",
-                    "title": f"Analyze results for {sample_name}",
-                    "status": analysis_status,
-                    "priority": "high",
-                    "source_type": "run_uuid",
-                    "source_id": run_uuid or block.id,
-                    "parent_task_id": run_task.id,
-                    "action_label": _action_for_status(analysis_status, pending_label="Analyzing", completed_label="Analysis ready"),
-                    "action_target": _build_target("results", run_uuid=run_uuid),
-                    "metadata": {
-                        "run_uuid": run_uuid,
-                        "sample_name": sample_name,
+                _decorate_task_spec(
+                    {
+                        "project_id": project_id,
+                        "source_key": analysis_source,
+                        "kind": "analysis",
+                        "title": f"Analyze results for {sample_name}",
+                        "status": analysis_status,
+                        "priority": "high",
+                        "source_type": "run_uuid",
+                        "source_id": run_uuid or block.id,
+                        "parent_task_id": run_task.id,
+                        "action_label": _action_for_status(analysis_status, pending_label="Analyzing", completed_label="Analysis ready"),
+                        "action_target": _build_target("results", run_uuid=run_uuid),
+                        "metadata": {
+                            "run_uuid": run_uuid,
+                            "sample_name": sample_name,
+                        },
                     },
-                },
+                    activity_at=run_activity_at,
+                ),
                 owner_id=owner_id,
             )
 
@@ -620,23 +733,26 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             _upsert_task(
                 session,
                 existing_by_source,
-                {
-                    "project_id": project_id,
-                    "source_key": review_source,
-                    "kind": "result_review",
-                    "title": f"Review results for {sample_name}",
-                    "status": review_status,
-                    "priority": "normal",
-                    "source_type": "run_uuid",
-                    "source_id": run_uuid or block.id,
-                    "parent_task_id": run_task.id,
-                    "action_label": "Open results",
-                    "action_target": _build_target("results", run_uuid=run_uuid),
-                    "metadata": {
-                        "run_uuid": run_uuid,
-                        "sample_name": sample_name,
+                _decorate_task_spec(
+                    {
+                        "project_id": project_id,
+                        "source_key": review_source,
+                        "kind": "result_review",
+                        "title": f"Review results for {sample_name}",
+                        "status": review_status,
+                        "priority": "normal",
+                        "source_type": "run_uuid",
+                        "source_id": run_uuid or block.id,
+                        "parent_task_id": run_task.id,
+                        "action_label": "Open results",
+                        "action_target": _build_target("results", run_uuid=run_uuid),
+                        "metadata": {
+                            "run_uuid": run_uuid,
+                            "sample_name": sample_name,
+                        },
                     },
-                },
+                    activity_at=run_activity_at,
+                ),
                 owner_id=owner_id,
             )
 
@@ -646,24 +762,27 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             _upsert_task(
                 session,
                 existing_by_source,
-                {
-                    "project_id": project_id,
-                    "source_key": retry_source,
-                    "kind": "recovery",
-                    "title": f"Fix or resubmit {sample_name}",
-                    "status": "FOLLOW_UP",
-                    "priority": "high",
-                    "source_type": "run_uuid",
-                    "source_id": run_uuid or block.id,
-                    "parent_task_id": run_task.id,
-                    "action_label": "Open run",
-                    "action_target": _build_target("block", block_id=block.id, run_uuid=run_uuid),
-                    "metadata": {
-                        "run_uuid": run_uuid,
-                        "sample_name": sample_name,
-                        "error": payload.get("error") or payload.get("message"),
+                _decorate_task_spec(
+                    {
+                        "project_id": project_id,
+                        "source_key": retry_source,
+                        "kind": "recovery",
+                        "title": f"Fix or resubmit {sample_name}",
+                        "status": "FOLLOW_UP",
+                        "priority": "high",
+                        "source_type": "run_uuid",
+                        "source_id": run_uuid or block.id,
+                        "parent_task_id": run_task.id,
+                        "action_label": "Open run",
+                        "action_target": _build_target("block", block_id=block.id, run_uuid=run_uuid),
+                        "metadata": {
+                            "run_uuid": run_uuid,
+                            "sample_name": sample_name,
+                            "error": payload.get("error") or payload.get("message"),
+                        },
                     },
-                },
+                    activity_at=run_activity_at,
+                ),
                 owner_id=owner_id,
             )
 
@@ -703,8 +822,15 @@ def archive_superseded_tasks(session, project_id: str) -> int:
     return result.rowcount  # type: ignore[return-value]
 
 
-def build_task_sections(tasks: list[ProjectTask]) -> dict:
-    all_task_dicts = [task_to_dict(task) for task in tasks]
+def build_task_sections(
+    tasks: list[ProjectTask],
+    project_context_by_id: dict[str, dict] | None = None,
+) -> dict:
+    project_context_by_id = project_context_by_id or {}
+    all_task_dicts = [
+        task_to_dict(task, **project_context_by_id.get(task.project_id, {}))
+        for task in tasks
+    ]
     child_map: dict[str, list[dict]] = {}
     for task in all_task_dicts:
         parent_id = task.get("parent_task_id")

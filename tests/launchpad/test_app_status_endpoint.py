@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import json
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -9,6 +10,32 @@ import launchpad.app as launchpad_app
 class _FakeSession:
     async def close(self):
         return None
+
+
+@pytest.mark.asyncio
+async def test_startup_schedules_background_staging_recovery(monkeypatch):
+    cleanup_sentinel = object()
+    recovery_sentinel = object()
+    mock_create_task = MagicMock()
+
+    monkeypatch.setattr("common.database.is_sqlite", lambda: False)
+    monkeypatch.setattr(
+        "launchpad.backends.staging_worker.periodic_cleanup",
+        lambda: cleanup_sentinel,
+    )
+    monkeypatch.setattr(
+        launchpad_app,
+        "_recover_staging_tasks_background",
+        lambda: recovery_sentinel,
+    )
+    monkeypatch.setattr(launchpad_app.asyncio, "create_task", mock_create_task)
+
+    await launchpad_app.startup()
+
+    assert [call.args[0] for call in mock_create_task.call_args_list] == [
+        cleanup_sentinel,
+        recovery_sentinel,
+    ]
 
 
 @pytest.mark.asyncio
@@ -53,6 +80,249 @@ async def test_get_job_status_returns_terminal_slurm_db_state_without_repoll(mon
     assert payload["slurm_state"] == "COMPLETED"
     assert payload["work_directory"] == "/local/project/workflow1"
     assert payload["tasks"] == {}
+
+
+@pytest.mark.asyncio
+async def test_get_staging_task_status_falls_back_to_persisted_row(monkeypatch):
+    monkeypatch.setattr("launchpad.backends.staging_worker.get_staging_tasks", lambda: {})
+    monkeypatch.setattr(
+        "launchpad.backends.staging_worker.hydrate_incomplete_staging_tasks",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        launchpad_app,
+        "get_staging_task_record",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                task_id="stg-1",
+                status="running",
+                progress_json={"file_percent": 42},
+                result_json=None,
+                error=None,
+                created_at=100.0,
+                updated_at=105.0,
+                params_json={"sample_name": "sample-a"},
+            )
+        ),
+    )
+
+    payload = await launchpad_app.get_staging_task_status("stg-1")
+
+    assert payload.task_id == "stg-1"
+    assert payload.status == "running"
+    assert payload.progress["file_percent"] == 42
+
+
+@pytest.mark.asyncio
+async def test_get_staging_task_status_attempts_resume_for_queued_task(monkeypatch):
+    queued_task = SimpleNamespace(
+        task_id="stg-queued",
+        status="queued",
+        progress={"wait_reason": "Waiting for the Remote Profile unlock to be re-established after restart."},
+        result=None,
+        error=None,
+        created_at=100.0,
+        updated_at=105.0,
+        params={"ssh_profile_id": "profile-1"},
+        _task=None,
+        to_dict=lambda: {
+            "task_id": "stg-queued",
+            "status": queued_task.status,
+            "progress": dict(queued_task.progress),
+            "result": queued_task.result,
+            "error": queued_task.error,
+            "created_at": queued_task.created_at,
+            "updated_at": queued_task.updated_at,
+        },
+    )
+    tasks = {"stg-queued": queued_task}
+
+    async def _fake_resume(profile_id=None):
+        assert profile_id == "profile-1"
+        queued_task.status = "running"
+        queued_task.progress = {"file_percent": 12}
+        return 1
+
+    monkeypatch.setattr("launchpad.backends.staging_worker.get_staging_tasks", lambda: tasks)
+    monkeypatch.setattr("launchpad.backends.staging_worker.resume_queued_staging_tasks", _fake_resume)
+
+    payload = await launchpad_app.get_staging_task_status("stg-queued")
+
+    assert payload.status == "running"
+    assert payload.progress["file_percent"] == 12
+
+
+@pytest.mark.asyncio
+async def test_get_staging_task_status_hydrates_persisted_incomplete_task_before_resuming(monkeypatch):
+    tasks: dict[str, object] = {}
+
+    def _task_to_dict(task):
+        return {
+            "task_id": task.task_id,
+            "status": task.status,
+            "progress": dict(task.progress),
+            "result": task.result,
+            "error": task.error,
+            "created_at": task.created_at,
+            "updated_at": task.updated_at,
+        }
+
+    async def _fake_hydrate(task_id=None, profile_id=None):
+        assert task_id == "stg-db"
+        task = SimpleNamespace(
+            task_id="stg-db",
+            status="queued",
+            progress={"wait_reason": "waiting"},
+            result=None,
+            error=None,
+            created_at=100.0,
+            updated_at=105.0,
+            params={"ssh_profile_id": "profile-1"},
+            _task=None,
+        )
+        task.to_dict = lambda task=task: _task_to_dict(task)
+        tasks[task.task_id] = task
+        return [task]
+
+    async def _fake_resume(profile_id=None):
+        assert profile_id == "profile-1"
+        task = tasks["stg-db"]
+        task.status = "running"
+        task.progress = {"file_percent": 9}
+        return 1
+
+    monkeypatch.setattr("launchpad.backends.staging_worker.get_staging_tasks", lambda: tasks)
+    monkeypatch.setattr("launchpad.backends.staging_worker.hydrate_incomplete_staging_tasks", _fake_hydrate)
+    monkeypatch.setattr("launchpad.backends.staging_worker.resume_queued_staging_tasks", _fake_resume)
+    monkeypatch.setattr(launchpad_app, "get_staging_task_record", AsyncMock(return_value=None))
+
+    payload = await launchpad_app.get_staging_task_status("stg-db")
+
+    assert payload.task_id == "stg-db"
+    assert payload.status == "running"
+    assert payload.progress["file_percent"] == 9
+
+
+@pytest.mark.asyncio
+async def test_retry_staging_task_uses_persisted_failed_row(monkeypatch):
+    staged_tasks: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr("launchpad.backends.staging_worker.get_staging_tasks", lambda: {})
+    monkeypatch.setattr(
+        launchpad_app,
+        "get_staging_task_record",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                task_id="stg-old",
+                status="failed",
+                progress_json={"file_percent": 80},
+                result_json=None,
+                error="network drop",
+                created_at=100.0,
+                updated_at=105.0,
+                params_json={
+                    "project_id": "proj-1",
+                    "user_id": "user-1",
+                    "sample_name": "sample-a",
+                    "mode": "RNA",
+                },
+            )
+        ),
+    )
+
+    async def _fake_persist(task, force=False, raise_on_error=False):
+        return True
+
+    def _fake_start(task):
+        staged_tasks.append((task.task_id, dict(task.params)))
+        return True
+
+    monkeypatch.setattr("launchpad.backends.staging_worker.active_task_count", lambda: 0)
+    monkeypatch.setattr("launchpad.backends.staging_worker.new_task_id", lambda: "stg-new")
+    monkeypatch.setattr("launchpad.backends.staging_worker.persist_staging_task", _fake_persist)
+    monkeypatch.setattr("launchpad.backends.staging_worker.start_staging_task", _fake_start)
+
+    response = await launchpad_app.retry_staging_task("stg-old")
+
+    assert response.task_id == "stg-new"
+    assert response.status == "queued"
+    assert staged_tasks == [
+        (
+            "stg-new",
+            {
+                "project_id": "proj-1",
+                "user_id": "user-1",
+                "sample_name": "sample-a",
+                "mode": "RNA",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_ssh_profile_auth_session_resumes_queued_staging_for_profile(monkeypatch):
+    profile = SimpleNamespace(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="key_file",
+        key_file_path="~/.ssh/id_ed25519",
+        local_username="alice",
+        is_enabled=True,
+    )
+
+    class _FakeExecuteResult:
+        def scalar_one_or_none(self):
+            return profile
+
+    class _FakeAsyncSessionContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, query):
+            return _FakeExecuteResult()
+
+    class _FakeAuthManager:
+        async def create_or_replace_session(self, profile_data, local_password):
+            assert profile_data.id == "profile-1"
+            assert local_password == "secret"
+            return SimpleNamespace(session_id="sess-1")
+
+        def _serialize_session(self, session_obj):
+            return {
+                "active": True,
+                "session_id": session_obj.session_id,
+                "local_username": "alice",
+                "created_at": "2026-04-11T00:00:00+00:00",
+                "last_used_at": "2026-04-11T00:00:00+00:00",
+                "expires_at": "2026-04-11T01:00:00+00:00",
+            }
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: _FakeAsyncSessionContext())
+    monkeypatch.setattr(launchpad_app, "get_local_auth_session_manager", lambda: _FakeAuthManager())
+    monkeypatch.setattr(
+        "launchpad.backends.staging_worker.hydrate_incomplete_staging_tasks",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "launchpad.backends.staging_worker.resume_queued_staging_tasks",
+        AsyncMock(return_value=1),
+    )
+
+    result = await launchpad_app.create_ssh_profile_auth_session(
+        profile_id="profile-1",
+        user_id="user-1",
+        local_password="secret",
+    )
+
+    assert result.active is True
+    assert result.message == "Local auth session started; resumed 1 queued staging task(s)"
 
 
 @pytest.mark.asyncio

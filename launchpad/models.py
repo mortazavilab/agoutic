@@ -2,7 +2,7 @@
 Database models for Launchpad job tracking.
 """
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import String, Integer, Text, DateTime, Boolean, UniqueConstraint, func, JSON
+from sqlalchemy import String, Integer, Text, DateTime, Boolean, UniqueConstraint, func, JSON, Float
 from datetime import datetime
 from common.database import Base
 
@@ -299,3 +299,18 @@ class RemoteStagedSample(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
+
+
+class StagingTask(Base):
+    """Durable record of remote staging state across Launchpad restarts."""
+
+    __tablename__ = "staging_tasks"
+
+    task_id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, default="queued", nullable=False, index=True)
+    progress_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+    params_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)

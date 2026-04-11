@@ -23,7 +23,7 @@ from cortex.models import (
     Project, ProjectAccess, ProjectBlock, Conversation,
     ConversationMessage, User,
 )
-from cortex.schemas import ProjectTaskListOut, ProjectTaskOut, ProjectTaskUpdate
+from cortex.schemas import CrossProjectTaskListOut, ProjectTaskListOut, ProjectTaskOut, ProjectTaskUpdate
 from cortex.task_service import build_task_sections, sync_project_tasks, task_to_dict, update_task_action
 from common.logging_config import get_logger
 
@@ -80,6 +80,29 @@ def _sanitize_work_dir(value: str | None) -> str | None:
         return None
     cleaned = _TRAILING_PATH_JUNK.sub('', str(value).strip())
     return cleaned or None
+
+
+def _project_task_context(
+    project: Project | None,
+    *,
+    fallback_name: str | None = None,
+    is_archived: bool | None = None,
+) -> dict:
+    return {
+        "project_name": project.name if project else fallback_name,
+        "project_slug": project.slug if project else None,
+        "project_is_archived": project.is_archived if project else is_archived,
+    }
+
+
+def _task_sort_key(task) -> tuple[str, str]:
+    updated_at = task.updated_at or task.created_at or ""
+    created_at = task.created_at or ""
+    if hasattr(updated_at, "isoformat"):
+        updated_at = updated_at.isoformat()
+    if hasattr(created_at, "isoformat"):
+        created_at = created_at.isoformat()
+    return updated_at, created_at
 
 
 # --- Project CRUD Endpoints ---
@@ -417,6 +440,51 @@ async def record_project_access(project_id: str, request: Request, project_name:
         session.close()
 
 
+@router.get("/tasks", response_model=CrossProjectTaskListOut)
+async def get_all_project_tasks(request: Request, include_archived: bool = False):
+    """Return grouped tasks across all projects the current user can access."""
+    user = request.state.user
+
+    session = _db.SessionLocal()
+    try:
+        access_records = session.execute(
+            select(ProjectAccess)
+            .where(ProjectAccess.user_id == user.id)
+            .order_by(desc(ProjectAccess.last_accessed))
+        ).scalars().all()
+
+        all_tasks = []
+        project_context_by_id: dict[str, dict] = {}
+
+        for access in access_records:
+            project = session.execute(
+                select(Project).where(Project.id == access.project_id)
+            ).scalar_one_or_none()
+
+            project_is_archived = project.is_archived if project else False
+            if project_is_archived and not include_archived:
+                continue
+
+            project_context_by_id[access.project_id] = _project_task_context(
+                project,
+                fallback_name=access.project_name,
+                is_archived=project_is_archived,
+            )
+            all_tasks.extend(sync_project_tasks(session, access.project_id))
+
+        all_tasks.sort(key=_task_sort_key, reverse=True)
+        return {
+            "sections": build_task_sections(
+                all_tasks,
+                project_context_by_id=project_context_by_id,
+            ),
+            "total_projects": len(project_context_by_id),
+            "projects_with_tasks": len({task.project_id for task in all_tasks}),
+        }
+    finally:
+        session.close()
+
+
 @router.get("/projects/{project_id}/tasks", response_model=ProjectTaskListOut)
 async def get_project_tasks(project_id: str, request: Request):
     """Return persistent project tasks grouped for the UI."""
@@ -425,10 +493,18 @@ async def get_project_tasks(project_id: str, request: Request):
 
     session = _db.SessionLocal()
     try:
+        project = session.execute(
+            select(Project).where(Project.id == project_id)
+        ).scalar_one_or_none()
         tasks = sync_project_tasks(session, project_id)
         return {
             "project_id": project_id,
-            "sections": build_task_sections(tasks),
+            "sections": build_task_sections(
+                tasks,
+                project_context_by_id={
+                    project_id: _project_task_context(project),
+                },
+            ),
         }
     finally:
         session.close()
@@ -445,7 +521,10 @@ async def patch_project_task(project_id: str, task_id: str, body: ProjectTaskUpd
         task = update_task_action(session, project_id, task_id, body.action)
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
-        return task_to_dict(task)
+        project = session.execute(
+            select(Project).where(Project.id == project_id)
+        ).scalar_one_or_none()
+        return task_to_dict(task, **_project_task_context(project))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     finally:

@@ -594,6 +594,49 @@ class TestProjectTasks:
         top_level_running = [task for task in sections["running"] if task["parent_task_id"] is None]
         assert all(task["kind"] != "run" for task in top_level_running if task["id"] != workflow_task["id"])
 
+    def test_stale_running_workflow_moves_to_follow_up(self, client, test_session_factory):
+        project_id = self._create_project(client)
+
+        workflow_resp = client.post("/block", json={
+            "project_id": project_id,
+            "type": "WORKFLOW_PLAN",
+            "payload": {
+                "workflow_type": "remote_sample_intake",
+                "title": "Stage remote sample for Jamshid",
+                "sample_name": "Jamshid",
+                "status": "RUNNING",
+                "steps": [
+                    {
+                        "id": "stage_input",
+                        "kind": "remote_stage",
+                        "title": "Stage input for Jamshid",
+                        "status": "RUNNING",
+                        "order_index": 0,
+                    }
+                ],
+            },
+            "status": "RUNNING",
+        })
+        assert workflow_resp.status_code == 200
+        workflow_block_id = workflow_resp.json()["id"]
+
+        Session = test_session_factory
+        session = Session()
+        workflow_block = session.query(ProjectBlock).filter(ProjectBlock.id == workflow_block_id).one()
+        workflow_block.created_at = datetime.datetime.utcnow() - datetime.timedelta(days=3)
+        session.commit()
+        session.close()
+
+        task_resp = client.get(f"/projects/{project_id}/tasks")
+        assert task_resp.status_code == 200
+        sections = task_resp.json()["sections"]
+
+        assert sections["running"] == []
+        stale_task = next(task for task in sections["follow_up"] if task["kind"] == "workflow_plan")
+        assert stale_task["title"] == "Stage remote sample for Jamshid"
+        assert stale_task["metadata"]["is_stale"] is True
+        assert stale_task["metadata"]["stale_original_status"] == "RUNNING"
+
     def test_clear_blocks_clears_tasks(self, client):
         project_id = self._create_project(client)
         client.post("/block", json={
@@ -614,6 +657,74 @@ class TestProjectTasks:
         assert refreshed.status_code == 200
         sections = refreshed.json()["sections"]
         assert all(len(items) == 0 for items in sections.values())
+
+    def test_all_tasks_aggregates_across_projects(self, client):
+        alpha_id = client.post("/projects", json={"name": "Alpha Project"}).json()["id"]
+        beta_id = client.post("/projects", json={"name": "Beta Project"}).json()["id"]
+
+        client.post("/block", json={
+            "project_id": alpha_id,
+            "type": "APPROVAL_GATE",
+            "payload": {"label": "Approve alpha workflow"},
+            "status": "PENDING",
+        })
+        client.post("/block", json={
+            "project_id": beta_id,
+            "type": "STAGING_TASK",
+            "payload": {
+                "sample_name": "beta-sample",
+                "mode": "DNA",
+                "progress_percent": 45,
+            },
+            "status": "RUNNING",
+        })
+
+        resp = client.get("/tasks")
+        assert resp.status_code == 200
+
+        data = resp.json()
+        assert data["total_projects"] == 2
+        assert data["projects_with_tasks"] == 2
+
+        pending_task = data["sections"]["pending"][0]
+        running_task = data["sections"]["running"][0]
+
+        assert pending_task["project_id"] == alpha_id
+        assert pending_task["project_name"] == "Alpha Project"
+        assert pending_task["project_is_archived"] is False
+
+        assert running_task["project_id"] == beta_id
+        assert running_task["project_name"] == "Beta Project"
+        assert running_task["kind"] == "stage_transfer"
+        assert running_task["metadata"]["sample_name"] == "beta-sample"
+
+    def test_all_tasks_excludes_archived_projects_by_default(self, client):
+        project_id = client.post("/projects", json={"name": "Archive Me"}).json()["id"]
+        client.post("/block", json={
+            "project_id": project_id,
+            "type": "APPROVAL_GATE",
+            "payload": {"label": "Approve archived workflow"},
+            "status": "PENDING",
+        })
+
+        archive_resp = client.delete(f"/projects/{project_id}")
+        assert archive_resp.status_code == 200
+
+        hidden_resp = client.get("/tasks")
+        assert hidden_resp.status_code == 200
+        hidden_sections = hidden_resp.json()["sections"]
+        assert all(len(items) == 0 for items in hidden_sections.values())
+
+        visible_resp = client.get("/tasks", params={"include_archived": True})
+        assert visible_resp.status_code == 200
+        visible_data = visible_resp.json()
+        assert visible_data["total_projects"] == 1
+        assert visible_data["projects_with_tasks"] == 1
+
+        archived_task = visible_data["sections"]["pending"][0]
+        assert archived_task["project_id"] == project_id
+        assert archived_task["project_name"] == "Archive Me"
+        assert archived_task["project_is_archived"] is True
 
 
 # ---------------------------------------------------------------------------

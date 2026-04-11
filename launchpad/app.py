@@ -45,6 +45,8 @@ from launchpad.db import (
     get_job_logs,
     job_to_dict,
     workflow_alias_for_index,
+    get_staging_task_record,
+    staging_task_record_to_dict,
 )
 from launchpad.models import DogmeJob, SSHProfile
 from launchpad.nextflow_executor import NextflowExecutor
@@ -502,6 +504,26 @@ async def _monitor_script_job(
         job_monitors.pop(run_uuid, None)
         await session.close()
 
+
+async def _recover_staging_tasks_background() -> None:
+    """Recover durable staging tasks without blocking Launchpad startup."""
+    from launchpad.backends.staging_worker import recover_staging_tasks
+
+    try:
+        recovered_tasks = await recover_staging_tasks()
+    except Exception as exc:
+        logger.error(
+            "Launchpad staging recovery failed",
+            error=_describe_exception(exc),
+            exc_info=True,
+        )
+        return
+
+    logger.info(
+        "Launchpad staging recovery completed",
+        recovered_staging_tasks=len(recovered_tasks),
+    )
+
 # --- LIFECYCLE ---
 @app.on_event("startup")
 async def startup():
@@ -511,11 +533,18 @@ async def startup():
         await init_db()  # Auto-create tables for local SQLite dev
     # For Postgres, tables are managed by Alembic migrations
 
-    # Start periodic cleanup of finished/old staging task entries.
+    # Start background staging maintenance only after the service is live.
     from launchpad.backends.staging_worker import periodic_cleanup
-    asyncio.create_task(periodic_cleanup())
 
-    logger.info("Launchpad initialized", max_concurrent_jobs=MAX_CONCURRENT_JOBS, poll_interval=JOB_POLL_INTERVAL)
+    asyncio.create_task(periodic_cleanup())
+    asyncio.create_task(_recover_staging_tasks_background())
+
+    logger.info(
+        "Launchpad initialized",
+        max_concurrent_jobs=MAX_CONCURRENT_JOBS,
+        poll_interval=JOB_POLL_INTERVAL,
+        staging_recovery="scheduled",
+    )
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -664,7 +693,8 @@ async def stage_remote_sample(
         get_staging_tasks,
         active_task_count,
         new_task_id,
-        run_staging,
+        persist_staging_task,
+        start_staging_task,
         MAX_CONCURRENT_STAGING_TASKS,
     )
 
@@ -710,9 +740,10 @@ async def stage_remote_sample(
         )
 
     task = StagingTaskState(task_id=new_task_id(), params=params_dict)
+    await persist_staging_task(task, force=True, raise_on_error=True)
     staging_tasks = get_staging_tasks()
     staging_tasks[task.task_id] = task
-    task._task = asyncio.create_task(run_staging(task))
+    start_staging_task(task)
     logger.info("Background staging task created", task_id=task.task_id, sample_name=req.sample_name)
 
     return StageTaskAcceptedResponse(task_id=task.task_id, status=task.status)
@@ -721,12 +752,26 @@ async def stage_remote_sample(
 @app.get("/remote/stage/{task_id}", response_model=StagingTaskStatusResponse)
 async def get_staging_task_status(task_id: str = FastAPIPath(..., min_length=1)):
     """Poll the status of a background staging task."""
-    from launchpad.backends.staging_worker import get_staging_tasks
+    from launchpad.backends.staging_worker import (
+        get_staging_tasks,
+        hydrate_incomplete_staging_tasks,
+        resume_queued_staging_tasks,
+    )
 
     task = get_staging_tasks().get(task_id)
     if task is None:
+        await hydrate_incomplete_staging_tasks(task_id=task_id)
+        task = get_staging_tasks().get(task_id)
+    if task is not None and task.status == "queued" and (task._task is None or task._task.done()):
+        await resume_queued_staging_tasks(profile_id=task.params.get("ssh_profile_id"))
+        task = get_staging_tasks().get(task_id)
+    if task is not None:
+        return StagingTaskStatusResponse(**task.to_dict())
+
+    task_record = await get_staging_task_record(task_id)
+    if task_record is None:
         raise HTTPException(status_code=404, detail=f"Staging task {task_id} not found")
-    return StagingTaskStatusResponse(**task.to_dict())
+    return StagingTaskStatusResponse(**staging_task_record_to_dict(task_record))
 
 
 @app.post("/remote/stage/{task_id}/retry", response_model=StageTaskAcceptedResponse)
@@ -737,14 +782,20 @@ async def retry_staging_task(task_id: str = FastAPIPath(..., min_length=1)):
         get_staging_tasks,
         active_task_count,
         new_task_id,
-        run_staging,
+        persist_staging_task,
+        start_staging_task,
+        staging_task_state_from_record,
         MAX_CONCURRENT_STAGING_TASKS,
     )
 
     staging_tasks = get_staging_tasks()
     old_task = staging_tasks.get(task_id)
     if old_task is None:
-        raise HTTPException(status_code=404, detail=f"Staging task {task_id} not found")
+        task_record = await get_staging_task_record(task_id)
+        if task_record is not None:
+            old_task = staging_task_state_from_record(task_record)
+        else:
+            raise HTTPException(status_code=404, detail=f"Staging task {task_id} not found")
     if old_task.status not in ("failed",):
         raise HTTPException(status_code=409, detail=f"Only failed tasks can be retried (current status: {old_task.status})")
     if active_task_count() >= MAX_CONCURRENT_STAGING_TASKS:
@@ -752,8 +803,9 @@ async def retry_staging_task(task_id: str = FastAPIPath(..., min_length=1)):
 
     new_id = new_task_id()
     task = StagingTaskState(task_id=new_id, params=dict(old_task.params))
+    await persist_staging_task(task, force=True, raise_on_error=True)
     staging_tasks[new_id] = task
-    task._task = asyncio.create_task(run_staging(task))
+    start_staging_task(task)
     logger.info("Retrying staging task", old_task_id=task_id, new_task_id=new_id)
 
     return StageTaskAcceptedResponse(task_id=new_id, status=task.status)
@@ -2246,6 +2298,8 @@ async def create_ssh_profile_auth_session(
 ):
     """Start or replace a local auth session for a profile using the local Unix password."""
     try:
+        from launchpad.backends.staging_worker import hydrate_incomplete_staging_tasks, resume_queued_staging_tasks
+
         async with SessionLocal() as session:
             result = await session.execute(
                 select(SSHProfile).where(SSHProfile.id == profile_id, SSHProfile.user_id == user_id)
@@ -2267,8 +2321,13 @@ async def create_ssh_profile_auth_session(
             is_enabled=profile.is_enabled,
         )
         session_obj = await get_local_auth_session_manager().create_or_replace_session(profile_data, local_password)
+        await hydrate_incomplete_staging_tasks(profile_id=profile_id)
+        resumed_count = await resume_queued_staging_tasks(profile_id=profile_id)
         payload = get_local_auth_session_manager()._serialize_session(session_obj)
-        return SSHProfileAuthSessionResult(message="Local auth session started", **payload)
+        message = "Local auth session started"
+        if resumed_count:
+            message = f"Local auth session started; resumed {resumed_count} queued staging task(s)"
+        return SSHProfileAuthSessionResult(message=message, **payload)
     except HTTPException:
         raise
     except PermissionError as exc:

@@ -87,6 +87,9 @@ class BlockUpdate(BaseModel):
 class ProjectTaskOut(BaseModel):
     id: str
     project_id: str
+    project_name: Optional[str] = None
+    project_slug: Optional[str] = None
+    project_is_archived: Optional[bool] = None
     kind: str
     title: str
     status: str
@@ -115,6 +118,12 @@ class ProjectTaskSectionsOut(BaseModel):
 class ProjectTaskListOut(BaseModel):
     project_id: str
     sections: ProjectTaskSectionsOut
+
+
+class CrossProjectTaskListOut(BaseModel):
+    sections: ProjectTaskSectionsOut
+    total_projects: int = 0
+    projects_with_tasks: int = 0
 
 
 class ProjectTaskUpdate(BaseModel):

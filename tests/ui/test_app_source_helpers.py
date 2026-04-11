@@ -3,6 +3,7 @@
 import ast
 import base64
 import datetime as dt
+import json
 import re as _re_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -284,6 +285,195 @@ class TestHasPendingDestructiveConfirmation:
         fn = _load_function("_has_pending_destructive_confirmation", {"st": fake_st})
 
         assert fn() is False
+
+
+class TestTaskHelpers:
+    def test_get_all_tasks_returns_grouped_collection(self):
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "sections": {
+                    "running": [{"id": "task-1"}],
+                    "pending": [],
+                    "follow_up": [],
+                    "completed": [],
+                },
+                "total_projects": 3,
+                "projects_with_tasks": 1,
+            },
+        )
+        request = MagicMock(return_value=response)
+        fn = _load_function("get_all_tasks")
+
+        result = fn("http://api.test", request, include_archived=True)
+
+        assert result["total_projects"] == 3
+        assert result["projects_with_tasks"] == 1
+        assert result["sections"]["running"][0]["id"] == "task-1"
+        request.assert_called_once_with(
+            "GET",
+            "http://api.test/tasks",
+            params={"include_archived": True},
+            timeout=8,
+        )
+
+    def test_handle_task_action_switches_to_task_project_for_results(self):
+        fake_st = SimpleNamespace(
+            session_state={},
+            switch_page=MagicMock(),
+            rerun=MagicMock(),
+        )
+        request = MagicMock()
+        apply_task_action = MagicMock(return_value=True)
+        fn = _load_function(
+            "_handle_task_action",
+            {
+                "st": fake_st,
+                "json": json,
+                "apply_task_action": apply_task_action,
+            },
+        )
+
+        fn(
+            {
+                "id": "task-results",
+                "kind": "result_review",
+                "project_id": "project-b",
+                "action_target": json.dumps({"type": "results", "run_uuid": "run-123"}),
+            },
+            "project-a",
+            "http://api.test",
+            request,
+        )
+
+        assert fake_st.session_state["active_project_id"] == "project-b"
+        assert fake_st.session_state["_project_id_input"] == "project-b"
+        assert fake_st.session_state["selected_job_run_uuid"] == "run-123"
+        fake_st.switch_page.assert_called_once_with("pages/results.py")
+        apply_task_action.assert_called_once_with(
+            "project-b",
+            "task-results",
+            "complete",
+            "http://api.test",
+            request,
+        )
+
+    def test_handle_task_action_opens_chat_for_block_target(self):
+        fake_st = SimpleNamespace(
+            session_state={"blocks": []},
+            switch_page=MagicMock(),
+            rerun=MagicMock(),
+        )
+        fn = _load_function(
+            "_handle_task_action",
+            {
+                "st": fake_st,
+                "json": json,
+                "apply_task_action": MagicMock(),
+            },
+        )
+
+        fn(
+            {
+                "id": "task-block",
+                "project_id": "project-c",
+                "action_target": json.dumps({"type": "block", "block_id": "block-9"}),
+            },
+            "project-a",
+            "http://api.test",
+            MagicMock(),
+            navigate_to_chat_on_block=True,
+        )
+
+        assert fake_st.session_state["active_project_id"] == "project-c"
+        assert fake_st.session_state["_project_id_input"] == "project-c"
+        assert fake_st.session_state["_task_focus_block_id"] == "block-9"
+        fake_st.switch_page.assert_called_once_with("appUI.py")
+        fake_st.rerun.assert_not_called()
+
+    def test_count_top_level_tasks_ignores_children(self):
+        fn = _load_function("count_top_level_tasks")
+
+        count = fn(
+            {
+                "running": [
+                    {"id": "root-1", "parent_task_id": None},
+                    {"id": "child-1", "parent_task_id": "root-1"},
+                ],
+                "follow_up": [{"id": "root-2", "parent_task_id": None}],
+            },
+            [("running", "Running"), ("follow_up", "Follow-up")],
+        )
+
+        assert count == 2
+
+    def test_count_stale_top_level_tasks_counts_only_stale_roots(self):
+        fn = _load_function("count_stale_top_level_tasks")
+
+        count = fn(
+            {
+                "follow_up": [
+                    {"id": "root-1", "parent_task_id": None, "metadata": {"is_stale": True}},
+                    {"id": "child-1", "parent_task_id": "root-1", "metadata": {"is_stale": True}},
+                    {"id": "root-2", "parent_task_id": None, "metadata": {}},
+                ]
+            },
+            [("follow_up", "Follow-up")],
+        )
+
+        assert count == 1
+
+    def test_prepare_project_task_sections_for_dock_hides_old_stale_roots(self):
+        fn = _load_function("prepare_project_task_sections_for_dock")
+
+        filtered, hidden_count = fn(
+            {
+                "follow_up": [
+                    {
+                        "id": "root-1",
+                        "parent_task_id": None,
+                        "metadata": {"is_stale": True, "stale_age_seconds": 60 * 60 * 72},
+                    },
+                    {
+                        "id": "child-1",
+                        "parent_task_id": "root-1",
+                        "metadata": {"is_stale": True, "stale_age_seconds": 60 * 60 * 72},
+                    },
+                    {
+                        "id": "root-2",
+                        "parent_task_id": None,
+                        "metadata": {"is_stale": True, "stale_age_seconds": 60 * 60 * 12},
+                    },
+                ]
+            },
+            [("follow_up", "Follow-up")],
+            stale_hide_hours=48,
+        )
+
+        assert hidden_count == 1
+        assert [task["id"] for task in filtered["follow_up"]] == ["root-2"]
+
+    def test_prepare_project_task_sections_for_dock_keeps_recent_or_non_stale_tasks(self):
+        fn = _load_function("prepare_project_task_sections_for_dock")
+
+        filtered, hidden_count = fn(
+            {
+                "running": [{"id": "root-1", "parent_task_id": None, "metadata": {}}],
+                "follow_up": [
+                    {
+                        "id": "root-2",
+                        "parent_task_id": None,
+                        "metadata": {"is_stale": True, "stale_age_seconds": 60 * 60 * 24},
+                    }
+                ],
+            },
+            [("running", "Running"), ("follow_up", "Follow-up")],
+            stale_hide_hours=48,
+        )
+
+        assert hidden_count == 0
+        assert [task["id"] for task in filtered["running"]] == ["root-1"]
+        assert [task["id"] for task in filtered["follow_up"]] == ["root-2"]
 
 
 class TestHelpIntent:

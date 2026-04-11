@@ -491,6 +491,11 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     "ssh_profile_nickname": ssh_profile_nickname,
                     "remote_base_path": job_data.get("remote_base_path"),
                     "workflow_plan_block_id": workflow_block.id if workflow_block is not None else None,
+                    "staging_task_id": None,
+                    "stage_input_step_id": stage_input_step_id,
+                    "complete_stage_only_step_id": complete_stage_only_step_id,
+                    "skill": gate_payload.get("skill", "remote_execution"),
+                    "model": gate_payload.get("model", "default"),
                     "progress_percent": _stage_part_progress(stage_parts),
                     "message": "Preparing remote staging...",
                     "stage_parts": stage_parts,
@@ -560,6 +565,14 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             if not staging_task_id:
                 raise RuntimeError(
                     f"Launchpad did not return a staging task_id: {stage_response!r}"
+                )
+
+            if stage_task_block is not None:
+                _update_project_block_payload(
+                    session,
+                    stage_task_block.id,
+                    {"staging_task_id": staging_task_id},
+                    status="RUNNING",
                 )
 
             # Spawn background poller — completion and block updates happen there

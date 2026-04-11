@@ -517,7 +517,31 @@ async def poll_staging_status(
                 xfr = progress.get("files_transferred", 0)
                 total = progress.get("files_total", 0)
 
-                if task_status == "running":
+                if task_status == "queued":
+                    wait_reason = str(progress.get("wait_reason") or "").strip()
+                    msg = wait_reason or "Staging is queued and waiting to resume."
+                    current_progress = stage_parts.get("data", {}).get("progress_percent", 35)
+                    try:
+                        current_progress = int(current_progress or 35)
+                    except (TypeError, ValueError):
+                        current_progress = 35
+
+                    if stage_parts.get("data", {}).get("status") != "COMPLETED":
+                        stage_parts["data"] = _make_stage_part("PENDING", max(35, current_progress), msg)
+
+                    _update_project_block_payload(
+                        session,
+                        block_id,
+                        {
+                            "progress_percent": _stage_part_progress(stage_parts),
+                            "message": msg,
+                            "stage_parts": stage_parts,
+                        },
+                        status="RUNNING",
+                    )
+                    logger.info("Staging queued", task_id=task_id, message=msg)
+
+                elif task_status == "running":
                     if total:
                         msg = f"Uploading {xfr}/{total} files ({pct}% current file) {speed}".strip()
                     elif pct:

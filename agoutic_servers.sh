@@ -307,6 +307,27 @@ start_process() {
     fi
 }
 
+run_db_migrations() {
+    local migration_log="$LOGS_DIR/migrations.log"
+    local alembic_ini="$AGOUTIC_CODE/alembic.ini"
+
+    log "Applying database migrations..."
+    cd "$AGOUTIC_CODE"
+    if python - "$alembic_ini" upgrade head >> "$migration_log" 2>&1 <<'PY'
+from alembic.config import main
+import sys
+
+raise SystemExit(main(argv=["-c", sys.argv[1], *sys.argv[2:]]))
+PY
+    then
+        success "Database migrations are up to date"
+        return 0
+    fi
+
+    error "Database migrations failed. Check: $migration_log"
+    return 1
+}
+
 stop_process() {
     local name="$1"
     local pid_file="$PIDS_DIR/${name}.pid"
@@ -370,6 +391,10 @@ cmd_start() {
     rotate_logs
     log "Starting AGOUTIC servers (${AGOUTIC_VERSION})..."
     echo ""
+
+    if ! run_db_migrations; then
+        return 1
+    fi
 
     # Launchpad - REST API (Nextflow/Dogme job execution)
     start_process "launchpad-rest" \

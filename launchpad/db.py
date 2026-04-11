@@ -4,6 +4,7 @@ Database connection and utilities for Launchpad.
 Delegates to common.database for engine/session creation.
 Retains Launchpad-specific CRUD helpers.
 """
+from typing import TYPE_CHECKING, Any
 import json
 import uuid
 import re
@@ -22,8 +23,12 @@ from launchpad.models import (
     RemoteReferenceCache,
     RemoteInputCache,
     RemoteStagedSample,
+    StagingTask,
 )
 from launchpad.backends.ssh_manager import SSHProfileData
+
+if TYPE_CHECKING:
+    from launchpad.backends.staging_worker import StagingTaskState
 
 
 def job_to_dict(job: DogmeJob) -> dict:
@@ -600,3 +605,100 @@ async def upsert_remote_staged_sample(
         await session.commit()
         await session.refresh(entry)
         return entry
+
+
+def staging_task_record_to_dict(task: StagingTask) -> dict[str, Any]:
+    """Convert a persisted staging task row to the API response shape."""
+    return {
+        "task_id": task.task_id,
+        "status": task.status,
+        "progress": dict(task.progress_json or {}),
+        "result": task.result_json,
+        "error": task.error,
+        "created_at": float(task.created_at),
+        "updated_at": float(task.updated_at),
+    }
+
+
+async def get_staging_task_record(
+    task_id: str,
+    session: AsyncSession | None = None,
+) -> StagingTask | None:
+    """Load a persisted staging task by id."""
+    owns_session = session is None
+    if owns_session:
+        session = SessionLocal()
+    try:
+        return await session.get(StagingTask, task_id)
+    finally:
+        if owns_session:
+            await session.close()
+
+
+async def get_incomplete_staging_tasks(
+    session: AsyncSession | None = None,
+) -> list[StagingTask]:
+    """Return queued and running staging tasks for restart recovery."""
+    owns_session = session is None
+    if owns_session:
+        session = SessionLocal()
+    try:
+        result = await session.execute(
+            select(StagingTask)
+            .where(StagingTask.status.in_(("queued", "running")))
+            .order_by(StagingTask.created_at.asc())
+        )
+        return list(result.scalars().all())
+    finally:
+        if owns_session:
+            await session.close()
+
+
+async def upsert_staging_task(
+    task: "StagingTaskState",
+    session: AsyncSession | None = None,
+) -> StagingTask:
+    """Insert or update a durable staging task record from in-memory state."""
+    owns_session = session is None
+    if owns_session:
+        session = SessionLocal()
+    try:
+        entry = await session.get(StagingTask, task.task_id)
+        if entry is None:
+            entry = StagingTask(task_id=task.task_id)
+            session.add(entry)
+
+        entry.status = task.status
+        entry.progress_json = dict(task.progress or {})
+        entry.result_json = task.result
+        entry.error = task.error
+        entry.created_at = float(task.created_at)
+        entry.updated_at = float(task.updated_at)
+        entry.params_json = dict(task.params or {})
+
+        await session.commit()
+        await session.refresh(entry)
+        return entry
+    finally:
+        if owns_session:
+            await session.close()
+
+
+async def delete_staging_task(
+    task_id: str,
+    session: AsyncSession | None = None,
+) -> bool:
+    """Delete a persisted staging task row. Returns whether a row existed."""
+    owns_session = session is None
+    if owns_session:
+        session = SessionLocal()
+    try:
+        entry = await session.get(StagingTask, task_id)
+        if entry is None:
+            return False
+        await session.delete(entry)
+        await session.commit()
+        return True
+    finally:
+        if owns_session:
+            await session.close()

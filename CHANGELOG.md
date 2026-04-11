@@ -1,5 +1,16 @@
 ## [3.6.1] - 2026-04-11
 
+### Features
+
+- **Cross-project Task Center** — added a dedicated Tasks page that aggregates
+  persistent work across all accessible projects, groups items by project
+  instead of by raw task stream, switches context automatically when opening a
+  task from another project, and surfaces follow-up and stale work in a
+  project-first layout.
+  (`cortex/routes/projects.py`, `cortex/schemas.py`,
+  `cortex/task_service.py`, `ui/pages/tasks.py`, `ui/appui_tasks.py`,
+  `ui/appui_sidebar.py`)
+
 ### Bug Fixes
 
 - **IGVF required-parameter repair in chat dispatch** — Cortex now repairs
@@ -20,6 +31,34 @@
   validation. This fixes file/analysis/prediction queries silently dropping
   filters and improves recovery from common LLM parameter hallucinations.
   (`atlas/config.py`, `cortex/igvf_helpers.py`, `cortex/tool_dispatch.py`)
+
+- **Remote staging tasks now survive Launchpad restarts** — Launchpad no
+  longer relies solely on the in-memory `_staging_tasks` registry for
+  background remote staging. Task state is now persisted to a durable
+  `staging_tasks` table, progress/result/error updates are written through as
+  transfers run, queued and in-flight rows are recovered on startup,
+  `/remote/stage/{task_id}` and retry requests fall back to persisted rows
+  after a restart, and TTL cleanup removes expired task records from both
+  memory and storage. This closes the gap where Cortex could observe repeated
+  404s after a Launchpad restart and mark an otherwise resumable transfer as
+  lost.
+  (`launchpad/backends/staging_worker.py`, `launchpad/db.py`,
+  `launchpad/models.py`, `launchpad/app.py`,
+  `alembic/versions/b7c3a9d1e4f2_add_staging_tasks_table.py`,
+  `tests/launchpad/test_staging_worker.py`, `tests/launchpad/test_db.py`,
+  `tests/launchpad/test_app_status_endpoint.py`)
+
+- **Dangling task cleanup and stale-task demotion** — task freshness now uses
+  source activity from workflow/block payloads rather than the `ProjectTask`
+  sync timestamp, which was being refreshed on every projection pass. Running
+  tasks with no recorded source updates for more than 24 hours are now
+  reclassified as stale follow-up work in the Task Center, and per-project
+  task docks hide stale root tasks older than 48 hours to keep active project
+  views focused on current work.
+  (`cortex/task_service.py`, `cortex/remote_orchestration.py`,
+  `ui/appUI.py`, `ui/appui_tasks.py`,
+  `tests/cortex/test_project_endpoints.py`,
+  `tests/ui/test_app_source_helpers.py`)
 
 ### Documentation
 

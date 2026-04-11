@@ -1836,7 +1836,7 @@ class SlurmBackend:
                 logger.warning(f"Reference source directory is unknown for {ref_raw}; skipping reference cache stage")
                 continue
 
-            source_signature = self._compute_directory_signature(ref_source_dir)
+            source_signature = await self._compute_directory_signature_async(ref_source_dir)
             source_uri = str(ref_source_dir)
             target_remote_path = str(PurePosixPath(ref_root) / ref_id)
 
@@ -1885,7 +1885,7 @@ class SlurmBackend:
             if ref_id == primary_ref:
                 reference_cache_path = cache_path
 
-        input_fingerprint = self._compute_input_fingerprint(params.input_directory)
+        input_fingerprint = await self._compute_input_fingerprint_async(params.input_directory)
         data_cache_key = input_fingerprint[:16]
         target_data_remote = str(PurePosixPath(data_root) / data_cache_key)
         data_entry = await get_remote_input_cache_entry(
@@ -2134,7 +2134,7 @@ class SlurmBackend:
                     await self._update_job_transfer_state(run_uuid, "transfer_failed")
                 raise RuntimeError(f"Reference cache repair failed for {ref_id}: {result['message']}")
 
-            source_signature = self._compute_directory_signature(ref_source_dir)
+            source_signature = await self._compute_directory_signature_async(ref_source_dir)
             await upsert_remote_reference_cache_entry(
                 user_id=params.user_id or self._cache_user_key(params, profile),
                 ssh_profile_id=profile.id,
@@ -2256,7 +2256,8 @@ class SlurmBackend:
 
         remote_paths = self._derive_remote_paths(params, profile)
         ref_root = remote_paths["ref_root"]
-        remote_input = str(PurePosixPath(remote_paths["data_root"]) / self._compute_input_fingerprint(params.input_directory)[:16])
+        input_fingerprint = await self._compute_input_fingerprint_async(params.input_directory)
+        remote_input = str(PurePosixPath(remote_paths["data_root"]) / input_fingerprint[:16])
 
         reference_status = "fallback"
         reference_cache_path = None
@@ -2422,6 +2423,11 @@ class SlurmBackend:
         return hasher.hexdigest()
 
     @staticmethod
+    async def _compute_directory_signature_async(directory: Path) -> str:
+        """Run directory signature scans off the main event loop."""
+        return await asyncio.to_thread(SlurmBackend._compute_directory_signature, directory)
+
+    @staticmethod
     def _compute_input_fingerprint(local_path: str) -> str:
         path = Path(local_path)
         hasher = hashlib.sha256()
@@ -2450,3 +2456,8 @@ class SlurmBackend:
                 hasher.update(str(stat.st_size).encode("utf-8"))
                 hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
         return hasher.hexdigest()
+
+    @staticmethod
+    async def _compute_input_fingerprint_async(local_path: str) -> str:
+        """Run input fingerprint scans off the main event loop."""
+        return await asyncio.to_thread(SlurmBackend._compute_input_fingerprint, local_path)

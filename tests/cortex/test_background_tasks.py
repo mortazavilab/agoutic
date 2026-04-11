@@ -34,6 +34,7 @@ from cortex.app import (
     download_after_approval,
     _auto_execute_plan_steps,
     _ensure_workflow_plan_approval_gate,
+    _recover_orphaned_background_tasks,
     _initial_stage_parts,
     _build_auto_analysis_context,
     _build_static_analysis_summary,
@@ -1140,7 +1141,7 @@ class TestSubmitJobAfterApproval:
              patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
              patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
              patch("cortex.workflow_submission.asyncio") as mock_aio:
-            mock_aio.create_task = MagicMock()
+            mock_aio.create_task = MagicMock(side_effect=lambda coro: (coro.close(), MagicMock())[1])
             await submit_job_after_approval("proj-bg", gate.id)
 
         submitted = mock_client.call_tool.call_args.kwargs
@@ -1209,11 +1210,16 @@ class TestSubmitJobAfterApproval:
             "task_id": "stg-test-001",
             "status": "accepted",
         })
+        poll_sentinel = object()
+
+        def _fake_poll_staging_status(*args, **kwargs):
+            return poll_sentinel
 
         with _patch_session(session_factory), \
              patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
              patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
              patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.job_polling.poll_staging_status", new=_fake_poll_staging_status), \
              patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
@@ -1226,6 +1232,7 @@ class TestSubmitJobAfterApproval:
 
         # Background polling was spawned
         assert mock_aio.create_task.call_count == 1
+        assert mock_aio.create_task.call_args.args[0] is poll_sentinel
 
         sess = session_factory()
         workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
@@ -1234,7 +1241,12 @@ class TestSubmitJobAfterApproval:
         # stage_input step is RUNNING (completion happens in the polling coroutine)
         assert payload["steps"][1]["status"] == "RUNNING"
         staging_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "STAGING_TASK").one()
+        staging_payload = get_block_payload(staging_block)
         assert staging_block.status == "RUNNING"
+        assert staging_payload["staging_task_id"] == "stg-test-001"
+        assert staging_payload["stage_input_step_id"] == payload["steps"][1]["id"]
+        assert staging_payload["skill"] == "remote_execution"
+        assert staging_payload["model"] == "default"
         assert sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all() == []
         sess.close()
 
@@ -1460,6 +1472,139 @@ class TestSubmitJobAfterApproval:
         assert sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all() == []
         workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
         workflow_payload = get_block_payload(workflow_block)
+        assert workflow_payload["steps"][1]["status"] == "FAILED"
+        sess.close()
+
+
+class TestStartupRecovery:
+    @pytest.mark.asyncio
+    async def test_resumes_orphaned_staging_poll_when_task_id_is_persisted(self, session_factory, seed_data):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "workflow_type": "remote_sample_intake",
+                "steps": [
+                    {"id": "check_remote_stage", "kind": "CHECK_REMOTE_STAGE", "status": "COMPLETED"},
+                    {"id": "stage_input", "kind": "STAGE_INPUT", "status": "RUNNING"},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        staging_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "STAGING_TASK",
+            {
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "input_directory": "/data/pod5",
+                "ssh_profile_id": "profile-123",
+                "ssh_profile_nickname": "hpc3",
+                "remote_base_path": "/remote/u1/agoutic",
+                "workflow_plan_block_id": workflow_block.id,
+                "staging_task_id": "stg-recover-001",
+                "stage_input_step_id": "stage_input",
+                "complete_stage_only_step_id": None,
+                "skill": "remote_execution",
+                "model": "default",
+                "progress_percent": 42,
+                "message": "Staging in progress...",
+                "stage_parts": _initial_stage_parts(
+                    {
+                        "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
+                        "data_action": {"action": "stage"},
+                    }
+                ),
+                "status": "RUNNING",
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        captured_kwargs = {}
+
+        async def _noop_poll():
+            return None
+
+        def _fake_poll(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return _noop_poll()
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling.poll_staging_status", new=_fake_poll), \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+            await _recover_orphaned_background_tasks()
+
+        kwargs = captured_kwargs
+        assert kwargs["task_id"] == "stg-recover-001"
+        assert kwargs["block_id"] == staging_block.id
+        assert kwargs["workflow_block_id"] == workflow_block.id
+        assert kwargs["stage_input_step_id"] == "stage_input"
+        assert kwargs["ssh_profile_id"] == "profile-123"
+        assert kwargs["job_data"]["sample_name"] == "Jamshid"
+
+    @pytest.mark.asyncio
+    async def test_marks_orphaned_staging_failed_when_task_id_was_never_persisted(self, session_factory, seed_data):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "workflow_type": "remote_sample_intake",
+                "steps": [
+                    {"id": "check_remote_stage", "kind": "CHECK_REMOTE_STAGE", "status": "COMPLETED"},
+                    {"id": "stage_input", "kind": "STAGE_INPUT", "status": "RUNNING"},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        _create_block_internal(
+            sess,
+            "proj-bg",
+            "STAGING_TASK",
+            {
+                "sample_name": "Legacy sample",
+                "mode": "RNA",
+                "input_directory": "/data/legacy",
+                "workflow_plan_block_id": workflow_block.id,
+                "stage_input_step_id": "stage_input",
+                "progress_percent": 67,
+                "message": "Staging in progress...",
+                "stage_parts": _initial_stage_parts(
+                    {
+                        "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
+                        "data_action": {"action": "stage"},
+                    }
+                ),
+                "status": "RUNNING",
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            await _recover_orphaned_background_tasks()
+
+        assert mock_create_task.call_count == 0
+
+        sess = session_factory()
+        staging_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "STAGING_TASK").one()
+        staging_payload = get_block_payload(staging_block)
+        workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        workflow_payload = get_block_payload(workflow_block)
+        assert staging_block.status == "FAILED"
+        assert "could not be resumed after restart" in staging_payload["error"]
+        assert staging_payload["stage_parts"]["data"]["status"] == "FAILED"
         assert workflow_payload["steps"][1]["status"] == "FAILED"
         sess.close()
 

@@ -1,6 +1,7 @@
 import pytest
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from launchpad.backends.slurm_backend import SlurmBackend
 from launchpad.backends.base import SubmitParams
@@ -43,6 +44,117 @@ class _FakeWriteConn:
 
     async def run(self, command, check=False):
         self.run_calls.append((command, check))
+
+
+@pytest.mark.asyncio
+async def test_compute_directory_signature_async_uses_to_thread(monkeypatch, tmp_path):
+    backend = SlurmBackend()
+    target_dir = tmp_path / "ref"
+    target_dir.mkdir()
+    observed: dict[str, object] = {}
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        observed["func"] = func
+        observed["args"] = args
+        return "sig-123"
+
+    monkeypatch.setattr("launchpad.backends.slurm_backend.asyncio.to_thread", _fake_to_thread)
+
+    result = await backend._compute_directory_signature_async(target_dir)
+
+    assert result == "sig-123"
+    assert observed["func"] is SlurmBackend._compute_directory_signature
+    assert observed["args"] == (target_dir,)
+
+
+@pytest.mark.asyncio
+async def test_compute_input_fingerprint_async_uses_to_thread(monkeypatch, tmp_path):
+    backend = SlurmBackend()
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    observed: dict[str, object] = {}
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        observed["func"] = func
+        observed["args"] = args
+        return "fp-123"
+
+    monkeypatch.setattr("launchpad.backends.slurm_backend.asyncio.to_thread", _fake_to_thread)
+
+    result = await backend._compute_input_fingerprint_async(str(input_dir))
+
+    assert result == "fp-123"
+    assert observed["func"] is SlurmBackend._compute_input_fingerprint
+    assert observed["args"] == (str(input_dir),)
+
+
+@pytest.mark.asyncio
+async def test_stage_sample_inputs_uses_async_signature_and_fingerprint_helpers(monkeypatch, tmp_path):
+    backend = SlurmBackend()
+    profile = _make_profile()
+    fake_conn = _FakeStageConn(existing_paths=set())
+    input_dir = tmp_path / "sample"
+    input_dir.mkdir()
+    (input_dir / "reads.pod5").write_text("pod5", encoding="utf-8")
+    ref_dir = tmp_path / "mm39"
+    ref_dir.mkdir()
+    (ref_dir / "mm39.fa").write_text(">chr1\nA\n", encoding="utf-8")
+    params = SubmitParams(
+        user_id="user-1",
+        sample_name="Jamshid",
+        mode="RNA",
+        input_directory=str(input_dir),
+        reference_genome=["mm39"],
+        ssh_profile_id="profile-1",
+        remote_base_path="/remote/agoutic",
+    )
+
+    signature_calls: list[Path] = []
+    fingerprint_calls: list[str] = []
+
+    async def _fake_signature(directory: Path) -> str:
+        signature_calls.append(directory)
+        return "sig-mm39"
+
+    async def _fake_fingerprint(local_path: str) -> str:
+        fingerprint_calls.append(local_path)
+        return "fingerprint-1234567890"
+
+    async def _fake_upload_inputs(**kwargs):
+        return {"ok": True, "message": "uploaded", "bytes_transferred": 1}
+
+    import launchpad.db as launchpad_db_module
+
+    monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda ref_raw: ref_dir)
+    monkeypatch.setattr(backend, "_compute_directory_signature_async", _fake_signature)
+    monkeypatch.setattr(backend, "_compute_input_fingerprint_async", _fake_fingerprint)
+    monkeypatch.setattr(
+        SlurmBackend,
+        "_compute_directory_signature",
+        staticmethod(lambda directory: (_ for _ in ()).throw(AssertionError("sync signature scan should not run on the event loop"))),
+    )
+    monkeypatch.setattr(
+        SlurmBackend,
+        "_compute_input_fingerprint",
+        staticmethod(lambda local_path: (_ for _ in ()).throw(AssertionError("sync fingerprint scan should not run on the event loop"))),
+    )
+    monkeypatch.setattr(backend._transfer_manager, "upload_inputs", _fake_upload_inputs)
+    monkeypatch.setattr(launchpad_db_module, "get_remote_reference_cache_entry", AsyncMock(return_value=None))
+    monkeypatch.setattr(launchpad_db_module, "get_remote_input_cache_entry", AsyncMock(return_value=None))
+    monkeypatch.setattr(launchpad_db_module, "upsert_remote_staged_sample", AsyncMock(return_value=None))
+    monkeypatch.setattr(launchpad_db_module, "upsert_remote_reference_cache_entry", AsyncMock(return_value=None))
+    monkeypatch.setattr(launchpad_db_module, "upsert_remote_input_cache_entry", AsyncMock(return_value=None))
+
+    result = await backend._stage_sample_inputs(
+        params,
+        profile,
+        fake_conn,
+        run_uuid=None,
+    )
+
+    assert signature_calls == [ref_dir]
+    assert fingerprint_calls == [str(input_dir)]
+    assert result["data_cache_path"] == "/remote/agoutic/data/fingerprint-1234"
 
 
 @pytest.mark.asyncio

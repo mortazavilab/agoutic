@@ -205,6 +205,142 @@ app.include_router(cross_project_router)
 app.include_router(memories_router)
 
 # Initialize database on startup
+async def _recover_orphaned_background_tasks() -> None:
+    """Resume or reconcile background polling state lost across Cortex restarts."""
+
+    recovery_session = SessionLocal()
+    try:
+        orphaned_jobs = recovery_session.query(ProjectBlock).filter(
+            ProjectBlock.type == "EXECUTION_JOB",
+            ProjectBlock.status == "RUNNING",
+        ).all()
+        for block in orphaned_jobs:
+            payload = get_block_payload(block)
+            run_uuid = payload.get("run_uuid", "")
+            inner_status = payload.get("job_status", {}).get("status", "")
+            if not run_uuid:
+                continue
+            if inner_status in ("COMPLETED", "FAILED"):
+                block.status = "DONE" if inner_status == "COMPLETED" else "FAILED"
+                recovery_session.commit()
+                logger.info(
+                    "Startup recovery: marked stale RUNNING block as done",
+                    run_uuid=run_uuid,
+                    inner_status=inner_status,
+                )
+                if inner_status == "COMPLETED":
+                    asyncio.create_task(
+                        job_polling._auto_trigger_analysis(
+                            block.project_id,
+                            run_uuid,
+                            payload,
+                            block.owner_id,
+                        )
+                    )
+                    logger.info("Startup recovery: triggered auto-analysis", run_uuid=run_uuid)
+            else:
+                asyncio.create_task(
+                    job_polling.poll_job_status(block.project_id, block.id, run_uuid)
+                )
+                logger.info(
+                    "Startup recovery: resumed polling for orphaned job",
+                    run_uuid=run_uuid,
+                    block_id=block.id,
+                )
+
+        orphaned_staging = recovery_session.query(ProjectBlock).filter(
+            ProjectBlock.type == "STAGING_TASK",
+            ProjectBlock.status == "RUNNING",
+        ).all()
+        for block in orphaned_staging:
+            payload = get_block_payload(block)
+            task_id = str(payload.get("staging_task_id") or payload.get("task_id") or "").strip()
+            payload_status = str(payload.get("status") or "").upper()
+            workflow_block_id = payload.get("workflow_plan_block_id")
+            stage_input_step_id = payload.get("stage_input_step_id")
+            stage_parts = payload.get("stage_parts") or {}
+
+            if payload_status in ("COMPLETED", "FAILED"):
+                block.status = "DONE" if payload_status == "COMPLETED" else "FAILED"
+                recovery_session.commit()
+                logger.info(
+                    "Startup recovery: reconciled stale staging block",
+                    task_id=task_id or None,
+                    block_id=block.id,
+                    payload_status=payload_status,
+                )
+                continue
+
+            if not task_id:
+                fail_msg = (
+                    "Staging status could not be resumed after restart because this transfer "
+                    "was created without a durable Launchpad task ID. Re-submit the staging "
+                    "request to resume."
+                )
+                failed_parts = _failed_stage_parts(stage_parts, fail_msg)
+                _update_project_block_payload(
+                    recovery_session,
+                    block.id,
+                    {
+                        "status": "FAILED",
+                        "progress_percent": _stage_part_progress(failed_parts),
+                        "message": fail_msg,
+                        "error": fail_msg,
+                        "stage_parts": failed_parts,
+                    },
+                    status="FAILED",
+                )
+                if workflow_block_id and stage_input_step_id:
+                    workflow_block = recovery_session.query(ProjectBlock).filter(
+                        ProjectBlock.id == workflow_block_id
+                    ).first()
+                    if workflow_block:
+                        _set_workflow_step_status(
+                            recovery_session,
+                            workflow_block,
+                            stage_input_step_id,
+                            "FAILED",
+                            extra={"error": fail_msg},
+                        )
+                logger.warning(
+                    "Startup recovery: failed stale staging block without task id",
+                    block_id=block.id,
+                )
+                continue
+
+            asyncio.create_task(
+                job_polling.poll_staging_status(
+                    task_id=task_id,
+                    project_id=block.project_id,
+                    block_id=block.id,
+                    owner_id=block.owner_id,
+                    job_data={
+                        "sample_name": payload.get("sample_name", ""),
+                        "mode": payload.get("mode", ""),
+                        "input_directory": payload.get("input_directory"),
+                        "remote_base_path": payload.get("remote_base_path"),
+                    },
+                    ssh_profile_id=str(payload.get("ssh_profile_id") or ""),
+                    ssh_profile_nickname=payload.get("ssh_profile_nickname"),
+                    workflow_block_id=workflow_block_id,
+                    stage_input_step_id=stage_input_step_id,
+                    complete_stage_only_step_id=payload.get("complete_stage_only_step_id"),
+                    gate_payload={
+                        "skill": payload.get("skill", "remote_execution"),
+                        "model": payload.get("model", "default"),
+                    },
+                    initial_stage_parts=stage_parts if isinstance(stage_parts, dict) else None,
+                )
+            )
+            logger.info(
+                "Startup recovery: resumed polling for orphaned staging task",
+                task_id=task_id,
+                block_id=block.id,
+            )
+    finally:
+        recovery_session.close()
+
+
 @app.on_event("startup")
 async def startup_event():
     from common.database import is_sqlite
@@ -224,43 +360,7 @@ async def startup_event():
     # before the job finished.  Without this, the block stays stuck in RUNNING
     # forever, blocking skill switches and suppressing auto-analysis.
     try:
-        _recovery_session = SessionLocal()
-        try:
-            _orphaned = _recovery_session.query(ProjectBlock).filter(
-                ProjectBlock.type == "EXECUTION_JOB",
-                ProjectBlock.status == "RUNNING",
-            ).all()
-            for _blk in _orphaned:
-                _pl = get_block_payload(_blk)
-                _run_uuid = _pl.get("run_uuid", "")
-                # Also check inner job_status — if it already says COMPLETED/FAILED
-                # the block is just stale; mark it done without re-polling.
-                _inner = _pl.get("job_status", {}).get("status", "")
-                if not _run_uuid:
-                    continue
-                if _inner in ("COMPLETED", "FAILED"):
-                    _blk.status = "DONE" if _inner == "COMPLETED" else "FAILED"
-                    _recovery_session.commit()
-                    logger.info("Startup recovery: marked stale RUNNING block as done",
-                                 run_uuid=_run_uuid, inner_status=_inner)
-                    # Trigger auto-analysis that was missed when polling died
-                    if _inner == "COMPLETED":
-                        asyncio.create_task(
-                            job_polling._auto_trigger_analysis(
-                                _blk.project_id, _run_uuid,
-                                _pl, _blk.owner_id,
-                            )
-                        )
-                        logger.info("Startup recovery: triggered auto-analysis",
-                                     run_uuid=_run_uuid)
-                else:
-                    asyncio.create_task(
-                        job_polling.poll_job_status(_blk.project_id, _blk.id, _run_uuid)
-                    )
-                    logger.info("Startup recovery: resumed polling for orphaned job",
-                                 run_uuid=_run_uuid, block_id=_blk.id)
-        finally:
-            _recovery_session.close()
+        await _recover_orphaned_background_tasks()
     except Exception as _rec_err:
         logger.warning("Startup recovery failed", error=str(_rec_err))
 

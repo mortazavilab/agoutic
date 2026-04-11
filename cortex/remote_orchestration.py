@@ -1034,6 +1034,7 @@ def _workflow_status(payload: dict) -> str:
 
 
 def _persist_workflow_plan(session, workflow_block: ProjectBlock, payload: dict, *, status: str | None = None) -> None:
+    payload["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
     payload["next_step"] = _workflow_next_step(payload)
     payload["status"] = _workflow_status(payload)
     workflow_block.payload_json = json.dumps(payload)
@@ -1056,6 +1057,7 @@ def _set_workflow_step_status(
     if idx is None:
         return payload
     step = dict(payload["steps"][idx])
+    step["updated_at"] = datetime.datetime.utcnow().isoformat() + "Z"
     step["status"] = status
     if extra:
         step.update(extra)
@@ -1087,6 +1089,7 @@ def _update_project_block_payload(session, block_id: str, updates: dict, *, stat
         return None
     payload = get_block_payload(block)
     payload.update(updates)
+    payload["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
     block.payload_json = json.dumps(payload)
     if status is not None:
         block.status = status
