@@ -125,9 +125,9 @@ def _render_local_help_response() -> None:
             st.markdown("- Wide sample tables can auto-melt when you ask for grouped plots such as `color by sample`")
             st.markdown("- Histogram, scatter, bar, box, heatmap, and pie charts render inline in chat")
         with st.expander("Differential Expression From Reconcile Outputs", expanded=False):
-            st.markdown("- Use the current workflow abundance table directly: `compare the AD samples exc and jbh to the control samples gko and lwf`")
-            st.markdown("- Run the same comparison from a dataframe: `compare exc and jbh to gko and lwf from DF1 at transcript level`")
-            st.markdown("- Slash form is also supported: `/de AD=exc,jbh vs control=gko,lwf`")
+            st.markdown("- Use the current workflow abundance table directly: `compare the treated samples treated_1 and treated_2 to the control samples ctrl_1 and ctrl_2`")
+            st.markdown("- Run the same comparison from a dataframe: `compare treated_1 and treated_2 to ctrl_1 and ctrl_2 from DF1 at transcript level`")
+            st.markdown("- Slash form is also supported: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`")
             st.markdown("- If you omit the groups, AGOUTIC will ask which sample columns belong to each side instead of guessing")
             st.markdown("- Default behavior is gene-level aggregation from `reconciled_abundance.tsv`; ask for transcript level when you want transcript-wise testing")
         with st.expander("Status Guide", expanded=False):

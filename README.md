@@ -143,9 +143,9 @@ The analysis layer returns:
 - `Parse the bedMethyl output and summarize methylation patterns`
 - `Show the top expressed genes from this result file`
 - `Run differential expression between control and treatment`
-- `Compare the AD samples exc and jbh to the control samples gko and lwf`
-- `Compare exc and jbh to gko and lwf from DF1 at transcript level`
-- `/de AD=exc,jbh vs control=gko,lwf`
+- `Compare the treated samples treated_1 and treated_2 to the control samples ctrl_1 and ctrl_2`
+- `Compare treated_1 and treated_2 to ctrl_1 and ctrl_2 from DF1 at transcript level`
+- `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`
 - `Annotate these Ensembl IDs`
 - `Run GO enrichment on the upregulated genes`
 - `Compare workflow1 and workflow2 outputs`

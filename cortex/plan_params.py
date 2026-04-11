@@ -123,9 +123,9 @@ def build_de_group_clarification(
         f"I can run edgePython {source_desc}, but I need the two sample groups. "
         "Please either provide a sample metadata file, or name which sample columns belong to each group.\n\n"
         "Examples:\n"
-        "- compare the AD samples exc and jbh to the control samples gko and lwf\n"
-        "- compare exc and jbh to gko and lwf from DF1\n"
-        "- /de AD=exc,jbh vs control=gko,lwf"
+        "- compare the treated samples treated_1 and treated_2 to the control samples ctrl_1 and ctrl_2\n"
+        "- compare treated_1 and treated_2 to ctrl_1 and ctrl_2 from DF1\n"
+        "- /de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2"
     )
 
 

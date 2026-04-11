@@ -50,9 +50,9 @@ def render_sidebar(
             if st.button("how do I compare reconcile samples", key="help_prompt_reconcile_de", width="stretch"):
                 st.session_state["_help_prompt"] = "how do i compare reconcile samples"
                 st.rerun()
-            st.caption("`compare the AD samples exc and jbh to the control samples gko and lwf`")
-            st.caption("`compare exc and jbh to gko and lwf from DF1 at transcript level`")
-            st.caption("`/de AD=exc,jbh vs control=gko,lwf`")
+            st.caption("`compare the treated samples treated_1 and treated_2 to the control samples ctrl_1 and ctrl_2`")
+            st.caption("`compare treated_1 and treated_2 to ctrl_1 and ctrl_2 from DF1 at transcript level`")
+            st.caption("`/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`")
             st.caption("**Memory**")
             if st.button("/memories", key="help_prompt_memories", width="stretch"):
                 st.session_state["_help_prompt"] = "/memories"
