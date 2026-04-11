@@ -1,3 +1,24 @@
+## [3.6.1] - 2026-04-11
+
+### Bug Fixes
+
+- **IGVF required-parameter repair in chat dispatch** — Cortex now repairs
+  malformed IGVF `DATA_CALL` tags before MCP execution by backfilling
+  `search_by_sample.sample_term` and `search_by_assay.assay_title` from the
+  user message when possible. Calls still missing required parameters after
+  repair are now dropped during schema validation instead of reaching the MCP
+  layer and surfacing raw Pydantic validation errors in chat.
+  (`cortex/igvf_helpers.py`, `cortex/tool_dispatch.py`)
+
+### Documentation
+
+- **Top-level docs/version alignment** — refreshed the root README and version
+  metadata so Atlas is described as a registry-driven ENCODE + IGVF data layer
+  rather than ENCODE-only.
+  (`README.md`, `VERSION`)
+
+---
+
 ## [3.6.0] - 2026-04-10
 
 ### Features

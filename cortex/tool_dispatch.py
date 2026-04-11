@@ -34,6 +34,7 @@ from cortex.data_call_generator import (
     _validate_analyzer_params,
     _validate_edgepython_params,
 )
+from cortex.igvf_helpers import _validate_igvf_params
 from cortex.llm_validators import _parse_tag_params
 from cortex.path_helpers import _pick_file_tool
 from cortex.remote_orchestration import (
@@ -328,6 +329,8 @@ def build_calls_by_source(
                 ac_tool, ac_params = _correct_tool_routing(
                     ac_tool, ac_params, user_message, conversation_history)
                 ac_params = _validate_encode_params(ac_tool, ac_params, user_message)
+            elif ac_source == "igvf":
+                ac_params = _validate_igvf_params(ac_tool, ac_params, user_message)
             elif ac_source == "analyzer":
                 ac_params = _validate_analyzer_params(
                     ac_tool, ac_params, user_message,
@@ -382,6 +385,8 @@ def build_calls_by_source(
 
         if source_key == "encode":
             params = _validate_encode_params(corrected_tool, params, user_message)
+        if source_key == "igvf":
+            params = _validate_igvf_params(corrected_tool, params, user_message)
         if source_key == "analyzer":
             params = _validate_analyzer_params(
                 corrected_tool, params, user_message,
@@ -560,10 +565,16 @@ def deduplicate_calls(calls_by_source: dict[str, list[dict]]) -> dict[str, list[
 
 
 def validate_call_schemas(calls_by_source: dict[str, list[dict]]) -> None:
-    """Validate params against cached tool schemas (in-place)."""
-    for src_key, calls_list in calls_by_source.items():
+    """Validate params against cached tool schemas (in-place).
+
+    Calls with missing required parameters are removed to prevent
+    guaranteed-to-fail MCP requests.
+    """
+    for src_key, calls_list in list(calls_by_source.items()):
+        surviving: list[dict] = []
         for call in calls_list:
             if "__routing_error__" in call.get("params", {}):
+                surviving.append(call)
                 continue
             cleaned, violations = validate_against_schema(
                 call["tool"], call["params"], src_key,
@@ -572,7 +583,20 @@ def validate_call_schemas(calls_by_source: dict[str, list[dict]]) -> None:
                 logger.warning("Schema validation issues",
                                tool=call["tool"], source=src_key,
                                violations=violations)
+            # Block calls that are missing required params — they will
+            # fail at the MCP layer with a Pydantic validation error anyway.
+            has_missing_required = any(
+                v.startswith("Missing required params:") for v in violations
+            )
+            if has_missing_required:
+                logger.error(
+                    "Dropping tool call: missing required params",
+                    tool=call["tool"], source=src_key, violations=violations,
+                )
+                continue
             call["params"] = cleaned
+            surviving.append(call)
+        calls_by_source[src_key] = surviving
 
 
 # ---------------------------------------------------------------------------

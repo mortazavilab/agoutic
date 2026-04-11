@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.5.3
+**Version:** 3.6.1
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -9,7 +9,7 @@ AGOUTIC is a general-purpose agent for analyzing and interpreting long-read geno
 
 The system is composed of:
 - **Cortex**: Agent Engine - AI-powered orchestration and user interaction
-- **Atlas**: ENCODE Integration - Public data retrieval via ENCODELIB
+- **Atlas**: Consortium Data Integration - Registry-driven ENCODE and IGVF retrieval via MCP
 - **Launchpad**: Execution Engine - Dogme/Nextflow pipeline management (local + remote SLURM)
 - **Analyzer**: Analysis Engine - Results analysis and QC reporting
 - **edgePython**: Differential Expression — Bulk/single-cell RNA-seq DE via edgePython
@@ -19,7 +19,9 @@ The system is composed of:
 Current status: database infrastructure centralized in `common/database.py`
 with Alembic migrations. Gene annotation and enrichment tools moved from
 edgePython to Analyzer. The analyzer/server4 adapter layer proxies remaining
-edgePython MCP calls upstream.
+edgePython MCP calls upstream. Atlas now exposes both ENCODE and IGVF
+consortium MCP servers through the same schema-aware routing and formatting
+layer.
 
 ## 🖥️ Execution Modes
 
@@ -308,6 +310,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Per-message and per-conversation token tracking** — every LLM response records `prompt_tokens`, `completion_tokens`, `total_tokens`, and `model_name` in the database; exposed via `GET /user/token-usage` (own data) and `GET /admin/token-usage` (all users)
   - **`find_file` echo recovery** — when a weak model emits a `find_file` JSON result verbatim instead of a `[[DATA_CALL:...]]` tag, the pipeline intercepts the response, auto-chains to `parse_csv_file`/`parse_bed_file`/`read_file_content`, and strips the bad block from conversation history to prevent looping
   - **ENCODE tool routing guards** — structural checks prevent LLM misrouting (e.g. cell-line names sent to `get_experiment`); assay-only queries are routed to `search_by_assay`; assay name aliases (e.g. `RNA-seq` → `total RNA-seq`, `ChIP-seq` → `TF ChIP-seq`) are resolved before MCP dispatch
+  - **IGVF dispatch guards** — malformed IGVF calls now backfill missing required `sample_term`/`assay_title` values from the user message when possible, and schema validation drops still-invalid calls before they hit MCP
   - **Tool Schema Contracts** — machine-readable JSON Schema for every MCP tool, fetched at startup from `/tools/schema` endpoints on all servers. Injected into the system prompt as a compact reference and used for pre-call param validation (strip unknown params, check required fields, normalise enums).
   - **Structured Conversation State** — typed `ConversationState` JSON (skill, project, sample, experiment, dataframes, workflows) built each turn and injected as `[STATE]...[/STATE]` so the LLM always sees current context
   - **Error-Handling Playbook** — deterministic failure rules in the system prompt + structured `[TOOL_ERROR]` blocks + single-retry for transient failures
@@ -322,18 +325,19 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **DF inspection quick commands** — `list dfs` lists all dataframes in the conversation with their metadata; `head df1` (or `head df3 5`) shows the first N rows as a markdown table. Both bypass the LLM entirely — zero token cost.
   - **In-memory dataframe actions** — filter, subset, select columns, rename, sort, melt, aggregate, join, and pivot existing conversation dataframes without going through analyzer file calls. Saved transforms can also appear as block-specific `PENDING_ACTION` controls in the UI.
 
-### Atlas: ENCODELIB (Port 8006 MCP)
-- **Role:** ENCODE Portal data retrieval
-- **Tech:** fastmcp + ENCODE API, extended via `atlas/mcp_server.py`
+### Atlas: Consortium Data MCPs (ENCODE 8006 / IGVF 8009)
+- **Role:** Registry-driven public consortium data retrieval
+- **Tech:** fastmcp + Atlas registry/configuration with ENCODE and IGVF MCP servers under `atlas/`
 - **Features:**
-  - Search experiments by biosample/organism/target
-  - **`search_by_assay`** — assay-first search (e.g. *"how many RNA-seq experiments"*) across both organisms, returning combined counts and per-organism lists
-  - Download experiment files
-  - Metadata caching
-  - 15+ MCP tools for data access
-  - Agent routing guards in Cortex prevent structural misrouting (e.g. cell-line names sent to `get_experiment`)
-- **Extension pattern:** `atlas/mcp_server.py` imports ENCODELIB's FastMCP `server` instance and registers additional tools on it. `launch_encode.py` imports from this module so extensions are available without modifying ENCODELIB.
-- **Tool schemas:** `atlas/tool_schemas.py` defines JSON Schema contracts for all 16 ENCODE tools, served via `/tools/schema` GET endpoint.
+  - Search ENCODE experiments by biosample/organism/target
+  - **`search_by_assay`** — assay-first ENCODE search (e.g. *"how many RNA-seq experiments"*) across both organisms, returning combined counts and per-organism lists
+  - Search IGVF measurement sets, analysis sets, prediction sets, files, genes, and samples
+  - Download and file-metadata helpers for both consortium integrations
+  - Metadata caching, result formatting, and tool/parameter alias repair
+  - 30+ MCP tools across the current consortium integrations
+  - Agent routing guards in Cortex prevent structural misrouting and block invalid required-param calls before MCP execution
+- **Extension pattern:** `atlas/mcp_server.py` extends ENCODELIB's FastMCP server, while `atlas/igvf_mcp_server.py` and `atlas/launch_igvf.py` provide the parallel IGVF HTTP MCP server path.
+- **Tool schemas:** `atlas/tool_schemas.py` and `atlas/igvf_tool_schemas.py` define JSON Schema contracts for the ENCODE and IGVF tools, served via `/tools/schema` GET endpoints.
 - **Docs:** [ATLAS_IMPLEMENTATION.md](ATLAS_IMPLEMENTATION.md)
 
 ### Launchpad: Execution Engine (Ports 8003 REST / 8002 MCP)
