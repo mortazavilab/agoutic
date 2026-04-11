@@ -10,6 +10,17 @@
   layer and surfacing raw Pydantic validation errors in chat.
   (`cortex/igvf_helpers.py`, `cortex/tool_dispatch.py`)
 
+- **IGVF tool routing and alias resolution hardening** — Cortex now preserves
+  IGVF canonical tools from generic alias shadowing, preventing routes such as
+  `get_gene` being redirected to analyzer gene lookup and `search_files` being
+  redirected to the generic file finder. It also reroutes mis-emitted
+  `search_measurement_sets` calls to the correct IGVF file, analysis-set,
+  prediction-set, or sample search tools based on the supplied parameters, and
+  normalizes organism values such as `Mus_musculus` and `Homo_sapiens` before
+  validation. This fixes file/analysis/prediction queries silently dropping
+  filters and improves recovery from common LLM parameter hallucinations.
+  (`atlas/config.py`, `cortex/igvf_helpers.py`, `cortex/tool_dispatch.py`)
+
 ### Documentation
 
 - **Top-level docs/version alignment** — refreshed the root README and version
