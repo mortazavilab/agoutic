@@ -1,3 +1,112 @@
+## [3.6.2] - 2026-04-11
+
+### Features
+
+- **Manifest-driven planning through phase 6** — Cortex now treats
+  `SkillManifest` as the planner-facing source of truth for core deterministic
+  flows. Skill manifests declare request triggers, expected inputs, required
+  services, runtime buckets, MCP tool chains, and dependency hints; the
+  planner now attempts manifest composition first; and a new `plan_composer`
+  module builds DE, enrichment, and XgenePy plans from that metadata while
+  preserving template fallback for unmigrated flows.
+  (`cortex/skill_manifest.py`, `cortex/plan_classifier.py`,
+  `cortex/plan_composer.py`, `cortex/planner.py`,
+  `cortex/plan_templates.py`)
+
+- **Planner/executor service-aware manifest gating** — composed plans now
+  surface manifest-derived runtime summaries plus missing-input and
+  unavailable-service warnings, and executor-side step dispatch now fails fast
+  for manifest-tagged steps when the required MCP backend is unavailable.
+  (`cortex/planner.py`, `cortex/plan_executor.py`)
+
+- **YAML-first skill manifest migration** — skill-specific planner metadata now
+  lives beside each skill in `skills/<skill_key>/manifest.yaml`, with
+  `cortex/skill_manifest.py` loading manifests dynamically and service /
+  consortium skill ownership derived from manifest `source.type` and
+  `source.key`. For existing backends, adding or updating a skill no longer
+  requires editing Cortex-side registries.
+  (`skills/*/manifest.yaml`, `cortex/skill_manifest.py`, `cortex/config.py`,
+  `atlas/config.py`, `environment.yml`)
+
+- **Deterministic skill-management commands** — added `/skills`,
+  `/skill <skill_key>`, and `/use-skill <skill_key>` plus equivalent explicit
+  English queries such as “what skills are available?”, “tell me about the
+  differential expression skill”, and “switch to the IGVF Search skill”.
+  Manual switching persists across turns by updating the active skill via the
+  same AGENT_PLAN state path used by normal chat continuation.
+  (`cortex/skill_commands.py`, `cortex/chat_stages/quick_exits.py`)
+
+- **Slash-command discovery surfaced in the UI and quick reference** — the
+  in-app help panel, sidebar help shortcuts, and deterministic capabilities
+  response now enumerate the live skill, workflow, DE, and memory slash
+  commands, and the quick reference now documents the complete existing
+  slash-command surface in one place.
+  (`QUICK_REFERENCE.md`, `ui/appui_sidebar.py`, `ui/appui_state.py`,
+  `cortex/chat_stages/quick_exits.py`)
+
+### Bug Fixes
+
+- **Workflow Results attachment no longer leaks across unrelated responses** —
+  agent-side workflow highlights now require explicit workflow linkage or a
+  real plan-title match, preventing stale DE workflow results from appearing
+  under unrelated non-DE agent responses.
+  (`ui/appui_services.py`, `cortex/job_polling.py`)
+
+### Tests
+
+- **Manifest planning regression suite** — added dedicated coverage for
+  manifest schema defaults, manifest-backed detection, plan composition,
+  planner fallback, and executor service gating, while keeping the adjacent
+  planner and executor regression suites green.
+  (`tests/cortex/test_skill_manifest.py`,
+  `tests/cortex/test_manifest_driven_planning.py`,
+  `tests/cortex/test_plan_composer.py`,
+  `tests/cortex/test_plan_executor_run_script.py`,
+  `tests/cortex/test_planner_cache_steps.py`,
+  `tests/cortex/test_planner_hybrid_bridge.py`,
+  `tests/cortex/test_xgenepy_planning.py`,
+  `tests/cortex/test_plan_executor_concurrency.py`)
+
+- **Skill command and YAML manifest regression coverage** — added tests for
+  folder-local YAML manifest discovery, manifest-derived source routing,
+  deterministic skill list/describe/use commands, natural-language command
+  equivalents, persisted manual skill switching across turns, workflow
+  highlight attachment safety, and UI help-intent detection for slash-command
+  discovery.
+  (`tests/cortex/test_skill_manifest.py`,
+  `tests/cortex/test_config_skill_sources.py`,
+  `tests/cortex/test_skill_commands.py`,
+  `tests/cortex/test_chat_entry.py`,
+  `tests/ui/test_app_source_helpers.py`,
+  `tests/cortex/test_background_tasks.py`)
+
+### Documentation
+
+- **Planning and skills docs refreshed for manifest-first composition** —
+  updated the root architecture overview, skills authoring guide, Cortex
+  overview, and architecture diagrams to describe the new `SkillManifest` +
+  `plan_composer` planning path and template fallback model.
+  (`README.md`, `SKILLS.md`, `cortex/README.md`,
+  `docs/architecture_diagrams.md`, `VERSION`)
+
+- **Skills authoring docs updated for YAML-local manifests and command
+  discovery** — documented `skills/<skill_key>/manifest.yaml` as the skill
+  metadata source of truth, removed stale instructions to edit Cortex
+  registries for normal skill changes, documented the new skill-management
+  commands and English-query equivalents, and cleaned up edgePython naming in
+  user-facing docs.
+  (`SKILLS.md`, `cortex/README.md`, `docs/architecture_diagrams.md`,
+  `atlas/README.md`, `atlas/QUICKSTART.md`,
+  `skills/differential_expression/SKILL.md`, `skills/welcome/SKILL.md`)
+
+- **Command reference and in-app help refreshed** — documented the full live
+  slash-command inventory in the quick reference and aligned the sidebar/local
+  help copy with the actual implemented command surface, including workflow
+  commands, `/de`, memory aliases, and skill-management commands.
+  (`QUICK_REFERENCE.md`, `ui/appui_sidebar.py`, `ui/appui_state.py`)
+
+---
+
 ## [3.6.1] - 2026-04-11
 
 ### Features

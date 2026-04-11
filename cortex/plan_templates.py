@@ -13,6 +13,7 @@ import uuid
 from typing import Any
 
 from common.logging_config import get_logger
+from cortex.skill_manifest import get_tool_call_spec
 
 logger = get_logger(__name__)
 
@@ -57,6 +58,28 @@ def _make_step(
 def _normalize_fragment_alias(raw_alias: str, *, fallback: str) -> str:
     alias = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_alias).strip("_")
     return alias or fallback
+
+
+def _manifest_tool_call(
+    skill_key: str,
+    tool_name: str,
+    params: dict[str, Any],
+    *,
+    default_source_key: str,
+) -> dict[str, Any]:
+    spec = get_tool_call_spec(skill_key, tool_name)
+    source_key = spec.source_key if spec is not None else default_source_key
+    if spec is None:
+        logger.warning(
+            "Falling back to hardcoded tool source because manifest entry is missing",
+            skill_key=skill_key,
+            tool=tool_name,
+        )
+    return {
+        "source_key": source_key,
+        "tool": tool_name,
+        "params": params,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -449,35 +472,74 @@ def _template_run_de_pipeline(params: dict) -> dict:
         contrast = f"{group_a_label} - {group_b_label}"
 
     de_tool_calls = [
-        {"source_key": "edgepython", "tool": "load_data",
-         "params": {"counts_path": counts_path, "sample_info_path": sample_info,
-                    "group_column": group_col}},
-        {"source_key": "edgepython", "tool": "filter_genes",
-         "params": {"min_count": 10, "min_total_count": 15}},
-        {"source_key": "edgepython", "tool": "normalize",
-         "params": {"method": "TMM"}},
+        _manifest_tool_call(
+            "differential_expression",
+            "load_data",
+            {"counts_path": counts_path, "sample_info_path": sample_info, "group_column": group_col},
+            default_source_key="edgepython",
+        ),
+        _manifest_tool_call(
+            "differential_expression",
+            "filter_genes",
+            {"min_count": 10, "min_total_count": 15},
+            default_source_key="edgepython",
+        ),
+        _manifest_tool_call(
+            "differential_expression",
+            "normalize",
+            {"method": "TMM"},
+            default_source_key="edgepython",
+        ),
     ]
     if method == "exact_test":
         de_tool_calls.extend([
-            {"source_key": "edgepython", "tool": "estimate_dispersion",
-             "params": {"robust": True}},
-            {"source_key": "edgepython", "tool": "exact_test",
-             "params": {"pair": [group_a_label, group_b_label], "name": result_name}},
+            _manifest_tool_call(
+                "differential_expression",
+                "estimate_dispersion",
+                {"robust": True},
+                default_source_key="edgepython",
+            ),
+            _manifest_tool_call(
+                "differential_expression",
+                "exact_test",
+                {"pair": [group_a_label, group_b_label], "name": result_name},
+                default_source_key="edgepython",
+            ),
         ])
     else:
         de_tool_calls.extend([
-            {"source_key": "edgepython", "tool": "set_design",
-             "params": {"formula": "~ 0 + group"}},
-            {"source_key": "edgepython", "tool": "estimate_dispersion",
-             "params": {"robust": True}},
-            {"source_key": "edgepython", "tool": "fit_model",
-             "params": {"robust": True}},
-            {"source_key": "edgepython", "tool": "test_contrast",
-             "params": {"contrast": contrast, "name": result_name}},
+            _manifest_tool_call(
+                "differential_expression",
+                "set_design",
+                {"formula": "~ 0 + group"},
+                default_source_key="edgepython",
+            ),
+            _manifest_tool_call(
+                "differential_expression",
+                "estimate_dispersion",
+                {"robust": True},
+                default_source_key="edgepython",
+            ),
+            _manifest_tool_call(
+                "differential_expression",
+                "fit_model",
+                {"robust": True},
+                default_source_key="edgepython",
+            ),
+            _manifest_tool_call(
+                "differential_expression",
+                "test_contrast",
+                {"contrast": contrast, "name": result_name},
+                default_source_key="edgepython",
+            ),
         ])
     de_tool_calls.append(
-        {"source_key": "edgepython", "tool": "get_top_genes",
-         "params": {"name": result_name, "n": 20, "fdr_threshold": 0.05}}
+        _manifest_tool_call(
+            "differential_expression",
+            "get_top_genes",
+            {"name": result_name, "n": 20, "fdr_threshold": 0.05},
+            default_source_key="edgepython",
+        )
     )
 
     s_de = _make_step("RUN_DE_PIPELINE", f"Run DE analysis ({contrast})", idx,
@@ -488,22 +550,40 @@ def _template_run_de_pipeline(params: dict) -> dict:
 
     s_save = _make_step("SAVE_RESULTS", "Save full DE results", idx,
                         depends_on=[s_de["id"]],
-                        tool_calls=[{"source_key": "edgepython", "tool": "save_results",
-                                     "params": {"name": result_name, "format": "tsv"}}])
+                        tool_calls=[
+                            _manifest_tool_call(
+                                "differential_expression",
+                                "save_results",
+                                {"name": result_name, "format": "tsv"},
+                                default_source_key="edgepython",
+                            )
+                        ])
     steps.append(s_save)
     idx += 1
 
     s_annotate = _make_step("ANNOTATE_RESULTS", "Annotate gene symbols", idx,
                             depends_on=[s_de["id"]],
-                            tool_calls=[{"source_key": "edgepython", "tool": "annotate_genes",
-                                         "params": {}}])
+                            tool_calls=[
+                                _manifest_tool_call(
+                                    "differential_expression",
+                                    "annotate_genes",
+                                    {},
+                                    default_source_key="edgepython",
+                                )
+                            ])
     steps.append(s_annotate)
     idx += 1
 
     s_plot = _make_step("GENERATE_DE_PLOT", "Generate volcano plot", idx,
                         depends_on=[s_annotate["id"]],
-                        tool_calls=[{"source_key": "edgepython", "tool": "generate_plot",
-                                     "params": {"plot_type": "volcano", "result_name": result_name}}])
+                        tool_calls=[
+                            _manifest_tool_call(
+                                "differential_expression",
+                                "generate_plot",
+                                {"plot_type": "volcano", "result_name": result_name},
+                                default_source_key="edgepython",
+                            )
+                        ])
     steps.append(s_plot)
     idx += 1
 
@@ -542,15 +622,27 @@ def _template_run_enrichment(params: dict) -> dict:
     idx = 0
 
     s_filter = _make_step("FILTER_DE_GENES", f"Filter DE genes ({direction})", idx,
-                           tool_calls=[{"source_key": "edgepython", "tool": "filter_de_genes",
-                                        "params": {"direction": direction}}])
+                           tool_calls=[
+                               _manifest_tool_call(
+                                   "enrichment_analysis",
+                                   "filter_de_genes",
+                                   {"direction": direction},
+                                   default_source_key="edgepython",
+                               )
+                           ])
     steps.append(s_filter)
     idx += 1
 
     s_go = _make_step("RUN_GO_ENRICHMENT", f"GO enrichment ({direction})", idx,
                        depends_on=[s_filter["id"]],
-                       tool_calls=[{"source_key": "edgepython", "tool": "run_go_enrichment",
-                                    "params": {"direction": direction}}])
+                       tool_calls=[
+                           _manifest_tool_call(
+                               "enrichment_analysis",
+                               "run_go_enrichment",
+                               {"direction": direction},
+                               default_source_key="edgepython",
+                           )
+                       ])
     steps.append(s_go)
     idx += 1
 
@@ -559,8 +651,14 @@ def _template_run_enrichment(params: dict) -> dict:
         db = database or "KEGG"
         s_pathway = _make_step("RUN_PATHWAY_ENRICHMENT", f"{db} pathway enrichment ({direction})", idx,
                                 depends_on=[s_filter["id"]],
-                                tool_calls=[{"source_key": "edgepython", "tool": "run_pathway_enrichment",
-                                             "params": {"direction": direction, "database": db}}])
+                                tool_calls=[
+                                    _manifest_tool_call(
+                                        "enrichment_analysis",
+                                        "run_pathway_enrichment",
+                                        {"direction": direction, "database": db},
+                                        default_source_key="edgepython",
+                                    )
+                                ])
         steps.append(s_pathway)
         idx += 1
         plot_deps = [s_go["id"], s_pathway["id"]]
@@ -569,8 +667,14 @@ def _template_run_enrichment(params: dict) -> dict:
 
     s_plot = _make_step("PLOT_ENRICHMENT", "Plot enrichment results", idx,
                          depends_on=plot_deps,
-                         tool_calls=[{"source_key": "edgepython", "tool": "generate_plot",
-                                      "params": {"plot_type": "enrichment_bar"}}])
+                         tool_calls=[
+                             _manifest_tool_call(
+                                 "enrichment_analysis",
+                                 "generate_plot",
+                                 {"plot_type": "enrichment_bar"},
+                                 default_source_key="edgepython",
+                             )
+                         ])
     steps.append(s_plot)
     idx += 1
 
@@ -641,10 +745,10 @@ def _template_run_xgenepy_analysis(params: dict) -> dict:
         requires_approval=False,
         depends_on=[s_approve["id"]],
         tool_calls=[
-            {
-                "source_key": "xgenepy",
-                "tool": "run_xgenepy_analysis",
-                "params": {
+            _manifest_tool_call(
+                "xgenepy_analysis",
+                "run_xgenepy_analysis",
+                {
                     "project_dir": project_dir,
                     "counts_path": counts_path,
                     "metadata_path": metadata_path,
@@ -653,7 +757,8 @@ def _template_run_xgenepy_analysis(params: dict) -> dict:
                     "alpha": alpha,
                     "execution_mode": "local",
                 },
-            }
+                default_source_key="xgenepy",
+            )
         ],
     )
     steps.append(s_run)

@@ -1,0 +1,26 @@
+display_name: Local Sample Intake
+description: Collect parameters and submit a local Dogme pipeline job.
+category: execution
+source:
+  type: service
+  key: launchpad
+required_services:
+  - launchpad
+expected_inputs:
+  - file_path
+  - sample_name
+  - reference_genome
+  - mode
+output_types:
+  - job
+sample_types:
+  - DNA
+  - RNA
+  - cDNA
+estimated_runtime: slow
+plan_type: run_workflow
+trigger_patterns:
+  - 'run\s+(?:the\s+)?(?:full\s+)?pipeline\s+(?:on|for)'
+  - 'process\s+(?:my\s+)?(?:local\s+)?(?:sample|data|pod5|fastq|bam)'
+  - 'analyze\s+(?:my\s+)?(?:local\s+)?(?:sample|data)'
+classification_priority: 40

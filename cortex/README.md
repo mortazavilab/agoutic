@@ -5,12 +5,12 @@
 
 ## Overview
 
-Cortex is the **orchestration and reasoning engine** for AGOUTIC. It provides an AI agent interface for interpreting user requests, planning workflows, and submitting analysis jobs to Launchpad.
+Cortex is the **orchestration and reasoning engine** for AGOUTIC. It provides an AI agent interface for interpreting user requests, planning workflows, and submitting analysis jobs to Launchpad. Multi-step planning is now manifest-first for the core deterministic analysis flows: skill manifests drive request classification, runtime/input warnings, MCP tool-chain selection, and service gating, while older templates remain fallback for unmigrated paths.
 
 ### Key Responsibilities
 
 - 🧠 **AI Reasoning**: LLM-based interpretation of user intent
-- 📋 **Workflow Planning**: Convert requests into executable pipelines
+- 📋 **Workflow Planning**: Classify requests, compose manifest-driven deterministic plans, and fall back safely when a flow is not yet migrated
 - 🎯 **Skill Management**: Load and apply bioinformatics skill definitions
 - 🔗 **Job Submission**: Orchestrate job submission to Launchpad
 - 📊 **Project Tracking**: Maintain project and analysis history
@@ -30,6 +30,9 @@ User Request (REST/Chat)
         ↓
 Cortex Agent Engine
   ├─ Load skill definitions (skills/*/SKILL.md)
+  ├─ Load skill manifests (skills/*/manifest.yaml via cortex/skill_manifest.py)
+  ├─ Classify requests (plan_classifier.py)
+  ├─ Compose manifest-driven plans when supported (plan_composer.py)
   ├─ Create system prompt with skill context
   ├─ Call LLM for reasoning
   ├─ (Optional) Request approval from user
@@ -63,9 +66,17 @@ Results & Tracking
 │  │  Agent Engine (agent_engine.py)     │    │
 │  │  - Skill loading                    │    │
 │  │  - LLM chat interface               │    │
-│  │  - Workflow planning                │    │
+│  │  - Manifest-first workflow planning │    │
 │  │  - Tool contract injection          │    │
 │  │  - Error-handling playbook          │    │
+│  └─────────────────────────────────────┘    │
+│            ↓                                  │
+│  ┌─────────────────────────────────────┐    │
+│  │  Planner Stack                      │    │
+│  │  - plan_classifier.py               │    │
+│  │  - plan_composer.py                 │    │
+│  │  - planner.py                       │    │
+│  │  - skill_manifest.py                │    │
 │  └─────────────────────────────────────┘    │
 │            ↓                                  │
 │  ┌─────────────────────────────────────┐    │
@@ -353,14 +364,8 @@ Skills are Markdown files in `skills/<skill_key>/SKILL.md` that define workflows
 ### Loading Skills
 
 ```python
-# Auto-registered in config.py
-SKILLS_REGISTRY = {
-  "run_dogme_dna": "run_dogme_dna/SKILL.md",
-  "run_dogme_rna": "run_dogme_rna/SKILL.md",
-  "run_dogme_cdna": "run_dogme_cdna/SKILL.md",
-  "ENCODE_LongRead": "ENCODE_LongRead/SKILL.md",
-  "analyze_local_sample": "analyze_local_sample/SKILL.md",
-}
+# Auto-discovered from skills/<skill_key>/manifest.yaml
+# and re-exported as SKILLS_REGISTRY for backward compatibility.
 
 # Agent loads via:
 skill_text = agent._load_skill_text("run_dogme_dna")
@@ -577,8 +582,8 @@ Error: Skill 'Dogme_DNA' not found in Registry
 
 **Solution:**
 - Verify skill file exists: `ls skills/run_dogme_dna/SKILL.md`
-- Check SKILLS_REGISTRY in config.py
-- Verify file path in registry matches actual file
+- Verify `skills/run_dogme_dna/manifest.yaml` exists and is valid YAML
+- Verify the skill folder name matches the intended skill key
 
 ### Database Locked
 

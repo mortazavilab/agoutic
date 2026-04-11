@@ -624,7 +624,7 @@ def filter_genes(
     min_count: int = 10,
     min_total_count: int = 15,
 ) -> str:
-    """Filter out lowly-expressed genes using edgeR's filterByExpr logic.
+    """Filter out lowly-expressed genes using edgePython filterByExpr-compatible logic.
 
     Uses adaptive CPM thresholds based on library sizes and group structure.
 
@@ -965,7 +965,7 @@ def estimate_glm_robust_dispersion(
 ) -> str:
     """Estimate robust GLM dispersions with iterative Huber reweighting.
 
-    Requires a design matrix; mirrors edgeR's estimateGLMRobustDisp.
+    Requires a design matrix; mirrors the robust dispersion workflow implemented in edgePython.
     """
     _require("dgelist", "DGEList")
     _require("design", "design matrix")
@@ -1402,7 +1402,7 @@ def exact_test(
     prior_count: float = 0.125,
     name: Optional[str] = None,
 ) -> str:
-    """Run edgeR-style exact test for two-group DE.
+    """Run edgePython exact test for two-group DE.
 
     Args:
         pair: Two group labels to compare. Default: first two groups.

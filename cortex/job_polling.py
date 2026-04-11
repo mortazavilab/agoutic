@@ -392,6 +392,7 @@ async def _auto_trigger_analysis(
                 "markdown": final_md,
                 "skill": analysis_skill,
                 "model": _model_name,
+                "workflow_plan_block_id": workflow_block.id if workflow_block is not None else None,
                 "tokens": _token_payload,
             },
             status="DONE",

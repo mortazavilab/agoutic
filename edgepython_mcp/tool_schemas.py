@@ -64,7 +64,7 @@ TOOL_SCHEMAS = {
         },
     },
     "filter_genes": {
-        "description": "Filter out lowly-expressed genes using edgeR's filterByExpr logic.",
+        "description": "Filter out lowly-expressed genes using edgePython's filterByExpr-compatible logic.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -228,7 +228,7 @@ TOOL_SCHEMAS = {
         },
     },
     "exact_test": {
-        "description": "Run edgeR-style exact test for two-group DE.",
+        "description": "Run edgePython exact test for two-group DE.",
         "parameters": {
             "type": "object",
             "properties": {

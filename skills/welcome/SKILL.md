@@ -62,7 +62,7 @@ Based on the user's answer, switch to the appropriate skill:
 [[SKILL_SWITCH_TO: download_files]]
 ```
 
-**Differential expression** (mentions "differential expression", "DE analysis", "count matrix", "edgePython", "edgeR", "volcano plot", "fold change", "NEBULA", "DTU", or option 5):
+**Differential expression** (mentions "differential expression", "DE analysis", "count matrix", "edgePython", "volcano plot", "fold change", "NEBULA", "DTU", or option 5):
 ```
 [[SKILL_SWITCH_TO: differential_expression]]
 ```

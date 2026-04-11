@@ -1,0 +1,17 @@
+display_name: Job Results Browser
+description: Browse and analyze completed pipeline job outputs.
+category: analysis
+source:
+  type: service
+  key: analyzer
+required_services:
+  - analyzer
+expected_inputs:
+  - job_uuid
+output_types:
+  - report
+  - dataframe
+  - plot
+sample_types:
+  - any
+estimated_runtime: medium

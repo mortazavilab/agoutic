@@ -78,11 +78,7 @@ SERVICE_REGISTRY = {
         "table_columns": [],
         "count_field": None,
         "count_label": None,
-        "skills": [
-            "analyze_local_sample",
-            "remote_execution",
-            "reconcile_bams",
-        ],
+        "skills": [],
         "fallback_patterns": {},
     },
     "analyzer": {
@@ -93,11 +89,7 @@ SERVICE_REGISTRY = {
         "table_columns": [],
         "count_field": None,
         "count_label": None,
-        "skills": [
-            "analyze_job_results",
-            "run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
-            "enrichment_analysis",
-        ],
+        "skills": [],
         "fallback_patterns": {},
     },
     "edgepython": {
@@ -107,9 +99,7 @@ SERVICE_REGISTRY = {
         "table_columns": [],
         "count_field": None,
         "count_label": None,
-        "skills": [
-            "differential_expression",
-        ],
+        "skills": [],
         "fallback_patterns": {},
     },
     "xgenepy": {
@@ -119,9 +109,7 @@ SERVICE_REGISTRY = {
         "table_columns": [],
         "count_field": None,
         "count_label": None,
-        "skills": [
-            "xgenepy_analysis",
-        ],
+        "skills": [],
         "fallback_patterns": {},
     },
 }
@@ -146,6 +134,12 @@ def get_source_for_skill(skill_key: str) -> tuple[str, str] | None:
         (source_key, source_type) e.g. ("encode", "consortium") or ("analyzer", "service")
         None if skill doesn't belong to any registered source.
     """
+    from cortex.skill_manifest import get_manifest
+
+    manifest = get_manifest(skill_key)
+    if manifest and manifest.source_key and manifest.source_type:
+        return (manifest.source_key, manifest.source_type)
+
     # Check consortia (imported lazily to avoid circular imports)
     from atlas.config import CONSORTIUM_REGISTRY
     for key, entry in CONSORTIUM_REGISTRY.items():
@@ -172,6 +166,11 @@ GENOME_ALIASES = {
 AVAILABLE_GENOMES = ["GRCh38", "mm39"]
 
 # --- SKILL REGISTRY ---
-# Authoritative manifests live in cortex/skill_manifest.py.
+# Authoritative manifests live in skills/<skill_key>/manifest.yaml and are loaded
+# by cortex.skill_manifest.py.
 # SKILLS_REGISTRY is re-exported here for backward compatibility (key → path).
-from cortex.skill_manifest import SKILLS_REGISTRY  # noqa: E402
+from cortex.skill_manifest import SKILLS_REGISTRY, skills_for_source  # noqa: E402
+
+
+for source_key, entry in SERVICE_REGISTRY.items():
+    entry["skills"] = [manifest.key for manifest in skills_for_source(source_key, "service")]

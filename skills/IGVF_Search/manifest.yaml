@@ -1,0 +1,17 @@
+display_name: IGVF Search
+description: Search the IGVF Data Portal for measurement sets, analysis sets, samples, genes, and files.
+category: data_retrieval
+source:
+  type: consortium
+  key: igvf
+required_services:
+  - igvf
+expected_inputs:
+  - sample_term
+  - assay_title
+  - accession
+  - gene_symbol
+output_types:
+  - dataframe
+sample_types:
+  - any

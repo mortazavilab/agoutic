@@ -7,10 +7,10 @@ that Cortex can route data queries to.
 Internal service servers (Launchpad, Analyzer) are configured in cortex/config.py.
 
 To add a new consortium:
-  1. Add an entry to CONSORTIUM_REGISTRY below
-  2. Create a skill markdown file in skills/
-  3. Register the skill in cortex/config.py SKILLS_REGISTRY
-  4. Start the consortium's MCP server (add to agoutic_servers.sh)
+    1. Add an entry to CONSORTIUM_REGISTRY below
+    2. Create a skill directory in skills/<skill_key>/ with SKILL.md + manifest.yaml
+    3. Point that manifest.yaml at this consortium via source.type/source.key
+    4. Start the consortium's MCP server (add to agoutic_servers.sh)
 """
 
 import os
@@ -45,8 +45,8 @@ CONSORTIUM_REGISTRY = {
         "count_field": "assay",
         "count_label": "assay type",
 
-        # Skills that belong to this consortium
-        "skills": ["ENCODE_Search", "ENCODE_LongRead"],
+        # Skills that belong to this consortium (auto-populated from skill manifests)
+        "skills": [],
 
         # Tool name aliases: fix LLM-hallucinated tool names inside DATA_CALL tags
         # Maps wrong_name -> correct_name
@@ -147,8 +147,8 @@ CONSORTIUM_REGISTRY = {
         "count_field": "assay",
         "count_label": "assay type",
 
-        # Skills that belong to this consortium
-        "skills": ["IGVF_Search"],
+        # Skills that belong to this consortium (auto-populated from skill manifests)
+        "skills": [],
 
         # Tool name aliases: fix LLM-hallucinated tool names
         "tool_aliases": {
@@ -269,6 +269,11 @@ CONSORTIUM_REGISTRY = {
     #     "fallback_patterns": {},
     # },
 }
+
+from cortex.skill_manifest import skills_for_source
+
+for source_key, entry in CONSORTIUM_REGISTRY.items():
+    entry["skills"] = [manifest.key for manifest in skills_for_source(source_key, "consortium")]
 
 
 def get_consortium_url(key: str) -> str:

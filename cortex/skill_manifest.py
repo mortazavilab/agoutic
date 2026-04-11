@@ -1,24 +1,24 @@
-"""
-Declarative skill capability manifest.
+"""Declarative skill capability manifest loaded from per-skill YAML files.
 
-Replaces the flat ``SKILLS_REGISTRY`` dict with rich per-skill metadata
-that enables smarter planner routing, runtime availability checks, and
-token-budget awareness.
+Each skill directory under ``skills/<skill_key>/`` now owns both:
 
-Every skill declares its expected inputs, output types, required MCP
-services, estimated runtime, and supported sample types.  The registry
-still exposes the same ``key → path`` mapping for backward-compat via
-:func:`get_skill_path` and the ``SKILLS_REGISTRY`` compat dict.
+- ``SKILL.md`` for LLM-facing instructions
+- ``manifest.yaml`` for planner/executor-facing metadata
+
+The loader in this module keeps the runtime API stable while removing the
+need to hand-edit Cortex registries for skill-specific configuration.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 from enum import Enum
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal, cast
 
+import yaml
 
-# ── Enums / types ─────────────────────────────────────────────────────────
 
 class SampleType(str, Enum):
     DNA = "DNA"
@@ -32,297 +32,266 @@ class SampleType(str, Enum):
 
 class OutputType(str, Enum):
     """Broad category of what a skill produces."""
-    DATAFRAME = "dataframe"      # tabular results
-    FILE = "file"                # downloaded / generated files
-    REPORT = "report"            # narrative analysis text
-    JOB = "job"                  # submitted pipeline job
-    PLOT = "plot"                # visualisation
-    ANNOTATION = "annotation"    # gene / pathway annotation
+
+    DATAFRAME = "dataframe"
+    FILE = "file"
+    REPORT = "report"
+    JOB = "job"
+    PLOT = "plot"
+    ANNOTATION = "annotation"
 
 
-# ── SkillManifest ─────────────────────────────────────────────────────────
+SourceType = Literal["service", "consortium", ""]
+RuntimeType = Literal["fast", "medium", "slow", "variable"]
+
+
+@dataclass(frozen=True)
+class ToolCallSpec:
+    """Declarative MCP tool entry used by manifest-driven planning."""
+
+    source_key: str
+    tool: str
+
 
 @dataclass(frozen=True)
 class SkillManifest:
     """Declarative capability descriptor for a single skill."""
 
-    # Identity
-    key: str                                          # unique skill key
-    skill_file: str                                   # relative path under skills/
-    display_name: str = ""                            # human-friendly label
-
-    # Routing / classification
-    description: str = ""                             # one-line purpose
-    category: str = "general"                         # logical grouping
-
-    # Required back-end services (keys into SERVICE_REGISTRY / CONSORTIUM_REGISTRY)
+    key: str
+    skill_file: str
+    display_name: str = ""
+    description: str = ""
+    category: str = "general"
+    source_key: str = ""
+    source_type: SourceType = ""
     required_services: tuple[str, ...] = ()
-
-    # Expected inputs (free-form labels such as "accession", "counts_matrix")
     expected_inputs: tuple[str, ...] = ()
-
-    # What the skill produces
     output_types: tuple[OutputType, ...] = ()
-
-    # Sample-type compatibility
     sample_types: tuple[SampleType, ...] = (SampleType.ANY,)
-
-    # Rough runtime bucket so the planner can warn users
-    estimated_runtime: Literal["fast", "medium", "slow", "variable"] = "fast"
-
-    # Whether the skill is analysis-only (should NOT be routed for job submission)
+    estimated_runtime: RuntimeType = "fast"
+    plan_type: str = ""
+    trigger_patterns: tuple[str, ...] = ()
+    slash_commands: tuple[str, ...] = ()
+    mcp_tool_chain: tuple[ToolCallSpec, ...] = ()
+    depends_on_skills: tuple[str, ...] = ()
+    feeds_into: tuple[str, ...] = ()
+    classification_priority: int = 50
     analysis_only: bool = False
-
-    # Whether this skill can be the target of a SKILL_SWITCH_TO tag
     switchable: bool = True
 
 
-# ── Manifest declarations ─────────────────────────────────────────────────
-
-SKILL_MANIFESTS: dict[str, SkillManifest] = {}
-
-
-def _register(*manifests: SkillManifest) -> None:
-    for m in manifests:
-        SKILL_MANIFESTS[m.key] = m
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SKILLS_ROOT = _REPO_ROOT / "skills"
+_MANIFEST_FILENAMES = ("manifest.yaml", "manifest.yml")
+_VALID_SOURCE_TYPES = {"", "service", "consortium"}
+_VALID_RUNTIMES = {"fast", "medium", "slow", "variable"}
 
 
-_register(
-    # ── Entry point ───────────────────────────────────────────────────
-    SkillManifest(
-        key="welcome",
-        skill_file="welcome/SKILL.md",
-        display_name="Welcome",
-        description="Entry point — greets the user and routes to the right skill.",
-        category="routing",
-        switchable=False,
-    ),
-
-    # ── ENCODE ────────────────────────────────────────────────────────
-    SkillManifest(
-        key="ENCODE_Search",
-        skill_file="ENCODE_Search/SKILL.md",
-        display_name="ENCODE Search",
-        description="Search the ENCODE portal for experiments, biosamples, and files.",
-        category="data_retrieval",
-        required_services=("encode",),
-        expected_inputs=("biosample", "assay_type", "accession", "search_term"),
-        output_types=(OutputType.DATAFRAME,),
-        sample_types=(SampleType.ANY,),
-    ),
-    SkillManifest(
-        key="ENCODE_LongRead",
-        skill_file="ENCODE_LongRead/SKILL.md",
-        display_name="ENCODE Long-Read",
-        description="Browse and download long-read experiments from ENCODE.",
-        category="data_retrieval",
-        required_services=("encode",),
-        expected_inputs=("experiment_accession",),
-        output_types=(OutputType.DATAFRAME, OutputType.FILE),
-        sample_types=(SampleType.ANY,),
-    ),
-
-    # ── IGVF ──────────────────────────────────────────────────────────
-    SkillManifest(
-        key="IGVF_Search",
-        skill_file="IGVF_Search/SKILL.md",
-        display_name="IGVF Search",
-        description="Search the IGVF Data Portal for measurement sets, analysis sets, samples, genes, and files.",
-        category="data_retrieval",
-        required_services=("igvf",),
-        expected_inputs=("sample_term", "assay_title", "accession", "gene_symbol"),
-        output_types=(OutputType.DATAFRAME,),
-        sample_types=(SampleType.ANY,),
-    ),
-
-    # ── Dogme interpretation (analysis-only) ──────────────────────────
-    SkillManifest(
-        key="run_dogme_dna",
-        skill_file="run_dogme_dna/SKILL.md",
-        display_name="DNA Results Interpretation",
-        description="Interpret completed Dogme DNA/Fiber-seq workflow results.",
-        category="analysis",
-        required_services=("analyzer",),
-        expected_inputs=("job_uuid", "work_dir"),
-        output_types=(OutputType.REPORT, OutputType.DATAFRAME),
-        sample_types=(SampleType.DNA, SampleType.FIBER_SEQ),
-        estimated_runtime="medium",
-        analysis_only=True,
-    ),
-    SkillManifest(
-        key="run_dogme_rna",
-        skill_file="run_dogme_rna/SKILL.md",
-        display_name="RNA Results Interpretation",
-        description="Interpret completed Dogme direct-RNA workflow results.",
-        category="analysis",
-        required_services=("analyzer",),
-        expected_inputs=("job_uuid", "work_dir"),
-        output_types=(OutputType.REPORT, OutputType.DATAFRAME),
-        sample_types=(SampleType.RNA,),
-        estimated_runtime="medium",
-        analysis_only=True,
-    ),
-    SkillManifest(
-        key="run_dogme_cdna",
-        skill_file="run_dogme_cdna/SKILL.md",
-        display_name="cDNA Results Interpretation",
-        description="Interpret completed Dogme cDNA workflow results.",
-        category="analysis",
-        required_services=("analyzer",),
-        expected_inputs=("job_uuid", "work_dir"),
-        output_types=(OutputType.REPORT, OutputType.DATAFRAME),
-        sample_types=(SampleType.CDNA,),
-        estimated_runtime="medium",
-        analysis_only=True,
-    ),
-
-    # ── Job submission / intake ───────────────────────────────────────
-    SkillManifest(
-        key="analyze_local_sample",
-        skill_file="analyze_local_sample/SKILL.md",
-        display_name="Local Sample Intake",
-        description="Collect parameters and submit a local Dogme pipeline job.",
-        category="execution",
-        required_services=("launchpad",),
-        expected_inputs=("file_path", "sample_name", "reference_genome", "mode"),
-        output_types=(OutputType.JOB,),
-        sample_types=(SampleType.DNA, SampleType.RNA, SampleType.CDNA),
-        estimated_runtime="slow",
-    ),
-
-    # ── Job results ───────────────────────────────────────────────────
-    SkillManifest(
-        key="analyze_job_results",
-        skill_file="analyze_job_results/SKILL.md",
-        display_name="Job Results Browser",
-        description="Browse and analyze completed pipeline job outputs.",
-        category="analysis",
-        required_services=("analyzer",),
-        expected_inputs=("job_uuid",),
-        output_types=(OutputType.REPORT, OutputType.DATAFRAME, OutputType.PLOT),
-        sample_types=(SampleType.ANY,),
-        estimated_runtime="medium",
-    ),
-
-    # ── Download ──────────────────────────────────────────────────────
-    SkillManifest(
-        key="download_files",
-        skill_file="download_files/SKILL.md",
-        display_name="File Download",
-        description="Download files from ENCODE or arbitrary URLs.",
-        category="data_retrieval",
-        required_services=("encode",),
-        expected_inputs=("accession", "url"),
-        output_types=(OutputType.FILE,),
-        sample_types=(SampleType.ANY,),
-        estimated_runtime="variable",
-    ),
-
-    # ── Differential expression ───────────────────────────────────────
-    SkillManifest(
-        key="differential_expression",
-        skill_file="differential_expression/SKILL.md",
-        display_name="Differential Expression",
-        description="Run edgeR-based differential expression analysis.",
-        category="analysis",
-        required_services=("edgepython",),
-        expected_inputs=("counts_matrix", "sample_metadata", "design_formula", "contrast"),
-        output_types=(OutputType.DATAFRAME, OutputType.PLOT, OutputType.REPORT),
-        sample_types=(SampleType.BULK_RNA, SampleType.SINGLE_CELL, SampleType.CDNA),
-        estimated_runtime="medium",
-    ),
-
-    # ── Enrichment ────────────────────────────────────────────────────
-    SkillManifest(
-        key="enrichment_analysis",
-        skill_file="enrichment_analysis/SKILL.md",
-        display_name="GO / Pathway Enrichment",
-        description="Run GO, KEGG, or Reactome enrichment on gene lists.",
-        category="analysis",
-        required_services=("analyzer",),
-        expected_inputs=("gene_list", "organism"),
-        output_types=(OutputType.DATAFRAME, OutputType.REPORT, OutputType.ANNOTATION),
-        sample_types=(SampleType.ANY,),
-    ),
-
-    # ── XgenePy ───────────────────────────────────────────────────────
-    SkillManifest(
-        key="xgenepy_analysis",
-        skill_file="xgenepy_analysis/SKILL.md",
-        display_name="Cis/Trans Analysis",
-        description="Run XgenePy cis/trans regulatory modeling.",
-        category="analysis",
-        required_services=("xgenepy",),
-        expected_inputs=("counts_table", "sample_metadata", "strain_column"),
-        output_types=(OutputType.DATAFRAME, OutputType.PLOT, OutputType.REPORT),
-        sample_types=(SampleType.ANY,),
-        estimated_runtime="medium",
-    ),
-
-    # ── Remote execution ──────────────────────────────────────────────
-    SkillManifest(
-        key="remote_execution",
-        skill_file="remote_execution/SKILL.md",
-        display_name="Remote SLURM Execution",
-        description="Submit pipeline jobs to a remote SLURM cluster via SSH.",
-        category="execution",
-        required_services=("launchpad",),
-        expected_inputs=("ssh_profile", "slurm_resources", "sample_name", "reference_genome", "mode"),
-        output_types=(OutputType.JOB,),
-        sample_types=(SampleType.DNA, SampleType.RNA, SampleType.CDNA, SampleType.FIBER_SEQ),
-        estimated_runtime="slow",
-    ),
-
-    # ── Reconcile BAMs ────────────────────────────────────────────────
-    SkillManifest(
-        key="reconcile_bams",
-        skill_file="reconcile_bams/SKILL.md",
-        display_name="Reconcile BAMs",
-        description="Merge annotated BAM outputs across multiple workflows.",
-        category="execution",
-        required_services=("launchpad",),
-        expected_inputs=("workflow_uuids", "bam_paths"),
-        output_types=(OutputType.FILE,),
-        sample_types=(SampleType.ANY,),
-        estimated_runtime="medium",
-    ),
-)
+def _skill_dirs() -> list[Path]:
+    if not _SKILLS_ROOT.exists():
+        return []
+    return sorted(
+        child for child in _SKILLS_ROOT.iterdir()
+        if child.is_dir() and (child / "SKILL.md").exists()
+    )
 
 
-# ── Backwards-compatible SKILLS_REGISTRY dict ─────────────────────────────
-# Consumers that only need key → path can keep using this.
+def _manifest_path(skill_dir: Path) -> Path:
+    for filename in _MANIFEST_FILENAMES:
+        candidate = skill_dir / filename
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"Missing manifest.yaml for skill '{skill_dir.name}'")
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, str):
+        text = value.strip()
+        return (text,) if text else ()
+    if not isinstance(value, list):
+        raise TypeError(f"Expected list[str] or str, got {type(value).__name__}")
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
+def _output_types(value: Any) -> tuple[OutputType, ...]:
+    return tuple(OutputType(str(item)) for item in _string_tuple(value))
+
+
+def _sample_types(value: Any) -> tuple[SampleType, ...]:
+    if value in (None, ""):
+        return (SampleType.ANY,)
+    parsed = tuple(SampleType(str(item)) for item in _string_tuple(value))
+    return parsed or (SampleType.ANY,)
+
+
+def _tool_chain(value: Any) -> tuple[ToolCallSpec, ...]:
+    if value in (None, ""):
+        return ()
+    if not isinstance(value, list):
+        raise TypeError(f"Expected list[dict] for mcp_tool_chain, got {type(value).__name__}")
+
+    specs: list[ToolCallSpec] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise TypeError("Each mcp_tool_chain item must be a mapping")
+        source_key = str(item.get("source_key") or "").strip()
+        tool = str(item.get("tool") or "").strip()
+        if not source_key or not tool:
+            raise ValueError("Each mcp_tool_chain item needs non-empty source_key and tool")
+        specs.append(ToolCallSpec(source_key=source_key, tool=tool))
+    return tuple(specs)
+
+
+def _runtime(value: Any) -> RuntimeType:
+    runtime = str(value or "fast").strip()
+    if runtime not in _VALID_RUNTIMES:
+        raise ValueError(f"Invalid estimated_runtime: {runtime}")
+    return cast(RuntimeType, runtime)
+
+
+def _source(metadata: dict[str, Any]) -> tuple[str, SourceType]:
+    source_data = metadata.get("source")
+    if source_data in (None, ""):
+        return "", ""
+    if not isinstance(source_data, dict):
+        raise TypeError("source must be a mapping with 'key' and 'type'")
+
+    source_key = str(source_data.get("key") or "").strip()
+    source_type = str(source_data.get("type") or "").strip()
+    if source_type not in _VALID_SOURCE_TYPES:
+        raise ValueError(f"Invalid source.type: {source_type}")
+    if bool(source_key) != bool(source_type):
+        raise ValueError("source.key and source.type must either both be set or both be empty")
+    return source_key, cast(SourceType, source_type)
+
+
+def _load_skill_manifest(skill_dir: Path) -> SkillManifest:
+    manifest_path = _manifest_path(skill_dir)
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    metadata = raw or {}
+    if not isinstance(metadata, dict):
+        raise TypeError(f"Skill manifest must be a mapping: {manifest_path}")
+
+    key = str(metadata.get("key") or skill_dir.name).strip()
+    if key != skill_dir.name:
+        raise ValueError(f"Skill manifest key '{key}' must match folder name '{skill_dir.name}'")
+
+    skill_file = str(metadata.get("skill_file") or f"{skill_dir.name}/SKILL.md").strip()
+    source_key, source_type = _source(metadata)
+
+    return SkillManifest(
+        key=key,
+        skill_file=skill_file,
+        display_name=str(metadata.get("display_name") or "").strip(),
+        description=str(metadata.get("description") or "").strip(),
+        category=str(metadata.get("category") or "general").strip() or "general",
+        source_key=source_key,
+        source_type=source_type,
+        required_services=_string_tuple(metadata.get("required_services")),
+        expected_inputs=_string_tuple(metadata.get("expected_inputs")),
+        output_types=_output_types(metadata.get("output_types")),
+        sample_types=_sample_types(metadata.get("sample_types")),
+        estimated_runtime=_runtime(metadata.get("estimated_runtime")),
+        plan_type=str(metadata.get("plan_type") or "").strip(),
+        trigger_patterns=_string_tuple(metadata.get("trigger_patterns")),
+        slash_commands=_string_tuple(metadata.get("slash_commands")),
+        mcp_tool_chain=_tool_chain(metadata.get("mcp_tool_chain")),
+        depends_on_skills=_string_tuple(metadata.get("depends_on_skills")),
+        feeds_into=_string_tuple(metadata.get("feeds_into")),
+        classification_priority=int(metadata.get("classification_priority", 50)),
+        analysis_only=bool(metadata.get("analysis_only", False)),
+        switchable=bool(metadata.get("switchable", True)),
+    )
+
+
+def _load_skill_manifests() -> dict[str, SkillManifest]:
+    manifests: dict[str, SkillManifest] = {}
+    for skill_dir in _skill_dirs():
+        manifest = _load_skill_manifest(skill_dir)
+        manifests[manifest.key] = manifest
+    return manifests
+
+
+SKILL_MANIFESTS: dict[str, SkillManifest] = _load_skill_manifests()
+
+
+def _build_compiled_trigger_entries() -> tuple[tuple[SkillManifest, tuple[re.Pattern[str], ...]], ...]:
+    entries: list[tuple[SkillManifest, tuple[re.Pattern[str], ...]]] = []
+    for manifest in SKILL_MANIFESTS.values():
+        if not manifest.plan_type:
+            continue
+
+        patterns: list[re.Pattern[str]] = [
+            re.compile(rf"^{re.escape(command)}\b", re.I)
+            for command in manifest.slash_commands
+        ]
+        patterns.extend(re.compile(pattern, re.I) for pattern in manifest.trigger_patterns)
+        if patterns:
+            entries.append((manifest, tuple(patterns)))
+
+    entries.sort(key=lambda item: (item[0].classification_priority, item[0].key))
+    return tuple(entries)
+
+
+_COMPILED_TRIGGER_ENTRIES = _build_compiled_trigger_entries()
+
 
 SKILLS_REGISTRY: dict[str, str] = {
-    m.key: m.skill_file for m in SKILL_MANIFESTS.values()
+    manifest.key: manifest.skill_file for manifest in SKILL_MANIFESTS.values()
 }
 
 
-# ── Query helpers ─────────────────────────────────────────────────────────
-
 def get_skill_path(skill_key: str) -> str | None:
-    """Return the skill file relative path, or None if not registered."""
-    m = SKILL_MANIFESTS.get(skill_key)
-    return m.skill_file if m else None
+    manifest = SKILL_MANIFESTS.get(skill_key)
+    return manifest.skill_file if manifest else None
 
 
 def get_manifest(skill_key: str) -> SkillManifest | None:
-    """Return the full manifest for a skill, or None."""
     return SKILL_MANIFESTS.get(skill_key)
 
 
-def skills_for_service(service_key: str) -> list[SkillManifest]:
-    """Return all skills that require *service_key*."""
+def get_manifest_for_plan_type(plan_type: str) -> SkillManifest | None:
+    for manifest in SKILL_MANIFESTS.values():
+        if manifest.plan_type == plan_type:
+            return manifest
+    return None
+
+
+def compiled_triggers() -> tuple[tuple[SkillManifest, tuple[re.Pattern[str], ...]], ...]:
+    return _COMPILED_TRIGGER_ENTRIES
+
+
+def get_tool_call_spec(skill_key: str, tool_name: str) -> ToolCallSpec | None:
+    manifest = SKILL_MANIFESTS.get(skill_key)
+    if manifest is None:
+        return None
+    for spec in manifest.mcp_tool_chain:
+        if spec.tool == tool_name:
+            return spec
+    return None
+
+
+def skills_for_source(source_key: str, source_type: SourceType | None = None) -> list[SkillManifest]:
     return [
-        m for m in SKILL_MANIFESTS.values()
-        if service_key in m.required_services
+        manifest for manifest in SKILL_MANIFESTS.values()
+        if manifest.source_key == source_key
+        and (source_type is None or manifest.source_type == source_type)
+    ]
+
+
+def skills_for_service(service_key: str) -> list[SkillManifest]:
+    return [
+        manifest for manifest in SKILL_MANIFESTS.values()
+        if service_key in manifest.required_services
     ]
 
 
 def skills_for_sample_type(sample_type: SampleType) -> list[SkillManifest]:
-    """Return skills compatible with the given sample type."""
     return [
-        m for m in SKILL_MANIFESTS.values()
-        if SampleType.ANY in m.sample_types or sample_type in m.sample_types
+        manifest for manifest in SKILL_MANIFESTS.values()
+        if SampleType.ANY in manifest.sample_types or sample_type in manifest.sample_types
     ]
 
 
@@ -330,13 +299,8 @@ def check_service_availability(
     skill_key: str,
     available_services: set[str],
 ) -> tuple[bool, list[str]]:
-    """Check whether all services required by a skill are available.
-
-    Returns:
-        (ok, missing_services)
-    """
-    m = SKILL_MANIFESTS.get(skill_key)
-    if m is None:
+    manifest = SKILL_MANIFESTS.get(skill_key)
+    if manifest is None:
         return False, [f"unknown skill: {skill_key}"]
-    missing = [s for s in m.required_services if s not in available_services]
+    missing = [service for service in manifest.required_services if service not in available_services]
     return len(missing) == 0, missing

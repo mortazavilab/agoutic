@@ -1,0 +1,24 @@
+display_name: Reconcile BAMs
+description: Merge annotated BAM outputs across multiple workflows.
+category: execution
+source:
+  type: service
+  key: launchpad
+required_services:
+  - launchpad
+expected_inputs:
+  - workflow_uuids
+  - bam_paths
+output_types:
+  - file
+sample_types:
+  - any
+estimated_runtime: medium
+plan_type: reconcile_bams
+trigger_patterns:
+  - '(?:reconcile|merge|combine)\s+(?:the\s+)?(?:annotated\s+)?bams?'
+  - 'cross[-\s]?workflow\s+bam\s+reconcil'
+mcp_tool_chain:
+  - source_key: launchpad
+    tool: run_allowlisted_script
+classification_priority: 12

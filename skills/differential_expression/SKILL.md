@@ -2,7 +2,7 @@
 
 ## Description
 
-This skill performs differential expression (DE) analysis using edgePython — a Python implementation of edgeR for RNA-seq count data. It supports bulk DE, single-cell DE (NEBULA-LN), differential transcript usage (DTU), ChIP-seq enrichment testing, and visualization.
+This skill performs differential expression (DE) analysis using edgePython for RNA-seq count data. It supports bulk DE, single-cell DE (NEBULA-LN), differential transcript usage (DTU), ChIP-seq enrichment testing, and visualization.
 
 ## Skill Scope & Routing
 

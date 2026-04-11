@@ -200,14 +200,16 @@ def _find_related_workflow_plan(agent_block: dict, all_blocks: list):
     if not isinstance(agent_block, dict):
         return None
 
+    payload = agent_block.get("payload", {}) if isinstance(agent_block.get("payload"), dict) else {}
     block_id = agent_block.get("id")
     project_id = agent_block.get("project_id")
-    markdown = str(agent_block.get("payload", {}).get("markdown") or "")
+    markdown = str(payload.get("markdown") or "")
+    workflow_plan_block_id = str(payload.get("workflow_plan_block_id") or "").strip()
 
     import re as _re
 
-    title_match = _re.search(r"^Plan:\s*(.+)$", markdown, _re.MULTILINE)
-    target_title = title_match.group(1).strip() if title_match else ""
+    title_match = _re.search(r"^\s{0,3}(?:#{1,6}\s*)?Plan:\s*(.+?)\s*$", markdown, _re.MULTILINE)
+    target_title = " ".join(title_match.group(1).split()) if title_match else ""
 
     block_index = None
     for idx, candidate in enumerate(all_blocks):
@@ -217,7 +219,7 @@ def _find_related_workflow_plan(agent_block: dict, all_blocks: list):
     if block_index is None:
         return None
 
-    fallback = None
+    prior_workflows = []
     for candidate in reversed(all_blocks[:block_index]):
         if not isinstance(candidate, dict):
             continue
@@ -225,10 +227,16 @@ def _find_related_workflow_plan(agent_block: dict, all_blocks: list):
             continue
         if project_id and candidate.get("project_id") != project_id:
             continue
-        payload = candidate.get("payload", {})
-        candidate_title = str(payload.get("title") or payload.get("summary") or "").strip()
+        prior_workflows.append(candidate)
+        if workflow_plan_block_id and candidate.get("id") == workflow_plan_block_id:
+            return candidate
+
+    if not target_title:
+        return None
+
+    for candidate in prior_workflows:
+        candidate_payload = candidate.get("payload", {}) if isinstance(candidate.get("payload"), dict) else {}
+        candidate_title = " ".join(str(candidate_payload.get("title") or candidate_payload.get("summary") or "").split())
         if target_title and candidate_title == target_title:
             return candidate
-        if fallback is None:
-            fallback = candidate
-    return fallback
+    return None

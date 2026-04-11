@@ -7,8 +7,8 @@ See [README.md](README.md), [CONFIGURATION.md](CONFIGURATION.md), and
 ## Table of Contents
 
 1. [Path Configuration](#two-root-variables)
-2. [Workflow Browsing Commands](#workflow-browsing-commands)
-3. [Memory Slash Commands](#memory-slash-commands)
+2. [Slash Commands](#slash-commands)
+3. [Workflow Browsing Commands](#workflow-browsing-commands)
 4. [Natural Language Memory](#natural-language-memory)
 5. [Dataframe Quick Commands](#dataframe-quick-commands)
 6. [Chat Shortcuts](#chat-shortcuts)
@@ -153,6 +153,69 @@ python -c "from launchpad.config import AGOUTIC_CODE, AGOUTIC_DATA; print(f'{AGO
 mkdir -p $AGOUTIC_DATA/database $AGOUTIC_DATA/launchpad_work $AGOUTIC_DATA/launchpad_logs
 ```
 
+## Slash Commands
+
+Slash commands currently fall into two buckets:
+
+- **Deterministic quick exits** — skill commands, workflow commands, and all memory commands are handled by the backend without calling the LLM.
+- **Planner-routed commands** — `/de` enters the differential-expression planning flow and can still ask follow-up questions when required inputs are missing.
+
+### Skill Commands
+
+| Command | Syntax | Description | Aliases |
+|---|---|---|---|
+| `/skills` | `/skills` | List all registered skills and show which one is active | `/list-skills` |
+| `/skill` | `/skill differential_expression` | Show the manifest-backed description of a skill | `/describe-skill <skill_key>` |
+| `/use-skill` | `/use-skill IGVF_Search` | Switch the active skill for subsequent turns | `/switch-skill <skill_key>` |
+
+### Workflow Commands
+
+| Command | Syntax | Description |
+|---|---|---|
+| `/use` | `/use workflow7` | Switch the active workflow context for follow-up browsing and analysis |
+| `/rerun` | `/rerun workflow7` | Rerun the matching workflow/job in the current project |
+| `/rename` | `/rename workflow7 treated-r1` | Rename the matching workflow/job |
+| `/delete` | `/delete workflow7` | Delete the matching workflow/job |
+
+Workflow references can match a workflow folder, workflow alias, workflow display name, or sample name.
+
+### Differential Expression Slash Command
+
+| Command | Syntax | Description |
+|---|---|---|
+| `/de` | `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2` | Run edgePython differential expression from the current workflow abundance context with explicit sample groups |
+
+Use natural-language DE requests when you want to point at a dataframe or counts file, or when you want AGOUTIC to clarify missing groups before running the plan.
+
+### Memory Slash Commands
+
+All memory slash commands are processed by the backend without calling the LLM — zero token cost.
+
+| Command | Syntax | Description |
+|---------|--------|--------------|
+| `/remember` | `/remember <text>` | Save a project-scoped memory |
+| `/remember-global` | `/remember-global <text>` | Save a user-global memory |
+| `/remember-df` | `/remember-df DF5` or `/remember-df DF5 as c2c12DF` | Save a conversation dataframe; optional user-given alias |
+| `/forget` | `/forget <text>` or `/forget #<id>` | Soft-delete by content match or ID prefix |
+| `/memories` | `/memories` or `/memories --global` | List active memories (project + global, or global only) |
+| `/pin` | `/pin #<id>` | Pin a memory (surfaced first in `[MEMORY]` context) |
+| `/unpin` | `/unpin #<id>` | Unpin a memory |
+| `/restore` | `/restore #<id>` | Restore a soft-deleted memory |
+| `/annotate` | `/annotate <sample> <key>=<value>...` | Annotate a sample with key/value metadata |
+| `/search-memories` | `/search-memories <query>` | Full-text search across memory content |
+| `/upgrade-to-global` | `/upgrade-to-global #<id>` | Promote a project-scoped memory to global scope |
+
+Commands with multi-word names also accept underscore variants such as `/remember_global`, `/remember_df`, and `/upgrade_global`.
+
+**Aliases**: `/make-global` and `/upgrade-global` are equivalent to `/upgrade-to-global`.
+
+Memory IDs in list output are 8-character prefixes (e.g. `a1b2c3d4`).
+Use them with `#` in pin, forget, restore, and upgrade commands.
+
+See [docs/MEMORY.md](docs/MEMORY.md) for the full architecture reference.
+
+---
+
 ## Workflow Browsing Commands
 
 Once a Dogme job completes, you can browse and parse result files via the chat interface:
@@ -172,33 +235,6 @@ Once a Dogme job completes, you can browse and parse result files via the chat i
 These commands are handled by Cortex's safety net (`_auto_generate_data_calls`) which generates `list_job_files`, `find_file`, and `parse_csv_file` Analyzer MCP tool calls automatically.
 
 **Tip:** Use `list project files` to always target the project root. If `list files in <folder>` can't find the folder, it shows suggestions for alternative commands.
-
----
-
-## Memory Slash Commands
-
-All memory slash commands are processed by the backend without calling the LLM — zero token cost.
-
-| Command | Syntax | Description |
-|---------|--------|--------------|
-| `/remember` | `/remember <text>` | Save a project-scoped memory |
-| `/remember-global` | `/remember-global <text>` | Save a user-global memory |
-| `/remember-df` | `/remember-df DF5` or `/remember-df DF5 as c2c12DF` | Save a conversation dataframe; optional user-given alias |
-| `/forget` | `/forget <text>` or `/forget #<id>` | Soft-delete by content match or ID prefix |
-| `/memories` | `/memories` or `/memories --global` | List active memories (project + global, or global only) |
-| `/pin` | `/pin #<id>` | Pin a memory (surfaced first in `[MEMORY]` context) |
-| `/unpin` | `/unpin #<id>` | Unpin a memory |
-| `/restore` | `/restore #<id>` | Restore a soft-deleted memory |
-| `/annotate` | `/annotate <sample> <key>=<value>...` | Annotate a sample with key/value metadata |
-| `/search-memories` | `/search-memories <query>` | Full-text search across memory content |
-| `/upgrade-to-global` | `/upgrade-to-global #<id>` | Promote a project-scoped memory to global scope |
-
-**Aliases**: `/make-global` and `/upgrade-global` are equivalent to `/upgrade-to-global`.
-
-Memory IDs in list output are 8-character prefixes (e.g. `a1b2c3d4`).
-Use them with `#` in pin, forget, restore, and upgrade commands.
-
-See [docs/MEMORY.md](docs/MEMORY.md) for the full architecture reference.
 
 ---
 

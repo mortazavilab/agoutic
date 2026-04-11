@@ -220,7 +220,7 @@ To add a new data source (e.g., 4DN, GEO):
        "emoji": "🔬",
        "table_columns": [...],
        "count_field": "total",
-       "skills": ["4DN_Search"],
+       "skills": [],  # auto-populated from skills/<skill_key>/manifest.yaml
        "fallback_patterns": [...]
    }
    ```
@@ -229,7 +229,14 @@ To add a new data source (e.g., 4DN, GEO):
 
 3. **Startup** — Add port and process to `agoutic_servers.sh`
 
-4. **Skill file** — Create `skills/4DN_Search/SKILL.md` with `[[DATA_CALL: consortium=4dn, tool=..., ...]]` tags
+4. **Skill folder** — Create `skills/4DN_Search/SKILL.md` and `skills/4DN_Search/manifest.yaml`
+
+5. **Manifest source mapping** — Set this in `skills/4DN_Search/manifest.yaml`:
+     ```yaml
+     source:
+         type: consortium
+         key: 4dn
+     ```
 
 5. **No code changes needed** in `cortex/app.py` or `cortex/agent_engine.py` — the dispatch is fully registry-driven.
 

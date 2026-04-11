@@ -27,6 +27,9 @@ def render_sidebar(
             if st.button("help", key="help_prompt_help", width="stretch"):
                 st.session_state["_help_prompt"] = "help"
                 st.rerun()
+            if st.button("show commands", key="help_prompt_commands", width="stretch"):
+                st.session_state["_help_prompt"] = "show commands"
+                st.rerun()
             if st.button("what can you do", key="help_prompt_capabilities", width="stretch"):
                 st.session_state["_help_prompt"] = "what can you do"
                 st.rerun()
@@ -36,6 +39,14 @@ def render_sidebar(
             if st.button("how do I use remote slurm", key="help_prompt_slurm", width="stretch"):
                 st.session_state["_help_prompt"] = "how do i use remote slurm"
                 st.rerun()
+            st.caption("**Skills**")
+            if st.button("/skills", key="help_prompt_skills", width="stretch"):
+                st.session_state["_help_prompt"] = "/skills"
+                st.rerun()
+            st.caption("`/skill <skill_key>`  ·  `/use-skill <skill_key>`")
+            st.caption("**Workflow Slash Commands**")
+            st.caption("`/use <workflow>`  ·  `/rerun <workflow>`")
+            st.caption("`/rename <workflow> <new_name>`  ·  `/delete <workflow>`")
             st.caption("**Dataframes**")
             if st.button("list dfs", key="help_prompt_list_dfs", width="stretch"):
                 st.session_state["_help_prompt"] = "list dfs"
@@ -59,8 +70,9 @@ def render_sidebar(
                 st.rerun()
             st.caption("`/remember <text>`  ·  `/remember-global <text>`")
             st.caption("`/remember-df DF5 as myDF`  ·  `/forget #<id>`")
-            st.caption("`/pin #<id>`  ·  `/annotate <sample> k=v`")
-            st.caption("`/search-memories <query>`  ·  `/upgrade-to-global #<id>`")
+            st.caption("`/pin #<id>`  ·  `/unpin #<id>`  ·  `/restore #<id>`")
+            st.caption("`/annotate <sample> k=v`  ·  `/search-memories <query>`")
+            st.caption("`/upgrade-to-global #<id>`  ·  `/make-global #<id>`")
             st.caption("**Shortcuts**")
             if st.button("try again", key="help_prompt_retry", width="stretch"):
                 st.session_state["_help_prompt"] = "try again"

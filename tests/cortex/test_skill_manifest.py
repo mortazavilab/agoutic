@@ -1,5 +1,7 @@
 """Tests for cortex.skill_manifest — declarative skill capability manifest."""
 
+from pathlib import Path
+
 import pytest
 
 from cortex.skill_manifest import (
@@ -8,10 +10,13 @@ from cortex.skill_manifest import (
     OutputType,
     SampleType,
     SkillManifest,
+    ToolCallSpec,
     check_service_availability,
     get_manifest,
+    get_manifest_for_plan_type,
     get_skill_path,
     skills_for_sample_type,
+    skills_for_source,
     skills_for_service,
 )
 
@@ -21,8 +26,14 @@ from cortex.skill_manifest import (
 # ---------------------------------------------------------------------------
 
 class TestRegistryIntegrity:
-    def test_all_14_skills_registered(self):
-        assert len(SKILL_MANIFESTS) == 14
+    def test_all_15_skills_registered(self):
+        assert len(SKILL_MANIFESTS) == 15
+
+    def test_every_skill_has_folder_local_yaml_manifest(self):
+        skills_root = Path(__file__).resolve().parents[2] / "skills"
+
+        for key in SKILL_MANIFESTS:
+            assert (skills_root / key / "manifest.yaml").exists(), f"{key}: missing manifest.yaml"
 
     def test_compat_dict_matches_manifests(self):
         """SKILLS_REGISTRY compat dict has same keys and paths."""
@@ -63,6 +74,13 @@ class TestLookups:
     def test_get_skill_path_missing(self):
         assert get_skill_path("nope") is None
 
+    def test_manifest_source_metadata_loaded(self):
+        manifest = get_manifest("differential_expression")
+
+        assert manifest is not None
+        assert manifest.source_key == "edgepython"
+        assert manifest.source_type == "service"
+
 
 # ---------------------------------------------------------------------------
 # Filter queries
@@ -78,6 +96,19 @@ class TestFilters:
 
     def test_skills_for_service_empty(self):
         assert skills_for_service("nonexistent") == []
+
+    def test_skills_for_source_service(self):
+        results = skills_for_source("edgepython", "service")
+        keys = {m.key for m in results}
+
+        assert "differential_expression" in keys
+        assert "enrichment_analysis" in keys
+
+    def test_skills_for_source_consortium(self):
+        results = skills_for_source("igvf", "consortium")
+        keys = {m.key for m in results}
+
+        assert keys == {"IGVF_Search"}
 
     def test_skills_for_sample_type_dna(self):
         results = skills_for_sample_type(SampleType.DNA)
@@ -147,3 +178,45 @@ class TestManifestFields:
         valid = {"fast", "medium", "slow", "variable"}
         for m in SKILL_MANIFESTS.values():
             assert m.estimated_runtime in valid, f"{m.key}: bad runtime"
+
+    def test_new_planning_fields_default_safely(self):
+        manifest = SkillManifest(key="demo", skill_file="demo/SKILL.md")
+
+        assert manifest.plan_type == ""
+        assert manifest.trigger_patterns == ()
+        assert manifest.slash_commands == ()
+        assert manifest.mcp_tool_chain == ()
+        assert manifest.depends_on_skills == ()
+        assert manifest.feeds_into == ()
+        assert manifest.classification_priority == 50
+        assert manifest.source_key == ""
+        assert manifest.source_type == ""
+
+    def test_tool_call_spec_is_hashable(self):
+        spec = ToolCallSpec(source_key="edgepython", tool="load_data")
+        assert spec == ToolCallSpec(source_key="edgepython", tool="load_data")
+        assert {spec} == {ToolCallSpec(source_key="edgepython", tool="load_data")}
+
+    def test_lookup_manifest_for_plan_type(self):
+        manifest = get_manifest_for_plan_type("run_de_pipeline")
+
+        assert manifest is not None
+        assert manifest.key == "differential_expression"
+
+    def test_differential_expression_manifest_declares_planning_metadata(self):
+        manifest = get_manifest("differential_expression")
+
+        assert manifest.plan_type == "run_de_pipeline"
+        assert "/de" in manifest.slash_commands
+        assert manifest.trigger_patterns
+        assert manifest.mcp_tool_chain[:3] == (
+            ToolCallSpec(source_key="edgepython", tool="load_data"),
+            ToolCallSpec(source_key="edgepython", tool="filter_genes"),
+            ToolCallSpec(source_key="edgepython", tool="normalize"),
+        )
+
+    def test_enrichment_manifest_requires_edgepython_service(self):
+        manifest = get_manifest("enrichment_analysis")
+
+        assert manifest.plan_type == "run_enrichment"
+        assert manifest.required_services == ("edgepython",)

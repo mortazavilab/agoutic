@@ -86,6 +86,8 @@ def _is_help_intent(message: str) -> bool:
         "help",
         "what can you do",
         "show commands",
+        "show slash commands",
+        "what slash commands are available",
         "how do i run a workflow",
         "how do i use remote slurm",
         "how do i use dataframes",
@@ -110,6 +112,12 @@ def _render_local_help_response() -> None:
             st.markdown("- show job status and next steps")
             st.markdown("- parse results for run UUID")
             st.markdown("- compare reconcile abundance samples with edgePython")
+        with st.expander("Slash Commands", expanded=False):
+            st.markdown("- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`")
+            st.markdown("- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`")
+            st.markdown("- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`")
+            st.markdown("- Memory: `/remember`, `/remember-global`, `/remember-df`, `/memories`, `/forget`, `/pin`, `/unpin`, `/restore`, `/annotate`, `/search-memories`, `/upgrade-to-global`")
+            st.markdown("- Hyphenated memory commands also accept underscore variants such as `/remember_global`, `/remember_df`, and `/upgrade_global`")
         with st.expander("Execution Modes", expanded=False):
             st.markdown("- Local: run on AGOUTIC host")
             st.markdown("- SLURM: submit via remote profile and queue")

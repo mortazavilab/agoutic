@@ -27,7 +27,9 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from common.logging_config import get_logger
+from cortex.plan_composer import compose_plan_from_manifest
 from cortex.plan_validation import PlanValidationError, validate_plan
+from cortex.skill_manifest import check_service_availability, get_manifest_for_plan_type
 
 # ---------------------------------------------------------------------------
 # Imports from extracted submodules
@@ -67,6 +69,98 @@ if TYPE_CHECKING:
     from cortex.schemas import ConversationState
 
 logger = get_logger(__name__)
+
+
+_EXPECTED_INPUT_PARAM_ALIASES: dict[str, tuple[str, ...]] = {
+    "counts_matrix": ("counts_matrix", "counts_path", "df_id", "work_dir"),
+    "sample_metadata": ("sample_metadata", "sample_info_path", "group_a_samples", "group_b_samples", "df_id"),
+    "design_formula": ("design_formula", "method", "group_column", "group_a_label", "group_b_label"),
+    "contrast": ("contrast", "group_a_label", "group_b_label"),
+    "gene_list": ("gene_list", "direction", "result_name", "work_dir"),
+    "organism": ("organism", "species", "genome", "work_dir"),
+    "counts_table": ("counts_table", "counts_path"),
+    "strain_column": ("strain_column", "group_column"),
+}
+
+
+def _configured_service_keys() -> set[str]:
+    from atlas.config import CONSORTIUM_REGISTRY
+    from cortex.config import SERVICE_REGISTRY
+
+    return set(SERVICE_REGISTRY) | set(CONSORTIUM_REGISTRY)
+
+
+def _has_expected_input_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) > 0
+    return True
+
+
+def _build_manifest_input_warnings(plan_type: str, params: dict[str, Any]) -> list[str]:
+    manifest = get_manifest_for_plan_type(plan_type)
+    if manifest is None:
+        return []
+
+    missing_inputs: list[str] = []
+    for expected_input in manifest.expected_inputs:
+        candidate_keys = _EXPECTED_INPUT_PARAM_ALIASES.get(expected_input, (expected_input,))
+        if any(_has_expected_input_value(params.get(key)) for key in candidate_keys):
+            continue
+        missing_inputs.append(expected_input)
+
+    if not missing_inputs:
+        return []
+    return [
+        f"Missing expected inputs for {manifest.display_name or manifest.key}: {', '.join(missing_inputs)}"
+    ]
+
+
+def _apply_manifest_planning_metadata(
+    plan: dict[str, Any] | None,
+    *,
+    plan_type: str,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(plan, dict):
+        return plan
+
+    manifest = get_manifest_for_plan_type(plan_type)
+    if manifest is None:
+        return plan
+
+    plan.setdefault("planning_skill", manifest.key)
+    plan.setdefault("estimated_runtime", manifest.estimated_runtime)
+    plan.setdefault("estimated_runtime_summary", f"Estimated runtime: {manifest.estimated_runtime}")
+
+    available_services = _configured_service_keys()
+    services_ok, missing_services = check_service_availability(manifest.key, available_services)
+    if "service_warnings" not in plan:
+        if services_ok:
+            plan["service_warnings"] = []
+        else:
+            plan["service_warnings"] = [
+                f"{manifest.display_name or manifest.key} requires unavailable service(s): {', '.join(missing_services)}"
+            ]
+
+    input_warnings = _build_manifest_input_warnings(plan_type, params)
+    if input_warnings and "input_warnings" not in plan:
+        plan["input_warnings"] = input_warnings
+
+    for step in plan.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        tool_calls = step.get("tool_calls") if isinstance(step.get("tool_calls"), list) else []
+        if any(
+            isinstance(tool_call, dict) and tool_call.get("source_key") in manifest.required_services
+            for tool_call in tool_calls
+        ):
+            step.setdefault("skill_key", manifest.key)
+
+    return plan
 
 
 # ---------------------------------------------------------------------------
@@ -501,8 +595,9 @@ def generate_plan(
     """
     Generate a structured plan payload for a MULTI_STEP request.
 
-    1. Try deterministic template matching first.
-    2. Fall back to LLM plan() call if no template matches.
+    1. Try manifest-driven composition for supported deterministic flows.
+    2. Fall back to deterministic templates when composition is unavailable.
+    3. Fall back to LLM plan() call if no template matches.
     3. Return None if planning fails (caller falls back to existing flow).
     """
     plan_type = _detect_plan_type(message)
@@ -527,29 +622,93 @@ def generate_plan(
         logger.info("Hybrid bridge returned no plan", plan_type=plan_type)
         return None
 
+    manifest = get_manifest_for_plan_type(plan_type) if plan_type else None
+    if manifest is not None:
+        try:
+            manifest_plan = compose_plan_from_manifest(
+                manifest.key,
+                params,
+                _configured_service_keys(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Manifest plan composition failed",
+                plan_type=plan_type,
+                skill_key=manifest.key,
+                error=str(exc),
+            )
+        else:
+            if manifest_plan is not None:
+                manifest_plan = _apply_manifest_planning_metadata(
+                    manifest_plan,
+                    plan_type=plan_type,
+                    params=params,
+                )
+                finalized_manifest_plan = _finalize_plan(manifest_plan, conv_state)
+                if finalized_manifest_plan is not None:
+                    finalized_manifest_plan["planner_metadata"] = {
+                        "planning_mode": "manifest",
+                        "hybrid_attempted": False,
+                        "hybrid_succeeded": False,
+                        "hybrid_failed": False,
+                        "deterministic_fallback_used": False,
+                        "reason_code": "",
+                    }
+                    logger.info(
+                        "Generated plan from manifest",
+                        plan_type=plan_type,
+                        skill_key=manifest.key,
+                        steps=len(finalized_manifest_plan.get("steps", [])),
+                    )
+                    return finalized_manifest_plan
+
     # 1. Deterministic templates
     if plan_type == "run_de_pipeline":
-        plan = _template_run_de_pipeline(params)
+        plan = _apply_manifest_planning_metadata(
+            _template_run_de_pipeline(params),
+            plan_type=plan_type,
+            params=params,
+        )
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
     if plan_type == "run_enrichment":
-        plan = _template_run_enrichment(params)
+        plan = _apply_manifest_planning_metadata(
+            _template_run_enrichment(params),
+            plan_type=plan_type,
+            params=params,
+        )
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
     if plan_type == "run_xgenepy_analysis":
-        plan = _template_run_xgenepy_analysis(params)
+        plan = _apply_manifest_planning_metadata(
+            _template_run_xgenepy_analysis(params),
+            plan_type=plan_type,
+            params=params,
+        )
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
     if plan_type == "remote_stage_workflow":
-        plan = _template_remote_stage_workflow(params)
+        plan = _apply_manifest_planning_metadata(
+            _template_remote_stage_workflow(params),
+            plan_type=plan_type,
+            params=params,
+        )
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
     if plan_type == "run_workflow":
-        plan = _template_run_workflow(params)
+        plan = _apply_manifest_planning_metadata(
+            _template_run_workflow(params),
+            plan_type=plan_type,
+            params=params,
+        )
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
     if plan_type == "reconcile_bams":
-        plan = _template_reconcile_bams(params)
+        plan = _apply_manifest_planning_metadata(
+            _template_reconcile_bams(params),
+            plan_type=plan_type,
+            params=params,
+        )
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
 

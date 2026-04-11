@@ -316,7 +316,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Error-Handling Playbook** — deterministic failure rules in the system prompt + structured `[TOOL_ERROR]` blocks + single-retry for transient failures
   - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
   - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
-  - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that decomposes complex requests into deterministic execution plans with dependency tracking, approval gates, and automatic replanning on failure. 9 plan templates covering: run workflow, compare samples, download+analyze, summarize results, run DE pipeline, run enrichment, parse+plot+interpret, compare workflows, and search+compare to local data. CHECK_EXISTING guards skip expensive operations when results already exist.
+  - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that now runs through manifest-first classification and composition for core deterministic flows. `SkillManifest` metadata supplies planner triggers, expected inputs, required services, runtime hints, and MCP tool chains; `plan_composer.py` builds DE, enrichment, and XgenePy plans from that metadata; legacy templates remain as deterministic fallback for unmigrated flows; and CHECK_EXISTING guards still skip expensive operations when results already exist.
   - **Gene Annotation & ID Translation** — offline Ensembl gene ID ↔ symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. Bidirectional `lookup_gene` tool answers "what is the Ensembl ID for TP53?" style queries. Pre-LLM auto-skill detection routes gene questions to the correct skill from any context (including Welcome). MCP tools: `annotate_genes` (edgePython, DE-stateful), `translate_gene_ids` and `lookup_gene` (Analyzer).
   - **Robust DATA_CALL tag parsing** — bracket-aware parameter parser handles JSON arrays inside DATA_CALL tags (e.g. `gene_symbols=["TP53", "BRCA1"]`). Mistral-native `[TOOL_CALLS]DATA_CALL:` format is auto-normalized to standard `[[DATA_CALL:...]]` tags.
   - **Skill-defined plan chains** — skill authors can declare multi-step workflows in skill Markdown files under a `## Plan Chains` section. A single message like "get K562 experiments and make a plot by assay type" is detected at classify-time and produces both a data search and a visualization. Trigger phrases support multi-phrasing (AND/OR keyword groups) for flexible matching. See `SKILLS.md` for the full authoring guide.
@@ -415,7 +415,10 @@ agoutic/
 │   ├── README.md                # Cortex documentation
 │   ├── app.py                   # FastAPI application
 │   ├── agent_engine.py          # AI agent orchestration
-│   ├── planner.py               # Request classifier + plan templates
+│   ├── skill_manifest.py        # Skill capability registry for routing + planning
+│   ├── plan_classifier.py       # Manifest-first request classification
+│   ├── plan_composer.py         # Manifest-driven deterministic plan builder
+│   ├── planner.py               # Planner orchestration + fallback selection
 │   ├── plan_executor.py         # Deterministic step execution engine
 │   ├── plan_replanner.py        # Failure recovery + plan adjustment
 │   ├── dependencies.py          # Auth gates (require_project_access, require_run_uuid_access)

@@ -1,24 +1,52 @@
 # Skills System
 
-The Agoutic skills system lets you teach the agent new workflows by writing
-Markdown files.  Each skill defines scope, routing rules, tool usage, and
-optional multi-step plan chains — all of which the LLM reads at runtime to
-decide how to handle a user request.
+The Agoutic skills system lets you teach the agent new workflows by keeping
+both prompt guidance and planner metadata inside each skill folder. Each skill
+now has two layers:
+
+- `skills/<skill_key>/SKILL.md` for LLM-facing scope, routing, tags, and plan-chain guidance.
+- `skills/<skill_key>/manifest.yaml` for planner-facing routing triggers, source mapping,
+  expected inputs, required services, runtime hints, MCP tool chains, and dependency metadata.
+
+The LLM reads the Markdown at runtime. The deterministic planner and executor
+read the YAML manifest metadata through the loader in `cortex/skill_manifest.py`.
 
 ---
 
 ## How Skills Work
 
-1. **Registry** — `cortex/config.py` maps a skill key to a relative
-  `skills/<skill_key>/SKILL.md` path via `SKILLS_REGISTRY`:
+1. **Registry** — the authoritative skill registry lives in each
+  `skills/<skill_key>/manifest.yaml`. `cortex/skill_manifest.py` discovers those
+  YAML files, loads them into `SkillManifest` objects, and `cortex/config.py`
+  re-exports the backward-compatible `SKILLS_REGISTRY` mapping for
+  `skills/<skill_key>/SKILL.md` path lookup:
+
+   ```yaml
+   # skills/differential_expression/manifest.yaml
+   display_name: Differential Expression
+   source:
+     type: service
+     key: edgepython
+   plan_type: run_de_pipeline
+   required_services:
+     - edgepython
+   trigger_patterns:
+     - '(?:differential\s+expression|DE)\s+(?:on|for|analysis)'
+   mcp_tool_chain:
+     - source_key: edgepython
+       tool: load_data
+     - source_key: edgepython
+       tool: filter_genes
+   ```
 
    ```python
-   SKILLS_REGISTRY = {
-       "welcome": "welcome/SKILL.md",
-       "ENCODE_Search": "ENCODE_Search/SKILL.md",
+     SKILLS_REGISTRY = {
+       "differential_expression": "differential_expression/SKILL.md",
        ...
-   }
+     }
    ```
+
+   No manual registry edit in `cortex/` is required when adding or updating an existing skill.
 
 2. **Loading** — When a skill becomes active, `AgentEngine._load_skill_text()`
    reads the Markdown and injects it into the first-pass LLM system prompt.
@@ -40,9 +68,72 @@ decide how to handle a user request.
    sample=…]` for Dogme skills, or previous DataFrame rows for ENCODE
    follow-up queries).
 
+5. **Manifest-driven planning** — `cortex/plan_classifier.py` checks the
+  manifest trigger metadata first, `cortex/plan_composer.py` composes
+  deterministic plans for supported flows from `mcp_tool_chain` and related
+  manifest fields, and `cortex/plan_executor.py` uses the manifest service
+  requirements to block steps before MCP dispatch when a required backend is
+  unavailable.
+
 ---
 
-## Skill File Structure
+## Skill Capability Manifests
+
+`manifest.yaml` is the planner-facing contract for each skill. It keeps
+Markdown prompt guidance separate from deterministic planning metadata while
+keeping both in the same skill directory.
+
+### Key Manifest Fields
+
+| Field | Purpose |
+|------|---------|
+| `plan_type` | Planner route key, e.g. `run_de_pipeline` |
+| `source.type` / `source.key` | Which consortium or internal service owns the skill |
+| `trigger_patterns` / `slash_commands` | Manifest-first request classification |
+| `required_services` | Service-availability checks and executor gating |
+| `expected_inputs` | Planner warnings when a request is under-specified |
+| `estimated_runtime` | Runtime hint surfaced in plan previews |
+| `mcp_tool_chain` | Ordered MCP tool sequence for manifest-driven composition |
+| `depends_on_skills` / `feeds_into` | Skill-level dependency hints for composition |
+
+### Current Division of Responsibility
+
+- Markdown skill files control LLM behavior, tool/tag instructions, and plan chains.
+- YAML skill manifests control deterministic planning, routing, runtime warnings, service gating, and source ownership.
+- Plan chains remain separate from manifest composition: chains are author-authored LLM workflows,
+  while manifests drive deterministic planner/executor behavior.
+
+For differential expression, the backend and service name are edgePython.
+
+## Skill Slash Commands
+
+These commands are handled deterministically before the LLM runs:
+
+- `/skills` — list all registered skills
+- `/skill <skill_key>` — show the manifest-backed description of a skill
+- `/use-skill <skill_key>` — set the active skill for subsequent turns
+
+Natural-language equivalents are also supported when phrased explicitly as skill-management requests, for example:
+
+- `what skills are available?`
+- `tell me about the differential expression skill`
+- `switch to the IGVF Search skill`
+
+These commands and English-query equivalents read the same manifest metadata that powers skill routing and planning.
+
+---
+
+## Skill Folder Structure
+
+Every skill directory should contain both of these files:
+
+```text
+skills/<skill_key>/
+├── SKILL.md
+└── manifest.yaml
+```
+
+`SKILL.md` is for the LLM. `manifest.yaml` is for deterministic runtime behavior.
 
 Every skill Markdown file should include these standard sections.  Not all
 are required — include what is relevant to your skill.
@@ -54,6 +145,7 @@ are required — include what is relevant to your skill.
 ```
 
 The key in parentheses must match the `SKILLS_REGISTRY` key exactly.
+In practice, that key is the skill folder name discovered from `skills/<skill_key>/manifest.yaml`.
 
 ### Description
 
@@ -304,6 +396,8 @@ live in one place and be included by multiple skills.
 | `enrichment_analysis` | enrichment_analysis/SKILL.md | GO/pathway enrichment |
 | `remote_execution` | remote_execution/SKILL.md | Remote SLURM execution |
 
+Every registered skill above is auto-discovered from its folder-local `manifest.yaml`.
+
 **Shared references** (not registered as skills, but auto-included):
 - `shared/SKILL_ROUTING_PATTERN.md` — Standard routing section template
 - `shared/DOGME_QUICK_WORKFLOW_GUIDE.md` — Shared output file parsing guide
@@ -312,27 +406,41 @@ live in one place and be included by multiple skills.
 
 ## Adding a New Skill
 
-1. **Create the Markdown file** at `skills/<skill_key>/SKILL.md` following the structure above.
-   At minimum include: header, description, scope & routing, and plan logic.
+1. **Create the folder** at `skills/<skill_key>/`.
 
-2. **Register it** in `cortex/config.py`:
+2. **Create `SKILL.md`** following the structure above.
+  At minimum include: header, description, scope & routing, and plan logic.
 
-   ```python
-   SKILLS_REGISTRY = {
-       ...
-       "my_new_skill": "my_new_skill/SKILL.md",
-   }
-   ```
+3. **Create `manifest.yaml`** in the same folder. For example:
 
-3. **Add routing rules** — update other skills' "Does NOT Handle" sections
+  ```yaml
+  display_name: My New Skill
+  description: Brief planner-facing summary.
+  category: analysis
+  source:
+    type: service
+    key: analyzer
+  required_services:
+    - analyzer
+  expected_inputs:
+    - work_dir
+  output_types:
+    - report
+  sample_types:
+    - any
+  ```
+
+4. **Add routing rules** — update other skills' "Does NOT Handle" sections
    to route relevant queries to your new skill.  Follow the pattern in
   `skills/shared/SKILL_ROUTING_PATTERN.md`.
 
-4. **(Optional) Add plan chains** — if the skill supports multi-step
+5. **(Optional) Add plan chains** — if the skill supports multi-step
    workflows, add a `## Plan Chains` section with trigger definitions.
 
-5. **Test** — ask the agent questions that should activate your skill and
+6. **Test** — ask the agent questions that should activate your skill and
    verify that classification, routing, and tool execution work correctly.
+
+No edit to `cortex/config.py`, `cortex/skill_manifest.py`, or service skill lists is required for normal skill registration.
 
 ### Tips
 

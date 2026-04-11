@@ -543,6 +543,40 @@ class TestSkillContinuation:
         payload = resp.json()["agent_block"]["payload"]
         assert payload["skill"] == "welcome"
 
+    def test_use_skill_command_switches_active_skill_for_next_turn(self, client, session_factory):
+        resp = client.post("/chat", json={
+            "project_id": "proj-chat",
+            "message": "/use-skill differential_expression",
+        })
+        assert resp.status_code == 200
+        payload = resp.json()["agent_block"]["payload"]
+        assert payload["skill"] == "differential_expression"
+
+        follow_up = client.post("/chat", json={
+            "project_id": "proj-chat",
+            "message": "help",
+        })
+        assert follow_up.status_code == 200
+        follow_payload = follow_up.json()["agent_block"]["payload"]
+        assert follow_payload["skill"] == "differential_expression"
+
+    def test_natural_language_switch_skill_changes_active_skill_for_next_turn(self, client, session_factory):
+        resp = client.post("/chat", json={
+            "project_id": "proj-chat",
+            "message": "switch to the differential expression skill",
+        })
+        assert resp.status_code == 200
+        payload = resp.json()["agent_block"]["payload"]
+        assert payload["skill"] == "differential_expression"
+
+        follow_up = client.post("/chat", json={
+            "project_id": "proj-chat",
+            "message": "help",
+        })
+        assert follow_up.status_code == 200
+        follow_payload = follow_up.json()["agent_block"]["payload"]
+        assert follow_payload["skill"] == "differential_expression"
+
 
 # ---------------------------------------------------------------------------
 # Normal chat message (LLM called, mocked)

@@ -110,5 +110,6 @@ async def search_encode():
 1. Add entry to `CONSORTIUM_REGISTRY` in `atlas/config.py`
 2. Create a launcher script (like `atlas/launch_encode.py`)
 3. Add port to `agoutic_servers.sh`
-4. Create skill files in `skills/`
-5. The unified dispatch in `cortex/app.py` handles routing automatically
+4. Create `skills/<skill_key>/SKILL.md` and `skills/<skill_key>/manifest.yaml`
+5. Set `source.type: consortium` and `source.key: <consortium_key>` in that manifest
+6. The unified dispatch in `cortex/app.py` handles routing automatically

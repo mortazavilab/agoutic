@@ -1,0 +1,18 @@
+display_name: cDNA Results Interpretation
+description: Interpret completed Dogme cDNA workflow results.
+category: analysis
+source:
+  type: service
+  key: analyzer
+required_services:
+  - analyzer
+expected_inputs:
+  - job_uuid
+  - work_dir
+output_types:
+  - report
+  - dataframe
+sample_types:
+  - cDNA
+estimated_runtime: medium
+analysis_only: true

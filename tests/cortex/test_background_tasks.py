@@ -2419,6 +2419,64 @@ class TestAutoTriggerAnalysis:
         sess.close()
 
     @pytest.mark.asyncio
+    async def test_links_analysis_block_to_workflow_plan(self, session_factory, seed_data):
+        """Workflow-owned auto-analysis blocks keep a durable workflow link for the UI."""
+
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "workflow_type": "local_sample_intake",
+                "title": "Process local sample s1",
+                "sample_name": "s1",
+                "run_uuid": "uuid-linked",
+                "status": "RUNNING",
+                "next_step": "analyze_results",
+                "steps": [
+                    {"id": "run_dogme", "kind": "run", "title": "Run Dogme", "status": "COMPLETED", "order_index": 0, "run_uuid": "uuid-linked"},
+                    {"id": "analyze_results", "kind": "analysis", "title": "Analyze results", "status": "PENDING", "order_index": 1, "run_uuid": "uuid-linked"},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "file_summary": {"csv_files": []},
+            "all_file_counts": {"total_files": 3, "csv_count": 0},
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(side_effect=RuntimeError("LLM down"))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-linked",
+                {"sample_name": "s1", "mode": "DNA", "model": "default", "work_directory": "/work/test"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        blocks = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()
+        assert len(blocks) >= 1
+        payload = get_block_payload(blocks[-1])
+        assert payload.get("workflow_plan_block_id") == workflow_block.id
+        sess.close()
+
+    @pytest.mark.asyncio
     async def test_llm_failure_uses_static_template(self, session_factory, seed_data):
         """When LLM fails, falls back to static summary template."""
 

@@ -23,6 +23,7 @@ from cortex.memory_commands import (
     execute_memory_intent,
     parse_memory_command,
 )
+from cortex.skill_commands import detect_skill_intent, execute_skill_command, parse_skill_command, resolve_skill_key
 from cortex.workflow_commands import (
     detect_workflow_intent,
     execute_use_workflow,
@@ -65,6 +66,11 @@ class CapabilitiesStage:
             "from DE results or custom gene sets\n"
             "7. **Search IGVF data** — Browse IGVF datasets, files, samples, and "
             "genes from the IGVF portal\n\n"
+            "Useful slash commands:\n"
+            "- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`\n"
+            "- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`\n"
+            "- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`\n"
+            "- Memory: `/remember <text>`, `/remember-global <text>`, `/remember-df DF5 as <name>`, `/memories`, `/pin #<id>`, `/unpin #<id>`, `/restore #<id>`, `/annotate <sample> key=value`, `/search-memories <query>`, `/upgrade-to-global #<id>`\n\n"
             "What would you like to do?\n"
         )
         agent_block = _create_block_internal(
@@ -184,6 +190,42 @@ class DfCommandStage:
 
 
 register_stage(DfCommandStage())
+
+
+# ── 225  Skill slash commands ──────────────────────────────────────────────
+
+class SkillCommandStage:
+    name = "skill_command"
+    priority = 225
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return parse_skill_command(ctx.message) is not None or detect_skill_intent(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        skill_cmd = parse_skill_command(ctx.message) or detect_skill_intent(ctx.message)
+        markdown = execute_skill_command(skill_cmd, active_skill=ctx.active_skill)
+
+        response_skill = ctx.active_skill
+        if skill_cmd.action == "use":
+            resolved_skill = resolve_skill_key(skill_cmd.skill_ref)
+            if resolved_skill:
+                response_skill = resolved_skill
+                ctx.active_skill = resolved_skill
+
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            response_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="skill_command" if ctx.message.strip().startswith("/") else "skill_intent",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(SkillCommandStage())
 
 
 # ── 230  Memory slash commands ─────────────────────────────────────────────

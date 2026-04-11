@@ -1,6 +1,6 @@
 # AGOUTIC Architecture — Visual Overview
 
-> Eight diagrams illustrating the architecture of **AGOUTIC v3.4.9**, an agentic
+> Eight diagrams illustrating the architecture of **AGOUTIC v3.6.2**, an agentic
 > bioinformatics platform that orchestrates ENCODE data retrieval, Nextflow
 > pipeline execution (local & HPC/SLURM), differential expression analysis,
 > and gene enrichment through natural-language conversation.
@@ -31,7 +31,7 @@ graph TB
         TagParse["Tag Parser<br/><i>DATA_CALL · PLOT · APPROVAL<br/>tag extraction & correction</i>"]
         ToolDisp["Tool Dispatch<br/><i>MCP client lifecycle<br/>ENCODE retry · chaining</i>"]
         ChatDF["Chat DataFrames<br/><i>DF embedding · plot-spec<br/>resolution · DF-ID assignment</i>"]
-        Planner["Planner<br/><i>11 templates + hybrid bridge<br/>fragment composition</i>"]
+        Planner["Planner<br/><i>manifest composer + template fallback<br/>hybrid bridge</i>"]
         PlanVal["Plan Validator<br/><i>contract checks before<br/>any step dispatch</i>"]
         Executor["Plan Executor<br/><i>parallel batches for safe kinds<br/>sequential for approvals</i>"]
         Replanner["Replanner<br/><i>failure recovery · SKIPPED<br/>dependent propagation</i>"]
@@ -46,7 +46,7 @@ graph TB
         LP["Launchpad<br/>port 8002/8003<br/><i>Job execution &<br/>backend dispatch</i>"]
         AN["Analyzer<br/>port 8004/8005<br/><i>QC · stats ·<br/>result parsing</i>"]
         AT["Atlas / ENCODE<br/>port 8006<br/><i>Consortium data<br/>search & download</i>"]
-        EP["edgePython<br/>port 8007<br/><i>edgeR differential<br/>expression</i>"]
+        EP["edgePython<br/>port 8007<br/><i>differential<br/>expression</i>"]
     end
 
     subgraph Backends ["Execution Backends"]
@@ -89,10 +89,12 @@ graph TB
 The agent uses a **two-pass architecture** that separates fast classification
 from careful execution, ensuring the system never improvises on safety-critical
 steps. Skill files (Markdown) encode domain workflows in a per-skill directory
-layout (`skills/<key>/SKILL.md`); tool contracts give the LLM precise parameter
-schemas. Multi-step requests now go through a **hybrid planning bridge** that
-attempts LLM fragment composition first for six non-core flows, falling back to
-deterministic templates on failure.
+layout (`skills/<key>/SKILL.md`) and planner metadata now lives beside them in
+`skills/<key>/manifest.yaml`, loaded by `cortex/skill_manifest.py`. Multi-step
+requests now go through a **manifest-first planning layer**: supported
+deterministic flows compose from `SkillManifest` metadata, selected non-core
+flows still use a hybrid bridge that attempts LLM fragment composition first,
+and deterministic templates remain fallback for unmigrated flows.
 
 ```mermaid
 flowchart LR
@@ -108,7 +110,7 @@ flowchart LR
     subgraph Pass2 ["Pass 2 — LLM Execution"]
         direction TB
         Prompt["System Prompt<br/>assembled from:"]
-        Skills["🧬 Skills<br/><i>15 Markdown files</i><br/>ENCODE · Dogme DNA/RNA/cDNA<br/>DE · Enrichment · Remote Exec<br/>Reconcile BAMs · Long Read"]
+        Skills["🧬 Skills + Manifests<br/><i>15 Markdown files + capability registry</i><br/>routing · runtime · services<br/>tool chains · chain prompts"]
         Contracts["📋 Tool Contracts<br/><i>JSON Schema per MCP tool</i>"]
         Context["📌 Context Injection<br/><i>project · sample · work_dir<br/>in-memory DataFrames</i>"]
         LLM["LLM Call<br/><i>Ollama / OpenAI-compatible</i>"]
@@ -117,8 +119,9 @@ flowchart LR
     subgraph Planning ["Plan Generation"]
         direction TB
         Hybrid{"Hybrid bridge?"}
+        ManifestPlan["Manifest composer<br/><i>DE · enrichment · XgenePy<br/>skill-chain metadata</i>"]
         LLMPlan["LLM fragment<br/>composition<br/><i>6 non-core flows</i>"]
-        Templates["Deterministic<br/>templates<br/><i>11 templates</i>"]
+        Templates["Deterministic<br/>template fallback<br/><i>legacy / unmigrated flows</i>"]
         Validate2["Plan contract<br/>validation<br/><i>kinds · deps · cycles<br/>scope · approval policy</i>"]
     end
 
@@ -134,8 +137,9 @@ flowchart LR
     Classify -->|workflow| Multi
     Single --> Prompt
     Multi --> Planning
+    Hybrid -->|manifest-supported flow| ManifestPlan --> Validate2
     Hybrid -->|non-core flow| LLMPlan --> Validate2
-    Hybrid -->|core flow| Templates --> Validate2
+    Hybrid -->|fallback| Templates --> Validate2
     LLMPlan -.->|fallback| Templates
     Skills --> Prompt
     Contracts --> Prompt
@@ -341,7 +345,7 @@ flowchart TB
     subgraph Phase4 ["Analysis & Interpretation"]
         QC["Parse QC & stats<br/><i>Analyzer MCP</i>"]
         Reconcile["Reconcile BAMs<br/><i>allowlisted script<br/>cross-workflow merge</i>"]
-        DE["Differential expression<br/><i>edgePython MCP · edgeR</i>"]
+        DE["Differential expression<br/><i>edgePython MCP</i>"]
         Enrich["GO & pathway enrichment<br/><i>Analyzer MCP</i>"]
         Plots["Generate plots<br/><i>volcano · MA · heatmap<br/>BED chr counts · enrichment</i>"]
         Summary["Natural-language summary<br/><i>LLM interprets results</i>"]
@@ -465,7 +469,7 @@ graph TB
 
         subgraph Analysis ["Analysis & Interpretation"]
             AJR["analyze_job_results<br/><i>QC · stats · file parsing<br/>📜 scripts/count_bed.py</i>"]
-            DE["differential_expression<br/><i>edgeR via edgePython<br/>volcano · MA plots</i>"]
+            DE["differential_expression<br/><i>edgePython<br/>volcano · MA plots</i>"]
             ENR["enrichment_analysis<br/><i>GO · pathway enrichment<br/>dot plots</i>"]
             RB["reconcile_bams<br/><i>cross-workflow BAM merge<br/>📜 scripts/reconcile_bams.py<br/>📜 scripts/check_workflow_references.py</i>"]
         end

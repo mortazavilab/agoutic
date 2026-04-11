@@ -10,6 +10,7 @@ import re
 from typing import TYPE_CHECKING
 
 from common.logging_config import get_logger
+from cortex.skill_manifest import compiled_triggers
 
 if TYPE_CHECKING:
     from cortex.schemas import ConversationState
@@ -197,11 +198,23 @@ _XGENEPY_PATTERNS = [
 # _detect_plan_type
 # ---------------------------------------------------------------------------
 
+def _detect_plan_type_from_manifests(message: str) -> str | None:
+    """Return a plan type from manifest trigger metadata, if any."""
+    for manifest, patterns in compiled_triggers():
+        for pattern in patterns:
+            if pattern.search(message):
+                return manifest.plan_type or None
+    return None
+
 def _detect_plan_type(message: str) -> str | None:
     """Return plan type string or None.
 
     Priority ordering: most specific patterns first.
     """
+    manifest_plan_type = _detect_plan_type_from_manifests(message)
+    if manifest_plan_type:
+        return manifest_plan_type
+
     # 1. DE analysis (most specific)
     for pat in _DE_PATTERNS:
         if pat.search(message):

@@ -271,6 +271,46 @@ async def test_execute_step_run_de_pipeline_executes_tool_calls(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_step_blocks_missing_manifest_service_before_mcp_dispatch(monkeypatch):
+    payload = {
+        "steps": [
+            {
+                "id": "de1",
+                "kind": "RUN_DE_PIPELINE",
+                "title": "Run DE",
+                "status": "PENDING",
+                "requires_approval": False,
+                "depends_on": [],
+                "skill_key": "differential_expression",
+                "tool_calls": [
+                    {"source_key": "edgepython", "tool": "load_data", "params": {"counts_path": "/tmp/counts.tsv"}},
+                ],
+            }
+        ]
+    }
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("cortex.plan_executor._configured_service_keys", lambda: {"analyzer"})
+
+    async def _unexpected_call_mcp_tool(*_args, **_kwargs):
+        raise AssertionError("MCP tool call should not run when required services are unavailable")
+
+    monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _unexpected_call_mcp_tool)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "de1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is False
+    assert payload["steps"][0]["status"] == "FAILED"
+    assert "edgepython" in (result.error or "")
+
+
+@pytest.mark.asyncio
 async def test_execute_step_locate_data_uses_completed_run_script_work_directory(monkeypatch):
     payload = {
         "steps": [

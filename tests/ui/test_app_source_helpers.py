@@ -482,6 +482,11 @@ class TestHelpIntent:
 
         assert fn("how do i compare reconcile samples") is True
 
+    def test_recognizes_show_slash_commands_help_shortcut(self):
+        fn = _load_function("_is_help_intent")
+
+        assert fn("show slash commands") is True
+
     def test_does_not_treat_actual_de_request_as_help(self):
         fn = _load_function("_is_help_intent")
 
@@ -587,6 +592,78 @@ class TestFindRelatedWorkflowPlan:
 
         assert related is not None
         assert related["id"] == "wf-2"
+
+    def test_matches_markdown_plan_heading_title(self):
+        fn = _load_function("_find_related_workflow_plan")
+        blocks = [
+            {
+                "id": "wf-1",
+                "type": "WORKFLOW_PLAN",
+                "project_id": "proj-1",
+                "payload": {"title": "Plot and interpret results for JamshidW"},
+            },
+            {
+                "id": "agent-1",
+                "type": "AGENT_PLAN",
+                "project_id": "proj-1",
+                "payload": {"markdown": "## Plan: Plot and interpret results for JamshidW\n\nDetails"},
+            },
+        ]
+
+        related = fn(blocks[-1], blocks)
+
+        assert related is not None
+        assert related["id"] == "wf-1"
+
+    def test_prefers_explicit_workflow_plan_block_id(self):
+        fn = _load_function("_find_related_workflow_plan")
+        blocks = [
+            {
+                "id": "wf-1",
+                "type": "WORKFLOW_PLAN",
+                "project_id": "proj-1",
+                "payload": {"title": "Old workflow"},
+            },
+            {
+                "id": "wf-2",
+                "type": "WORKFLOW_PLAN",
+                "project_id": "proj-1",
+                "payload": {"title": "New workflow"},
+            },
+            {
+                "id": "agent-1",
+                "type": "AGENT_PLAN",
+                "project_id": "proj-1",
+                "payload": {
+                    "markdown": "Analysis complete.",
+                    "workflow_plan_block_id": "wf-1",
+                },
+            },
+        ]
+
+        related = fn(blocks[-1], blocks)
+
+        assert related is not None
+        assert related["id"] == "wf-1"
+
+    def test_returns_none_when_no_workflow_match(self):
+        fn = _load_function("_find_related_workflow_plan")
+        blocks = [
+            {
+                "id": "wf-1",
+                "type": "WORKFLOW_PLAN",
+                "project_id": "proj-1",
+                "payload": {"title": "Old workflow"},
+            },
+            {
+                "id": "agent-1",
+                "type": "AGENT_PLAN",
+                "project_id": "proj-1",
+                "payload": {"markdown": "Analysis complete."},
+            },
+        ]
+
+        assert fn(blocks[-1], blocks) is None
 
 
 class TestWorkflowHighlightSteps:

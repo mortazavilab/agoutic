@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from common import MCPHttpClient
 from common.logging_config import get_logger
 from common.workflow_paths import next_workflow_number, workflow_dir_name
+from cortex.skill_manifest import check_service_availability
 from sqlalchemy import select
 from cortex.config import get_service_url
 from cortex.plan_validation import PlanValidationError, validate_plan
@@ -86,6 +87,29 @@ _PARALLEL_BATCH_SAFE_KINDS = frozenset({
     "SEARCH_ENCODE",
     "CHECK_EXISTING",
 })
+
+
+def _configured_service_keys() -> set[str]:
+    from atlas.config import CONSORTIUM_REGISTRY
+    from cortex.config import SERVICE_REGISTRY
+
+    return set(SERVICE_REGISTRY) | set(CONSORTIUM_REGISTRY)
+
+
+def _step_service_gate_error(step: dict[str, Any], source_key: str) -> str | None:
+    skill_key = step.get("skill_key")
+    if not isinstance(skill_key, str) or not skill_key:
+        return None
+
+    services_ok, missing_services = check_service_availability(skill_key, _configured_service_keys())
+    if services_ok:
+        return None
+    if source_key and source_key not in missing_services:
+        return None
+    return (
+        f"Required service(s) unavailable for skill '{skill_key}': "
+        f"{', '.join(missing_services)}"
+    )
 
 
 def should_auto_execute(step: dict) -> bool:
@@ -1517,6 +1541,14 @@ async def execute_step(
         if not source_key or not tool_name:
             logger.warning("Skipping empty tool call in step", step_id=step_id)
             continue
+
+        service_gate_error = _step_service_gate_error(step, source_key)
+        if service_gate_error:
+            step["status"] = "FAILED"
+            step["error"] = service_gate_error
+            step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+            _persist_step_update(session, workflow_block, plan_payload)
+            return StepResult(success=False, data={"results": all_results}, error=service_gate_error)
 
         if source_key == "edgepython":
             from cortex.tool_dispatch import _inject_edgepython_output_path

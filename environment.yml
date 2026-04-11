@@ -22,6 +22,7 @@ dependencies:
     # --- The Logic & MCP ---
     - mcp                      # Model Context Protocol SDK
     - pydantic>=2.0            # Data validation
+    - pyyaml                   # YAML skill manifests
     - requests
     - httpx                    # Async HTTP client
     
