@@ -177,6 +177,7 @@ CONSORTIUM_REGISTRY = {
                 "biosample_name": "sample_term",
                 "cell_line": "sample_term",
                 "sample": "sample_term",
+                "sample_name": "sample_term",
                 "search_term": "sample_term",
                 "tissue": "sample_term",
             },
@@ -188,6 +189,7 @@ CONSORTIUM_REGISTRY = {
             "search_measurement_sets": {
                 "biosample": "sample",
                 "cell_line": "sample",
+                "sample_name": "sample",
                 "search_term": "sample",
                 "tissue": "sample",
                 "assay_title": "assay",

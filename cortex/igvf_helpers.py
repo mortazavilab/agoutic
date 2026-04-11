@@ -80,9 +80,9 @@ def _validate_igvf_params(tool: str, params: dict, user_message: str) -> dict:
     # --- Fix 1: missing sample_term in search_by_sample ---
     if tool == "search_by_sample" and "sample_term" not in params:
         # Try to salvage from other params that might contain the sample name
-        for candidate_key in ("assay", "organism", "status"):
+        for candidate_key in ("sample_name", "sample", "assay", "status"):
             val = params.get(candidate_key, "")
-            if val and val.lower() not in _IGVF_ASSAY_KEYWORDS and candidate_key != "organism":
+            if val and val.lower() not in _IGVF_ASSAY_KEYWORDS and candidate_key not in ("organism", "status"):
                 params["sample_term"] = val
                 del params[candidate_key]
                 logger.warning("Moved %s to sample_term (was sample, not %s)",

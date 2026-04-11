@@ -140,6 +140,12 @@ def _validate_llm_output(
         "get_files_summary", "get_file_metadata", "get_file_url",
         "get_available_output_types", "get_all_metadata", "list_experiments",
         "get_cache_stats", "get_server_info",
+        # IGVF
+        "search_measurement_sets", "search_analysis_sets",
+        "search_prediction_sets", "search_by_sample",
+        "search_files", "get_dataset",
+        "get_file_download_url", "get_files_for_dataset",
+        "search_genes", "get_gene", "search_samples",
         # Common aliases that are resolved downstream — not violations
         "search",
         # Launchpad (Dogme)
