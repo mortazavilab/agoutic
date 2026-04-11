@@ -122,6 +122,9 @@ class TestWelcomeSkillRouting(unittest.TestCase):
     def test_igvf_search_routing_present(self):
         self.assertIn("[[SKILL_SWITCH_TO: IGVF_Search]]", self.skill_content)
 
+    def test_igvf_help_option_present(self):
+        self.assertIn("**Search IGVF data**", self.skill_content)
+
     def test_igvf_keywords_mentioned(self):
         self.assertIn("IGVF", self.skill_content)
         self.assertIn("measurement sets", self.skill_content)

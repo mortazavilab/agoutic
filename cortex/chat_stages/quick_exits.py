@@ -60,8 +60,11 @@ class CapabilitiesStage:
             "stats, modification calls, and expression data\n"
             "5. **Differential expression analysis** — Run edgePython on count "
             "matrices, reconciled abundance tables, or saved dataframes; compare "
-            "named groups like AD samples `exc` and `jbh` versus control samples "
-            "`gko` and `lwf`\n\n"
+            "named groups for bulk, single-cell, DTU, or ChIP-seq analyses\n"
+            "6. **GO & pathway enrichment** — Run enrichment analysis on gene lists "
+            "from DE results or custom gene sets\n"
+            "7. **Search IGVF data** — Browse IGVF datasets, files, samples, and "
+            "genes from the IGVF portal\n\n"
             "What would you like to do?\n"
         )
         agent_block = _create_block_internal(

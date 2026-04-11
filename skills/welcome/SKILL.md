@@ -19,8 +19,9 @@ Here's what I can help you with:
 2. **Download & analyze ENCODE data** — Search the ENCODE portal for long-read experiments, download files, and process them
 3. **Download files from URLs** — Grab files from any URL into your project
 4. **Check results from a completed job** — View QC reports, alignment stats, modification calls, and expression data
-5. **Differential expression analysis** — Run DE analysis on count matrices using edgePython (bulk, single-cell, DTU, ChIP-seq)
+5. **Differential expression analysis** — Run edgePython on count matrices, reconciled abundance tables, or saved dataframes; compare named groups for bulk, single-cell, DTU, or ChIP-seq analyses
 6. **GO & pathway enrichment** — Run enrichment analysis on gene lists from DE results or custom gene sets
+7. **Search IGVF data** — Browse IGVF datasets, files, samples, and genes from the IGVF portal
 
 What would you like to do?
 ```
@@ -51,7 +52,7 @@ Based on the user's answer, switch to the appropriate skill:
 [[SKILL_SWITCH_TO: ENCODE_Search]]
 ```
 
-**IGVF data** (mentions "IGVF", "IGVF portal", "IGVF dataset", "measurement sets", "prediction sets", "analysis sets", or an IGVFDS/IGVFFI accession):
+**IGVF data** (mentions "IGVF", "IGVF portal", "IGVF dataset", "measurement sets", "prediction sets", "analysis sets", an IGVFDS/IGVFFI accession, or option 7):
 ```
 [[SKILL_SWITCH_TO: IGVF_Search]]
 ```
@@ -94,7 +95,7 @@ The analyze_job_results skill will handle UUID validation and file parsing.
 
 ### Step 4: Handle Ambiguous Requests
 
-If the user's intent is clear from their first message (e.g., they paste a UUID, mention parsing a file, mention ENCODE, or ask about a job), skip the menu and route directly. The welcome message is only needed when the user's initial message is vague (e.g., "hi", "hello", "help").
+If the user's intent is clear from their first message (e.g., they paste a UUID, mention parsing a file, mention ENCODE or IGVF, or ask about a job), skip the menu and route directly. The welcome message is only needed when the user's initial message is vague (e.g., "hi", "hello", "help").
 
 ## Important Rules
 

@@ -207,6 +207,7 @@ class TestCapabilitiesResponse:
         assert resp.status_code == 200
         data = resp.json()
         assert "Analyze a new local dataset" in data["agent_block"]["payload"]["markdown"]
+        assert "Search IGVF data" in data["agent_block"]["payload"]["markdown"]
 
     def test_what_can_i_do(self, client):
         resp = client.post("/chat", json={
