@@ -34,7 +34,7 @@ from cortex.data_call_generator import (
     _validate_analyzer_params,
     _validate_edgepython_params,
 )
-from cortex.igvf_helpers import _validate_igvf_params
+from cortex.igvf_helpers import _correct_igvf_tool_routing, _validate_igvf_params
 from cortex.llm_validators import _parse_tag_params
 from cortex.path_helpers import _pick_file_tool
 from cortex.remote_orchestration import (
@@ -284,10 +284,22 @@ class ToolExecutionResult:
 # ---------------------------------------------------------------------------
 
 def _get_aliases() -> tuple[dict[str, str], dict[str, dict[str, str]]]:
-    """Merge atlas registry aliases with our base aliases."""
+    """Merge atlas registry aliases with our base aliases.
+
+    Consortium-registered canonical tool names are protected: if a base alias
+    would remap a name that is itself a real consortium tool (i.e. appears as
+    an alias target or has param_aliases defined), the base alias is skipped
+    so the consortium tool remains reachable.
+    """
     tool_aliases = get_all_tool_aliases()
-    tool_aliases.update(_BASE_TOOL_ALIASES)
+    # Canonical consortium tool names = alias targets + param_alias keys
+    _consortium_canonical: set[str] = set(tool_aliases.values())
     param_aliases = get_all_param_aliases()
+    _consortium_canonical.update(param_aliases.keys())
+    # Add base aliases only when the alias key is not itself a consortium tool
+    for _alias, _target in _BASE_TOOL_ALIASES.items():
+        if _alias not in _consortium_canonical:
+            tool_aliases[_alias] = _target
     for tool_name, pa in _BASE_PARAM_ALIASES.items():
         param_aliases.setdefault(tool_name, {}).update(pa)
     return tool_aliases, param_aliases
@@ -386,6 +398,8 @@ def build_calls_by_source(
         if source_key == "encode":
             params = _validate_encode_params(corrected_tool, params, user_message)
         if source_key == "igvf":
+            corrected_tool, params = _correct_igvf_tool_routing(
+                corrected_tool, params, user_message)
             params = _validate_igvf_params(corrected_tool, params, user_message)
         if source_key == "analyzer":
             params = _validate_analyzer_params(

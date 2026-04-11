@@ -1,8 +1,8 @@
 """
-IGVF-specific helper functions for parameter repair.
+IGVF-specific helper functions for parameter repair and tool routing.
 
 Parallel to cortex/encode_helpers.py — last-chance parameter sanitisation
-before MCP calls for IGVF tools.
+and tool rerouting before MCP calls for IGVF tools.
 """
 
 import re
@@ -46,6 +46,32 @@ _IGVF_STOP_WORDS = frozenset([
     "results", "result",
 ])
 
+# Organism name normalisation (underscores, capitalisation)
+_ORGANISM_NORMALISE: dict[str, str] = {
+    "mus_musculus": "Mus musculus",
+    "mus musculus": "Mus musculus",
+    "mouse": "Mus musculus",
+    "homo_sapiens": "Homo sapiens",
+    "homo sapiens": "Homo sapiens",
+    "human": "Homo sapiens",
+}
+
+# Object-type reroute map for search_measurement_sets misuse
+_OBJECT_TYPE_REROUTE: dict[str, str] = {
+    "analysisset": "search_analysis_sets",
+    "analysis_set": "search_analysis_sets",
+    "analysis set": "search_analysis_sets",
+    "predictionset": "search_prediction_sets",
+    "prediction_set": "search_prediction_sets",
+    "prediction set": "search_prediction_sets",
+}
+
+# Params that signal biosample intent when found on search_measurement_sets
+_BIOSAMPLE_SIGNAL_PARAMS = frozenset([
+    "biosample_type", "biosample_ontology", "biosample", "cell_line",
+    "tissue", "cell_type",
+])
+
 
 def _extract_igvf_search_term(user_message: str) -> str | None:
     """Extract the most likely sample/search term from an IGVF query."""
@@ -65,6 +91,79 @@ def _extract_igvf_search_term(user_message: str) -> str | None:
         return " ".join(content)
 
     return None
+
+
+def _normalise_organism(value: str) -> str:
+    """Normalise organism strings (Mus_musculus → Mus musculus, etc.)."""
+    return _ORGANISM_NORMALISE.get(value.lower().strip(), value)
+
+
+def _correct_igvf_tool_routing(
+    tool: str, params: dict, user_message: str,
+) -> tuple[str, dict]:
+    """
+    Fix cases where the LLM picks the wrong IGVF tool.
+
+    Common mistakes:
+    - search_measurement_sets + file_format param → should be search_files
+    - search_measurement_sets + object_type=AnalysisSet → search_analysis_sets
+    - search_measurement_sets + object_type=PredictionSet → search_prediction_sets
+    - search_measurement_sets + biosample_type/biosample_ontology → search_by_sample
+    """
+    params = dict(params)
+
+    if tool == "search_measurement_sets":
+        # ── Redirect to search_files when file_format is present ──
+        file_format = params.get("file_format")
+        if file_format:
+            new_params: dict = {"file_format": file_format}
+            for k in ("content_type", "dataset_accession", "status", "limit"):
+                if k in params:
+                    new_params[k] = params[k]
+            logger.warning(
+                "Rerouted search_measurement_sets → search_files (file_format present)",
+                original_params=params, new_params=new_params,
+            )
+            return "search_files", new_params
+
+        # ── Redirect by object_type to specialised search tools ──
+        obj_type = params.get("object_type", "")
+        target_tool = _OBJECT_TYPE_REROUTE.get(obj_type.lower().strip())
+        if target_tool:
+            kept = {k: v for k, v in params.items() if k != "object_type"}
+            logger.warning(
+                "Rerouted search_measurement_sets → %s (object_type=%s)",
+                target_tool, obj_type,
+                original_params=params, new_params=kept,
+            )
+            return target_tool, kept
+
+        # ── Redirect to search_by_sample when biosample params present ──
+        biosample_keys = params.keys() & _BIOSAMPLE_SIGNAL_PARAMS
+        if biosample_keys:
+            sample_term = None
+            for bk in ("biosample", "cell_line", "tissue", "cell_type",
+                        "biosample_type", "biosample_ontology"):
+                val = params.get(bk, "")
+                if val:
+                    sample_term = val
+                    break
+            if not sample_term:
+                sample_term = _extract_igvf_search_term(user_message)
+            new_params = {}
+            if sample_term:
+                new_params["sample_term"] = sample_term
+            for k in ("organism", "assay", "status", "limit"):
+                if k in params:
+                    new_params[k] = params[k]
+            logger.warning(
+                "Rerouted search_measurement_sets → search_by_sample "
+                "(biosample params: %s)", biosample_keys,
+                original_params=params, new_params=new_params,
+            )
+            return "search_by_sample", new_params
+
+    return tool, params
 
 
 def _validate_igvf_params(tool: str, params: dict, user_message: str) -> dict:
@@ -107,5 +206,13 @@ def _validate_igvf_params(tool: str, params: dict, user_message: str) -> dict:
                 logger.warning("Injected missing assay_title from user message",
                                assay_title=assay_kw)
                 break
+
+    # --- Fix 3: organism normalisation (Mus_musculus → Mus musculus, etc.) ---
+    if "organism" in params:
+        normalised = _normalise_organism(params["organism"])
+        if normalised != params["organism"]:
+            logger.warning("Normalised organism %r → %r",
+                           params["organism"], normalised)
+            params["organism"] = normalised
 
     return params

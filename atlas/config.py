@@ -220,6 +220,22 @@ CONSORTIUM_REGISTRY = {
                 "accession": "file_accession",
                 "file_id": "file_accession",
             },
+            # Entries below ensure these canonical tool names are protected
+            # from base-alias shadowing (search_files → find_file, etc.)
+            "search_files": {
+                "format": "file_format",
+                "type": "content_type",
+            },
+            "search_analysis_sets": {
+                "biosample": "sample",
+                "cell_line": "sample",
+                "tissue": "sample",
+            },
+            "search_prediction_sets": {
+                "biosample": "sample",
+                "cell_line": "sample",
+                "tissue": "sample",
+            },
         },
 
         # Fallback patterns
