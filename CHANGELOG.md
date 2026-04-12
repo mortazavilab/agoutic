@@ -44,6 +44,13 @@
   (`QUICK_REFERENCE.md`, `ui/appui_sidebar.py`, `ui/appui_state.py`,
   `cortex/chat_stages/quick_exits.py`)
 
+- **IGVF downloads now follow the same approval-gated project save flow as
+  ENCODE downloads** — Cortex now treats IGVF file URL resolution as a real
+  download chain, so users can move from IGVF dataset/file accessions to the
+  normal project download approval path instead of getting a bare URL back.
+  (`cortex/tool_dispatch.py`, `skills/download_files/SKILL.md`,
+  `skills/IGVF_Search/SKILL.md`)
+
 ### Bug Fixes
 
 - **Workflow Results attachment no longer leaks across unrelated responses** —
@@ -51,6 +58,13 @@
   real plan-title match, preventing stale DE workflow results from appearing
   under unrelated non-DE agent responses.
   (`ui/appui_services.py`, `cortex/job_polling.py`)
+
+- **IGVF accessions and dataset file rows now survive result formatting and
+  DataFrame extraction** — IGVF search and dataset-file payloads are now
+  unwrapped before generic dict compaction, which preserves real accession
+  values in second-pass answers and restores interactive DataFrames for IGVF
+  result sets.
+  (`atlas/result_formatter.py`, `cortex/chat_dataframes.py`)
 
 ### Tests
 
