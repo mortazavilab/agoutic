@@ -33,6 +33,10 @@ logger = get_logger(__name__)
 _SEARCH_TOOLS = frozenset({
     "search_by_biosample", "search_by_target",
     "search_by_organism", "search_by_assay", "list_experiments",
+    # IGVF portal search tools
+    "search_measurement_sets", "search_analysis_sets", "search_prediction_sets",
+    "search_by_sample", "search_by_assay", "search_files",
+    "search_genes", "search_samples", "get_files_for_dataset",
 })
 
 _FILE_TOOLS = frozenset({"get_files_by_type"})
@@ -199,7 +203,13 @@ def _extract_search_results(
     if isinstance(rd, list):
         experiment_list = rd
     elif isinstance(rd, dict):
-        if "experiments" in rd and isinstance(rd["experiments"], list):
+        # IGVF tools return {"total": N, "count": N, "results": [...]}
+        # or {"total_files": N, "files": [...]}
+        if "results" in rd and isinstance(rd["results"], list):
+            experiment_list = rd["results"]
+        elif "total_files" in rd and isinstance(rd.get("files"), list):
+            experiment_list = rd["files"]
+        elif "experiments" in rd and isinstance(rd["experiments"], list):
             experiment_list = rd["experiments"]
         else:
             for sub_key in ("human", "mouse"):

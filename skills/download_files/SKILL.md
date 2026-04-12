@@ -2,9 +2,10 @@
 
 ## Description
 
-This skill handles **downloading files** into the user's project from two sources:
+This skill handles **downloading files** into the user's project from three sources:
 1. **ENCODE files** — given an experiment accession and file type, resolve URLs via Atlas and download.
-2. **Arbitrary URLs** — direct HTTP/HTTPS links to files.
+2. **IGVF files** — given a dataset accession and file accession, resolve URLs via IGVF portal and download.
+3. **Arbitrary URLs** — direct HTTP/HTTPS links to files.
 
 Files are saved into the user's **central data folder** at
 `AGOUTIC_DATA/users/{username}/data/` and symlinked into the project's
@@ -19,6 +20,7 @@ After downloads complete, the skill suggests next steps based on file types.
 ### ✅ This Skill Handles:
 - "Download these files"
 - "Download the pod5 files from ENCSR000ABC"
+- "Download file IGVFFI1234ABCD from IGVF"
 - "Grab these URLs for me"
 - "Save this file to my project"
 - User pastes one or more HTTP/HTTPS URLs
@@ -46,12 +48,27 @@ get_file_url(accession="ENCSR123ABC", file_accession="ENCFF123ABC")
 
 **Important:** Do NOT use `download_files` from Atlas. Instead, resolve URLs with `get_file_url` and then use the project download endpoint.
 
+## IGVF Tools Available
+
+Use these [[DATA_CALL: consortium=igvf, tool=...]] tags to resolve IGVF file URLs:
+
+```
+get_files_for_dataset(accession="IGVFDS1234ABCD")
+get_files_for_dataset(accession="IGVFDS1234ABCD", file_format="bam")
+get_file_download_url(file_accession="IGVFFI1234ABCD")
+get_file_metadata(file_accession="IGVFFI1234ABCD")
+```
+
+**Important:** Use `get_file_download_url` to resolve download URLs for IGVF files.
+IGVF files only require the file accession (IGVFFI format) — no parent dataset accession needed.
+
 ## Plan Logic
 
 ### Step 1: Determine Source
 
 Look at what the user asked:
-- If they mention an ENCODE accession → ENCODE source
+- If they mention an ENCODE accession (ENCSR/ENCFF) → ENCODE source
+- If they mention an IGVF accession (IGVFDS/IGVFFI) → IGVF source
 - If they paste URLs → URL source
 - If unclear, ask
 
@@ -91,7 +108,31 @@ Proceed with download?
 
 6. After approval, the system downloads files via the project download endpoint.
 
-### Step 2b: URL Downloads
+### Step 2b: IGVF Files
+
+If the user wants IGVF files:
+
+1. If the user provides a dataset accession (IGVFDS), list available files:
+```
+[[DATA_CALL: consortium=igvf, tool=get_files_for_dataset, accession=IGVFDS1234ABCD]]
+```
+
+   Optionally filter by format:
+```
+[[DATA_CALL: consortium=igvf, tool=get_files_for_dataset, accession=IGVFDS1234ABCD, file_format=bam]]
+```
+
+2. Present the available files and let the user choose.
+
+3. For each chosen file, resolve the download URL:
+```
+[[DATA_CALL: consortium=igvf, tool=get_file_download_url, file_accession=IGVFFI6571ANCX]]
+```
+
+4. The system will automatically extract the download URL, build a download plan,
+   and present an approval gate — just like ENCODE downloads.
+
+### Step 2c: URL Downloads
 
 If the user provides URLs:
 

@@ -790,7 +790,7 @@ async def execute_tool_calls(
                     # --- Download chaining ---
                     _handle_download_chain(
                         call, tool_name, params, result_data,
-                        user_message, result,
+                        user_message, result, source_key,
                     )
 
                     # --- list_job_files -> modification BED counting ---
@@ -1010,9 +1010,12 @@ def _handle_download_chain(
     result_data,
     user_message: str,
     result: ToolExecutionResult,
+    source_key: str = "",
 ) -> None:
-    """After get_file_metadata, extract the download URL and accumulate files."""
-    if tool_name != "get_file_metadata" or not isinstance(result_data, dict):
+    """After get_file_metadata / get_file_download_url, extract the download
+    URL and accumulate files for an approval-gated download."""
+    _download_tools = {"get_file_metadata", "get_file_download_url"}
+    if tool_name not in _download_tools or not isinstance(result_data, dict):
         return
 
     msg_lower = user_message.lower()
@@ -1033,11 +1036,23 @@ def _handle_download_chain(
     file_fmt = result_data.get("file_format", "")
     file_name = f"{file_acc}.{file_fmt}" if file_acc and file_fmt else file_acc
 
-    cloud = result_data.get("cloud_metadata")
-    if isinstance(cloud, dict) and cloud.get("url"):
-        dl_url = cloud["url"]
-    elif result_data.get("href"):
-        dl_url = f"https://www.encodeproject.org{result_data['href']}"
+    # IGVF: get_file_download_url returns a direct "download_url" field
+    if result_data.get("download_url"):
+        dl_url = result_data["download_url"]
+    # IGVF: get_file_metadata returns "href" (relative to api.data.igvf.org)
+    elif source_key == "igvf" and result_data.get("href"):
+        href = result_data["href"]
+        if href.startswith("http"):
+            dl_url = href
+        else:
+            dl_url = f"https://api.data.igvf.org{href}"
+    # ENCODE: cloud_metadata or href
+    else:
+        cloud = result_data.get("cloud_metadata")
+        if isinstance(cloud, dict) and cloud.get("url"):
+            dl_url = cloud["url"]
+        elif result_data.get("href"):
+            dl_url = f"https://www.encodeproject.org{result_data['href']}"
 
     if not dl_url:
         return
@@ -1050,7 +1065,8 @@ def _handle_download_chain(
     }
     result.pending_download_files.append(dl_file_info)
     logger.info("Download chain: resolved URL from file metadata",
-                file_accession=file_acc, url=dl_url, size_bytes=file_size)
+                file_accession=file_acc, url=dl_url, size_bytes=file_size,
+                source=source_key)
 
     result.active_skill = "download_files"
     result.needs_approval = True

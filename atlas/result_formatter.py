@@ -74,6 +74,15 @@ def _format_data(
 ) -> str:
     """Format a single data result based on its type and column config."""
 
+    # IGVF tools return {"total": N, "count": N, "results": [...]} or
+    # {"total_files": N, "files": [...]}; unwrap so the list branch handles
+    # them with proper table formatting.
+    if isinstance(data, dict):
+        if "results" in data and isinstance(data["results"], list):
+            data = data["results"]
+        elif "total_files" in data and isinstance(data.get("files"), list):
+            data = data["files"]
+
     if isinstance(data, list):
         total = len(data)
         result = f"Found {total} result(s):\n\n"

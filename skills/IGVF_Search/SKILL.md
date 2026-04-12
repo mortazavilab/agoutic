@@ -85,6 +85,7 @@ Use this skill to:
 
 - User asks about **ENCODE data** → `[[SKILL_SWITCH_TO: ENCODE_Search]]`
 - User mentions **local data** on disk → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
+- User wants to **download IGVF files** to their project → `[[SKILL_SWITCH_TO: download_files]]`
 
 ## Approval Gates
 
