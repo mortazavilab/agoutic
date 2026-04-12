@@ -207,7 +207,15 @@ CONSORTIUM_REGISTRY = {
                 "symbol": "gene_id",
                 "gene_name": "gene_id",
             },
+            "get_dataset": {
+                "dataset_id": "accession",
+                "dataset_accession": "accession",
+                "dataset": "accession",
+                "measurement_set": "accession",
+                "file_set": "accession",
+            },
             "get_files_for_dataset": {
+                "dataset_id": "accession",
                 "dataset_accession": "accession",
                 "dataset": "accession",
                 "file_set": "accession",

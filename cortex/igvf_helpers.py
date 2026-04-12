@@ -72,6 +72,9 @@ _BIOSAMPLE_SIGNAL_PARAMS = frozenset([
     "tissue", "cell_type",
 ])
 
+_IGVF_DATASET_PATTERN = re.compile(r'(IGVFDS[A-Z0-9]{4,8})', re.IGNORECASE)
+_IGVF_FILE_PATTERN = re.compile(r'(IGVFFI[A-Z0-9]{4,8})', re.IGNORECASE)
+
 
 def _extract_igvf_search_term(user_message: str) -> str | None:
     """Extract the most likely sample/search term from an IGVF query."""
@@ -176,6 +179,54 @@ def _validate_igvf_params(tool: str, params: dict, user_message: str) -> dict:
     """
     params = dict(params)  # shallow copy
 
+    # --- Fix 0: repair dataset/file accession parameter names and values ---
+    if tool in {"get_dataset", "get_files_for_dataset"}:
+        if "accession" not in params:
+            for candidate_key in (
+                "dataset_id",
+                "dataset_accession",
+                "dataset",
+                "measurement_set",
+                "file_set",
+            ):
+                val = params.get(candidate_key, "")
+                if val:
+                    params["accession"] = val
+                    del params[candidate_key]
+                    logger.warning("Moved %s to accession",
+                                   candidate_key, accession=val)
+                    break
+        dataset_in_msg = _IGVF_DATASET_PATTERN.findall(user_message)
+        if dataset_in_msg:
+            user_dataset = dataset_in_msg[0].upper()
+            if params.get("accession", "").upper() != user_dataset:
+                params["accession"] = user_dataset
+                logger.warning(
+                    "Replaced dataset accession with user-stated IGVFDS",
+                    correct=user_dataset,
+                )
+
+    if tool in {"get_file_metadata", "get_file_download_url"}:
+        if "file_accession" not in params:
+            for candidate_key in ("accession", "file_id", "file", "file_accession_id"):
+                val = params.get(candidate_key, "")
+                if val:
+                    params["file_accession"] = val
+                    if candidate_key != "file_accession":
+                        del params[candidate_key]
+                    logger.warning("Moved %s to file_accession",
+                                   candidate_key, file_accession=val)
+                    break
+        file_in_msg = _IGVF_FILE_PATTERN.findall(user_message)
+        if file_in_msg:
+            user_file = file_in_msg[0].upper()
+            if params.get("file_accession", "").upper() != user_file:
+                params["file_accession"] = user_file
+                logger.warning(
+                    "Replaced file accession with user-stated IGVFFI",
+                    correct=user_file,
+                )
+
     # --- Fix 1: missing sample_term in search_by_sample ---
     if tool == "search_by_sample" and "sample_term" not in params:
         # Try to salvage from other params that might contain the sample name
@@ -216,3 +267,4 @@ def _validate_igvf_params(tool: str, params: dict, user_message: str) -> dict:
             params["organism"] = normalised
 
     return params
+

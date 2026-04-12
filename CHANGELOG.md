@@ -66,6 +66,13 @@
   result sets.
   (`atlas/result_formatter.py`, `cortex/chat_dataframes.py`)
 
+- **IGVF dataset and file lookups now recover from hallucinated parameter
+  names** — IGVF dataset/file tool calls now repair aliases such as
+  `dataset_id`, `dataset_accession`, and misplaced file accessions, and they
+  prefer the user-stated `IGVFDS` / `IGVFFI` accession when the model emits a
+  mismatched value.
+  (`atlas/config.py`, `cortex/igvf_helpers.py`)
+
 ### Tests
 
 - **Manifest planning regression suite** — added dedicated coverage for
@@ -93,6 +100,11 @@
   `tests/cortex/test_chat_entry.py`,
   `tests/ui/test_app_source_helpers.py`,
   `tests/cortex/test_background_tasks.py`)
+
+- **IGVF parameter-repair regression coverage** — added helper tests covering
+  dataset lookup alias repair, `get_files_for_dataset` dataset accession
+  repair, and file-download accession normalization for `IGVFFI` values.
+  (`tests/cortex/test_igvf_helpers.py`)
 
 ### Documentation
 
