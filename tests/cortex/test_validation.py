@@ -132,6 +132,12 @@ class TestUnknownTools:
         cleaned, violations = _validate_llm_output(response, "ENCODE_Search")
         assert not any("Unknown tool" in v for v in violations)
 
+    def test_get_file_alias_not_flagged(self):
+        response = "[[DATA_CALL: consortium=igvf, tool=get_file, file_id=IGVFFI1476XCPC]]"
+        cleaned, violations = _validate_llm_output(response, "IGVF_Search")
+        assert cleaned == response
+        assert not any("Unknown tool" in v for v in violations)
+
     def test_show_bam_details_alias_not_flagged(self):
         """show_bam_details is a compatibility alias resolved downstream."""
         response = "[[DATA_CALL: service=analyzer, tool=show_bam_details, file_path=ENCFF032XPV.bam]]"

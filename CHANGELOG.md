@@ -73,6 +73,15 @@
   mismatched value.
   (`atlas/config.py`, `cortex/igvf_helpers.py`)
 
+- **IGVF download prompts no longer fall through analyzer file aliases** —
+  download requests mentioning `IGVFFI` / `IGVFDS` accessions now switch into
+  `download_files` before generic consortium-search routing, `get_file` is
+  accepted as a repairable IGVF alias, and consortium-specific alias mappings
+  now preserve `get_file -> get_file_metadata` instead of rewriting it to the
+  analyzer `read_file_content` path.
+  (`atlas/config.py`, `cortex/llm_validators.py`,
+  `cortex/tool_dispatch.py`)
+
 ### Tests
 
 - **Manifest planning regression suite** — added dedicated coverage for
@@ -105,6 +114,15 @@
   dataset lookup alias repair, `get_files_for_dataset` dataset accession
   repair, and file-download accession normalization for `IGVFFI` values.
   (`tests/cortex/test_igvf_helpers.py`)
+
+- **IGVF download-routing regression coverage** — added tests ensuring IGVF
+  file and dataset download prompts switch into `download_files`, `get_file`
+  aliases are not rejected during validation, and consortium alias resolution
+  keeps IGVF `get_file` mapped to `get_file_metadata` rather than the generic
+  analyzer file-reader alias.
+  (`tests/cortex/test_skill_detection.py`,
+  `tests/cortex/test_validation.py`,
+  `tests/cortex/test_tool_dispatch_path_resolution.py`)
 
 ### Documentation
 

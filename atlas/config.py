@@ -158,6 +158,7 @@ CONSORTIUM_REGISTRY = {
             "search": "search_measurement_sets",
             "get_experiment": "get_dataset",
             "get_measurement_set": "get_dataset",
+            "get_file": "get_file_metadata",
             "file_metadata": "get_file_metadata",
             "file_download": "get_file_download_url",
             "download_file": "get_file_download_url",

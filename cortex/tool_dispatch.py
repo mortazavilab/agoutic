@@ -298,7 +298,7 @@ def _get_aliases() -> tuple[dict[str, str], dict[str, dict[str, str]]]:
     _consortium_canonical.update(param_aliases.keys())
     # Add base aliases only when the alias key is not itself a consortium tool
     for _alias, _target in _BASE_TOOL_ALIASES.items():
-        if _alias not in _consortium_canonical:
+        if _alias not in _consortium_canonical and _alias not in tool_aliases:
             tool_aliases[_alias] = _target
     for tool_name, pa in _BASE_PARAM_ALIASES.items():
         param_aliases.setdefault(tool_name, {}).update(pa)

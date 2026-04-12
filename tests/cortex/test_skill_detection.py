@@ -228,6 +228,18 @@ class TestDownloadFiles:
         )
         assert result == "download_files"
 
+    def test_download_igvf_file_from_igvf_search(self):
+        result = _auto_detect_skill_switch(
+            "download file IGVFFI1476XCPC", "IGVF_Search"
+        )
+        assert result == "download_files"
+
+    def test_download_igvf_dataset_from_welcome(self):
+        result = _auto_detect_skill_switch(
+            "download the bam files for IGVFDS3560WHCX", "welcome"
+        )
+        assert result == "download_files"
+
     def test_download_without_target(self):
         """'download the results' triggers analyze_job_results due to results keywords."""
         result = _auto_detect_skill_switch(

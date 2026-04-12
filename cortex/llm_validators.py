@@ -147,7 +147,7 @@ def _validate_llm_output(
         "get_file_download_url", "get_files_for_dataset",
         "search_genes", "get_gene", "search_samples",
         # Common aliases that are resolved downstream — not violations
-        "search",
+        "search", "get_file",
         # Launchpad (Dogme)
         "submit_dogme_job", "check_nextflow_status", "get_dogme_report",
         "stage_remote_sample", "list_remote_files",
@@ -274,6 +274,24 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
         )):
             return "reconcile_bams"
 
+    # --- Signals for download_files ---
+    _download_words = ["download", "grab", "fetch", "save"]
+    _has_download = any(w in msg_lower for w in _download_words)
+    _has_encode_file_accession = bool(re.search(r'ENCFF[A-Z0-9]{6}', user_message, re.IGNORECASE))
+    _has_encode_dataset_accession = bool(re.search(r'ENCSR[A-Z0-9]{6}', user_message, re.IGNORECASE))
+    _has_igvf_file_accession = bool(re.search(r'IGVFFI[A-Z0-9]{4,8}', user_message, re.IGNORECASE))
+    _has_igvf_dataset_accession = bool(re.search(r'IGVFDS[A-Z0-9]{4,8}', user_message, re.IGNORECASE))
+    _has_url = bool(re.search(r'https?://', msg_lower))
+    if current_skill != "download_files":
+        if _has_download and (
+            _has_encode_file_accession
+            or _has_encode_dataset_accession
+            or _has_igvf_file_accession
+            or _has_igvf_dataset_accession
+            or _has_url
+        ):
+            return "download_files"
+
     # --- Signals for ENCODE_Search ---
     _encode_words = ["encode", "encsr", "encff", "encode portal"]
     _search_words = ["search", "how many", "experiments", "accession", "biosample"]
@@ -316,15 +334,6 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
     if current_skill != "analyze_job_results":
         if any(w in msg_lower for w in _results_words):
             return "analyze_job_results"
-
-    # --- Signals for download_files ---
-    _download_words = ["download", "grab", "fetch", "save"]
-    _has_download = any(w in msg_lower for w in _download_words)
-    _has_file_accession = bool(re.search(r'ENCFF[A-Z0-9]{6}', user_message, re.IGNORECASE))
-    _has_url = bool(re.search(r'https?://', msg_lower))
-    if current_skill != "download_files":
-        if _has_download and (_has_file_accession or _has_url):
-            return "download_files"
 
     # --- Signals for enrichment analysis ---
     _enrichment_words = [

@@ -1,7 +1,7 @@
 import json
 from unittest.mock import MagicMock
 
-from cortex.tool_dispatch import build_calls_by_source
+from cortex.tool_dispatch import _get_aliases, build_calls_by_source
 
 
 def _make_block(payload: dict):
@@ -12,6 +12,10 @@ def _make_block(payload: dict):
 
 
 class TestToolDispatchPathResolution:
+    def test_consortium_alias_preserved_over_base_alias(self):
+        tool_aliases, _ = _get_aliases()
+        assert tool_aliases["get_file"] == "get_file_metadata"
+
     def test_auto_call_find_file_keeps_explicit_workflow_path(self):
         blocks = [
             _make_block(
