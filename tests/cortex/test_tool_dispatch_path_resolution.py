@@ -1,4 +1,5 @@
 import json
+import re
 from unittest.mock import MagicMock
 
 from cortex.tool_dispatch import _get_aliases, build_calls_by_source
@@ -15,6 +16,34 @@ class TestToolDispatchPathResolution:
     def test_consortium_alias_preserved_over_base_alias(self):
         tool_aliases, _ = _get_aliases()
         assert tool_aliases["get_file"] == "get_file_metadata"
+
+    def test_igvf_file_metadata_does_not_hit_encode_rerouter(self):
+        tag_pattern = re.compile(r'\[\[DATA_CALL: (consortium|service)=([^,]+), tool=([^,]+),?\s*(.*?)\]\]')
+        match = tag_pattern.match(
+            "[[DATA_CALL: consortium=igvf, tool=get_file_metadata, file_accession=IGVFFI1476XCPC]]"
+        )
+        assert match is not None
+
+        calls_by_source = build_calls_by_source(
+            data_call_matches=[match],
+            legacy_encode_matches=[],
+            legacy_analysis_matches=[],
+            auto_calls=[],
+            has_any_tags=True,
+            user_id="u-1",
+            project_id="proj-1",
+            user_message="what is file IGVFFI1476XCPC in experiment IGVFDS8756YQUM ?",
+            conversation_history=[],
+            history_blocks=[],
+            project_dir="",
+            active_skill="IGVF_Search",
+        )
+
+        igvf_calls = calls_by_source["igvf"]
+        assert len(igvf_calls) == 1
+        assert igvf_calls[0]["tool"] == "get_file_metadata"
+        assert igvf_calls[0]["params"]["file_accession"] == "IGVFFI1476XCPC"
+        assert "__routing_error__" not in igvf_calls[0]["params"]
 
     def test_auto_call_find_file_keeps_explicit_workflow_path(self):
         blocks = [

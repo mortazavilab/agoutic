@@ -78,7 +78,10 @@
   `download_files` before generic consortium-search routing, `get_file` is
   accepted as a repairable IGVF alias, and consortium-specific alias mappings
   now preserve `get_file -> get_file_metadata` instead of rewriting it to the
-  analyzer `read_file_content` path.
+  analyzer `read_file_content` path. IGVF `get_file_metadata` calls also stay
+  on the IGVF-specific repair path instead of passing through ENCODE
+  experiment/file rerouting logic, which avoids spurious `ENCSR` parent
+  experiment errors for valid `IGVFFI` lookups.
   (`atlas/config.py`, `cortex/llm_validators.py`,
   `cortex/tool_dispatch.py`)
 
@@ -119,7 +122,9 @@
   file and dataset download prompts switch into `download_files`, `get_file`
   aliases are not rejected during validation, and consortium alias resolution
   keeps IGVF `get_file` mapped to `get_file_metadata` rather than the generic
-  analyzer file-reader alias.
+  analyzer file-reader alias. Added a dispatch regression asserting that IGVF
+  `get_file_metadata` tags remain on the IGVF path and do not inherit ENCODE
+  file-metadata routing errors.
   (`tests/cortex/test_skill_detection.py`,
   `tests/cortex/test_validation.py`,
   `tests/cortex/test_tool_dispatch_path_resolution.py`)

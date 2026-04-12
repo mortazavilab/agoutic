@@ -392,10 +392,9 @@ def build_calls_by_source(
         if p_aliases:
             params = {p_aliases.get(k, k): v for k, v in params.items()}
 
-        corrected_tool, params = _correct_tool_routing(
-            corrected_tool, params, user_message, conversation_history)
-
         if source_key == "encode":
+            corrected_tool, params = _correct_tool_routing(
+                corrected_tool, params, user_message, conversation_history)
             params = _validate_encode_params(corrected_tool, params, user_message)
         if source_key == "igvf":
             corrected_tool, params = _correct_igvf_tool_routing(
