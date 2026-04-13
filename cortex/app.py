@@ -9,7 +9,7 @@ import shutil
 import httpx
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Path as FastAPIPath, Request
+from fastapi import Body, FastAPI, HTTPException, Path as FastAPIPath, Request
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool  # To run LLM without blocking
@@ -143,6 +143,7 @@ from cortex.remote_orchestration import (
     _initial_stage_parts,
     _final_stage_parts,
     _failed_stage_parts,
+    _cancelled_stage_parts,
     _workflow_step_index,
     _workflow_next_step,
     _workflow_status,
@@ -428,6 +429,11 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
         raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
 
 
+class CancelStagingTaskBody(BaseModel):
+    project_id: str
+    block_id: str
+
+
 @app.post("/jobs/{run_uuid}/cancel")
 async def cancel_job_proxy(run_uuid: str, request: Request):
     """
@@ -463,6 +469,105 @@ async def cancel_job_proxy(run_uuid: str, request: Request):
         logger.warning("Failed to proxy job cancel to Launchpad",
                        run_uuid=run_uuid, error=str(e))
         raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
+
+
+@app.post("/remote/stage/{task_id}/cancel")
+async def cancel_staging_task_proxy(
+    request: Request,
+    task_id: str = FastAPIPath(..., min_length=1),
+    body: CancelStagingTaskBody = Body(...),
+):
+    """Cancel a queued or running staging task and update the local block immediately."""
+    user = request.state.user
+    require_project_access(body.project_id, user, min_role="editor")
+
+    session = SessionLocal()
+    try:
+        block = session.execute(
+            select(ProjectBlock).where(
+                ProjectBlock.id == body.block_id,
+                ProjectBlock.project_id == body.project_id,
+            )
+        ).scalar_one_or_none()
+        if block is None:
+            raise HTTPException(status_code=404, detail="Staging block not found")
+        if block.type != "STAGING_TASK":
+            raise HTTPException(status_code=400, detail="Block is not a staging task")
+
+        payload = get_block_payload(block)
+        if str(payload.get("staging_task_id") or "") != task_id:
+            raise HTTPException(status_code=400, detail="Block does not match staging task")
+
+        from cortex.config import INTERNAL_API_SECRET
+
+        launchpad_rest = SERVICE_REGISTRY.get("launchpad", {}).get(
+            "rest_url", os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
+        )
+        headers = {}
+        if INTERNAL_API_SECRET:
+            headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    f"{launchpad_rest}/remote/stage/{task_id}/cancel",
+                    headers=headers,
+                )
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail="Staging task not found")
+            if resp.status_code == 409:
+                raise HTTPException(status_code=409, detail=resp.json().get("detail", "Cannot cancel staging task"))
+            resp.raise_for_status()
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to proxy staging cancel to Launchpad", task_id=task_id, error=str(e))
+            raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
+
+        result = resp.json() or {}
+        cancel_msg = str(result.get("message") or "Remote staging cancelled by user.").strip()
+        stage_parts = _cancelled_stage_parts(payload.get("stage_parts"), cancel_msg)
+
+        _update_project_block_payload(
+            session,
+            block.id,
+            {
+                "status": "CANCELLED",
+                "message": cancel_msg,
+                "error": None,
+                "stage_parts": stage_parts,
+                "progress_percent": _stage_part_progress(stage_parts),
+            },
+            status="CANCELLED",
+        )
+
+        workflow_plan_block_id = payload.get("workflow_plan_block_id")
+        stage_input_step_id = payload.get("stage_input_step_id")
+        complete_stage_only_step_id = payload.get("complete_stage_only_step_id")
+        if workflow_plan_block_id:
+            workflow_block = session.execute(
+                select(ProjectBlock).where(ProjectBlock.id == workflow_plan_block_id)
+            ).scalar_one_or_none()
+            if workflow_block is not None and stage_input_step_id:
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    stage_input_step_id,
+                    "CANCELLED",
+                    extra={"error": cancel_msg},
+                )
+            if workflow_block is not None and complete_stage_only_step_id:
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    complete_stage_only_step_id,
+                    "CANCELLED",
+                    extra={"error": cancel_msg},
+                )
+
+        return result
+    finally:
+        session.close()
 
 @app.delete("/jobs/{run_uuid}")
 async def delete_job_proxy(run_uuid: str, request: Request):

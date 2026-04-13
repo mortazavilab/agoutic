@@ -201,6 +201,8 @@ async def test_upload_single_file_direct_rsync_omits_trailing_slash(monkeypatch,
     assert result == {"ok": True, "message": "Upload completed", "bytes_transferred": 123}
     assert str(local_file) in captured["cmd"]
     assert f"{local_file}/" not in captured["cmd"]
+    assert "--partial-dir=.rsync-partial" in captured["cmd"]
+    assert "--partial" not in captured["cmd"]
     assert any(str(part).startswith("--skip-compress=") for part in captured["cmd"])
     assert "--copy-links" in captured["cmd"]
 
@@ -235,6 +237,8 @@ async def test_download_direct_rsync_uses_copy_dirlinks_and_skip_compress(monkey
     )
 
     assert result == {"ok": True, "message": "Download completed", "bytes_transferred": 456}
+    assert "--partial-dir=.rsync-partial" in captured["cmd"]
+    assert "--partial" not in captured["cmd"]
     assert "--copy-dirlinks" in captured["cmd"]
     assert "--copy-links" not in captured["cmd"]
     assert any(str(part).startswith("--skip-compress=") for part in captured["cmd"])
@@ -278,6 +282,10 @@ async def test_direct_rsync_retries_without_skip_compress_on_incompatible_option
 
     assert result == {"ok": True, "message": "Upload completed", "bytes_transferred": 789}
     assert len(commands) == 2
+    assert "--partial-dir=.rsync-partial" in commands[0]
+    assert "--partial" not in commands[0]
+    assert "--partial-dir=.rsync-partial" in commands[1]
+    assert "--partial" not in commands[1]
     assert any(str(part).startswith("--skip-compress=") for part in commands[0])
     assert not any(str(part).startswith("--skip-compress=") for part in commands[1])
 
@@ -295,12 +303,20 @@ async def test_upload_direct_rsync_times_out_with_actionable_message(monkeypatch
 
     class FakeProcess:
         returncode = None
+        pid = 12345
 
         async def communicate(self):
             raise AssertionError("communicate should not be called directly during timeout path")
 
         def kill(self):
             self.returncode = -9
+
+        def terminate(self):
+            self.returncode = -15
+
+        async def wait(self):
+            self.returncode = self.returncode if self.returncode is not None else -15
+            return self.returncode
 
     async def fake_create_subprocess_exec(*cmd, **kwargs):
         return FakeProcess()

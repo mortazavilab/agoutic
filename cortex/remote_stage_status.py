@@ -182,3 +182,24 @@ def _failed_stage_parts(parts: dict | None, error_message: str) -> dict:
                 "message": error_message,
             })
     return parts
+
+
+def _cancelled_stage_parts(parts: dict | None, message: str) -> dict:
+    parts = {
+        "references": dict((parts or {}).get("references") or _make_stage_part("RUNNING", 40, "Staging reference assets on the remote profile...")),
+        "data": dict((parts or {}).get("data") or _make_stage_part("PENDING", 0, "Waiting for reference staging to finish.")),
+    }
+
+    if parts["references"].get("status") != "COMPLETED":
+        parts["references"].update({
+            "status": "CANCELLED",
+            "message": "Reference staging cancelled.",
+        })
+
+    if parts["data"].get("status") != "COMPLETED":
+        parts["data"].update({
+            "status": "CANCELLED",
+            "message": message or "Sample data staging cancelled.",
+        })
+
+    return parts

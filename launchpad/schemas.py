@@ -186,10 +186,17 @@ class StageTaskAcceptedResponse(BaseModel):
     status: str = "queued"
 
 
+class StageTaskCancelResponse(BaseModel):
+    """Returned when a staging task cancellation is accepted."""
+    task_id: str
+    status: str = "cancelled"
+    message: str
+
+
 class StagingTaskStatusResponse(BaseModel):
     """Current state of a background staging task."""
     task_id: str
-    status: str  # queued | running | completed | failed
+    status: str  # queued | running | completed | failed | cancelled
     progress: dict[str, Any] = Field(default_factory=dict)
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None

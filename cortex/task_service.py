@@ -219,6 +219,8 @@ def _build_target(kind: str, *, block_id: str | None = None, run_uuid: str | Non
 
 
 def _action_for_status(status: str, *, pending_label: str, completed_label: str) -> str:
+    if status == "CANCELLED":
+        return "Cancelled"
     if status in _ACTIVE_STATUSES:
         return pending_label
     return completed_label
@@ -231,6 +233,8 @@ def _normalize_name(value: str) -> str:
 def _workflow_action_for_step(step: dict) -> tuple[str | None, str | None]:
     status = step.get("status", "PENDING")
     kind = step.get("kind", "")
+    if status == "CANCELLED":
+        return "Cancelled", None
     if status == "FOLLOW_UP" and step.get("decision_gate_id"):
         return "Review choice", _build_target("block", block_id=step["decision_gate_id"])
     # --- Plan step kinds ---
@@ -608,6 +612,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 "RUNNING": "RUNNING",
                 "DONE": "COMPLETED",
                 "FAILED": "FAILED",
+                "CANCELLED": "CANCELLED",
             }.get(block.status, "PENDING")
             source_key = f"stage-transfer:{block.id}"
             seen_sources.add(source_key)

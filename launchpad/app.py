@@ -55,6 +55,7 @@ from launchpad.schemas import (
     StageRemoteSampleRequest,
     StageRemoteSampleResponse,
     StageTaskAcceptedResponse,
+    StageTaskCancelResponse,
     StagingTaskStatusResponse,
     JobStatusResponse,
     JobStatusExtendedResponse,
@@ -772,6 +773,25 @@ async def get_staging_task_status(task_id: str = FastAPIPath(..., min_length=1))
     if task_record is None:
         raise HTTPException(status_code=404, detail=f"Staging task {task_id} not found")
     return StagingTaskStatusResponse(**staging_task_record_to_dict(task_record))
+
+
+@app.post("/remote/stage/{task_id}/cancel", response_model=StageTaskCancelResponse)
+async def cancel_staging_task_endpoint(task_id: str = FastAPIPath(..., min_length=1)):
+    """Cancel a queued or running background staging task."""
+    from launchpad.backends.staging_worker import cancel_staging_task
+
+    try:
+        task = await cancel_staging_task(task_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return StageTaskCancelResponse(
+        task_id=task.task_id,
+        status="cancelled",
+        message=task.error or "Remote staging cancelled by user.",
+    )
 
 
 @app.post("/remote/stage/{task_id}/retry", response_model=StageTaskAcceptedResponse)

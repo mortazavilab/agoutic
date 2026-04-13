@@ -200,8 +200,8 @@ bash: rsync: command not found
 **Fixes:**
 1. Check if rsync is available on the cluster: `which rsync`
 2. Load the rsync module if applicable: `module load rsync`
-3. AGOUTIC will automatically fall back to SFTP if rsync is unavailable
-4. Ask cluster admins to install rsync
+3. AGOUTIC does not currently auto-fallback to SFTP for staging transfers; install `rsync` on the cluster or use an image that includes it
+4. Ask cluster admins to install rsync if the cluster environment omits it
 
 ### Slow Transfers for BAM or POD5 Outputs
 

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import launchpad.backends.local_user_broker as local_user_broker_module
 from launchpad.backends.local_auth_sessions import LocalAuthSession, LocalAuthSessionManager, _launch_helper_via_su
 from launchpad.backends.local_user_broker import _build_ssh_transport, _handle_request
 
@@ -115,7 +116,7 @@ async def test_local_broker_rsync_transfer_keeps_single_file_source(monkeypatch,
     local_file.write_text("BAM")
     captured = {}
 
-    async def fake_run_subprocess(cmd, timeout_seconds=None):
+    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None):
         captured["cmd"] = cmd
         return {"ok": True, "stdout": "total size is 42\n", "stderr": "", "exit_status": 0}
 
@@ -144,6 +145,8 @@ async def test_local_broker_rsync_transfer_keeps_single_file_source(monkeypatch,
     assert result["ok"] is True
     assert str(local_file) in captured["cmd"]
     assert f"{local_file}/" not in captured["cmd"]
+    assert "--partial-dir=.rsync-partial" in captured["cmd"]
+    assert "--partial" not in captured["cmd"]
     assert any(str(part).startswith("--skip-compress=") for part in captured["cmd"])
     assert "--copy-links" in captured["cmd"]
 
@@ -153,7 +156,7 @@ async def test_local_broker_rsync_download_preserves_remote_trailing_slash(monke
     """Remote rsync sources (user@host:path/) must keep their trailing slash."""
     captured = {}
 
-    async def fake_run_subprocess(cmd, timeout_seconds=None):
+    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None):
         captured["cmd"] = cmd
         return {"ok": True, "stdout": "total size is 42\n", "stderr": "", "exit_status": 0}
 
@@ -183,6 +186,8 @@ async def test_local_broker_rsync_download_preserves_remote_trailing_slash(monke
     # The trailing slash on the remote source must survive — without it rsync
     # creates a nested directory instead of copying contents into dest.
     assert "seyedam@hpc3.example.edu:/share/crsp/workflow1/" in captured["cmd"]
+    assert "--partial-dir=.rsync-partial" in captured["cmd"]
+    assert "--partial" not in captured["cmd"]
     assert any(str(part).startswith("--skip-compress=") for part in captured["cmd"])
 
 
@@ -192,7 +197,7 @@ async def test_local_broker_rsync_retries_without_skip_compress_on_incompatible_
     local_file.write_text("BAM")
     commands = []
 
-    async def fake_run_subprocess(cmd, timeout_seconds=None):
+    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None):
         commands.append(cmd)
         if len(commands) == 1:
             return {
@@ -228,8 +233,41 @@ async def test_local_broker_rsync_retries_without_skip_compress_on_incompatible_
     assert result["ok"] is True
     assert result["bytes_transferred"] == 84
     assert len(commands) == 2
+    assert "--partial-dir=.rsync-partial" in commands[0]
+    assert "--partial" not in commands[0]
+    assert "--partial-dir=.rsync-partial" in commands[1]
+    assert "--partial" not in commands[1]
     assert any(str(part).startswith("--skip-compress=") for part in commands[0])
     assert not any(str(part).startswith("--skip-compress=") for part in commands[1])
+
+
+@pytest.mark.asyncio
+async def test_local_broker_cancel_request_terminates_active_process(monkeypatch):
+    terminated = []
+
+    class _FakeProc:
+        returncode = None
+        pid = 12345
+
+    async def fake_terminate(proc, *, grace_seconds=5.0):
+        terminated.append((proc, grace_seconds))
+
+    local_user_broker_module._ACTIVE_PROCESSES["req-1"] = _FakeProc()
+    monkeypatch.setattr(local_user_broker_module, "_terminate_process_tree", fake_terminate)
+
+    result = await _handle_request(
+        {
+            "auth_token": "token-123",
+            "op": "cancel_request",
+            "request_id": "req-1",
+        },
+        shutdown_event=asyncio.Event(),
+        auth_token="token-123",
+    )
+
+    assert result == {"ok": True, "request_id": "req-1", "cancelled": True}
+    assert len(terminated) == 1
+    assert "req-1" not in local_user_broker_module._ACTIVE_PROCESSES
 
 
 @pytest.mark.asyncio

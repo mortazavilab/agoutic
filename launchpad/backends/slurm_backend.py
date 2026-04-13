@@ -34,6 +34,7 @@ class SlurmBackend:
 
     _result_sync_tasks: dict[str, asyncio.Task] = {}
     _transfer_progress: dict[str, dict] = {}
+    _RSYNC_PARTIAL_DIR = ".rsync-partial"
     _RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "kallisto", "openChromatin", "stats")
     _RESULT_SYNC_FILE_PATTERNS = ("*.config", "*.html", "*.txt", "*.csv", "*.tsv")
 
@@ -1807,6 +1808,7 @@ class SlurmBackend:
         *,
         run_uuid: str | None,
         on_progress: Callable[[dict], None] | None = None,
+        transfer_id: str | None = None,
     ) -> dict:
         """Stage or reuse remote references and sample data, optionally updating a job record."""
         from launchpad.db import (
@@ -1854,12 +1856,15 @@ class SlurmBackend:
                     await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
                     await self._update_job_transfer_state(run_uuid, "uploading_inputs")
                 await conn.mkdir_p(cache_path)
-                result = await self._transfer_manager.upload_inputs(
-                    profile=profile,
-                    local_path=str(ref_source_dir),
-                    remote_path=cache_path,
-                    on_progress=on_progress,
-                )
+                upload_kwargs = {
+                    "profile": profile,
+                    "local_path": str(ref_source_dir),
+                    "remote_path": cache_path,
+                    "on_progress": on_progress,
+                }
+                if transfer_id:
+                    upload_kwargs["transfer_id"] = transfer_id
+                result = await self._transfer_manager.upload_inputs(**upload_kwargs)
                 if not result["ok"]:
                     if run_uuid:
                         await self._update_job_transfer_state(run_uuid, "transfer_failed")
@@ -1886,6 +1891,7 @@ class SlurmBackend:
                 reference_cache_path = cache_path
 
         input_fingerprint = await self._compute_input_fingerprint_async(params.input_directory)
+        input_size_bytes = await self._compute_input_size_async(params.input_directory)
         data_cache_key = input_fingerprint[:16]
         target_data_remote = str(PurePosixPath(data_root) / data_cache_key)
         data_entry = await get_remote_input_cache_entry(
@@ -1897,32 +1903,59 @@ class SlurmBackend:
 
         data_cache_path = data_entry.remote_path if data_entry else target_data_remote
         data_exists = await conn.path_exists(data_cache_path)
-        data_has_symlinks = False
+        data_cache_info: dict[str, object] | None = None
+        data_refresh_reason: str | None = None
         if data_exists:
-            data_has_symlinks = await self._remote_dir_contains_symlinks(conn, data_cache_path)
+            if data_entry is None:
+                data_refresh_reason = "uncataloged remote cache path already exists"
+            data_cache_info = await self._inspect_remote_cache_dir(conn, data_cache_path)
+            if data_cache_info is None:
+                data_refresh_reason = data_refresh_reason or "remote cache inspection failed"
+            elif data_cache_info.get("has_symlinks"):
+                data_refresh_reason = "cached input contains symlinks"
+            elif data_cache_info.get("has_partial_dir"):
+                data_refresh_reason = f"cached input contains {self._RSYNC_PARTIAL_DIR}"
+            elif int(data_cache_info.get("size_bytes") or 0) != input_size_bytes:
+                data_refresh_reason = (
+                    "cached input size mismatch "
+                    f"(remote={int(data_cache_info.get('size_bytes') or 0)}, expected={input_size_bytes})"
+                )
+        elif data_entry is not None:
+            data_refresh_reason = "cached input path is missing"
 
-        if data_entry is not None and data_exists and not data_has_symlinks:
+        if data_entry is not None and data_exists and data_refresh_reason is None:
             data_status = "reused"
         else:
             if run_uuid:
                 await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
                 await self._update_job_transfer_state(run_uuid, "uploading_inputs")
-            if data_exists and data_has_symlinks:
+            if data_exists:
+                logger.warning(
+                    "Refreshing remote input cache",
+                    sample_name=params.sample_name,
+                    remote_path=data_cache_path,
+                    reason=data_refresh_reason or "stale remote cache path",
+                    remote_size_bytes=int((data_cache_info or {}).get("size_bytes") or 0),
+                    expected_size_bytes=input_size_bytes,
+                )
                 await conn.run(f"rm -rf {shlex.quote(data_cache_path)}", check=True)
                 data_status = "refreshed"
+            else:
+                data_status = "staged"
             await conn.mkdir_p(data_cache_path)
-            result = await self._transfer_manager.upload_inputs(
-                profile=profile,
-                local_path=params.input_directory,
-                remote_path=data_cache_path,
-                on_progress=on_progress,
-            )
+            upload_kwargs = {
+                "profile": profile,
+                "local_path": params.input_directory,
+                "remote_path": data_cache_path,
+                "on_progress": on_progress,
+            }
+            if transfer_id:
+                upload_kwargs["transfer_id"] = transfer_id
+            result = await self._transfer_manager.upload_inputs(**upload_kwargs)
             if not result["ok"]:
                 if run_uuid:
                     await self._update_job_transfer_state(run_uuid, "transfer_failed")
                 raise RuntimeError(f"Input transfer failed: {result['message']}")
-            if not (data_exists and data_has_symlinks):
-                data_status = "staged"
 
         await upsert_remote_input_cache_entry(
             user_id=params.user_id or user_key,
@@ -1930,6 +1963,7 @@ class SlurmBackend:
             reference_id=primary_ref,
             input_fingerprint=input_fingerprint,
             remote_path=data_cache_path,
+            size_bytes=input_size_bytes,
             status="READY",
             increment_use_count=True,
         )
@@ -1988,6 +2022,47 @@ class SlurmBackend:
             logger.warning("Failed to inspect remote cache directory for symlinks", path=path, error=str(exc))
             return False
         return any((entry.get("type") or "") == "symlink" for entry in entries)
+
+    async def _inspect_remote_cache_dir(self, conn, path: str) -> dict[str, object] | None:
+        """Collect recursive cache integrity evidence for a staged input directory."""
+        script = (
+            "python3 - <<'PY'\n"
+            "import json, os\n"
+            f"path = {path!r}\n"
+            "summary = {'size_bytes': 0, 'has_symlinks': False, 'has_partial_dir': False}\n"
+            "for root, dirs, files in os.walk(path, followlinks=False):\n"
+            f"    if {self._RSYNC_PARTIAL_DIR!r} in dirs:\n"
+            "        summary['has_partial_dir'] = True\n"
+            "    for name in list(dirs) + list(files):\n"
+            "        candidate = os.path.join(root, name)\n"
+            "        if os.path.islink(candidate):\n"
+            "            summary['has_symlinks'] = True\n"
+            "    for name in files:\n"
+            "        candidate = os.path.join(root, name)\n"
+            "        if os.path.islink(candidate):\n"
+            "            continue\n"
+            "        try:\n"
+            "            summary['size_bytes'] += int(os.stat(candidate, follow_symlinks=False).st_size)\n"
+            "        except OSError:\n"
+            "            pass\n"
+            "print(json.dumps(summary))\n"
+            "PY"
+        )
+        try:
+            result = await conn.run(script, check=True)
+        except Exception as exc:
+            logger.warning("Failed to inspect remote cache directory", path=path, error=str(exc))
+            return None
+        try:
+            payload = json.loads((result.stdout or "").strip() or "{}")
+        except json.JSONDecodeError as exc:
+            logger.warning("Remote cache inspection returned invalid JSON", path=path, error=str(exc))
+            return None
+        return {
+            "size_bytes": int(payload.get("size_bytes") or 0),
+            "has_symlinks": bool(payload.get("has_symlinks")),
+            "has_partial_dir": bool(payload.get("has_partial_dir")),
+        }
 
     @staticmethod
     def _reference_paths_from_cache_preflight(params: SubmitParams) -> dict[str, str]:
@@ -2456,6 +2531,34 @@ class SlurmBackend:
                 hasher.update(str(stat.st_size).encode("utf-8"))
                 hasher.update(str(stat.st_mtime_ns).encode("utf-8"))
         return hasher.hexdigest()
+
+    @staticmethod
+    def _compute_input_size(local_path: str) -> int:
+        path = Path(local_path)
+        if not path.exists():
+            return 0
+
+        if path.is_file():
+            try:
+                return int(path.stat().st_size)
+            except OSError:
+                return 0
+
+        total_size = 0
+        for root, _, files in os.walk(path):
+            root_path = Path(root)
+            for filename in files:
+                file_path = root_path / filename
+                try:
+                    total_size += int(file_path.stat().st_size)
+                except OSError:
+                    continue
+        return total_size
+
+    @staticmethod
+    async def _compute_input_size_async(local_path: str) -> int:
+        """Run input size scans off the main event loop."""
+        return await asyncio.to_thread(SlurmBackend._compute_input_size, local_path)
 
     @staticmethod
     async def _compute_input_fingerprint_async(local_path: str) -> str:

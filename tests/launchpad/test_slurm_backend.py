@@ -120,6 +120,10 @@ async def test_stage_sample_inputs_uses_async_signature_and_fingerprint_helpers(
         fingerprint_calls.append(local_path)
         return "fingerprint-1234567890"
 
+    async def _fake_input_size(local_path: str) -> int:
+        assert local_path == str(input_dir)
+        return 4
+
     async def _fake_upload_inputs(**kwargs):
         return {"ok": True, "message": "uploaded", "bytes_transferred": 1}
 
@@ -128,6 +132,7 @@ async def test_stage_sample_inputs_uses_async_signature_and_fingerprint_helpers(
     monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda ref_raw: ref_dir)
     monkeypatch.setattr(backend, "_compute_directory_signature_async", _fake_signature)
     monkeypatch.setattr(backend, "_compute_input_fingerprint_async", _fake_fingerprint)
+    monkeypatch.setattr(backend, "_compute_input_size_async", _fake_input_size)
     monkeypatch.setattr(
         SlurmBackend,
         "_compute_directory_signature",
@@ -253,6 +258,90 @@ async def test_reuse_pre_staged_input_raises_when_remote_path_missing():
 
     with pytest.raises(FileNotFoundError, match="no longer exists"):
         await backend._reuse_pre_staged_input("run-1", params, profile=profile, conn=fake_conn)
+
+
+@pytest.mark.asyncio
+async def test_stage_sample_inputs_refreshes_size_mismatched_remote_cache(monkeypatch):
+    backend = SlurmBackend()
+    profile = _make_profile()
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        sample_name="C2C12r1",
+        mode="RNA",
+        input_directory="data/ENCFF921XAH.bam",
+        reference_genome=["mm39"],
+    )
+    data_cache_path = "/remote/agoutic/data/fingerprint123456"
+    fake_conn = _FakeStageConn(existing_paths={data_cache_path})
+    uploaded = []
+    upsert_input_cache_calls = []
+
+    async def fake_get_remote_reference_cache_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_get_remote_input_cache_entry(*_args, **_kwargs):
+        return SimpleNamespace(remote_path=data_cache_path, size_bytes=999)
+
+    async def fake_upsert_remote_reference_cache_entry(**_kwargs):
+        return None
+
+    async def fake_upsert_remote_input_cache_entry(**kwargs):
+        upsert_input_cache_calls.append(kwargs)
+        return None
+
+    async def fake_upsert_remote_staged_sample(**_kwargs):
+        return None
+
+    async def fake_upload_inputs(**kwargs):
+        uploaded.append(kwargs)
+        return {"ok": True, "message": "Upload completed", "bytes_transferred": 999}
+
+    async def fake_inspect_remote_cache_dir(conn, path):
+        assert conn is fake_conn
+        assert path == data_cache_path
+        return {"size_bytes": 123, "has_symlinks": False, "has_partial_dir": False}
+
+    monkeypatch.setattr("launchpad.db.get_remote_reference_cache_entry", fake_get_remote_reference_cache_entry)
+    monkeypatch.setattr("launchpad.db.get_remote_input_cache_entry", fake_get_remote_input_cache_entry)
+    monkeypatch.setattr("launchpad.db.upsert_remote_reference_cache_entry", fake_upsert_remote_reference_cache_entry)
+    monkeypatch.setattr("launchpad.db.upsert_remote_input_cache_entry", fake_upsert_remote_input_cache_entry)
+    monkeypatch.setattr("launchpad.db.upsert_remote_staged_sample", fake_upsert_remote_staged_sample)
+    monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda _ref: None)
+    monkeypatch.setattr(backend, "_compute_input_fingerprint_async", AsyncMock(return_value="fingerprint1234567890"))
+    monkeypatch.setattr(backend, "_compute_input_size_async", AsyncMock(return_value=999))
+    monkeypatch.setattr(backend, "_inspect_remote_cache_dir", fake_inspect_remote_cache_dir)
+    monkeypatch.setattr(backend._transfer_manager, "upload_inputs", fake_upload_inputs)
+
+    result = await backend._stage_sample_inputs(
+        params=params,
+        profile=profile,
+        conn=fake_conn,
+        run_uuid=None,
+    )
+
+    assert result["data_cache_status"] == "refreshed"
+    assert uploaded == [
+        {
+            "profile": profile,
+            "local_path": "data/ENCFF921XAH.bam",
+            "remote_path": data_cache_path,
+            "on_progress": None,
+        }
+    ]
+    assert (f"rm -rf {data_cache_path}", True) in fake_conn.run_calls
+    assert upsert_input_cache_calls == [
+        {
+            "user_id": "user-1",
+            "ssh_profile_id": "profile-1",
+            "reference_id": "mm39",
+            "input_fingerprint": "fingerprint1234567890",
+            "remote_path": data_cache_path,
+            "size_bytes": 999,
+            "status": "READY",
+            "increment_use_count": True,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1029,7 +1118,13 @@ async def test_stage_sample_inputs_refreshes_remote_cache_when_top_level_symlink
     monkeypatch.setattr("launchpad.db.upsert_remote_input_cache_entry", fake_upsert_remote_input_cache_entry)
     monkeypatch.setattr("launchpad.db.upsert_remote_staged_sample", fake_upsert_remote_staged_sample)
     monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda _ref: None)
-    monkeypatch.setattr(backend, "_compute_input_fingerprint", lambda _path: "fingerprint1234567890")
+    monkeypatch.setattr(backend, "_compute_input_fingerprint_async", AsyncMock(return_value="fingerprint1234567890"))
+    monkeypatch.setattr(backend, "_compute_input_size_async", AsyncMock(return_value=123))
+    monkeypatch.setattr(
+        backend,
+        "_inspect_remote_cache_dir",
+        AsyncMock(return_value={"size_bytes": 123, "has_symlinks": True, "has_partial_dir": False}),
+    )
     monkeypatch.setattr(backend._transfer_manager, "upload_inputs", fake_upload_inputs)
 
     result = await backend._stage_sample_inputs(

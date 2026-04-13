@@ -221,6 +221,101 @@ class TestCreateBlock:
         assert data["type"] == "USER_MESSAGE"
         assert data["payload"]["text"] == "Hello"
 
+    def test_cancel_staging_task_proxy_updates_block_and_workflow(self, client, session_factory, monkeypatch):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "WORKFLOW_PLAN",
+            {
+                "status": "RUNNING",
+                "steps": [
+                    {"id": "stage_input", "kind": "REMOTE_STAGE", "title": "Stage input", "status": "RUNNING"},
+                    {"id": "complete_stage_only", "kind": "COMPLETE_STAGE_ONLY", "title": "Finish stage-only flow", "status": "PENDING"},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-blk",
+        )
+        stage_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "STAGING_TASK",
+            {
+                "sample_name": "ENCFF433WOA",
+                "mode": "RNA",
+                "staging_task_id": "stg-1",
+                "workflow_plan_block_id": workflow_block.id,
+                "stage_input_step_id": "stage_input",
+                "complete_stage_only_step_id": "complete_stage_only",
+                "progress_percent": 70,
+                "message": "Uploading sample data",
+                "stage_parts": {
+                    "references": {"status": "COMPLETED", "progress_percent": 100, "message": "Reference assets are ready."},
+                    "data": {"status": "RUNNING", "progress_percent": 40, "message": "Uploading sample data"},
+                },
+            },
+            status="RUNNING",
+            owner_id="u-blk",
+        )
+        sess.commit()
+        sess.close()
+
+        class _FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "task_id": "stg-1",
+                    "status": "cancelled",
+                    "message": "Remote staging cancelled by user.",
+                }
+
+            def raise_for_status(self):
+                return None
+
+        class _FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def post(self, url, headers=None):
+                assert url.endswith("/remote/stage/stg-1/cancel")
+                return _FakeResponse()
+
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", _FakeAsyncClient)
+
+        resp = client.post(
+            "/remote/stage/stg-1/cancel",
+            json={"project_id": "proj-blk", "block_id": stage_block.id},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "cancelled"
+
+        sess = session_factory()
+        refreshed_stage = sess.execute(select(ProjectBlock).where(ProjectBlock.id == stage_block.id)).scalar_one()
+        refreshed_workflow = sess.execute(select(ProjectBlock).where(ProjectBlock.id == workflow_block.id)).scalar_one()
+        stage_payload = get_block_payload(refreshed_stage)
+        workflow_payload = get_block_payload(refreshed_workflow)
+        sess.close()
+
+        assert refreshed_stage.status == "CANCELLED"
+        assert stage_payload["message"] == "Remote staging cancelled by user."
+        assert stage_payload["stage_parts"]["references"]["status"] == "COMPLETED"
+        assert stage_payload["stage_parts"]["data"]["status"] == "CANCELLED"
+        assert refreshed_workflow.status == "CANCELLED"
+        assert workflow_payload["status"] == "CANCELLED"
+        assert {step["id"]: step["status"] for step in workflow_payload["steps"]} == {
+            "stage_input": "CANCELLED",
+            "complete_stage_only": "CANCELLED",
+        }
+
     def test_create_block_unauthenticated(self, session_factory, seed_data):
         with patch("cortex.db.SessionLocal", session_factory), \
              patch("cortex.app.SessionLocal", session_factory), \

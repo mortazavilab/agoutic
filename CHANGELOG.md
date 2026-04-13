@@ -23,6 +23,17 @@
   `analyzer/mcp_server.py`, `analyzer/mcp_tools.py`,
   `cortex/plan_templates.py`, `skills/differential_expression/SKILL.md`)
 
+- **Live remote staging can now be cancelled from the UI and API** — running
+  `STAGING_TASK` blocks now expose a cancel control, Launchpad accepts
+  `POST /remote/stage/{task_id}/cancel`, Cortex proxies the request and marks
+  the staging block and related workflow steps as `CANCELLED`, and brokered
+  transfers reuse the staging task id as the rsync request id so cancellation
+  can stop the active broker-side process as well.
+  (`ui/appui_block_part2.py`, `cortex/app.py`, `cortex/job_polling.py`,
+  `cortex/remote_orchestration.py`, `cortex/task_service.py`,
+  `launchpad/app.py`, `launchpad/backends/staging_worker.py`,
+  `launchpad/backends/local_user_broker.py`)
+
 ### Bug Fixes
 
 - **Server startup no longer emits a `runpy` warning while checking shared GTF
@@ -32,6 +43,17 @@
   executes.
   (`common/__init__.py`, `agoutic_servers.sh`)
 
+- **Remote rsync staging now preserves partial transfers safely and rejects
+  stale remote cache reuse** — rsync uploads/downloads now use
+  `.rsync-partial`, timeout and lost-task messages point users to that
+  recovery path, direct and brokered rsync processes are terminated as a full
+  process group on cancellation/timeouts, and SLURM input-cache reuse now
+  refreshes remote directories that contain symlinks, partial-transfer state,
+  or size mismatches instead of trusting incomplete cached inputs.
+  (`launchpad/backends/file_transfer.py`,
+  `launchpad/backends/local_user_broker.py`,
+  `launchpad/backends/slurm_backend.py`, `cortex/job_polling.py`)
+
 ### Tests
 
 - **GTF parser and annotation regression coverage** — added focused tests for
@@ -40,6 +62,26 @@
   reconciled-GTF precedence over legacy reference lookups.
   (`tests/common/test_gtf_parser.py`,
   `tests/common/test_gene_annotation.py`)
+
+- **Remote staging cancellation and rsync-hardening regression coverage** —
+  added targeted tests for Launchpad staging cancellation, broker-side cancel
+  requests, direct rsync partial-dir handling and timeout cleanup, Cortex block
+  cancellation propagation, and SLURM remote cache refresh when cached input
+  contents no longer match the local source.
+  (`tests/launchpad/test_staging_worker.py`,
+  `tests/launchpad/test_app_status_endpoint.py`,
+  `tests/launchpad/test_local_auth_sessions.py`,
+  `tests/launchpad/test_file_transfer.py`,
+  `tests/launchpad/test_slurm_backend.py`,
+  `tests/cortex/test_block_endpoints.py`)
+
+### Documentation
+
+- **Remote staging troubleshooting notes corrected for current rsync
+  behavior** — the troubleshooting guide now documents that AGOUTIC does not
+  currently auto-fallback to SFTP when `rsync` is missing and points users to
+  the actual rsync-based recovery path.
+  (`docs/troubleshooting_remote.md`)
 
 ## [3.6.2] - 2026-04-11
 

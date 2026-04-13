@@ -183,10 +183,10 @@ def render_block_part2(
             if data_state == "COMPLETED":
                 _step_completed.append(1)
 
-            if refs_state == "FAILED":
+            if refs_state in {"FAILED", "CANCELLED"}:
                 _step_current = 0
                 _step_failed.append(0)
-            elif data_state == "FAILED":
+            elif data_state in {"FAILED", "CANCELLED"}:
                 _step_current = 1
                 _step_failed.append(1)
             elif data_state == "RUNNING":
@@ -196,7 +196,7 @@ def render_block_part2(
             elif block.get("status") == "DONE":
                 _step_current = 1
                 _step_completed = [0, 1]
-            elif block.get("status") == "FAILED":
+            elif block.get("status") in {"FAILED", "CANCELLED"}:
                 _step_current = 1 if 0 in _step_completed else 0
                 if 0 in _step_completed and 1 not in _step_failed:
                     _step_failed.append(1)
@@ -221,6 +221,8 @@ def render_block_part2(
                     st.caption(f"✅ {part_message}")
                 elif state == "FAILED":
                     st.error(part_message)
+                elif state == "CANCELLED":
+                    st.warning(part_message)
                 elif state == "RUNNING":
                     st.caption(f"🔄 {part_message}")
                 else:
@@ -236,6 +238,28 @@ def render_block_part2(
                 status_chip("running", label="Staging Running", icon="🔄")
                 st.caption(message)
                 st.progress(max(min(progress, 100), 0) / 100)
+                staging_task_id = content.get("staging_task_id")
+                if staging_task_id and st.button("🛑 Cancel Staging", type="primary", key=f"cancel_stage_{block_id}"):
+                    _pause_auto_refresh(4)
+                    try:
+                        _cancel_resp = make_authenticated_request(
+                            "POST",
+                            f"{API_URL}/remote/stage/{staging_task_id}/cancel",
+                            json={"project_id": active_id, "block_id": block_id},
+                            timeout=15,
+                        )
+                        if _cancel_resp.status_code == 200:
+                            _cancel_data = _cancel_resp.json()
+                            st.success(_cancel_data.get("message", "Staging cancelled."))
+                            st.rerun()
+                        elif _cancel_resp.status_code == 404:
+                            st.warning("Staging task not found. It may have already finished or the server was restarted.")
+                        elif _cancel_resp.status_code == 409:
+                            st.warning(_cancel_resp.json().get("detail", "Cannot cancel staging task."))
+                        else:
+                            st.error(f"Cancel failed: {_cancel_resp.status_code} — {_cancel_resp.text[:200]}")
+                    except Exception as _ce:
+                        st.error(f"Error cancelling staging task: {_ce}")
                 _render_stage_part("References", stage_parts.get("references") or {
                     "status": "RUNNING",
                     "progress_percent": 40,
@@ -265,6 +289,21 @@ def render_block_part2(
                 if ref_statuses:
                     with st.expander("Reference cache status", expanded=False):
                         st.json(ref_statuses)
+            elif block.get("status") == "CANCELLED":
+                status_chip("cancelled", label="Staging Cancelled", icon="🛑")
+                st.warning(message)
+                _render_stage_part("References", stage_parts.get("references") or {
+                    "status": "CANCELLED",
+                    "progress_percent": 0,
+                    "message": "Reference staging cancelled.",
+                })
+                _render_stage_part("Data", stage_parts.get("data") or {
+                    "status": "CANCELLED",
+                    "progress_percent": 0,
+                    "message": message,
+                })
+                if remote_data_path:
+                    st.caption(f"Remote data path: `{remote_data_path}`")
             else:
                 status_chip("failed", label="Staging Failed", icon="❌")
                 st.error(content.get("error") or message)

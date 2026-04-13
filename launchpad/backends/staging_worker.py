@@ -25,6 +25,7 @@ _PROGRESS_PERSIST_INTERVAL_SECONDS = float(
 )
 _WAIT_REASON_KEY = "wait_reason"
 _WAITING_FOR_AUTH_KEY = "waiting_for_auth"
+_CANCELLED_TASK_MESSAGE = "Remote staging cancelled by user."
 
 # ---------------------------------------------------------------------------
 # Task state
@@ -35,7 +36,7 @@ class StagingTaskState:
     """Mutable in-memory state for a single background staging task."""
 
     task_id: str
-    status: str = "queued"  # queued | running | completed | failed
+    status: str = "queued"  # queued | running | completed | failed | cancelled
     progress: dict = field(default_factory=dict)
     result: dict | None = None
     error: str | None = None
@@ -96,6 +97,10 @@ def staging_task_state_from_record(record: Any) -> StagingTaskState:
     )
     task._last_persisted_at = float(record.updated_at)
     return task
+
+
+def _is_terminal_status(status: str) -> bool:
+    return status in {"completed", "failed", "cancelled"}
 
 
 def running_task_count() -> int:
@@ -226,6 +231,90 @@ def schedule_staging_task_persist(task: StagingTaskState) -> None:
     except RuntimeError:
         return
     loop.create_task(persist_staging_task(task))
+
+
+async def _mark_task_cancelled(task: StagingTaskState, message: str) -> None:
+    _clear_task_wait_reason(task)
+    task.status = "cancelled"
+    task.error = str(message or _CANCELLED_TASK_MESSAGE).strip() or _CANCELLED_TASK_MESSAGE
+    task.touch()
+    await persist_staging_task(task, force=True)
+
+
+async def _cancel_local_broker_transfer(task: StagingTaskState) -> bool:
+    from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
+    from launchpad.db import get_ssh_profile
+
+    profile_id = str(task.params.get("ssh_profile_id") or "").strip()
+    user_id = str(task.params.get("user_id") or "").strip()
+    if not profile_id or not user_id:
+        return False
+
+    profile = await get_ssh_profile(profile_id, user_id=user_id)
+    if profile is None or profile.auth_method != "key_file" or not profile.local_username:
+        return False
+
+    session_manager = get_local_auth_session_manager()
+    session = await session_manager.get_active_session(profile)
+    if session is None:
+        return False
+
+    try:
+        response = await session_manager.invoke(
+            session,
+            {
+                "op": "cancel_request",
+                "request_id": task.task_id,
+                "timeout_seconds": 5,
+            },
+        )
+    except Exception:
+        logger.debug("Failed to cancel local broker transfer", task_id=task.task_id, exc_info=True)
+        return False
+    return bool(response.get("ok"))
+
+
+async def cancel_staging_task(task_id: str, *, message: str = _CANCELLED_TASK_MESSAGE) -> StagingTaskState:
+    task = _staging_tasks.get(task_id)
+    if task is None:
+        await hydrate_incomplete_staging_tasks(task_id=task_id)
+        task = _staging_tasks.get(task_id)
+
+    if task is None:
+        from launchpad.db import get_staging_task_record
+
+        task_record = await get_staging_task_record(task_id)
+        if task_record is None:
+            raise LookupError(f"Staging task {task_id} not found")
+        task = staging_task_state_from_record(task_record)
+
+    if task.status == "cancelled":
+        return task
+    if _is_terminal_status(task.status):
+        raise ValueError(f"Cannot cancel staging task with status {task.status}")
+
+    if task.status == "queued" and (task._task is None or task._task.done()):
+        await _mark_task_cancelled(task, message)
+        _staging_tasks[task.task_id] = task
+        return task
+
+    broker_cancelled = await _cancel_local_broker_transfer(task)
+    if task._task is not None and not task._task.done():
+        task._task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task._task), timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+
+    if task.status != "cancelled":
+        await _mark_task_cancelled(task, message)
+
+    logger.info(
+        "Background staging cancellation requested",
+        task_id=task.task_id,
+        broker_cancelled=broker_cancelled,
+    )
+    return task
 
 
 async def _run_staging_lifecycle(task: StagingTaskState) -> None:
@@ -373,7 +462,12 @@ async def run_staging(task: StagingTaskState) -> None:
             )
         else:
             stage_result = await backend._stage_sample_inputs(
-                params, profile, conn, run_uuid=None, on_progress=_on_progress,
+                params,
+                profile,
+                conn,
+                run_uuid=None,
+                on_progress=_on_progress,
+                transfer_id=task.task_id,
             )
         reference_statuses = dict(stage_result.get("reference_cache_statuses") or {})
         reference_asset_evidence, reference_statuses = await backend._ensure_reference_assets_present(
@@ -401,6 +495,13 @@ async def run_staging(task: StagingTaskState) -> None:
         await persist_staging_task(task, force=True)
         logger.info(
             "Background staging completed",
+            task_id=task.task_id,
+            sample_name=params.sample_name,
+        )
+    except asyncio.CancelledError:
+        await _mark_task_cancelled(task, task.error or _CANCELLED_TASK_MESSAGE)
+        logger.info(
+            "Background staging cancelled",
             task_id=task.task_id,
             sample_name=params.sample_name,
         )
@@ -451,7 +552,7 @@ async def cleanup_old_tasks() -> int:
     to_remove = [
         tid
         for tid, t in _staging_tasks.items()
-        if t.status in ("completed", "failed") and (now - t.updated_at) > _CLEANUP_TTL_SECONDS
+        if _is_terminal_status(t.status) and (now - t.updated_at) > _CLEANUP_TTL_SECONDS
     ]
     for tid in to_remove:
         _staging_tasks.pop(tid, None)

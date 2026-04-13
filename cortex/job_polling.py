@@ -457,6 +457,7 @@ async def poll_staging_status(
     Mirrors poll_job_status() with an adaptive schedule tuned for transfers.
     """
     from cortex.remote_orchestration import (
+        _cancelled_stage_parts,
         _failed_stage_parts,
         _final_stage_parts,
         _find_workflow_plan,
@@ -664,6 +665,41 @@ async def poll_staging_status(
                     _done = True
                     break
 
+                elif task_status == "cancelled":
+                    cancel_msg = error_msg or "Remote staging cancelled by user."
+                    stage_parts = _cancelled_stage_parts(stage_parts, cancel_msg)
+                    _update_project_block_payload(
+                        session,
+                        block_id,
+                        {
+                            "status": "CANCELLED",
+                            "progress_percent": _stage_part_progress(stage_parts),
+                            "message": cancel_msg,
+                            "error": None,
+                            "stage_parts": stage_parts,
+                        },
+                        status="CANCELLED",
+                    )
+
+                    if workflow_block_id:
+                        workflow_block = session.query(ProjectBlock).filter(
+                            ProjectBlock.id == workflow_block_id
+                        ).first()
+                        if workflow_block and stage_input_step_id:
+                            _set_workflow_step_status(
+                                session, workflow_block, stage_input_step_id, "CANCELLED",
+                                extra={"error": cancel_msg},
+                            )
+                        if workflow_block and complete_stage_only_step_id:
+                            _set_workflow_step_status(
+                                session, workflow_block, complete_stage_only_step_id, "CANCELLED",
+                                extra={"error": cancel_msg},
+                            )
+
+                    logger.info("Staging cancelled", task_id=task_id, message=cancel_msg)
+                    _done = True
+                    break
+
             except Exception as e:
                 err_str = str(e)
                 # Detect 404 — task_id vanished (Launchpad restart or cleanup)
@@ -677,7 +713,7 @@ async def poll_staging_status(
                     if _consecutive_not_found >= _NOT_FOUND_THRESHOLD:
                         fail_msg = (
                             "Staging task lost — Launchpad may have restarted during the transfer. "
-                            "Partial files are preserved on the remote profile (rsync --partial). "
+                            "Partial files are preserved on the remote profile in .rsync-partial. "
                             "Re-submit the staging request to resume."
                         )
                         stage_parts = _failed_stage_parts(stage_parts)

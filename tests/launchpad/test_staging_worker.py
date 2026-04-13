@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import launchpad.db as launchpad_db_module
 import launchpad.backends.staging_worker as staging_worker_module
 from launchpad.backends.base import SubmitParams
 from launchpad.backends.staging_worker import StagingTaskState, active_task_count, cleanup_old_tasks, recover_staging_tasks, run_staging
@@ -43,7 +44,7 @@ async def test_run_staging_uses_current_backend_and_path_validator(monkeypatch):
                 "data_root": "/remote/base/data",
             }
 
-        async def _stage_sample_inputs(self, params, profile, conn, run_uuid=None, on_progress=None):
+        async def _stage_sample_inputs(self, params, profile, conn, run_uuid=None, on_progress=None, transfer_id=None):
             if on_progress is not None:
                 on_progress({"file_percent": 25, "files_transferred": 1, "files_total": 4})
             return {
@@ -145,7 +146,7 @@ async def test_run_staging_routes_remote_input_path_to_reuse(monkeypatch):
                 "detected_input_type": "pod5",
             }
 
-        async def _stage_sample_inputs(self, params, profile, conn, run_uuid=None, on_progress=None):
+        async def _stage_sample_inputs(self, params, profile, conn, run_uuid=None, on_progress=None, transfer_id=None):
             nonlocal stage_called
             stage_called = True
             raise AssertionError("_stage_sample_inputs should not be called for remote_input_path")
@@ -222,7 +223,7 @@ async def test_run_staging_persists_state_transitions(monkeypatch):
                 "data_root": "/remote/base/data",
             }
 
-        async def _stage_sample_inputs(self, params, profile, conn, run_uuid=None, on_progress=None):
+        async def _stage_sample_inputs(self, params, profile, conn, run_uuid=None, on_progress=None, transfer_id=None):
             if on_progress is not None:
                 on_progress({"file_percent": 25, "files_transferred": 1, "files_total": 4})
             return {
@@ -519,3 +520,108 @@ async def test_run_staging_requeues_when_auth_becomes_unavailable_during_start(m
     assert task.progress["waiting_for_auth"] is True
     assert "unlock" in task.progress["wait_reason"].lower()
     assert persisted_snapshots[-1]["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_cancel_staging_task_marks_queued_task_cancelled(monkeypatch):
+    persisted_snapshots = []
+
+    async def _fake_upsert(task, session=None):
+        persisted_snapshots.append(
+            {
+                "status": task.status,
+                "progress": dict(task.progress),
+                "error": task.error,
+            }
+        )
+        return None
+
+    monkeypatch.setattr(launchpad_db_module, "upsert_staging_task", _fake_upsert)
+
+    task = StagingTaskState(
+        task_id="task-cancel-queued",
+        status="queued",
+        progress={"waiting_for_auth": True, "wait_reason": "Unlock required"},
+        params={"ssh_profile_id": "profile-1", "user_id": "user-1"},
+    )
+    staging_worker_module.get_staging_tasks()[task.task_id] = task
+
+    cancelled = await staging_worker_module.cancel_staging_task(task.task_id)
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.error == "Remote staging cancelled by user."
+    assert "waiting_for_auth" not in cancelled.progress
+    assert "wait_reason" not in cancelled.progress
+    assert persisted_snapshots[-1]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_staging_task_requests_broker_cancel_for_running_task(monkeypatch):
+    persisted_snapshots = []
+    cancel_requests = []
+    started = asyncio.Event()
+
+    async def _fake_upsert(task, session=None):
+        persisted_snapshots.append(
+            {
+                "status": task.status,
+                "error": task.error,
+            }
+        )
+        return None
+
+    async def _fake_get_profile(profile_id, user_id=None):
+        return SimpleNamespace(
+            id=profile_id,
+            user_id=user_id,
+            auth_method="key_file",
+            local_username="alice",
+        )
+
+    class _FakeSessionManager:
+        async def get_active_session(self, profile):
+            return SimpleNamespace(session_id="sess-1")
+
+        async def invoke(self, session, payload):
+            cancel_requests.append(payload)
+            return {"ok": True, "cancelled": True}
+
+    async def _fake_run(task):
+        task.status = "running"
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(launchpad_db_module, "upsert_staging_task", _fake_upsert)
+    monkeypatch.setattr(launchpad_db_module, "get_ssh_profile", _fake_get_profile)
+    monkeypatch.setattr("launchpad.backends.local_auth_sessions.get_local_auth_session_manager", lambda: _FakeSessionManager())
+    monkeypatch.setattr(staging_worker_module, "run_staging", _fake_run)
+
+    task = StagingTaskState(
+        task_id="task-cancel-running",
+        params={
+            "project_id": "proj-1",
+            "user_id": "user-1",
+            "sample_name": "sample-a",
+            "mode": "RNA",
+            "input_directory": "/tmp/sample-a.bam",
+            "reference_genome": ["GRCh38"],
+            "ssh_profile_id": "profile-1",
+        },
+    )
+    staging_worker_module.get_staging_tasks()[task.task_id] = task
+    staging_worker_module.start_staging_task(task)
+    await started.wait()
+
+    cancelled = await staging_worker_module.cancel_staging_task(task.task_id)
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.error == "Remote staging cancelled by user."
+    assert task._task is None or task._task.done()
+    assert cancel_requests == [
+        {
+            "op": "cancel_request",
+            "request_id": "task-cancel-running",
+            "timeout_seconds": 5,
+        }
+    ]
+    assert persisted_snapshots[-1]["status"] == "cancelled"

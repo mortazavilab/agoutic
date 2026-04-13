@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import signal
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,8 @@ _RSYNC_SKIP_COMPRESS_SUFFIXES = (
     "war", "webm", "webp", "xz", "z", "zip", "zst",
 )
 _RSYNC_SKIP_COMPRESS = "/".join(_RSYNC_SKIP_COMPRESS_SUFFIXES)
+_RSYNC_PARTIAL_DIR = ".rsync-partial"
+_ACTIVE_PROCESSES: dict[str, asyncio.subprocess.Process] = {}
 
 
 def _normalize_local_rsync_source(source: str) -> str:
@@ -57,7 +60,7 @@ def _build_rsync_command(
     use_skip_compress: bool = True,
 ) -> list[str]:
     cmd = [
-        "rsync", "-avz", "--omit-dir-times", "--no-perms", "--partial", "--progress",
+        "rsync", "-avz", "--omit-dir-times", "--no-perms", f"--partial-dir={_RSYNC_PARTIAL_DIR}", "--progress",
         "-e", ssh_command,
     ]
     if use_skip_compress:
@@ -150,19 +153,71 @@ def _remaining_timeout_seconds(deadline: float | None) -> float | None:
     return max(0.001, deadline - asyncio.get_running_loop().time())
 
 
-async def _run_subprocess(command: list[str], timeout_seconds: float | None = None) -> dict[str, Any]:
+async def _terminate_process_tree(
+    proc: asyncio.subprocess.Process,
+    *,
+    grace_seconds: float = 5.0,
+) -> None:
+    if proc.returncode is not None:
+        return
+
+    try:
+        if proc.pid:
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        return
+    except Exception:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+        return
+    except asyncio.TimeoutError:
+        pass
+
+    if proc.returncode is not None:
+        return
+
+    try:
+        if proc.pid:
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        return
+
+    await proc.wait()
+
+
+async def _run_subprocess(
+    command: list[str],
+    timeout_seconds: float | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
     proc = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
+    if request_id:
+        _ACTIVE_PROCESSES[request_id] = proc
     try:
         if timeout_seconds and timeout_seconds > 0:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
         else:
             stdout, stderr = await proc.communicate()
+    except asyncio.CancelledError:
+        await _terminate_process_tree(proc)
+        await proc.communicate()
+        raise
     except asyncio.TimeoutError:
-        proc.kill()
+        await _terminate_process_tree(proc)
         stdout, stderr = await proc.communicate()
         timeout_label = int(timeout_seconds) if timeout_seconds else timeout_seconds
         stderr_text = (stderr.decode() if stderr else "").strip()
@@ -175,6 +230,9 @@ async def _run_subprocess(command: list[str], timeout_seconds: float | None = No
             "stderr": timeout_msg,
             "exit_status": 124,
         }
+    finally:
+        if request_id and _ACTIVE_PROCESSES.get(request_id) is proc:
+            _ACTIVE_PROCESSES.pop(request_id, None)
     return {
         "ok": proc.returncode == 0,
         "stdout": stdout.decode(),
@@ -194,6 +252,16 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
     if op == "shutdown":
         shutdown_event.set()
         return {"ok": True}
+
+    if op == "cancel_request":
+        request_id = str(request.get("request_id") or "").strip()
+        if not request_id:
+            return {"ok": False, "error": "request_id is required", "cancelled": False}
+        proc = _ACTIVE_PROCESSES.pop(request_id, None)
+        if proc is None:
+            return {"ok": False, "error": f"No active request {request_id}", "cancelled": False}
+        await _terminate_process_tree(proc)
+        return {"ok": True, "request_id": request_id, "cancelled": True}
 
     if op == "ssh_run":
         profile = request["profile"]
@@ -230,6 +298,7 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
         copy_links = bool(request.get("copy_links"))
         copy_dirlinks = bool(request.get("copy_dirlinks"))
         use_skip_compress = bool(request.get("use_skip_compress", True))
+        request_id = str(request.get("request_id") or "").strip() or uuid.uuid4().hex
 
         cmd = _build_rsync_command(
             ssh_command=" ".join(_build_ssh_transport(profile)),
@@ -253,7 +322,11 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
         deadline = None
         if timeout_seconds and timeout_seconds > 0:
             deadline = asyncio.get_running_loop().time() + timeout_seconds
-        result = await _run_subprocess(cmd, timeout_seconds=_remaining_timeout_seconds(deadline))
+        result = await _run_subprocess(
+            cmd,
+            timeout_seconds=_remaining_timeout_seconds(deadline),
+            request_id=request_id,
+        )
         if _should_retry_without_skip_compress(
             exit_code=result.get("exit_status"),
             stderr_text=result.get("stderr", ""),
@@ -278,8 +351,10 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
             result = await _run_subprocess(
                 fallback_cmd,
                 timeout_seconds=_remaining_timeout_seconds(deadline),
+                request_id=request_id,
             )
         result["bytes_transferred"] = _parse_rsync_bytes(result.get("stdout", ""))
+        result["request_id"] = request_id
         logger.info(
             "Local auth broker finished rsync_transfer host=%s user=%s timeout=%ss exit_status=%s bytes=%s source=%s dest=%s",
             profile.get("ssh_host"),

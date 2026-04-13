@@ -7,6 +7,7 @@ import asyncio
 import os
 import re
 import shlex
+import signal
 from pathlib import Path
 from typing import Callable
 
@@ -43,6 +44,7 @@ _RSYNC_SKIP_COMPRESS_SUFFIXES = (
     "war", "webm", "webp", "xz", "z", "zip", "zst",
 )
 _RSYNC_SKIP_COMPRESS = "/".join(_RSYNC_SKIP_COMPRESS_SUFFIXES)
+_RSYNC_PARTIAL_DIR = ".rsync-partial"
 
 
 def build_rsync_command(
@@ -57,7 +59,7 @@ def build_rsync_command(
     use_skip_compress: bool = True,
 ) -> list[str]:
     cmd = [
-        "rsync", "-avz", "--omit-dir-times", "--no-perms", "--partial", "--progress",
+        "rsync", "-avz", "--omit-dir-times", "--no-perms", f"--partial-dir={_RSYNC_PARTIAL_DIR}", "--progress",
         "-e", ssh_command,
     ]
     if use_skip_compress:
@@ -172,8 +174,49 @@ def _rsync_timeout_stderr(direction: str, timeout_seconds: float | None) -> str:
     timeout_label = int(timeout_seconds) if timeout_seconds and float(timeout_seconds).is_integer() else timeout_seconds
     return (
         f"{direction.title()} transfer exceeded its timeout budget after {timeout_label}s while waiting for rsync to finish. "
-        "Partial files may already exist on the remote profile."
+        f"Partial files may already exist in {_RSYNC_PARTIAL_DIR} at the transfer destination."
     )
+
+
+async def _terminate_process_tree(
+    proc: asyncio.subprocess.Process,
+    *,
+    grace_seconds: float = 5.0,
+) -> None:
+    if proc.returncode is not None:
+        return
+
+    try:
+        if proc.pid:
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        return
+    except Exception:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace_seconds)
+        return
+    except asyncio.TimeoutError:
+        pass
+
+    if proc.returncode is not None:
+        return
+
+    try:
+        if proc.pid:
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        return
+
+    await proc.wait()
 
 
 class FileTransferManager:
@@ -196,6 +239,7 @@ class FileTransferManager:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
 
         # -- on_progress path: idle-based stall detection + safety ceiling ----
@@ -228,7 +272,7 @@ class FileTransferManager:
                             on_progress(info)
 
                 if stalled:
-                    proc.kill()
+                    await _terminate_process_tree(proc)
                 stderr_bytes = await proc.stderr.read()
                 await proc.wait()
                 stdout_text = "".join(stdout_lines)
@@ -236,7 +280,7 @@ class FileTransferManager:
                 if stalled:
                     idle_msg = (
                         f"{direction.title()} transfer stalled — no rsync output for "
-                        f"{int(idle_timeout)}s. Partial files (--partial) are preserved for retry."
+                        f"{int(idle_timeout)}s. Partial files are preserved for retry in {_RSYNC_PARTIAL_DIR}."
                     )
                     stderr_text = f"{idle_msg}\n{stderr_text}" if stderr_text.strip() else idle_msg
                     return 124, stdout_text, stderr_text
@@ -246,8 +290,12 @@ class FileTransferManager:
                 return await asyncio.wait_for(
                     _stream_with_idle_timeout(), timeout=max_total,
                 )
+            except asyncio.CancelledError:
+                await _terminate_process_tree(proc)
+                await proc.communicate()
+                raise
             except asyncio.TimeoutError:
-                proc.kill()
+                await _terminate_process_tree(proc)
                 stdout_bytes, stderr_bytes = await proc.communicate()
                 stdout_text = stdout_bytes.decode(errors="replace")
                 stderr_text = stderr_bytes.decode(errors="replace")
@@ -271,8 +319,12 @@ class FileTransferManager:
                 stdout_text, stderr_text = await asyncio.wait_for(_communicate(), timeout=timeout_seconds)
             else:
                 stdout_text, stderr_text = await _communicate()
+        except asyncio.CancelledError:
+            await _terminate_process_tree(proc)
+            await proc.communicate()
+            raise
         except asyncio.TimeoutError:
-            proc.kill()
+            await _terminate_process_tree(proc)
             stdout_bytes, stderr_bytes = await proc.communicate()
             stdout_text = stdout_bytes.decode(errors="replace")
             stderr_text = stderr_bytes.decode(errors="replace")
@@ -298,6 +350,7 @@ class FileTransferManager:
         use_skip_compress: bool = True,
         timeout_seconds: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
+        transfer_id: str | None = None,
     ) -> dict | None:
         """Use a local auth broker session when one is active for the profile."""
         if profile.auth_method != "key_file" or not profile.local_username or not profile.key_file_path:
@@ -327,6 +380,7 @@ class FileTransferManager:
                 "copy_dirlinks": copy_dirlinks,
                 "use_skip_compress": use_skip_compress,
                 "timeout_seconds": timeout_seconds or LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
+                "request_id": transfer_id,
             },
         )
         if response.get("ok"):
@@ -356,6 +410,7 @@ class FileTransferManager:
         exclude_patterns: list[str] | None = None,
         timeout_seconds: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
+        transfer_id: str | None = None,
     ) -> dict:
         """Upload local input files to the remote host via rsync.
 
@@ -379,6 +434,7 @@ class FileTransferManager:
             copy_links=True,
             timeout_seconds=timeout_seconds if timeout_seconds is not None else _stage_upload_timeout_seconds(),
             on_progress=on_progress,
+            transfer_id=transfer_id,
         )
 
     async def download_outputs(
@@ -389,6 +445,7 @@ class FileTransferManager:
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
         on_progress: Callable[[dict], None] | None = None,
+        transfer_id: str | None = None,
     ) -> dict:
         """Download remote output files to local via rsync.
 
@@ -418,6 +475,7 @@ class FileTransferManager:
             copy_links=False,
             copy_dirlinks=True,
             on_progress=on_progress,
+            transfer_id=transfer_id,
         )
 
     async def _rsync_transfer(
@@ -432,6 +490,7 @@ class FileTransferManager:
         copy_dirlinks: bool = False,
         timeout_seconds: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
+        transfer_id: str | None = None,
     ) -> dict:
         """Execute rsync transfer."""
         cmd = build_rsync_command(
@@ -463,6 +522,7 @@ class FileTransferManager:
                 use_skip_compress=True,
                 timeout_seconds=_remaining_timeout_seconds(deadline),
                 on_progress=on_progress,
+                transfer_id=transfer_id,
             )
             if broker_result is not None:
                 return broker_result

@@ -260,6 +260,40 @@ async def test_retry_staging_task_uses_persisted_failed_row(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancel_staging_task_endpoint_returns_cancelled_response(monkeypatch):
+    monkeypatch.setattr(
+        "launchpad.backends.staging_worker.cancel_staging_task",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                task_id="stg-1",
+                status="cancelled",
+                error="Remote staging cancelled by user.",
+            )
+        ),
+    )
+
+    payload = await launchpad_app.cancel_staging_task_endpoint("stg-1")
+
+    assert payload.task_id == "stg-1"
+    assert payload.status == "cancelled"
+    assert payload.message == "Remote staging cancelled by user."
+
+
+@pytest.mark.asyncio
+async def test_cancel_staging_task_endpoint_maps_terminal_conflict(monkeypatch):
+    monkeypatch.setattr(
+        "launchpad.backends.staging_worker.cancel_staging_task",
+        AsyncMock(side_effect=ValueError("Cannot cancel staging task with status completed")),
+    )
+
+    with pytest.raises(launchpad_app.HTTPException) as exc_info:
+        await launchpad_app.cancel_staging_task_endpoint("stg-done")
+
+    assert exc_info.value.status_code == 409
+    assert "completed" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
 async def test_create_ssh_profile_auth_session_resumes_queued_staging_for_profile(monkeypatch):
     profile = SimpleNamespace(
         id="profile-1",

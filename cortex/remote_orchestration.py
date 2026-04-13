@@ -25,6 +25,7 @@ from cortex.remote_stage_status import (
     _initial_stage_parts,
     _final_stage_parts,
     _failed_stage_parts,
+    _cancelled_stage_parts,
 )
 from cortex.task_service import sync_project_tasks
 
@@ -1026,6 +1027,10 @@ def _workflow_status(payload: dict) -> str:
         return "FAILED"
     if any(step.get("status") == "FOLLOW_UP" for step in steps):
         return "FOLLOW_UP"
+    if steps and all(step.get("status") in {"COMPLETED", "CANCELLED"} for step in steps if step.get("id")):
+        if any(step.get("status") == "CANCELLED" for step in steps):
+            return "CANCELLED"
+        return "COMPLETED"
     if all(step.get("status") == "COMPLETED" for step in steps if step.get("id")) and steps:
         return "COMPLETED"
     if any(step.get("status") == "RUNNING" for step in steps):
