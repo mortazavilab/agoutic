@@ -66,6 +66,14 @@ ensure_dirs() {
     mkdir -p "$PIDS_DIR" "$LOGS_DIR"
 }
 
+ensure_gene_caches() {
+    log "Checking shared gene annotation caches..."
+    if ! python -m common.gtf_parser --ensure-caches; then
+        error "Failed to build shared gene annotation caches"
+        return 1
+    fi
+}
+
 log() {
     echo -e "${BLUE}[AGOUTIC]${NC} $1"
 }
@@ -393,6 +401,10 @@ cmd_start() {
     echo ""
 
     if ! run_db_migrations; then
+        return 1
+    fi
+
+    if ! ensure_gene_caches; then
         return 1
     fi
 

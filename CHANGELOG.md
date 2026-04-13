@@ -1,3 +1,46 @@
+## [Unreleased]
+
+### Features
+
+- **GTF-backed gene and transcript annotation with colocated caches** —
+  AGOUTIC now derives gene and transcript annotations directly from source GTF
+  files, writes compact `.genes.tsv` and `.transcripts.tsv` caches beside each
+  source annotation, supports both versioned and unversioned Ensembl IDs, and
+  preserves original symbol capitalization while keeping symbol lookup
+  case-insensitive. Shared reference GTF caches are generated on demand, and
+  workflow-specific or custom GTFs can be loaded the same way.
+  (`common/gtf_parser.py`, `common/gene_annotation.py`,
+  `scripts/build_gene_reference.py`)
+
+- **DE and analyzer annotation paths now prefer workflow-local
+  `reconciled.gtf` when present** — edgePython data loading and manual
+  annotation now detect `reconciled.gtf` beside the active counts/work
+  directory, shared reference caches remain available as fallback, and the
+  analyzer MCP surface now exposes transcript-aware lookup/translation plus a
+  `build_gene_cache` tool for user-provided GTFs.
+  (`edgepython_mcp/edgepython_server.py`,
+  `edgepython_mcp/tool_schemas.py`, `analyzer/gene_tools.py`,
+  `analyzer/mcp_server.py`, `analyzer/mcp_tools.py`,
+  `cortex/plan_templates.py`, `skills/differential_expression/SKILL.md`)
+
+### Bug Fixes
+
+- **Server startup no longer emits a `runpy` warning while checking shared GTF
+  caches** — the `common` package now exposes `GeneAnnotator` lazily instead of
+  importing it eagerly at package import time, which avoids preloading
+  `common.gtf_parser` before `python -m common.gtf_parser --ensure-caches`
+  executes.
+  (`common/__init__.py`, `agoutic_servers.sh`)
+
+### Tests
+
+- **GTF parser and annotation regression coverage** — added focused tests for
+  human and mouse GTF parsing, gzip support, stale-cache rebuilds, colocated
+  cache generation, transcript annotation, case-insensitive symbol lookup, and
+  reconciled-GTF precedence over legacy reference lookups.
+  (`tests/common/test_gtf_parser.py`,
+  `tests/common/test_gene_annotation.py`)
+
 ## [3.6.2] - 2026-04-11
 
 ### Features

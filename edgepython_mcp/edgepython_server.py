@@ -14,6 +14,7 @@ import os
 import sys
 import re
 import json
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -69,7 +70,59 @@ _state: dict = {
     "feature_level_note": None,
     "analysis_context": "unknown",  # inferred: bulk | single_cell_10x | single_cell | unknown
     "analysis_context_note": None,
+    "counts_path": None,
+    "work_dir": None,
+    "annotation_gtf": None,
 }
+
+
+def _resolve_existing_path(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    return resolved if resolved.exists() else None
+
+
+def _infer_annotation_dir(data_input: object = None, path: Optional[str] = None) -> Path | None:
+    candidates: list[object] = []
+    if path:
+        candidates.append(path)
+    if isinstance(data_input, (list, tuple)):
+        candidates.extend(data_input)
+    elif data_input is not None:
+        candidates.append(data_input)
+
+    for candidate in candidates:
+        resolved = _resolve_existing_path(candidate)
+        if resolved is None:
+            continue
+        return resolved if resolved.is_dir() else resolved.parent
+    return None
+
+
+def _configure_annotation_sources(
+    *,
+    work_dir: str | Path | None = None,
+    annotation_gtf: str | Path | None = None,
+) -> dict[str, str | int | None] | None:
+    global _annotator
+
+    _annotator = GeneAnnotator()
+    if annotation_gtf:
+        candidate = _resolve_existing_path(annotation_gtf)
+        if candidate is not None and candidate.is_file():
+            return _annotator.load_gtf(candidate, cache=True)
+    if work_dir:
+        candidate_dir = _resolve_existing_path(work_dir)
+        if candidate_dir is not None:
+            search_dir = candidate_dir if candidate_dir.is_dir() else candidate_dir.parent
+            return _annotator.load_reconciled_gtf(search_dir)
+    return None
 
 
 def _require(key: str, label: str):
@@ -272,6 +325,7 @@ def load_data(
     sample_info_path: Optional[str] = None,
     group_column: Optional[str] = None,
     separator: Optional[str] = None,
+    annotation_gtf: Optional[str] = None,
 ) -> str:
     """Load a count matrix (and optional sample metadata) to create a DGEList.
 
@@ -296,6 +350,8 @@ def load_data(
     counts = counts_df.values.astype(np.float64)
 
     genes_df = pd.DataFrame({"GeneID": gene_ids})
+    work_dir = str(Path(counts_path).expanduser().resolve().parent)
+    annotation_info = _configure_annotation_sources(work_dir=work_dir, annotation_gtf=annotation_gtf)
 
     # Auto-annotate gene symbols if reference data is available
     _n_annotated = 0
@@ -352,6 +408,9 @@ def load_data(
     _state["feature_level_note"] = level_note
     _state["analysis_context"] = context
     _state["analysis_context_note"] = context_note
+    _state["counts_path"] = str(Path(counts_path).expanduser().resolve())
+    _state["work_dir"] = work_dir
+    _state["annotation_gtf"] = annotation_info.get("gtf_path") if annotation_info else None
     _state["filtered"] = False
     _state["normalized"] = False
     _state["dispersions_estimated"] = False
@@ -385,6 +444,8 @@ def load_data(
         lines.append(f"Context: {_state['analysis_context']} ({_state['analysis_context_note']})")
     if _n_annotated:
         lines.append(f"Gene symbols: {_n_annotated:,}/{len(gene_ids):,} annotated")
+    if annotation_info and annotation_info.get("gtf_path"):
+        lines.append(f"Annotation GTF: {annotation_info['gtf_path']}")
     _append_gene_level_warning(lines)
     return "\n".join(lines)
 
@@ -408,6 +469,7 @@ def load_data_auto(
     layer: Optional[str] = None,
     ngibbs: int = 100,
     verbose: bool = True,
+    annotation_gtf: Optional[str] = None,
 ) -> str:
     """Load data using edgePython's flexible read_data() loader.
 
@@ -435,6 +497,9 @@ def load_data_auto(
     else:
         raise ValueError("Provide data or data_list.")
 
+    inferred_work_dir = _infer_annotation_dir(data_input=data_input, path=path)
+    annotation_info = _configure_annotation_sources(work_dir=inferred_work_dir, annotation_gtf=annotation_gtf)
+
     dgelist = ep.read_data(
         data_input,
         source=source,
@@ -461,8 +526,18 @@ def load_data_auto(
     _state["results"] = {}
     _state["last_result"] = None
     _state["voom"] = None
+    _state["counts_path"] = str(_resolve_existing_path(data_input)) if isinstance(data_input, str) and _resolve_existing_path(data_input) else None
+    _state["work_dir"] = str(inferred_work_dir) if inferred_work_dir is not None else None
+    _state["annotation_gtf"] = annotation_info.get("gtf_path") if annotation_info else None
 
     counts = dgelist["counts"]
+    sample_names = None
+    if dgelist.get("samples") is not None:
+        sdf = dgelist["samples"]
+        if sdf.index is not None and len(sdf.index) == counts.shape[1]:
+            sample_names = [str(x) for x in sdf.index]
+            dgelist["_sample_names"] = sample_names
+
     gene_ids = None
     if dgelist.get("genes") is not None:
         gdf = dgelist["genes"]
@@ -496,14 +571,6 @@ def load_data_auto(
     _state["analysis_context"] = context
     _state["analysis_context_note"] = context_note
 
-    sample_names = None
-    if dgelist.get("samples") is not None:
-        sdf = dgelist["samples"]
-        if sdf.index is not None and len(sdf.index) == counts.shape[1]:
-            sample_names = [str(x) for x in sdf.index]
-    if sample_names is not None:
-        dgelist["_sample_names"] = sample_names
-
     lines = [f"Loaded {counts.shape[0]:,} genes × {counts.shape[1]} samples"]
     if sample_names is not None:
         lines.append(f"Samples: {', '.join(sample_names)}")
@@ -513,6 +580,8 @@ def load_data_auto(
         lines.append(f"Context: {_state['analysis_context']} ({_state['analysis_context_note']})")
     if _n_auto_annotated:
         lines.append(f"Gene symbols: {_n_auto_annotated:,}/{counts.shape[0]:,} annotated")
+    if annotation_info and annotation_info.get("gtf_path"):
+        lines.append(f"Annotation GTF: {annotation_info['gtf_path']}")
     _append_gene_level_warning(lines)
     return "\n".join(lines)
 
@@ -1909,22 +1978,33 @@ def generate_plot(
 
 
 @mcp.tool()
-def annotate_genes(organism: Optional[str] = None) -> str:
+def annotate_genes(organism: Optional[str] = None, annotation_gtf: Optional[str] = None) -> str:
     """Add gene symbol annotations to the currently loaded dataset.
 
     Auto-detects organism from gene ID prefixes if not specified.
     Requires data to be loaded first (load_data or load_data_auto).
 
     Args:
-        organism: 'human' or 'mouse'. Auto-detected if not provided.
+        organism: Optional organism label. Auto-detected if not provided.
+        annotation_gtf: Optional explicit GTF path. If omitted, a reconciled.gtf
+            in the active work directory is preferred automatically.
     """
     _require("dgelist", "DGEList")
     d = _state["dgelist"]
     genes = d.get("genes")
     if genes is None:
         return "No gene annotation available in DGEList."
+    annotation_info = _configure_annotation_sources(
+        work_dir=_state.get("work_dir"),
+        annotation_gtf=annotation_gtf or _state.get("annotation_gtf"),
+    )
+    if annotation_info and annotation_info.get("gtf_path"):
+        _state["annotation_gtf"] = annotation_info["gtf_path"]
     if not _annotator.is_available:
-        return "Gene annotation data not available. Place reference TSV files in data/reference/."
+        return (
+            "Gene annotation data not available. Shared caches are generated at startup, "
+            "or provide annotation_gtf to build a colocated cache for a specific GTF."
+        )
 
     gdf = genes if isinstance(genes, pd.DataFrame) else pd.DataFrame(genes)
 
@@ -1944,10 +2024,13 @@ def annotate_genes(organism: Optional[str] = None) -> str:
     n_annotated = int(gdf["Symbol"].notna().sum())
     organism_detected = _annotator.detect_organism(str(gdf[id_col].iloc[0])) if n_total else None
     org_label = organism or organism_detected or "unknown"
-    return (
+    message = (
         f"Annotated {n_annotated:,}/{n_total:,} genes with symbols "
         f"(organism: {org_label})"
     )
+    if annotation_info and annotation_info.get("gtf_path"):
+        message += f" using {annotation_info['gtf_path']}"
+    return message
 
 
 # ===========================================================================

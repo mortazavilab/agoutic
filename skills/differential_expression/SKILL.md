@@ -57,8 +57,10 @@ The standard workflow proceeds through these steps:
 [[DATA_CALL: service=edgepython, tool=load_data, counts_path=<path>, sample_info_path=<path>, group_column=<col>]]
 ```
 
-Gene symbols are automatically annotated when data is loaded, if reference files
-are available in `data/reference/`. To manually annotate or re-annotate after loading:
+Gene symbols are automatically annotated when data is loaded. Shared reference
+caches are generated from the configured reference GTFs at server startup, and
+if a `reconciled.gtf` is present beside the counts file it is preferred
+automatically. To manually annotate or re-annotate after loading:
 
 ```
 [[DATA_CALL: service=edgepython, tool=annotate_genes]]

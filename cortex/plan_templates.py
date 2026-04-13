@@ -567,7 +567,7 @@ def _template_run_de_pipeline(params: dict) -> dict:
                                 _manifest_tool_call(
                                     "differential_expression",
                                     "annotate_genes",
-                                    {},
+                                    ({"annotation_gtf": os.path.join(work_dir, "reconciled.gtf")} if work_dir else {}),
                                     default_source_key="edgepython",
                                 )
                             ])

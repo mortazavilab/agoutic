@@ -1,6 +1,569 @@
+# AGOUTIC Architecture — Visual Overview (v3.6.2)
+
+> Presentation-ready diagrams for **AGOUTIC v3.6.2**, an agentic bioinformatics
+> platform that orchestrates genomic data portal queries (ENCODE, IGVF),
+> Nextflow pipeline execution (local and HPC/SLURM), differential expression,
+> gene enrichment, and cross-workflow analysis through natural-language
+> conversation.
+>
+> **Audience:** bioinformatics researchers, computational biologists, and
+> reviewers evaluating the system architecture.
+>
+> **Tip:** Each diagram is self-contained and sized for a single PowerPoint
+> slide or manuscript panel. Use the Mermaid CLI or a live editor to export
+> SVG/PNG at 300 DPI.
+
+---
+
+## 1 — System Architecture
+
+Six MCP micro-services communicate over stateless JSON-RPC 2.0.
+The Streamlit UI connects only to Cortex; all downstream services are
+abstracted behind the orchestrator.
+
+```mermaid
+graph LR
+    User(["User"])
+
+    subgraph ui ["UI  (Streamlit · 8501)"]
+        Chat["Chat"]
+        Approve["Approval\nGates"]
+        Monitor["Job\nMonitor"]
+        Results["Results\nBrowser"]
+        Tasks["Task\nCenter"]
+        Memories["Memory\nViewer"]
+    end
+
+    subgraph cortex ["Cortex  (Orchestrator · 8000)"]
+        Pipeline["Chat Pipeline\n13 stages"]
+        Planning["Planning\nmanifest → compose → validate"]
+        Execution["Execution\nparallel-safe batches"]
+        Memory["Memory Service\nauto-capture · injection"]
+        Budget["Context Budget\ntiktoken allocation"]
+    end
+
+    subgraph services ["MCP Services"]
+        LP["Launchpad\n8002 / 8003"]
+        AN["Analyzer\n8004 / 8005"]
+        ENCODE["ENCODE Portal\n8006"]
+        IGVF["IGVF Portal\n8009"]
+        EP["edgePython\n8007"]
+    end
+
+    subgraph backends ["Execution Backends"]
+        Local["Local\nNextflow + Scripts"]
+        SLURM["SLURM / HPC\nSSH · sbatch · rsync"]
+    end
+
+    User --> Chat
+    ui -->|REST + cookie| cortex
+    cortex -->|MCP JSON-RPC| services
+    LP --> Local
+    LP --> SLURM
+
+    style ui fill:#2980b9,color:#fff,stroke:#2471a3
+    style cortex fill:#1a5276,color:#fff,stroke:#154360
+    style services fill:#117a65,color:#fff,stroke:#0e6655
+    style backends fill:#6c3483,color:#fff,stroke:#5b2c6f
+```
+
+---
+
+## 2 — Chat Pipeline (13 Stages)
+
+A user message enters Cortex and flows through a priority-ordered pipeline
+of self-registering stages. Any stage can short-circuit the pipeline
+(e.g., `/memories` returns immediately at stage 230). The pipeline replaced
+a monolithic 1,600-line function with 13 focused modules.
+
+```mermaid
+flowchart TB
+    Msg["User message\nPOST /chat"]
+
+    subgraph pipeline ["Chat Pipeline  (cortex/chat_pipeline.py)"]
+        direction TB
+        S100["100 — Setup\nuser · session · project"]
+        S200["200 — Capabilities\nhelp · /skills · /workflows"]
+        S210["210 — Prompt Inspection\nmodel debug · prompt dump"]
+        S220["220 — DataFrame Command\nlist dfs · head DF · transform"]
+        S230["230 — Memory Command\n/remember · /forget · /memories"]
+        S240["240 — Memory Intent\n'remember that…' side-effects"]
+        S300["300 — History\nlast 20 turns · DF map rebuild"]
+        S400["400 — Context Prep\nmemory inject · state · budget"]
+        S500["500 — Plan Detection\nheuristic classify → template or hybrid"]
+        S600["600 — LLM First Pass\nskill prompt + tool contracts → response"]
+        S700["700 — Tag Parsing\nDATA_CALL · PLOT · APPROVAL tags"]
+        S800["800 — Overrides\npost-LLM sync/browse/early-exit"]
+        S900["900 — Tool Execution\nMCP dispatch · ENCODE retry · chaining"]
+        S1000["1000 — LLM Second Pass\nsummarise real data for user"]
+        S1100["1100 — Response Assembly\nDF embed · plot specs · persist"]
+    end
+
+    Msg --> S100 --> S200 --> S210 --> S220 --> S230 --> S240
+    S240 --> S300 --> S400 --> S500 --> S600 --> S700
+    S700 --> S800 --> S900 --> S1000 --> S1100
+
+    S200 -..->|short-circuit| Resp
+    S220 -..->|short-circuit| Resp
+    S230 -..->|short-circuit| Resp
+
+    Resp(["Response\nAGENT_PLAN block + DFs + plots"])
+
+    S1100 --> Resp
+
+    style pipeline fill:#f8f9fa,color:#1a1a2e,stroke:#1a5276
+    style Msg fill:#2980b9,color:#fff,stroke:#2471a3
+    style Resp fill:#117a65,color:#fff,stroke:#0e6655
+```
+
+---
+
+## 3 — Skill Manifests & Planning
+
+Skills are defined as YAML manifests (`skills/<key>/manifest.yaml`) that
+declare triggers, required services, MCP tool chains, and input/output types.
+The planner attempts manifest-driven composition first, falling back to
+deterministic templates for unmigrated flows.
+
+```mermaid
+flowchart LR
+    Req["User\nrequest"]
+
+    subgraph classify ["Plan Classifier"]
+        Heuristic["Regex heuristics\n+ manifest triggers"]
+        PlanType["plan_type\nrun_workflow · de_pipeline\nreconcile · remote_stage …"]
+    end
+
+    subgraph compose ["Plan Composer"]
+        Manifest["SkillManifest\nYAML metadata"]
+        Chain["MCP tool chain\nservice → tool → params"]
+        Compose["Compose plan\nfrom manifest metadata"]
+    end
+
+    subgraph fallback ["Template Fallback"]
+        Templates["11 deterministic\ntemplates"]
+        Hybrid["Hybrid bridge\nLLM fragment composition\n6 non-core flows"]
+    end
+
+    subgraph validate ["Validation & Execution"]
+        PlanVal["Plan Validator\nkinds · deps · cycles · scope"]
+        Executor["Plan Executor\nparallel-safe batches\napproval gates"]
+        Replan["Replanner\nfailure → SKIPPED dependents"]
+    end
+
+    Req --> Heuristic --> PlanType
+    PlanType -->|manifest-backed| Manifest --> Chain --> Compose
+    PlanType -->|unmigrated| Templates
+    PlanType -->|non-core| Hybrid
+    Hybrid -.->|fallback| Templates
+    Compose --> PlanVal
+    Templates --> PlanVal
+    PlanVal --> Executor --> Replan
+
+    style classify fill:#2980b9,color:#fff,stroke:#2471a3
+    style compose fill:#1a5276,color:#fff,stroke:#154360
+    style fallback fill:#b7950b,color:#fff,stroke:#9a7d0a
+    style validate fill:#117a65,color:#fff,stroke:#0e6655
+```
+
+---
+
+## 4 — Dual Consortium Data Access (ENCODE + IGVF)
+
+AGOUTIC queries two major genomic data portals through dedicated MCP servers.
+Both are registered in the consortium registry and accessed identically via
+DATA_CALL tags. Natural-language routing auto-detects which portal to query.
+
+```mermaid
+graph TB
+    User(["User\n'Search IGVF for K562 ATAC-seq'\n'Find ENCODE RNA-seq for liver'"])
+
+    subgraph routing ["Natural-Language Routing"]
+        Detect["Keyword detection\nIGVF accessions: IGVFDS / IGVFFI\nENCODE accessions: ENCSR / ENCFF\nportal name mentions"]
+        Skill["Auto skill switch\nIGVF_Search or ENCODE_Search"]
+    end
+
+    subgraph encode ["ENCODE Portal  (port 8006)"]
+        ET1["search_by_biosample"]
+        ET2["search_by_assay"]
+        ET3["get_experiment"]
+        ET4["get_files_by_type"]
+        ET5["download_file_url"]
+        ET6["+ 12 more tools"]
+    end
+
+    subgraph igvf ["IGVF Portal  (port 8009)"]
+        IT1["search_measurement_sets"]
+        IT2["search_analysis_sets"]
+        IT3["search_prediction_sets"]
+        IT4["search_by_sample / by_assay"]
+        IT5["search_files / genes"]
+        IT6["get_dataset / file / gene"]
+        IT7["get_file_download_url"]
+        IT8["get_server_info"]
+    end
+
+    subgraph shared ["Shared Dispatch Infrastructure"]
+        Alias["Tool + param alias correction"]
+        Fallback["Hallucination regex repair"]
+        Format["Result formatting + table columns"]
+    end
+
+    User --> Detect --> Skill
+    Skill -->|ENCODE keywords| encode
+    Skill -->|IGVF keywords| igvf
+    encode --> shared
+    igvf --> shared
+
+    style encode fill:#2980b9,color:#fff,stroke:#2471a3
+    style igvf fill:#6c3483,color:#fff,stroke:#5b2c6f
+    style routing fill:#1a5276,color:#fff,stroke:#154360
+    style shared fill:#117a65,color:#fff,stroke:#0e6655
+```
+
+---
+
+## 5 — Skill System & Domain Coverage
+
+Each skill lives in `skills/<key>/` with a `SKILL.md` prompt, an optional
+`manifest.yaml` for planner metadata, and an optional `scripts/` directory
+for allowlisted utilities. Skills are grouped by biological function and
+mapped to backend MCP services.
+
+```mermaid
+graph TB
+    subgraph data ["Data Access"]
+        ES["ENCODE Search"]
+        EL["ENCODE Long Read"]
+        IS["IGVF Search"]
+        DL["Download Files"]
+    end
+
+    subgraph exec ["Pipeline Execution"]
+        DNA["Dogme DNA\nmethylation"]
+        RNA["Dogme RNA\ndirect RNA"]
+        CDNA["Dogme cDNA"]
+        ALS["Local Sample\nIntake"]
+        RE["Remote Execution\nHPC / SLURM"]
+    end
+
+    subgraph analysis ["Analysis & Interpretation"]
+        AJR["Analyze Results\nQC · stats · BED"]
+        DE["Differential\nExpression"]
+        ENR["Enrichment\nGO · pathways"]
+        RB["Reconcile BAMs\ncross-workflow"]
+        XG["XGenePy"]
+    end
+
+    subgraph routing ["Service Backends"]
+        ENCODE_S["ENCODE\nport 8006"]
+        IGVF_S["IGVF\nport 8009"]
+        LP_S["Launchpad\nport 8002"]
+        AN_S["Analyzer\nport 8005"]
+        EP_S["edgePython\nport 8007"]
+    end
+
+    ES & EL --> ENCODE_S
+    IS --> IGVF_S
+    ALS & RE & RB --> LP_S
+    DNA & RNA & CDNA & AJR & ENR & XG --> AN_S
+    DE --> EP_S
+
+    style data fill:#2980b9,color:#fff,stroke:#2471a3
+    style exec fill:#1a5276,color:#fff,stroke:#154360
+    style analysis fill:#6c3483,color:#fff,stroke:#5b2c6f
+    style routing fill:#117a65,color:#fff,stroke:#0e6655
+```
+
+---
+
+## 6 — Execution Backends
+
+The `ExecutionBackend` protocol provides a uniform interface for local and
+remote job execution. Cortex and the UI remain backend-agnostic. Scripts run
+through an allowlisted runner; remote staging runs as a durable background task.
+
+```mermaid
+classDiagram
+    class ExecutionBackend {
+        <<protocol>>
+        +submit(run_uuid, params) str
+        +check_status(run_uuid) JobStatus
+        +cancel(run_uuid) bool
+        +get_logs(run_uuid, limit) LogEntry[]
+        +cleanup(run_uuid) bool
+    }
+
+    class LocalBackend {
+        Nextflow subprocess
+        SQLite progress polling
+    }
+
+    class SlurmBackend {
+        SSH + asyncssh
+        Resource validation
+        sbatch generation
+        Native Apptainer config
+        Shared container cache
+        rsync file transfer
+        13-stage state machine
+    }
+
+    class ScriptRunner {
+        Allowlist: deny-by-default
+        Auto-discovery: skills/*/scripts/
+        JSON output → DataFrame
+    }
+
+    class StagingWorker {
+        Background asyncio.Task
+        Durable DB persistence
+        Survives Launchpad restarts
+        Progress polling by Cortex
+    }
+
+    ExecutionBackend <|.. LocalBackend : implements
+    ExecutionBackend <|.. SlurmBackend : implements
+    LocalBackend -- ScriptRunner : run_type=script
+    SlurmBackend -- StagingWorker : async file transfer
+```
+
+---
+
+## 7 — HPC Remote Execution Lifecycle
+
+Remote SLURM jobs follow a 13-stage state machine with enforced transitions.
+Results are never marked complete until verified locally (fail-closed).
+Staging now runs as a durable background task that survives HTTP timeouts
+and Launchpad restarts.
+
+```mermaid
+stateDiagram-v2
+    [*] --> awaiting_details
+
+    awaiting_details --> awaiting_approval
+    awaiting_approval --> validating_connection
+
+    validating_connection --> preparing_remote_dirs
+    preparing_remote_dirs --> transferring_inputs
+
+    transferring_inputs --> submitting_job
+
+    submitting_job --> queued
+    queued --> running
+
+    running --> collecting_outputs
+    collecting_outputs --> syncing_results
+
+    syncing_results --> completed
+
+    awaiting_details --> cancelled
+    awaiting_approval --> cancelled
+    validating_connection --> failed
+    transferring_inputs --> failed
+    submitting_job --> failed
+    running --> failed
+    syncing_results --> failed
+
+    state transferring_inputs {
+        [*] --> background_rsync
+        background_rsync --> progress_polling
+        progress_polling --> transfer_done
+        note right of background_rsync : Durable staging worker\nsurvives HTTP timeouts\nand Launchpad restarts
+    }
+
+    state completed {
+        [*] --> outputs_verified
+        outputs_verified --> auto_analysis
+        note right of outputs_verified : Fail-closed:\nresults verified on disk\nbefore marking complete
+    }
+```
+
+---
+
+## 8 — Memory System
+
+AGOUTIC maintains persistent memory across conversations with both project
+and global scope. Memories are auto-captured from pipeline steps and results,
+injected into LLM context with token-budgeted priority, and queryable via
+slash commands or natural language.
+
+```mermaid
+flowchart TB
+    subgraph sources ["Memory Sources"]
+        Manual["/remember\n/annotate\n/remember-df"]
+        AutoStep["Auto-capture\npipeline steps"]
+        AutoResult["Auto-capture\nresults · DE · plots"]
+        NL["Natural language\n'remember that X is…'"]
+    end
+
+    subgraph store ["Memory Store"]
+        DB[("memories table\nuser_id · project_id\ncategory · scope")]
+        Categories["8 categories\nresult · sample_annotation\npipeline_step · preference\nfinding · custom\ndataframe · plot"]
+    end
+
+    subgraph injection ["Context Injection"]
+        Budget["Token budget\n~2,000 tokens default"]
+        Priority["Priority order\n1. Pinned memories\n2. Sample annotations\n3. Recent results"]
+        Block["MEMORY block\nprepended to LLM prompt"]
+    end
+
+    subgraph query ["Query & Management"]
+        Slash["/memories · /forget\n/pin · /unpin\n/search-memories"]
+        UI["Memories page\nfilter · recover · upgrade"]
+        DFMem["Named DF recall\nhead c2c12DF\nplot c2c12DF by assay"]
+    end
+
+    Manual & AutoStep & AutoResult & NL --> DB
+    DB --> Categories
+    DB --> Budget --> Priority --> Block
+    DB --> Slash & UI & DFMem
+
+    style sources fill:#2980b9,color:#fff,stroke:#2471a3
+    style store fill:#1a5276,color:#fff,stroke:#154360
+    style injection fill:#117a65,color:#fff,stroke:#0e6655
+    style query fill:#6c3483,color:#fff,stroke:#5b2c6f
+```
+
+---
+
+## 9 — End-to-End Bioinformatics Workflow
+
+A complete session from data discovery through pipeline execution to
+biological interpretation. Diamonds are human approval gates. Safe steps
+run in parallel; failures trigger the replanner.
+
+```mermaid
+flowchart TB
+    Start(["User: 'Find RNA-seq for K562,\nrun Dogme RNA on the cluster,\nthen differential expression'"])
+
+    subgraph p1 ["1  Data Discovery"]
+        Search["Search ENCODE or IGVF\nbiosample · assay · target"]
+        Browse["Interactive DataFrame\nfilter · sort · select"]
+    end
+
+    DL{"Approve\ndownload?"}
+
+    subgraph p2 ["2  Stage to HPC"]
+        Download["Download files"]
+        Cache["Cache check\nreference already staged?"]
+        Stage["Background rsync\ndurable staging worker"]
+    end
+
+    Submit{"Approve\nSLURM job?"}
+
+    subgraph p3 ["3  HPC Execution"]
+        Validate["Resource validation\nCPU · RAM · GPU · walltime"]
+        Sbatch["sbatch submit\nNextflow + Apptainer"]
+        Poll["SLURM monitoring\n13-stage tracking"]
+        Sync["Result sync\nselective rsync to local"]
+    end
+
+    subgraph p4 ["4  Analysis"]
+        QC["QC & stats parsing"]
+        Reconcile["Reconcile BAMs\nacross workflows"]
+        DE["Differential expression\ngrouped from abundance"]
+        Enrich["GO & pathway\nenrichment"]
+        Plots["Plots: volcano · MA\nheatmap · enrichment"]
+        Summary["LLM interpretation\nresults → memory"]
+    end
+
+    Start --> Search --> Browse --> DL
+    DL -->|Yes| Download --> Cache --> Stage --> Submit
+    Submit -->|Yes| Validate --> Sbatch --> Poll --> Sync
+    Sync --> QC --> Reconcile --> DE --> Enrich --> Plots --> Summary
+
+    style p1 fill:#2980b9,color:#fff,stroke:#2471a3
+    style p2 fill:#1a5276,color:#fff,stroke:#154360
+    style p3 fill:#6c3483,color:#fff,stroke:#5b2c6f
+    style p4 fill:#117a65,color:#fff,stroke:#0e6655
+```
+
+---
+
+## 10 — Security Model
+
+Security is enforced at every layer. No raw credentials are stored.
+All destructive operations require explicit user approval.
+
+```mermaid
+flowchart LR
+    subgraph auth ["Authentication"]
+        OAuth["Google OAuth 2.0"]
+        Session["Session tokens\n72h expiry · heartbeat"]
+        Admin["Admin user approval"]
+    end
+
+    subgraph access ["Access Control"]
+        RBAC["Project RBAC\nowner · editor · viewer"]
+        Jail["User Jail\npaths ⊂ users/name/project/"]
+        Traversal["Path traversal\nblocked"]
+    end
+
+    subgraph gates ["Approval Gates"]
+        JobGate["Job submission"]
+        DLGate["Data download"]
+        RemoteGate["Remote execution"]
+        ScriptGate["Script allowlist\ndeny-by-default"]
+    end
+
+    subgraph hpc ["HPC Isolation"]
+        NoStore["No raw keys stored"]
+        Broker["Auth broker\nper-session · 0600 · timeout"]
+        Audit["Audit log\nno secrets recorded"]
+    end
+
+    subgraph validation ["Input Validation"]
+        Schema["Tool param validation"]
+        PlanCheck["Plan contract check"]
+        Resource["SLURM resource limits"]
+        ModeDrift["Mode/path drift\nrejection"]
+    end
+
+    auth --> access --> gates --> hpc
+    gates --> validation
+
+    style auth fill:#2980b9,color:#fff,stroke:#2471a3
+    style access fill:#1a5276,color:#fff,stroke:#154360
+    style gates fill:#b7950b,color:#fff,stroke:#9a7d0a
+    style hpc fill:#6c3483,color:#fff,stroke:#5b2c6f
+    style validation fill:#922b21,color:#fff,stroke:#7b241c
+```
+
+---
+
+## 11 — Context Budget & Token Management
+
+The LLM context window is allocated across six priority-ranked slots using
+tiktoken for accurate token counting. This prevents context overflow and
+ensures the most relevant information reaches the model.
+
+```mermaid
+flowchart LR
+    subgraph window ["LLM Context Window  (32K tokens)"]
+        direction TB
+        Sys["System Prompt\n~2,000 tokens"]
+        Skill["Skill Content\nactive SKILL.md"]
+        Mem["Memory Injection\npinned > annotations > recent\n~2,000 token budget"]
+        Tools["Tool Schemas\nactive service contracts"]
+        History["Conversation History\noldest-first eviction"]
+        Query["Current Query\naugmented message + state"]
+    end
+
+    Budget["ContextBudgetManager\ntiktoken cl100k_base\n6 priority slots\nhard/soft trim\nmin-token guarantees"]
+
+    Budget --> Sys & Skill & Mem & Tools & History & Query
+
+    style window fill:#f8f9fa,color:#1a1a2e,stroke:#1a5276
+    style Budget fill:#1a5276,color:#fff,stroke:#154360
+```
+
+---
+
+*Generated for AGOUTIC v3.6.2 — April 2026*
 # AGOUTIC Architecture — Visual Overview
 
-> Eight diagrams illustrating the architecture of **AGOUTIC v3.6.2**, an agentic
+> Eight diagrams illustrating the architecture of **AGOUTIC v3.4.9**, an agentic
 > bioinformatics platform that orchestrates ENCODE data retrieval, Nextflow
 > pipeline execution (local & HPC/SLURM), differential expression analysis,
 > and gene enrichment through natural-language conversation.
@@ -31,7 +594,7 @@ graph TB
         TagParse["Tag Parser<br/><i>DATA_CALL · PLOT · APPROVAL<br/>tag extraction & correction</i>"]
         ToolDisp["Tool Dispatch<br/><i>MCP client lifecycle<br/>ENCODE retry · chaining</i>"]
         ChatDF["Chat DataFrames<br/><i>DF embedding · plot-spec<br/>resolution · DF-ID assignment</i>"]
-        Planner["Planner<br/><i>manifest composer + template fallback<br/>hybrid bridge</i>"]
+        Planner["Planner<br/><i>11 templates + hybrid bridge<br/>fragment composition</i>"]
         PlanVal["Plan Validator<br/><i>contract checks before<br/>any step dispatch</i>"]
         Executor["Plan Executor<br/><i>parallel batches for safe kinds<br/>sequential for approvals</i>"]
         Replanner["Replanner<br/><i>failure recovery · SKIPPED<br/>dependent propagation</i>"]
@@ -46,7 +609,7 @@ graph TB
         LP["Launchpad<br/>port 8002/8003<br/><i>Job execution &<br/>backend dispatch</i>"]
         AN["Analyzer<br/>port 8004/8005<br/><i>QC · stats ·<br/>result parsing</i>"]
         AT["Atlas / ENCODE<br/>port 8006<br/><i>Consortium data<br/>search & download</i>"]
-        EP["edgePython<br/>port 8007<br/><i>differential<br/>expression</i>"]
+        EP["edgePython<br/>port 8007<br/><i>edgeR differential<br/>expression</i>"]
     end
 
     subgraph Backends ["Execution Backends"]
@@ -89,12 +652,10 @@ graph TB
 The agent uses a **two-pass architecture** that separates fast classification
 from careful execution, ensuring the system never improvises on safety-critical
 steps. Skill files (Markdown) encode domain workflows in a per-skill directory
-layout (`skills/<key>/SKILL.md`) and planner metadata now lives beside them in
-`skills/<key>/manifest.yaml`, loaded by `cortex/skill_manifest.py`. Multi-step
-requests now go through a **manifest-first planning layer**: supported
-deterministic flows compose from `SkillManifest` metadata, selected non-core
-flows still use a hybrid bridge that attempts LLM fragment composition first,
-and deterministic templates remain fallback for unmigrated flows.
+layout (`skills/<key>/SKILL.md`); tool contracts give the LLM precise parameter
+schemas. Multi-step requests now go through a **hybrid planning bridge** that
+attempts LLM fragment composition first for six non-core flows, falling back to
+deterministic templates on failure.
 
 ```mermaid
 flowchart LR
@@ -110,7 +671,7 @@ flowchart LR
     subgraph Pass2 ["Pass 2 — LLM Execution"]
         direction TB
         Prompt["System Prompt<br/>assembled from:"]
-        Skills["🧬 Skills + Manifests<br/><i>15 Markdown files + capability registry</i><br/>routing · runtime · services<br/>tool chains · chain prompts"]
+        Skills["🧬 Skills<br/><i>15 Markdown files</i><br/>ENCODE · Dogme DNA/RNA/cDNA<br/>DE · Enrichment · Remote Exec<br/>Reconcile BAMs · Long Read"]
         Contracts["📋 Tool Contracts<br/><i>JSON Schema per MCP tool</i>"]
         Context["📌 Context Injection<br/><i>project · sample · work_dir<br/>in-memory DataFrames</i>"]
         LLM["LLM Call<br/><i>Ollama / OpenAI-compatible</i>"]
@@ -119,9 +680,8 @@ flowchart LR
     subgraph Planning ["Plan Generation"]
         direction TB
         Hybrid{"Hybrid bridge?"}
-        ManifestPlan["Manifest composer<br/><i>DE · enrichment · XgenePy<br/>skill-chain metadata</i>"]
         LLMPlan["LLM fragment<br/>composition<br/><i>6 non-core flows</i>"]
-        Templates["Deterministic<br/>template fallback<br/><i>legacy / unmigrated flows</i>"]
+        Templates["Deterministic<br/>templates<br/><i>11 templates</i>"]
         Validate2["Plan contract<br/>validation<br/><i>kinds · deps · cycles<br/>scope · approval policy</i>"]
     end
 
@@ -137,9 +697,8 @@ flowchart LR
     Classify -->|workflow| Multi
     Single --> Prompt
     Multi --> Planning
-    Hybrid -->|manifest-supported flow| ManifestPlan --> Validate2
     Hybrid -->|non-core flow| LLMPlan --> Validate2
-    Hybrid -->|fallback| Templates --> Validate2
+    Hybrid -->|core flow| Templates --> Validate2
     LLMPlan -.->|fallback| Templates
     Skills --> Prompt
     Contracts --> Prompt
@@ -345,7 +904,7 @@ flowchart TB
     subgraph Phase4 ["Analysis & Interpretation"]
         QC["Parse QC & stats<br/><i>Analyzer MCP</i>"]
         Reconcile["Reconcile BAMs<br/><i>allowlisted script<br/>cross-workflow merge</i>"]
-        DE["Differential expression<br/><i>edgePython MCP</i>"]
+        DE["Differential expression<br/><i>edgePython MCP · edgeR</i>"]
         Enrich["GO & pathway enrichment<br/><i>Analyzer MCP</i>"]
         Plots["Generate plots<br/><i>volcano · MA · heatmap<br/>BED chr counts · enrichment</i>"]
         Summary["Natural-language summary<br/><i>LLM interprets results</i>"]
@@ -469,7 +1028,7 @@ graph TB
 
         subgraph Analysis ["Analysis & Interpretation"]
             AJR["analyze_job_results<br/><i>QC · stats · file parsing<br/>📜 scripts/count_bed.py</i>"]
-            DE["differential_expression<br/><i>edgePython<br/>volcano · MA plots</i>"]
+            DE["differential_expression<br/><i>edgeR via edgePython<br/>volcano · MA plots</i>"]
             ENR["enrichment_analysis<br/><i>GO · pathway enrichment<br/>dot plots</i>"]
             RB["reconcile_bams<br/><i>cross-workflow BAM merge<br/>📜 scripts/reconcile_bams.py<br/>📜 scripts/check_workflow_references.py</i>"]
         end

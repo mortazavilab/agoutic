@@ -1,105 +1,67 @@
 #!/usr/bin/env python3
-"""
-Build gene reference TSV files from Gencode GTF annotations.
+"""Build colocated AGOUTIC gene reference TSV files from a GTF annotation."""
 
-Extracts gene_id, gene_symbol, gene_name, and biotype from a Gencode GTF
-file and writes a compact TSV lookup table for use by GeneAnnotator.
-
-Usage:
-    # Human (Gencode v44)
-    python scripts/build_gene_reference.py \
-        --gtf gencode.v44.annotation.gtf.gz \
-        --organism human \
-        --output data/reference/human_genes.tsv
-
-    # Mouse (Gencode vM33)
-    python scripts/build_gene_reference.py \
-        --gtf gencode.vM33.annotation.gtf.gz \
-        --organism mouse \
-        --output data/reference/mouse_genes.tsv
-"""
+from __future__ import annotations
 
 import argparse
-import gzip
-import re
-import sys
-from pathlib import Path
+
+from common.gtf_parser import (
+    cache_path_for_gtf,
+    parse_gtf,
+    write_gene_cache,
+    write_transcript_cache,
+)
 
 
-def _parse_gtf_attributes(attr_str: str) -> dict[str, str]:
-    """Parse the GTF attribute column into a dict."""
-    attrs: dict[str, str] = {}
-    for item in attr_str.strip().rstrip(";").split(";"):
-        item = item.strip()
-        if not item:
-            continue
-        m = re.match(r'(\w+)\s+"([^"]*)"', item)
-        if m:
-            attrs[m.group(1)] = m.group(2)
-    return attrs
+def build_reference(
+    gtf_path: str,
+    output_path: str | None = None,
+    transcript_output_path: str | None = None,
+    include_transcripts: bool = False,
+) -> tuple[int, int]:
+    """Read a GTF and write gene/transcript cache TSVs.
 
-
-def build_reference(gtf_path: str, output_path: str) -> int:
-    """Read a Gencode GTF and write a gene reference TSV.
-
-    Returns the number of genes written.
+    Returns ``(n_genes, n_transcripts)``.
     """
-    opener = gzip.open if gtf_path.endswith(".gz") else open
-    genes: dict[str, dict[str, str]] = {}
+    parsed = parse_gtf(gtf_path)
+    gene_output = output_path or str(cache_path_for_gtf(gtf_path, ".genes.tsv"))
+    write_gene_cache(parsed["genes"], gene_output)
 
-    with opener(gtf_path, "rt", encoding="utf-8") as fh:
-        for line in fh:
-            if line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 9:
-                continue
-            feature_type = parts[2]
-            if feature_type != "gene":
-                continue
+    if include_transcripts:
+        transcript_output = transcript_output_path or str(cache_path_for_gtf(gtf_path, ".transcripts.tsv"))
+        write_transcript_cache(parsed["transcripts"], transcript_output)
 
-            attrs = _parse_gtf_attributes(parts[8])
-            gene_id_raw = attrs.get("gene_id", "")
-            # Strip version suffix
-            gene_id = gene_id_raw.split(".")[0] if "." in gene_id_raw else gene_id_raw
-            if not gene_id:
-                continue
-
-            symbol = attrs.get("gene_name", "")
-            name = attrs.get("gene_name", "")  # Gencode uses gene_name for symbol
-            biotype = attrs.get("gene_type", attrs.get("gene_biotype", ""))
-
-            genes[gene_id] = {
-                "symbol": symbol,
-                "name": name,
-                "biotype": biotype,
-            }
-
-    # Write TSV
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as out:
-        out.write("gene_id\tgene_symbol\tgene_name\tbiotype\n")
-        for gid in sorted(genes):
-            entry = genes[gid]
-            out.write(f"{gid}\t{entry['symbol']}\t{entry['name']}\t{entry['biotype']}\n")
-
-    return len(genes)
+    return parsed["gene_count"], parsed["transcript_count"]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build gene reference TSV from Gencode GTF")
-    parser.add_argument("--gtf", required=True, help="Path to Gencode GTF file (.gtf or .gtf.gz)")
-    parser.add_argument("--organism", required=True, choices=["human", "mouse"],
-                        help="Organism name (determines output filename if --output omitted)")
-    parser.add_argument("--output", default=None,
-                        help="Output TSV path (default: data/reference/<organism>_genes.tsv)")
+    parser = argparse.ArgumentParser(description="Build AGOUTIC gene cache TSVs from a GTF")
+    parser.add_argument("--gtf", required=True, help="Path to a GTF or GTF.GZ file")
+    parser.add_argument("--organism", default=None, help="Optional organism label (retained for compatibility)")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Gene-cache TSV path (default: next to the GTF as <stem>.genes.tsv)",
+    )
+    parser.add_argument(
+        "--include-transcripts",
+        action="store_true",
+        help="Also write a colocated transcript cache TSV",
+    )
+    parser.add_argument("--transcript-output", default=None, help="Optional transcript-cache TSV path")
     args = parser.parse_args()
 
-    if args.output is None:
-        args.output = f"data/reference/{args.organism}_genes.tsv"
-
-    count = build_reference(args.gtf, args.output)
-    print(f"Wrote {count:,} genes to {args.output}")
+    gene_count, transcript_count = build_reference(
+        args.gtf,
+        output_path=args.output,
+        transcript_output_path=args.transcript_output,
+        include_transcripts=args.include_transcripts,
+    )
+    gene_output = args.output or str(cache_path_for_gtf(args.gtf, ".genes.tsv"))
+    print(f"Wrote {gene_count:,} genes to {gene_output}")
+    if args.include_transcripts:
+        transcript_output = args.transcript_output or str(cache_path_for_gtf(args.gtf, ".transcripts.tsv"))
+        print(f"Wrote {transcript_count:,} transcripts to {transcript_output}")
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ from analyzer.analysis_engine import (
 from analyzer.edgepython_adapter import call_edgepython_tool, relocate_edgepython_artifact
 from analyzer.config import MAX_PREVIEW_LINES
 from edgepython_mcp.tool_schemas import TOOL_SCHEMAS as EDGEPYTHON_TOOL_SCHEMAS
-from analyzer.gene_tools import translate_gene_ids, lookup_gene
+from analyzer.gene_tools import build_gene_cache, lookup_gene, translate_gene_ids
 from analyzer.enrichment_engine import (
     run_go_enrichment, run_pathway_enrichment,
     get_enrichment_results, get_term_genes,
@@ -31,7 +31,7 @@ from analyzer.enrichment_engine import (
 
 # Tools that have moved from edgePython to analyzer — exclude from proxy
 _EXCLUDED_FROM_PROXY = {
-    "translate_gene_ids", "lookup_gene",
+    "translate_gene_ids", "lookup_gene", "build_gene_cache",
     "run_go_enrichment", "run_pathway_enrichment",
     "get_enrichment_results", "get_term_genes",
 }
@@ -639,6 +639,7 @@ TOOL_REGISTRY = {
     "categorize_job_files": categorize_job_files_tool,
     # Gene annotation tools (moved from edgePython)
     "translate_gene_ids": translate_gene_ids,
+    "build_gene_cache": build_gene_cache,
     "lookup_gene": lookup_gene,
     # Enrichment tools (moved from edgePython)
     "run_go_enrichment": run_go_enrichment,
@@ -838,7 +839,7 @@ TOOL_SCHEMAS = {
     },
     # Gene annotation tools (moved from edgePython)
     "translate_gene_ids": {
-        "description": "Translate Ensembl gene IDs to gene symbols.",
+        "description": "Translate Ensembl gene or transcript IDs to gene symbols.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -847,16 +848,38 @@ TOOL_SCHEMAS = {
                     "items": {"type": "string"},
                     "description": "List of Ensembl gene IDs (e.g. ['ENSG00000141510'])"
                 },
+                "transcript_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of Ensembl transcript IDs (e.g. ['ENST00000378418'])"
+                },
                 "organism": {
                     "type": "string",
-                    "description": "'human' or 'mouse'. Auto-detected from ID prefix if not provided."
+                    "description": "Optional organism label. Auto-detected from ID prefix if not provided."
                 },
             },
-            "required": ["gene_ids"]
+            "required": []
+        }
+    },
+    "build_gene_cache": {
+        "description": "Build colocated gene/transcript cache TSVs for a specific GTF file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gtf_path": {
+                    "type": "string",
+                    "description": "Path to a GTF or GTF.GZ file. Cache TSVs are written alongside it."
+                },
+                "organism": {
+                    "type": "string",
+                    "description": "Optional organism label for custom GTFs."
+                }
+            },
+            "required": ["gtf_path"]
         }
     },
     "lookup_gene": {
-        "description": "Look up genes by symbol or Ensembl ID (bidirectional).",
+        "description": "Look up genes or transcripts by symbol or Ensembl ID.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -870,9 +893,14 @@ TOOL_SCHEMAS = {
                     "items": {"type": "string"},
                     "description": "Ensembl gene IDs (e.g. ['ENSG00000141510'])"
                 },
+                "transcript_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ensembl transcript IDs (e.g. ['ENST00000378418'])"
+                },
                 "organism": {
                     "type": "string",
-                    "description": "'human' or 'mouse'. Auto-detected if not provided."
+                    "description": "Optional organism label. Auto-detected if not provided."
                 },
             },
             "required": []

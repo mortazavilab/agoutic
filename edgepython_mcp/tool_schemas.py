@@ -21,6 +21,7 @@ TOOL_SCHEMAS = {
                 "sample_info_path": {"type": "string", "description": "Optional path to sample metadata file."},
                 "group_column": {"type": "string", "description": "Column in sample info to use as group factor."},
                 "separator": {"type": "string", "description": "Column separator. Auto-detected from file extension."},
+                "annotation_gtf": {"type": "string", "description": "Optional explicit GTF path. If omitted, reconciled.gtf in the counts directory is preferred when present."},
             },
             "required": ["counts_path"],
         },
@@ -43,6 +44,7 @@ TOOL_SCHEMAS = {
                 "layer": {"type": "string", "description": "AnnData: layer name to use instead of .X."},
                 "ngibbs": {"type": "integer", "description": "RSEM: number of Gibbs samples per sample."},
                 "verbose": {"type": "boolean", "description": "Print progress messages."},
+                "annotation_gtf": {"type": "string", "description": "Optional explicit GTF path. If omitted, reconciled.gtf in the inferred work directory is preferred when present."},
             },
             "required": [],
         },
@@ -417,6 +419,7 @@ TOOL_SCHEMAS = {
             "type": "object",
             "properties": {
                 "organism": {"type": "string", "description": "'human' or 'mouse'. Auto-detected if not provided."},
+                "annotation_gtf": {"type": "string", "description": "Optional explicit GTF path. If omitted, reconciled.gtf in the active work directory is preferred when present."},
             },
             "required": [],
         },

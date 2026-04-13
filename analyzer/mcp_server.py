@@ -77,14 +77,19 @@ async def categorize_job_files(work_dir: str | None = None, run_uuid: str | None
 # ==================== Gene Annotation Tools ====================
 
 @mcp.tool()
-def translate_gene_ids(gene_ids: list, organism: str | None = None) -> str:
-    """Translate Ensembl gene IDs to gene symbols."""
-    return TOOL_REGISTRY["translate_gene_ids"](gene_ids=gene_ids, organism=organism)
+def translate_gene_ids(gene_ids: list | None = None, transcript_ids: list | None = None, organism: str | None = None) -> str:
+    """Translate Ensembl gene or transcript IDs to gene symbols."""
+    return TOOL_REGISTRY["translate_gene_ids"](gene_ids=gene_ids, transcript_ids=transcript_ids, organism=organism)
 
 @mcp.tool()
-def lookup_gene(gene_symbols: list | None = None, gene_ids: list | None = None, organism: str | None = None) -> str:
-    """Look up genes by symbol or Ensembl ID (bidirectional)."""
-    return TOOL_REGISTRY["lookup_gene"](gene_symbols=gene_symbols, gene_ids=gene_ids, organism=organism)
+def build_gene_cache(gtf_path: str, organism: str | None = None) -> str:
+    """Build colocated gene/transcript cache TSVs for a specific GTF."""
+    return TOOL_REGISTRY["build_gene_cache"](gtf_path=gtf_path, organism=organism)
+
+@mcp.tool()
+def lookup_gene(gene_symbols: list | None = None, gene_ids: list | None = None, transcript_ids: list | None = None, organism: str | None = None) -> str:
+    """Look up genes or transcripts by symbol or Ensembl ID."""
+    return TOOL_REGISTRY["lookup_gene"](gene_symbols=gene_symbols, gene_ids=gene_ids, transcript_ids=transcript_ids, organism=organism)
 
 
 # ==================== Enrichment Analysis Tools ====================

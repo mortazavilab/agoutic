@@ -1,9 +1,17 @@
 """Tests for common.gene_annotation — GeneAnnotator."""
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
 from common.gene_annotation import GeneAnnotator
+
+
+def _write_gtf(path: Path, content: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 # -----------------------------------------------------------------------
@@ -244,3 +252,101 @@ class TestAnnotateDataframe:
         })
         annotator.annotate_dataframe(df)
         assert df["Symbol"].tolist() == ["Trp53", "Braf"]
+
+
+# -----------------------------------------------------------------------
+# GTF-backed loading and transcript support
+# -----------------------------------------------------------------------
+
+@pytest.fixture
+def human_gtf(tmp_path):
+    return _write_gtf(
+        tmp_path / "references" / "GRCh38" / "gencode.test.gtf",
+        (
+            'chr11\tHAVANA\tgene\t17719568\t17722131\t.\t+\t.\tgene_id "ENSG00000129152.3"; gene_type "protein_coding"; gene_name "MYOD1";\n'
+            'chr11\tHAVANA\ttranscript\t17719568\t17722131\t.\t+\t.\tgene_id "ENSG00000129152.3"; transcript_id "ENST00000378418.8"; gene_type "protein_coding"; gene_name "MYOD1"; transcript_name "MYOD1-201";\n'
+        ),
+    )
+
+
+@pytest.fixture
+def mouse_gtf(tmp_path):
+    return _write_gtf(
+        tmp_path / "references" / "mm39" / "mouse.test.gtf",
+        (
+            'chr7\tHAVANA\tgene\t46025898\t46028523\t.\t+\t.\tgene_id "ENSMUSG00000009471.5"; gene_type "protein_coding"; gene_name "Myod1";\n'
+            'chr7\tHAVANA\ttranscript\t46025898\t46028523\t.\t+\t.\tgene_id "ENSMUSG00000009471.5"; transcript_id "ENSMUST00000100495.1"; gene_type "protein_coding"; gene_name "Myod1"; transcript_name "Myod1-201";\n'
+        ),
+    )
+
+
+class TestGtfLoading:
+    def test_load_gtf_supports_versioned_and_unversioned_ids(self, human_gtf, tmp_path):
+        annotator = GeneAnnotator(data_dir=tmp_path)
+        info = annotator.load_gtf(human_gtf)
+
+        assert info["gene_count"] == 1
+        assert annotator.translate("ENSG00000129152") == "MYOD1"
+        assert annotator.translate("ENSG00000129152.3") == "MYOD1"
+
+    def test_case_insensitive_reverse_lookup_preserves_original_case(self, mouse_gtf, tmp_path):
+        annotator = GeneAnnotator(data_dir=tmp_path)
+        annotator.load_gtf(mouse_gtf)
+
+        assert annotator.reverse_translate("myod1") == "ENSMUSG00000009471"
+        assert annotator.reverse_translate("Myod1") == "ENSMUSG00000009471"
+        assert annotator.reverse_translate("MYOD1") == "ENSMUSG00000009471"
+
+    def test_translate_transcript_and_lookup_transcript(self, human_gtf, tmp_path):
+        annotator = GeneAnnotator(data_dir=tmp_path)
+        annotator.load_gtf(human_gtf)
+
+        assert annotator.translate_transcript("ENST00000378418") == "MYOD1"
+        assert annotator.translate_transcript("ENST00000378418.8") == "MYOD1"
+        transcript_info = annotator.lookup_transcript("ENST00000378418")
+        assert transcript_info == {
+            "transcript_id": "ENST00000378418",
+            "gene_id": "ENSG00000129152",
+            "symbol": "MYOD1",
+            "name": "MYOD1",
+            "biotype": "protein_coding",
+        }
+
+    def test_transcript_dataframe_annotation(self, human_gtf, tmp_path):
+        annotator = GeneAnnotator(data_dir=tmp_path)
+        annotator.load_gtf(human_gtf)
+        df = pd.DataFrame({"TranscriptID": ["ENST00000378418.8"]})
+
+        annotator.annotate_dataframe(df, id_column="TranscriptID", symbol_column="Symbol")
+
+        assert df["Symbol"].tolist() == ["MYOD1"]
+
+    def test_reconciled_gtf_overrides_reference_symbol(self, tmp_path):
+        ref_dir = tmp_path / "reference"
+        ref_dir.mkdir()
+        (ref_dir / "human_genes.tsv").write_text(
+            "gene_id\tgene_symbol\tgene_name\tbiotype\n"
+            "ENSG00000129152\tOLDMYOD1\told myod1\tprotein_coding\n",
+            encoding="utf-8",
+        )
+        work_dir = tmp_path / "work"
+        reconciled_gtf = _write_gtf(
+            work_dir / "reconciled.gtf",
+            'chr11\tHAVANA\tgene\t17719568\t17722131\t.\t+\t.\tgene_id "ENSG00000129152.3"; gene_type "protein_coding"; gene_name "MYOD1";\n',
+        )
+
+        annotator = GeneAnnotator(data_dir=tmp_path)
+        assert annotator.translate("ENSG00000129152") == "OLDMYOD1"
+
+        info = annotator.load_reconciled_gtf(work_dir)
+
+        assert info is not None
+        assert Path(info["gtf_path"]) == reconciled_gtf
+        assert annotator.translate("ENSG00000129152") == "MYOD1"
+
+    def test_custom_organism_label_is_supported(self, human_gtf, tmp_path):
+        annotator = GeneAnnotator(data_dir=tmp_path)
+        annotator.load_gtf(human_gtf, organism="primate")
+
+        assert "primate" in annotator.available_organisms
+        assert annotator.translate("ENSG00000129152", organism="primate") == "MYOD1"
