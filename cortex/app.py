@@ -618,6 +618,7 @@ def _sync_active_staging_block(
             "error": None,
             "stage_parts": stage_parts,
             "progress_percent": _stage_part_progress(stage_parts),
+            "transfer_progress": progress,
         },
         status="RUNNING",
     )

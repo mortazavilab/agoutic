@@ -69,8 +69,8 @@ async def test_upload_prefers_active_broker_session(monkeypatch, tmp_path, key_f
     assert payload["include_patterns"] == []
     assert payload["copy_links"] is True
     assert payload["use_skip_compress"] is True
-    assert payload["timeout_seconds"] == pytest.approx(3480.0, rel=0.01)
-    assert payload["timeout_seconds"] < LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS
+    assert payload["timeout_seconds"] == pytest.approx(28800.0, rel=0.01)
+    assert payload["timeout_seconds"] > LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -395,6 +395,8 @@ async def test_run_rsync_subprocess_treats_carriage_return_progress_as_activity(
     assert stderr_text == ""
     assert "total size is 20971520" in stdout_text
     assert any(update.get("current_file") == "sample.pod5" for update in progress_updates)
+    assert any(update.get("current_file_bytes_transferred") == 1048576 for update in progress_updates)
+    assert any(update.get("current_file_total_bytes_estimate") == 20971520 for update in progress_updates)
     assert any(update.get("file_percent") == 100 for update in progress_updates)
 
 
@@ -430,6 +432,36 @@ async def test_upload_broker_uses_shared_timeout_budget_for_retry(monkeypatch, t
         "bytes_transferred": 0,
     }
     assert invoke_calls[0]["timeout_seconds"] == pytest.approx(42.0, rel=0.01)
+
+
+@pytest.mark.asyncio
+async def test_upload_prefers_explicit_remote_stage_transfer_timeout(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_dir = tmp_path / "inputs"
+    local_dir.mkdir()
+    (local_dir / "reads.fastq").write_text("ACGT")
+    fake_session = SimpleNamespace(session_id="sess-1")
+    invoke_calls = []
+
+    class FakeSessionManager:
+        async def get_active_session(self, profile):
+            return fake_session
+
+        async def invoke(self, session, payload):
+            invoke_calls.append(payload)
+            return {"ok": True, "bytes_transferred": 1234}
+
+    monkeypatch.setenv("REMOTE_STAGE_TRANSFER_TIMEOUT_SECONDS", "7200")
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+
+    result = await manager.upload_inputs(
+        profile=key_file_profile,
+        local_path=str(local_dir),
+        remote_path="/scratch/seyedam/agoutic/data/sample",
+    )
+
+    assert result == {"ok": True, "message": "Upload completed", "bytes_transferred": 1234}
+    assert invoke_calls[0]["timeout_seconds"] == pytest.approx(7200.0, rel=0.01)
 
 
 def test_rsync_ssh_command_uses_fail_fast_publickey_transport(key_file_profile):

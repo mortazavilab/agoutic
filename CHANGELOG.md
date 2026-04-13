@@ -2,16 +2,35 @@
 
 ### Bug Fixes
 
+- **Remote staging now surfaces byte-level transfer updates in the UI** —
+  Launchpad tracks current-file transferred bytes and total-size estimates from
+  rsync progress, Cortex persists that snapshot on `STAGING_TASK` blocks, and
+  the staging card now shows current file, transferred bytes, total input size,
+  file counts, and speed while a transfer is running or after it fails.
+  (`launchpad/backends/file_transfer.py`,
+  `launchpad/backends/slurm_backend.py`, `cortex/job_polling.py`,
+  `cortex/app.py`, `ui/appui_block_part2.py`)
+
 - **Large rsync staging transfers no longer false-stall on carriage-return
   progress updates** — the direct and brokered rsync watchdogs now treat any
   stdout activity as progress instead of waiting for newline-delimited output,
   which avoids aborting long single-file transfers that only emit `\r`
   progress frames. The default staging idle watchdog was also relaxed from
-  600 s to 1800 s while the existing total transfer ceiling remains in place.
+  600 s to 1800 s. Background staging uploads also no longer inherit the old
+  `LAUNCHPAD_STAGE_TIMEOUT - reserve` request budget; they now default to the
+  full `STAGE_MAX_TOTAL_TIMEOUT_SECONDS` ceiling unless
+  `REMOTE_STAGE_TRANSFER_TIMEOUT_SECONDS` is set explicitly.
   (`launchpad/backends/file_transfer.py`,
   `launchpad/backends/local_user_broker.py`)
 
 ### Tests
+
+- **Staging transfer byte-progress regression coverage** — added focused tests
+  for rsync byte parsing, Cortex staging-payload persistence of transfer
+  snapshots, and refresh-path propagation of transfer byte details.
+  (`tests/launchpad/test_file_transfer.py`,
+  `tests/cortex/test_background_tasks.py`,
+  `tests/cortex/test_block_endpoints.py`)
 
 - **Rsync progress watchdog regression coverage** — added focused tests for
   both direct and brokered transfer runners to ensure carriage-return rsync

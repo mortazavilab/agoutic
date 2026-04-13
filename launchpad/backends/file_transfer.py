@@ -24,8 +24,6 @@ from launchpad.backends.ssh_manager import SSHConnection, SSHProfileData, resolv
 
 logger = get_logger(__name__)
 
-_DEFAULT_STAGE_TIMEOUT_SECONDS = 3600.0
-_DEFAULT_STAGE_TIMEOUT_RESERVE_SECONDS = 120.0
 _RSYNC_PROGRESS_CHUNK_SIZE = 4096
 
 _RSYNC_SKIP_COMPRESS_SUFFIXES = (
@@ -109,6 +107,12 @@ def _normalize_local_rsync_source(source: str) -> str:
 
 
 def _stage_upload_timeout_seconds() -> float:
+    """Default upload ceiling for background staging transfers.
+
+    Background staging now runs outside the request/response path, so the
+    default upload budget should follow the staging transfer ceiling rather
+    than the older `LAUNCHPAD_STAGE_TIMEOUT - reserve` submit budget.
+    """
     raw_explicit = os.getenv("REMOTE_STAGE_TRANSFER_TIMEOUT_SECONDS", "").strip()
     if raw_explicit:
         try:
@@ -118,25 +122,7 @@ def _stage_upload_timeout_seconds() -> float:
                 "Ignoring invalid REMOTE_STAGE_TRANSFER_TIMEOUT_SECONDS",
                 raw_value=raw_explicit,
             )
-
-    raw_stage_timeout = os.getenv("LAUNCHPAD_STAGE_TIMEOUT", str(_DEFAULT_STAGE_TIMEOUT_SECONDS)).strip()
-    raw_reserve = os.getenv(
-        "LAUNCHPAD_STAGE_TIMEOUT_RESERVE_SECONDS",
-        str(_DEFAULT_STAGE_TIMEOUT_RESERVE_SECONDS),
-    ).strip()
-    try:
-        stage_timeout = float(raw_stage_timeout)
-    except ValueError:
-        stage_timeout = _DEFAULT_STAGE_TIMEOUT_SECONDS
-    try:
-        reserve_seconds = float(raw_reserve)
-    except ValueError:
-        reserve_seconds = _DEFAULT_STAGE_TIMEOUT_RESERVE_SECONDS
-
-    derived_timeout = stage_timeout - reserve_seconds
-    if derived_timeout <= 0:
-        return max(1.0, stage_timeout)
-    return derived_timeout
+    return _stage_max_total_timeout_seconds()
 
 
 def _remaining_timeout_seconds(deadline: float | None) -> float | None:
@@ -182,6 +168,15 @@ def _stage_max_total_timeout_seconds() -> float:
         except ValueError:
             pass
     return _DEFAULT_STAGE_MAX_TOTAL_TIMEOUT_SECONDS
+
+
+def _estimate_total_bytes_from_progress(transferred_bytes: int, percent: int) -> int | None:
+    if transferred_bytes < 0 or percent <= 0:
+        return None
+    if percent >= 100:
+        return transferred_bytes
+    estimated = round((transferred_bytes * 100) / percent)
+    return max(transferred_bytes, int(estimated))
 
 
 def _rsync_timeout_stderr(direction: str, timeout_seconds: float | None) -> str:
@@ -237,7 +232,7 @@ class FileTransferManager:
     """Handles file transfers between local and remote systems."""
 
     # Regex for rsync --progress output parsing
-    _RE_PROGRESS_LINE = re.compile(r"^[\d,]+\s+(\d+)%\s+([\d.]+\S+/s)")
+    _RE_PROGRESS_LINE = re.compile(r"^([\d,]+)\s+(\d+)%\s+([\d.]+\S+/s)")
     _RE_OVERALL_PROGRESS = re.compile(r"\(xfr#(\d+),\s*(?:to|ir)-chk=(\d+)/(\d+)\)")
     _RE_FILENAME = re.compile(r"^[^\s].*[/.]")  # non-indented line with path separators or extension
 
@@ -629,8 +624,9 @@ class FileTransferManager:
         """Parse a single segment of rsync --progress output.
 
         Returns a dict with keys like current_file, file_percent, speed,
-        files_transferred, files_remaining, files_total — or None if the
-        line contains no useful progress information.
+        current_file_bytes_transferred, current_file_total_bytes_estimate,
+        files_transferred, files_remaining, files_total — or None if the line
+        contains no useful progress information.
         """
         stripped = line.strip()
         if not stripped:
@@ -639,7 +635,16 @@ class FileTransferManager:
         # Progress line: "  32,768 100%  31.25MB/s  0:00:00 (xfr#1, to-chk=5/8)"
         m_progress = cls._RE_PROGRESS_LINE.search(stripped)
         if m_progress:
-            info: dict = {"file_percent": int(m_progress.group(1)), "speed": m_progress.group(2)}
+            current_file_bytes = int(m_progress.group(1).replace(",", ""))
+            file_percent = int(m_progress.group(2))
+            info: dict = {
+                "current_file_bytes_transferred": current_file_bytes,
+                "current_file_total_bytes_estimate": _estimate_total_bytes_from_progress(
+                    current_file_bytes, file_percent,
+                ),
+                "file_percent": file_percent,
+                "speed": m_progress.group(3),
+            }
             m_overall = cls._RE_OVERALL_PROGRESS.search(stripped)
             if m_overall:
                 info["files_transferred"] = int(m_overall.group(1))

@@ -1892,6 +1892,8 @@ class SlurmBackend:
 
         input_fingerprint = await self._compute_input_fingerprint_async(params.input_directory)
         input_size_bytes = await self._compute_input_size_async(params.input_directory)
+        input_source_path = Path(params.input_directory).expanduser()
+        source_is_single_file = input_source_path.exists() and input_source_path.is_file()
         data_cache_key = input_fingerprint[:16]
         target_data_remote = str(PurePosixPath(data_root) / data_cache_key)
         data_entry = await get_remote_input_cache_entry(
@@ -1962,11 +1964,40 @@ class SlurmBackend:
                 data_status = "staged"
             if not resume_partial_transfer:
                 await conn.mkdir_p(data_cache_path)
+
+            def _on_data_stage_progress(info: dict) -> None:
+                if on_progress is None:
+                    return
+                enriched = dict(info or {})
+                enriched["overall_bytes_total"] = input_size_bytes
+
+                current_file_bytes = enriched.get("current_file_bytes_transferred")
+                try:
+                    current_file_bytes = int(current_file_bytes) if current_file_bytes is not None else None
+                except (TypeError, ValueError):
+                    current_file_bytes = None
+
+                files_total = enriched.get("files_total")
+                try:
+                    files_total = int(files_total) if files_total is not None else None
+                except (TypeError, ValueError):
+                    files_total = None
+
+                if source_is_single_file:
+                    enriched.setdefault("current_file", input_source_path.name)
+                    enriched["current_file_total_bytes_estimate"] = input_size_bytes
+
+                if current_file_bytes is not None and (source_is_single_file or files_total == 1):
+                    enriched["overall_bytes_transferred"] = min(current_file_bytes, input_size_bytes)
+                    enriched["current_file_total_bytes_estimate"] = input_size_bytes
+
+                on_progress(enriched)
+
             upload_kwargs = {
                 "profile": profile,
                 "local_path": params.input_directory,
                 "remote_path": data_cache_path,
-                "on_progress": on_progress,
+                "on_progress": _on_data_stage_progress,
             }
             if transfer_id:
                 upload_kwargs["transfer_id"] = transfer_id

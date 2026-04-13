@@ -2228,6 +2228,105 @@ class TestPollJobStatus:
         sess.close()
 
     @pytest.mark.anyio
+    async def test_poll_staging_status_preserves_transfer_snapshot(self, session_factory, seed_data):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "status": "RUNNING",
+                "steps": [
+                    {"id": "stage_input", "kind": "REMOTE_STAGE", "status": "RUNNING"},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        initial_parts = _initial_stage_parts(
+            {
+                "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
+                "data_action": {"action": "stage"},
+            }
+        )
+        stage_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "STAGING_TASK",
+            {
+                "sample_name": "Jamshid",
+                "mode": "RNA",
+                "staging_task_id": "stg-progress-001",
+                "workflow_plan_block_id": workflow_block.id,
+                "stage_input_step_id": "stage_input",
+                "message": "Staging in progress...",
+                "stage_parts": initial_parts,
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(
+            side_effect=[
+                {
+                    "task_id": "stg-progress-001",
+                    "status": "running",
+                    "error": None,
+                    "result": None,
+                    "progress": {
+                        "current_file": "IGVFFI6571ANCX.bam",
+                        "current_file_bytes_transferred": 670,
+                        "current_file_total_bytes_estimate": 1000,
+                        "overall_bytes_total": 1000,
+                        "overall_bytes_transferred": 670,
+                        "file_percent": 67,
+                        "speed": "120MB/s",
+                        "files_transferred": 0,
+                        "files_total": 1,
+                    },
+                },
+                {
+                    "task_id": "stg-progress-001",
+                    "status": "failed",
+                    "error": "Upload stalled for too long.",
+                    "progress": {},
+                    "result": None,
+                },
+            ]
+        )
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            mock_sleep.return_value = None
+            await poll_staging_status(
+                task_id="stg-progress-001",
+                project_id="proj-bg",
+                block_id=stage_block.id,
+                owner_id="u-bg",
+                job_data={"sample_name": "Jamshid", "mode": "RNA", "input_directory": "/data/Jamshid.bam"},
+                ssh_profile_id="profile-123",
+                ssh_profile_nickname="hpc3",
+                workflow_block_id=workflow_block.id,
+                stage_input_step_id="stage_input",
+                complete_stage_only_step_id=None,
+                gate_payload={"skill": "remote_execution", "model": "default"},
+                initial_stage_parts=initial_parts,
+            )
+
+        sess = session_factory()
+        updated_stage = sess.query(ProjectBlock).filter(ProjectBlock.id == stage_block.id).first()
+        updated_stage_payload = get_block_payload(updated_stage)
+        assert updated_stage.status == "FAILED"
+        assert updated_stage_payload["transfer_progress"]["current_file"] == "IGVFFI6571ANCX.bam"
+        assert updated_stage_payload["transfer_progress"]["overall_bytes_transferred"] == 670
+        assert updated_stage_payload["transfer_progress"]["overall_bytes_total"] == 1000
+        sess.close()
+
+    @pytest.mark.anyio
     async def test_poll_staging_status_marks_block_failed(self, session_factory, seed_data):
         sess = session_factory()
         workflow_block = _create_block_internal(

@@ -575,6 +575,11 @@ class TestCreateBlock:
                     "task_id": "stg-refresh",
                     "status": "running",
                     "progress": {
+                        "current_file": "IGVFFI6571ANCX.bam",
+                        "current_file_bytes_transferred": 820,
+                        "current_file_total_bytes_estimate": 1000,
+                        "overall_bytes_total": 1000,
+                        "overall_bytes_transferred": 820,
                         "file_percent": 82,
                         "speed": "120MB/s",
                         "files_transferred": 1,
@@ -616,6 +621,9 @@ class TestCreateBlock:
 
         assert refreshed_stage.status == "RUNNING"
         assert stage_payload["message"] == "Uploading 1/3 files (82% current file) 120MB/s"
+        assert stage_payload["transfer_progress"]["current_file"] == "IGVFFI6571ANCX.bam"
+        assert stage_payload["transfer_progress"]["overall_bytes_transferred"] == 820
+        assert stage_payload["transfer_progress"]["overall_bytes_total"] == 1000
         assert stage_payload["stage_parts"]["data"]["status"] == "RUNNING"
         assert stage_payload["stage_parts"]["data"]["progress_percent"] == 82
         assert stage_payload["last_updated"]

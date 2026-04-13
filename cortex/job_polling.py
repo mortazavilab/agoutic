@@ -513,6 +513,7 @@ async def poll_staging_status(
                 progress = status_data.get("progress") or {}
                 stage_result = status_data.get("result")
                 error_msg = status_data.get("error")
+                transfer_progress = dict(progress) if isinstance(progress, dict) else {}
 
                 # Derive a human-friendly progress message
                 pct = progress.get("file_percent", 0)
@@ -539,6 +540,7 @@ async def poll_staging_status(
                             "progress_percent": _stage_part_progress(stage_parts),
                             "message": msg,
                             "stage_parts": stage_parts,
+                            "transfer_progress": transfer_progress,
                         },
                         status="RUNNING",
                     )
@@ -562,6 +564,7 @@ async def poll_staging_status(
                             "progress_percent": _stage_part_progress(stage_parts),
                             "message": msg,
                             "stage_parts": stage_parts,
+                            "transfer_progress": transfer_progress,
                         },
                         status="RUNNING",
                     )
@@ -587,6 +590,7 @@ async def poll_staging_status(
                             "reference_cache_statuses": stage_result.get("reference_cache_statuses"),
                             "reference_asset_evidence": stage_result.get("reference_asset_evidence"),
                             "stage_parts": stage_parts,
+                            **({"transfer_progress": transfer_progress} if transfer_progress else {}),
                         },
                         status="DONE",
                     )
@@ -686,6 +690,7 @@ async def poll_staging_status(
                             "message": fail_msg,
                             "error": fail_msg,
                             "stage_parts": stage_parts,
+                            **({"transfer_progress": transfer_progress} if transfer_progress else {}),
                         },
                         status="FAILED",
                     )
@@ -765,6 +770,7 @@ async def poll_staging_status(
                                 "message": fail_msg,
                                 "error": fail_msg,
                                 "stage_parts": stage_parts,
+                                **({"transfer_progress": transfer_progress} if transfer_progress else {}),
                             },
                             status="FAILED",
                         )

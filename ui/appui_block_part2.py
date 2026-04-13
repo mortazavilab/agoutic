@@ -71,6 +71,72 @@ def _refresh_staging_block_status(*, staging_task_id, block_id, project_id, api_
     return False, detail or getattr(resp, "text", "")[:200] or "Unable to refresh staging status."
 
 
+def _format_stage_bytes(value):
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    if amount < 0:
+        return None
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    unit_index = 0
+    while amount >= 1024 and unit_index < len(units) - 1:
+        amount /= 1024.0
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(amount)} {units[unit_index]}"
+    if amount >= 100:
+        return f"{amount:.0f} {units[unit_index]}"
+    if amount >= 10:
+        return f"{amount:.1f} {units[unit_index]}"
+    return f"{amount:.2f} {units[unit_index]}"
+
+
+def _render_stage_transfer_snapshot(transfer_progress: dict | None):
+    if not isinstance(transfer_progress, dict) or not transfer_progress:
+        return
+
+    current_file = str(transfer_progress.get("current_file") or "").strip()
+    current_bytes = _format_stage_bytes(transfer_progress.get("current_file_bytes_transferred"))
+    current_total = _format_stage_bytes(transfer_progress.get("current_file_total_bytes_estimate"))
+    overall_transferred = _format_stage_bytes(transfer_progress.get("overall_bytes_transferred"))
+    overall_total = _format_stage_bytes(transfer_progress.get("overall_bytes_total"))
+    speed = str(transfer_progress.get("speed") or "").strip()
+
+    files_transferred = transfer_progress.get("files_transferred")
+    files_total = transfer_progress.get("files_total")
+    try:
+        files_label = (
+            f"{int(files_transferred or 0)}/{int(files_total)}"
+            if files_total not in (None, "") else None
+        )
+    except (TypeError, ValueError):
+        files_label = None
+
+    stats = {}
+    if overall_transferred and overall_total:
+        stats["Transferred"] = f"{overall_transferred} / {overall_total}"
+    elif overall_total:
+        stats["Total Input"] = overall_total
+
+    if current_bytes and current_total:
+        stats["Current File"] = f"{current_bytes} / ~{current_total}"
+    elif current_bytes:
+        stats["Current File"] = current_bytes
+    elif current_total:
+        stats["Current File"] = f"~{current_total}"
+
+    if files_label:
+        stats["Files"] = files_label
+    if speed:
+        stats["Speed"] = speed
+
+    if stats:
+        progress_stats(stats)
+    if current_file:
+        st.caption(f"Current file: `{current_file}`")
+
+
 def render_block_part2(
     *,
     btype,
@@ -304,6 +370,7 @@ def render_block_part2(
                 status_chip("running", label="Staging Running", icon="🔄")
                 st.caption(message)
                 st.progress(max(min(progress, 100), 0) / 100)
+                _render_stage_transfer_snapshot(content.get("transfer_progress"))
                 staging_task_id = content.get("staging_task_id")
                 if _staging_block_needs_refresh(block, content):
                     st.info("Refreshing status before showing staging actions...")
@@ -379,6 +446,7 @@ def render_block_part2(
             elif block.get("status") == "CANCELLED":
                 status_chip("cancelled", label="Staging Cancelled", icon="🛑")
                 st.warning(message)
+                _render_stage_transfer_snapshot(content.get("transfer_progress"))
                 staging_task_id = content.get("staging_task_id")
                 if staging_task_id and st.button("🔄 Resume Staging", type="primary", key=f"resume_stage_{block_id}"):
                     _pause_auto_refresh(4)
@@ -415,6 +483,7 @@ def render_block_part2(
             else:
                 status_chip("failed", label="Staging Failed", icon="❌")
                 st.error(content.get("error") or message)
+                _render_stage_transfer_snapshot(content.get("transfer_progress"))
                 staging_task_id = content.get("staging_task_id")
                 if staging_task_id and st.button("🔄 Resume Staging", type="primary", key=f"resume_failed_stage_{block_id}"):
                     _pause_auto_refresh(4)
