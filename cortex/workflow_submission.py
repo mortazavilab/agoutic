@@ -94,6 +94,35 @@ def _build_reconcile_script_args(job_params: dict) -> list[str]:
     return script_args
 
 
+def _remote_stage_data_action(job_data: dict) -> tuple[dict, str]:
+    cache_preflight = job_data.get("cache_preflight")
+    if not isinstance(cache_preflight, dict):
+        return {}, ""
+    data_action = cache_preflight.get("data_action")
+    if not isinstance(data_action, dict):
+        return {}, ""
+    return data_action, str(data_action.get("action") or "").strip().lower()
+
+
+def _should_background_remote_stage(
+    *,
+    run_type: str,
+    execution_mode: str,
+    remote_stage_only: bool,
+    job_data: dict,
+) -> bool:
+    if run_type == "script" or execution_mode != "slurm":
+        return False
+    if job_data.get("staged_remote_input_path"):
+        return False
+    _data_action, data_action_name = _remote_stage_data_action(job_data)
+    if remote_stage_only:
+        return True
+    if data_action_name:
+        return data_action_name not in {"reuse", "use_remote_path"}
+    return True
+
+
 async def submit_job_after_approval(project_id: str, gate_block_id: str):
     """
     Background task to submit a job to Launchpad after approval.
@@ -285,6 +314,15 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 stage_only=remote_stage_only,
             )
 
+        if workflow_block is not None:
+            job_params["workflow_block_id"] = workflow_block.id
+            if gate_payload.get("edited_params"):
+                gate_payload["edited_params"] = job_params
+            else:
+                gate_payload["extracted_params"] = job_params
+            gate_block.payload_json = json.dumps(gate_payload)
+            session.commit()
+
         _apply_slurm_cache_preflight_to_workflow(session, workflow_block, job_data.get("cache_preflight"))
 
         if run_type != "script" and _should_stage_local_sample(gate_payload, job_params):
@@ -438,6 +476,18 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 kinds=("complete_stage_only", "COMPLETE_STAGE_ONLY"),
             )
 
+        data_action, data_action_name = _remote_stage_data_action(job_data)
+        background_remote_stage = (
+            workflow_block is not None
+            and stage_input_step_id is not None
+            and _should_background_remote_stage(
+                run_type=run_type,
+                execution_mode=execution_mode,
+                remote_stage_only=remote_stage_only,
+                job_data=job_data,
+            )
+        )
+
         if execution_mode == "slurm" and workflow_block is not None and check_remote_stage_step_id:
             _set_workflow_step_status(
                 session,
@@ -448,17 +498,17 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             )
 
         if execution_mode == "slurm" and workflow_block is not None and stage_input_step_id and not remote_stage_only:
-            cache_preflight = job_data.get("cache_preflight") if isinstance(job_data.get("cache_preflight"), dict) else {}
-            data_action = cache_preflight.get("data_action") if isinstance(cache_preflight, dict) else {}
-            data_action_name = str((data_action or {}).get("action") or "").strip().lower()
-            if job_data.get("staged_remote_input_path") and data_action_name in {"reuse", "use_remote_path"}:
+            if job_data.get("staged_remote_input_path"):
+                decision = "use_remote_path" if data_action_name == "use_remote_path" else (
+                    "reuse" if data_action_name == "reuse" else "stage"
+                )
                 _set_workflow_step_status(
                     session,
                     workflow_block,
                     stage_input_step_id,
                     "COMPLETED",
                     extra={
-                        "decision": "use_remote_path" if data_action_name == "use_remote_path" else "reuse",
+                        "decision": decision,
                         "staged_input_directory": job_data.get("staged_remote_input_path"),
                         "data_action": data_action,
                     },
@@ -477,7 +527,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     },
                 )
 
-        if remote_stage_only:
+        if background_remote_stage:
             stage_parts = _initial_stage_parts(job_data.get("cache_preflight"))
             stage_task_block = _create_block_internal(
                 session,
@@ -490,6 +540,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     "ssh_profile_id": ssh_profile_id,
                     "ssh_profile_nickname": ssh_profile_nickname,
                     "remote_base_path": job_data.get("remote_base_path"),
+                    "gate_block_id": gate_block.id,
                     "workflow_plan_block_id": workflow_block.id if workflow_block is not None else None,
                     "staging_task_id": None,
                     "stage_input_step_id": stage_input_step_id,
@@ -538,7 +589,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
 
             try:
                 launchpad_url = get_service_url("launchpad")
-                client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=60.0)
+                client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=REMOTE_STAGE_MCP_TIMEOUT)
                 await client.connect()
                 try:
                     stage_response = await client.call_tool(
@@ -586,6 +637,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     ssh_profile_id=ssh_profile_id,
                     ssh_profile_nickname=ssh_profile_nickname,
                     workflow_block_id=workflow_block.id if workflow_block is not None else None,
+                    gate_block_id=gate_block.id,
                     stage_input_step_id=stage_input_step_id,
                     complete_stage_only_step_id=complete_stage_only_step_id,
                     gate_payload=gate_payload,
@@ -597,6 +649,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 project_id=project_id,
                 sample_name=job_data["sample_name"],
                 staging_task_id=staging_task_id,
+                continue_submission=not remote_stage_only,
             )
             return
 

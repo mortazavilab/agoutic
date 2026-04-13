@@ -205,58 +205,15 @@ async def test_get_staging_task_status_hydrates_persisted_incomplete_task_before
 
 @pytest.mark.asyncio
 async def test_retry_staging_task_uses_persisted_failed_row(monkeypatch):
-    staged_tasks: list[tuple[str, dict]] = []
-
-    monkeypatch.setattr("launchpad.backends.staging_worker.get_staging_tasks", lambda: {})
     monkeypatch.setattr(
-        launchpad_app,
-        "get_staging_task_record",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                task_id="stg-old",
-                status="failed",
-                progress_json={"file_percent": 80},
-                result_json=None,
-                error="network drop",
-                created_at=100.0,
-                updated_at=105.0,
-                params_json={
-                    "project_id": "proj-1",
-                    "user_id": "user-1",
-                    "sample_name": "sample-a",
-                    "mode": "RNA",
-                },
-            )
-        ),
+        "launchpad.backends.staging_worker.requeue_staging_task",
+        AsyncMock(return_value=SimpleNamespace(task_id="stg-new", status="queued")),
     )
-
-    async def _fake_persist(task, force=False, raise_on_error=False):
-        return True
-
-    def _fake_start(task):
-        staged_tasks.append((task.task_id, dict(task.params)))
-        return True
-
-    monkeypatch.setattr("launchpad.backends.staging_worker.active_task_count", lambda: 0)
-    monkeypatch.setattr("launchpad.backends.staging_worker.new_task_id", lambda: "stg-new")
-    monkeypatch.setattr("launchpad.backends.staging_worker.persist_staging_task", _fake_persist)
-    monkeypatch.setattr("launchpad.backends.staging_worker.start_staging_task", _fake_start)
 
     response = await launchpad_app.retry_staging_task("stg-old")
 
     assert response.task_id == "stg-new"
     assert response.status == "queued"
-    assert staged_tasks == [
-        (
-            "stg-new",
-            {
-                "project_id": "proj-1",
-                "user_id": "user-1",
-                "sample_name": "sample-a",
-                "mode": "RNA",
-            },
-        )
-    ]
 
 
 @pytest.mark.asyncio
@@ -291,6 +248,34 @@ async def test_cancel_staging_task_endpoint_maps_terminal_conflict(monkeypatch):
 
     assert exc_info.value.status_code == 409
     assert "completed" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_resume_staging_task_endpoint_returns_replacement_task(monkeypatch):
+    monkeypatch.setattr(
+        "launchpad.backends.staging_worker.resume_staging_task",
+        AsyncMock(return_value=SimpleNamespace(task_id="stg-2", status="queued")),
+    )
+
+    payload = await launchpad_app.resume_staging_task_endpoint("stg-1")
+
+    assert payload.task_id == "stg-2"
+    assert payload.status == "queued"
+    assert payload.resumed_from_task_id == "stg-1"
+
+
+@pytest.mark.asyncio
+async def test_resume_staging_task_endpoint_maps_capacity_limit(monkeypatch):
+    monkeypatch.setattr(
+        "launchpad.backends.staging_worker.resume_staging_task",
+        AsyncMock(side_effect=RuntimeError("Too many concurrent staging tasks")),
+    )
+
+    with pytest.raises(launchpad_app.HTTPException) as exc_info:
+        await launchpad_app.resume_staging_task_endpoint("stg-1")
+
+    assert exc_info.value.status_code == 429
+    assert "Too many concurrent staging tasks" in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio

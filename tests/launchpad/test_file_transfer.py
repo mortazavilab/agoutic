@@ -348,6 +348,57 @@ async def test_upload_direct_rsync_times_out_with_actionable_message(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_run_rsync_subprocess_treats_carriage_return_progress_as_activity(monkeypatch):
+    manager = FileTransferManager()
+    progress_updates = []
+
+    class FakeStdout:
+        def __init__(self):
+            self._chunks = [
+                b"sample.pod5\r",
+                b"      1048576   5%    8.00MB/s    0:00:10\r",
+                b"     20971520 100%   12.00MB/s    0:00:10 (xfr#1, to-chk=0/1)\n",
+                b"total size is 20971520  speedup is 1.00\n",
+                b"",
+            ]
+
+        async def read(self, _size):
+            return self._chunks.pop(0)
+
+    class FakeStderr:
+        async def read(self):
+            return b""
+
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = 0
+            self.pid = 12345
+            self.stdout = FakeStdout()
+            self.stderr = FakeStderr()
+
+        async def wait(self):
+            return self.returncode
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeProcess()
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    returncode, stdout_text, stderr_text = await manager._run_rsync_subprocess(
+        cmd=["rsync", "source", "dest"],
+        direction="upload",
+        timeout_seconds=30,
+        on_progress=progress_updates.append,
+    )
+
+    assert returncode == 0
+    assert stderr_text == ""
+    assert "total size is 20971520" in stdout_text
+    assert any(update.get("current_file") == "sample.pod5" for update in progress_updates)
+    assert any(update.get("file_percent") == 100 for update in progress_updates)
+
+
+@pytest.mark.asyncio
 async def test_upload_broker_uses_shared_timeout_budget_for_retry(monkeypatch, tmp_path, key_file_profile):
     manager = FileTransferManager()
     local_dir = tmp_path / "inputs"

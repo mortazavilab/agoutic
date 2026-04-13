@@ -1905,6 +1905,7 @@ class SlurmBackend:
         data_exists = await conn.path_exists(data_cache_path)
         data_cache_info: dict[str, object] | None = None
         data_refresh_reason: str | None = None
+        resume_partial_transfer = False
         if data_exists:
             if data_entry is None:
                 data_refresh_reason = "uncataloged remote cache path already exists"
@@ -1914,7 +1915,15 @@ class SlurmBackend:
             elif data_cache_info.get("has_symlinks"):
                 data_refresh_reason = "cached input contains symlinks"
             elif data_cache_info.get("has_partial_dir"):
-                data_refresh_reason = f"cached input contains {self._RSYNC_PARTIAL_DIR}"
+                remote_size_bytes = int(data_cache_info.get("size_bytes") or 0)
+                if remote_size_bytes <= input_size_bytes and data_cache_path == target_data_remote:
+                    resume_partial_transfer = True
+                    data_refresh_reason = None
+                else:
+                    data_refresh_reason = (
+                        f"cached input contains {self._RSYNC_PARTIAL_DIR} "
+                        f"(remote={remote_size_bytes}, expected={input_size_bytes})"
+                    )
             elif int(data_cache_info.get("size_bytes") or 0) != input_size_bytes:
                 data_refresh_reason = (
                     "cached input size mismatch "
@@ -1923,13 +1932,13 @@ class SlurmBackend:
         elif data_entry is not None:
             data_refresh_reason = "cached input path is missing"
 
-        if data_entry is not None and data_exists and data_refresh_reason is None:
+        if data_entry is not None and data_exists and data_refresh_reason is None and not resume_partial_transfer:
             data_status = "reused"
         else:
             if run_uuid:
                 await self._update_job_stage(run_uuid, RunStage.TRANSFERRING_INPUTS)
                 await self._update_job_transfer_state(run_uuid, "uploading_inputs")
-            if data_exists:
+            if data_exists and not resume_partial_transfer:
                 logger.warning(
                     "Refreshing remote input cache",
                     sample_name=params.sample_name,
@@ -1940,9 +1949,19 @@ class SlurmBackend:
                 )
                 await conn.run(f"rm -rf {shlex.quote(data_cache_path)}", check=True)
                 data_status = "refreshed"
+            elif resume_partial_transfer:
+                logger.info(
+                    "Resuming partial remote input cache transfer",
+                    sample_name=params.sample_name,
+                    remote_path=data_cache_path,
+                    remote_size_bytes=int((data_cache_info or {}).get("size_bytes") or 0),
+                    expected_size_bytes=input_size_bytes,
+                )
+                data_status = "resumed"
             else:
                 data_status = "staged"
-            await conn.mkdir_p(data_cache_path)
+            if not resume_partial_transfer:
+                await conn.mkdir_p(data_cache_path)
             upload_kwargs = {
                 "profile": profile,
                 "local_path": params.input_directory,

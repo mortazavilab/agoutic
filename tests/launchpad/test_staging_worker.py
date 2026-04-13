@@ -625,3 +625,93 @@ async def test_cancel_staging_task_requests_broker_cancel_for_running_task(monke
         }
     ]
     assert persisted_snapshots[-1]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_resume_staging_task_requeues_cancelled_task(monkeypatch):
+    persisted = []
+    started = []
+    staging_worker_module.get_staging_tasks().clear()
+
+    async def fake_persist(task, force=False, raise_on_error=False):
+        persisted.append((task.task_id, task.status, dict(task.params)))
+        return True
+
+    def fake_start(task):
+        started.append(task.task_id)
+        return True
+
+    monkeypatch.setattr(staging_worker_module, "persist_staging_task", fake_persist)
+    monkeypatch.setattr(staging_worker_module, "start_staging_task", fake_start)
+    monkeypatch.setattr(staging_worker_module, "new_task_id", lambda: "task-resumed")
+
+    old_task = StagingTaskState(
+        task_id="task-cancelled",
+        status="cancelled",
+        params={
+            "project_id": "proj-1",
+            "user_id": "user-1",
+            "sample_name": "sample-a",
+            "mode": "RNA",
+        },
+    )
+    staging_worker_module.get_staging_tasks()[old_task.task_id] = old_task
+
+    resumed = await staging_worker_module.resume_staging_task(old_task.task_id)
+
+    assert resumed.task_id == "task-resumed"
+    assert resumed.status == "queued"
+    assert resumed.params == old_task.params
+    assert started == ["task-resumed"]
+    assert persisted == [
+        (
+            "task-resumed",
+            "queued",
+            {
+                "project_id": "proj-1",
+                "user_id": "user-1",
+                "sample_name": "sample-a",
+                "mode": "RNA",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_staging_task_cancels_running_task_before_requeue(monkeypatch):
+    persisted = []
+    started = []
+    staging_worker_module.get_staging_tasks().clear()
+
+    async def fake_persist(task, force=False, raise_on_error=False):
+        persisted.append(task.task_id)
+        return True
+
+    def fake_start(task):
+        started.append(task.task_id)
+        return True
+
+    old_task = StagingTaskState(
+        task_id="task-running",
+        status="running",
+        params={"project_id": "proj-1", "user_id": "user-1", "sample_name": "sample-a", "mode": "RNA"},
+    )
+    staging_worker_module.get_staging_tasks()[old_task.task_id] = old_task
+
+    async def fake_cancel(task_id, *, message=""):
+        assert task_id == "task-running"
+        old_task.status = "cancelled"
+        old_task.error = message
+        return old_task
+
+    monkeypatch.setattr(staging_worker_module, "cancel_staging_task", fake_cancel)
+    monkeypatch.setattr(staging_worker_module, "persist_staging_task", fake_persist)
+    monkeypatch.setattr(staging_worker_module, "start_staging_task", fake_start)
+    monkeypatch.setattr(staging_worker_module, "new_task_id", lambda: "task-running-resumed")
+
+    resumed = await staging_worker_module.resume_staging_task(old_task.task_id)
+
+    assert resumed.task_id == "task-running-resumed"
+    assert resumed.status == "queued"
+    assert started == ["task-running-resumed"]
+    assert persisted == ["task-running-resumed"]

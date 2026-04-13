@@ -193,6 +193,13 @@ class StageTaskCancelResponse(BaseModel):
     message: str
 
 
+class StageTaskResumeResponse(BaseModel):
+    """Returned when a staging task resume is accepted and queued."""
+    task_id: str
+    status: str = "queued"
+    resumed_from_task_id: str
+
+
 class StagingTaskStatusResponse(BaseModel):
     """Current state of a background staging task."""
     task_id: str

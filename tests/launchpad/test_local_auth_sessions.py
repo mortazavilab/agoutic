@@ -116,7 +116,7 @@ async def test_local_broker_rsync_transfer_keeps_single_file_source(monkeypatch,
     local_file.write_text("BAM")
     captured = {}
 
-    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None):
+    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None, idle_timeout_seconds=None, stall_message=None, timeout_message=None):
         captured["cmd"] = cmd
         return {"ok": True, "stdout": "total size is 42\n", "stderr": "", "exit_status": 0}
 
@@ -156,7 +156,7 @@ async def test_local_broker_rsync_download_preserves_remote_trailing_slash(monke
     """Remote rsync sources (user@host:path/) must keep their trailing slash."""
     captured = {}
 
-    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None):
+    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None, idle_timeout_seconds=None, stall_message=None, timeout_message=None):
         captured["cmd"] = cmd
         return {"ok": True, "stdout": "total size is 42\n", "stderr": "", "exit_status": 0}
 
@@ -197,7 +197,7 @@ async def test_local_broker_rsync_retries_without_skip_compress_on_incompatible_
     local_file.write_text("BAM")
     commands = []
 
-    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None):
+    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None, idle_timeout_seconds=None, stall_message=None, timeout_message=None):
         commands.append(cmd)
         if len(commands) == 1:
             return {
@@ -239,6 +239,157 @@ async def test_local_broker_rsync_retries_without_skip_compress_on_incompatible_
     assert "--partial" not in commands[1]
     assert any(str(part).startswith("--skip-compress=") for part in commands[0])
     assert not any(str(part).startswith("--skip-compress=") for part in commands[1])
+
+
+@pytest.mark.asyncio
+async def test_local_broker_rsync_transfer_forwards_idle_timeout(monkeypatch, tmp_path):
+    local_file = tmp_path / "ENCFF921XAH.bam"
+    local_file.write_text("BAM")
+    captured = {}
+
+    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None, idle_timeout_seconds=None, stall_message=None, timeout_message=None):
+        captured.update(
+            {
+                "cmd": cmd,
+                "timeout_seconds": timeout_seconds,
+                "request_id": request_id,
+                "idle_timeout_seconds": idle_timeout_seconds,
+                "stall_message": stall_message,
+                "timeout_message": timeout_message,
+            }
+        )
+        return {"ok": False, "stdout": "", "stderr": stall_message or "stalled", "exit_status": 124}
+
+    monkeypatch.setattr("launchpad.backends.local_user_broker._run_subprocess", fake_run_subprocess)
+
+    result = await _handle_request(
+        {
+            "auth_token": "token-123",
+            "op": "rsync_transfer",
+            "profile": {
+                "ssh_host": "hpc3.example.edu",
+                "ssh_port": 22,
+                "ssh_username": "seyedam",
+                "auth_method": "key_file",
+                "key_file_path": "~/.ssh/id_ed25519",
+            },
+            "source": str(local_file),
+            "dest": "seyedam@hpc3.example.edu:/scratch/seyedam/agoutic/data/sample",
+            "copy_links": True,
+            "timeout_seconds": 30,
+            "idle_timeout_seconds": 600,
+            "request_id": "req-123",
+        },
+        shutdown_event=asyncio.Event(),
+        auth_token="token-123",
+    )
+
+    assert result["ok"] is False
+    assert captured["request_id"] == "req-123"
+    assert captured["idle_timeout_seconds"] == 600
+    assert ".rsync-partial" in captured["stall_message"]
+    assert ".rsync-partial" in captured["timeout_message"]
+
+
+@pytest.mark.asyncio
+async def test_local_broker_run_subprocess_stalls_on_idle_timeout(monkeypatch):
+    terminated = []
+
+    class _FakeStdout:
+        async def read(self, _size):
+            await asyncio.Event().wait()
+
+    class _FakeStderr:
+        async def read(self):
+            return b""
+
+    class _FakeProc:
+        def __init__(self):
+            self.returncode = None
+            self.pid = 12345
+            self.stdout = _FakeStdout()
+            self.stderr = _FakeStderr()
+
+        async def wait(self):
+            self.returncode = -15 if self.returncode is None else self.returncode
+            return self.returncode
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return _FakeProc()
+
+    async def fake_terminate(proc, *, grace_seconds=5.0):
+        terminated.append((proc, grace_seconds))
+        proc.returncode = -15
+
+    monkeypatch.setattr(local_user_broker_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(local_user_broker_module, "_terminate_process_tree", fake_terminate)
+
+    result = await local_user_broker_module._run_subprocess(
+        ["rsync", "source", "dest"],
+        timeout_seconds=30,
+        request_id="req-stall",
+        idle_timeout_seconds=0.01,
+        stall_message="Rsync transfer stalled - no output for 0.01s.",
+    )
+
+    assert result["ok"] is False
+    assert result["exit_status"] == 124
+    assert "stalled" in result["stderr"]
+    assert len(terminated) == 1
+    assert "req-stall" not in local_user_broker_module._ACTIVE_PROCESSES
+
+
+@pytest.mark.asyncio
+async def test_local_broker_run_subprocess_treats_carriage_return_progress_as_activity(monkeypatch):
+    class _FakeStdout:
+        def __init__(self):
+            self._chunks = [
+                b"sample.pod5\r",
+                b"      1048576   5%    8.00MB/s    0:00:10\r",
+                b"total size is 20971520  speedup is 1.00\n",
+                b"",
+            ]
+
+        async def read(self, _size):
+            return self._chunks.pop(0)
+
+    class _FakeStderr:
+        async def read(self):
+            return b""
+
+    class _FakeProc:
+        def __init__(self):
+            self.returncode = 0
+            self.pid = 12345
+            self.stdout = _FakeStdout()
+            self.stderr = _FakeStderr()
+
+        async def wait(self):
+            return self.returncode
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(local_user_broker_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await local_user_broker_module._run_subprocess(
+        ["rsync", "source", "dest"],
+        timeout_seconds=30,
+        request_id="req-progress",
+        idle_timeout_seconds=0.01,
+        stall_message="Rsync transfer stalled - no output for 0.01s.",
+    )
+
+    assert result["ok"] is True
+    assert result["exit_status"] == 0
+    assert "total size is 20971520" in result["stdout"]
+    assert "req-progress" not in local_user_broker_module._ACTIVE_PROCESSES
 
 
 @pytest.mark.asyncio

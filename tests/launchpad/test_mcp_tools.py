@@ -402,6 +402,20 @@ class TestRunAllowlistedScript:
                 )
 
     @pytest.mark.asyncio
+    async def test_submit_dogme_job_read_timeout_has_actionable_message(self):
+        fake_client = FakeAsyncClient(post_error=httpx.ReadTimeout("", request=None))
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            with pytest.raises(RuntimeError, match="LAUNCHPAD_SUBMIT_TIMEOUT"):
+                await tools.submit_dogme_job(
+                    project_id="proj-1",
+                    sample_name="sample-a",
+                    mode="DNA",
+                    input_directory="/data/input",
+                )
+
+    @pytest.mark.asyncio
     async def test_submit_dogme_job_wraps_empty_exception_message(self):
         fake_client = FakeAsyncClient(post_error=Exception())
 

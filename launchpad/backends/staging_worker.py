@@ -83,6 +83,23 @@ def get_staging_tasks() -> dict[str, StagingTaskState]:
     return _staging_tasks
 
 
+async def _load_staging_task_state(task_id: str) -> StagingTaskState:
+    task = _staging_tasks.get(task_id)
+    if task is None:
+        await hydrate_incomplete_staging_tasks(task_id=task_id)
+        task = _staging_tasks.get(task_id)
+
+    if task is None:
+        from launchpad.db import get_staging_task_record
+
+        task_record = await get_staging_task_record(task_id)
+        if task_record is None:
+            raise LookupError(f"Staging task {task_id} not found")
+        task = staging_task_state_from_record(task_record)
+
+    return task
+
+
 def staging_task_state_from_record(record: Any) -> StagingTaskState:
     """Rebuild in-memory task state from a persisted DB row."""
     task = StagingTaskState(
@@ -275,18 +292,7 @@ async def _cancel_local_broker_transfer(task: StagingTaskState) -> bool:
 
 
 async def cancel_staging_task(task_id: str, *, message: str = _CANCELLED_TASK_MESSAGE) -> StagingTaskState:
-    task = _staging_tasks.get(task_id)
-    if task is None:
-        await hydrate_incomplete_staging_tasks(task_id=task_id)
-        task = _staging_tasks.get(task_id)
-
-    if task is None:
-        from launchpad.db import get_staging_task_record
-
-        task_record = await get_staging_task_record(task_id)
-        if task_record is None:
-            raise LookupError(f"Staging task {task_id} not found")
-        task = staging_task_state_from_record(task_record)
+    task = await _load_staging_task_state(task_id)
 
     if task.status == "cancelled":
         return task
@@ -315,6 +321,55 @@ async def cancel_staging_task(task_id: str, *, message: str = _CANCELLED_TASK_ME
         broker_cancelled=broker_cancelled,
     )
     return task
+
+
+async def _enqueue_replacement_task(source_task: StagingTaskState) -> StagingTaskState:
+    if active_task_count() >= MAX_CONCURRENT_STAGING_TASKS:
+        raise RuntimeError("Too many concurrent staging tasks")
+
+    replacement = StagingTaskState(task_id=new_task_id(), params=dict(source_task.params))
+    await persist_staging_task(replacement, force=True, raise_on_error=True)
+    _staging_tasks[replacement.task_id] = replacement
+    start_staging_task(replacement)
+    return replacement
+
+
+async def requeue_staging_task(
+    task_id: str,
+    *,
+    allowed_statuses: set[str],
+    action_name: str,
+    cancel_active: bool = False,
+    cancel_message: str = "Remote staging cancelled so it can resume.",
+) -> StagingTaskState:
+    task = await _load_staging_task_state(task_id)
+
+    if task.status in {"queued", "running"} and cancel_active:
+        task = await cancel_staging_task(task_id, message=cancel_message)
+
+    if task.status not in allowed_statuses:
+        allowed = ", ".join(sorted(allowed_statuses))
+        raise ValueError(
+            f"Only {allowed} tasks can be {action_name} (current status: {task.status})"
+        )
+
+    replacement = await _enqueue_replacement_task(task)
+    logger.info(
+        "Background staging task re-queued",
+        action=action_name,
+        old_task_id=task_id,
+        new_task_id=replacement.task_id,
+    )
+    return replacement
+
+
+async def resume_staging_task(task_id: str) -> StagingTaskState:
+    return await requeue_staging_task(
+        task_id,
+        allowed_statuses={"failed", "cancelled"},
+        action_name="resumed",
+        cancel_active=True,
+    )
 
 
 async def _run_staging_lifecycle(task: StagingTaskState) -> None:

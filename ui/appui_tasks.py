@@ -8,6 +8,7 @@ from components.cards import status_chip
 
 
 _PROJECT_TASK_HIDE_STALE_HOURS = float(os.getenv("PROJECT_TASK_HIDE_STALE_HOURS", "48"))
+_STAGE_TASK_ACTION_TIMEOUT_SECONDS = float(os.getenv("STAGE_TASK_ACTION_TIMEOUT_SECONDS", "15"))
 
 
 def get_sanitized_blocks(target_project_id: str, api_url: str, request_fn):
@@ -99,6 +100,80 @@ def apply_task_action(project_id: str, task_id: str, action: str, api_url: str, 
         return resp.status_code == 200
     except Exception:
         return False
+
+
+def _stage_task_identity(task: dict, project_id: str) -> tuple[str, str | None, str | None]:
+    task_project_id = task.get("project_id") or project_id
+    metadata = task.get("metadata", {}) if isinstance(task.get("metadata", {}), dict) else {}
+    staging_task_id = metadata.get("staging_task_id")
+    block_id = task.get("source_id")
+    if not block_id:
+        try:
+            target = json.loads(task.get("action_target") or "")
+        except (TypeError, ValueError):
+            target = {}
+        block_id = target.get("block_id")
+    return task_project_id, staging_task_id, block_id
+
+
+def _stage_task_request(action: str, task: dict, project_id: str, api_url: str, request_fn):
+    task_project_id, staging_task_id, block_id = _stage_task_identity(task, project_id)
+    if not staging_task_id or not block_id:
+        return False, "Staging task details are missing.", {}
+
+    try:
+        resp = request_fn(
+            "POST",
+            f"{api_url}/remote/stage/{staging_task_id}/{action}",
+            json={"project_id": task_project_id, "block_id": block_id},
+            timeout=_STAGE_TASK_ACTION_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        return False, f"Error {action}ing staging task: {exc}", {}
+
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    if resp.status_code == 200:
+        default_message = {
+            "cancel": "Staging cancelled.",
+            "refresh": "Staging status refreshed.",
+            "resume": "Resuming staging from the existing cache path.",
+        }.get(action, "Staging action completed.")
+        return True, str(data.get("message") or default_message), data
+
+    detail = data.get("detail") or getattr(resp, "text", "") or f"Unable to {action} staging task."
+    return False, str(detail), data
+
+
+def cancel_stage_task(task: dict, project_id: str, api_url: str, request_fn):
+    return _stage_task_request("cancel", task, project_id, api_url, request_fn)
+
+
+def refresh_stage_task(task: dict, project_id: str, api_url: str, request_fn):
+    return _stage_task_request("refresh", task, project_id, api_url, request_fn)
+    
+def resume_stage_task(task: dict, project_id: str, api_url: str, request_fn):
+    return _stage_task_request("resume", task, project_id, api_url, request_fn)
+
+
+def _stage_task_secondary_action(task: dict) -> str | None:
+    if task.get("kind") != "stage_transfer":
+        return None
+    metadata = task.get("metadata", {}) if isinstance(task.get("metadata", {}), dict) else {}
+    if not metadata.get("staging_task_id"):
+        return None
+    if metadata.get("is_stale") and metadata.get("stale_original_status") == "RUNNING":
+        return "refresh"
+    if str(task.get("status") or "").upper() == "RUNNING":
+        return "cancel"
+    if str(task.get("status") or "").upper() in {"FAILED", "CANCELLED"}:
+        return "resume"
+    return None
 
 
 def _parse_timestamp(value):
@@ -384,6 +459,7 @@ def _render_single_task(
     show_activity: bool = False,
 ):
     meta = task.get("metadata", {})
+    stage_secondary_action = _stage_task_secondary_action(task)
     extra = []
     project_label = ""
     if show_project_context and not is_child and task.get("project_name"):
@@ -434,7 +510,37 @@ def _render_single_task(
     with extra_col:
         task_project_id = task.get("project_id") or project_id
         status = task.get("status")
-        if task.get("kind") in {"result_review", "recovery"} and status in {"PENDING", "FOLLOW_UP"}:
+        if stage_secondary_action == "refresh":
+            if st.button("Refresh", key=f"task_refresh_stage_{task['id']}"):
+                with st.spinner("Refreshing status..."):
+                    ok, message, _data = refresh_stage_task(task, task_project_id, api_url, request_fn)
+                if ok:
+                    st.toast(message)
+                    st.rerun()
+                st.warning(f"Refresh failed: {message}")
+        elif stage_secondary_action == "cancel":
+            if st.button("Cancel", key=f"task_cancel_stage_{task['id']}"):
+                with st.spinner("Cancelling staging..."):
+                    ok, message, data = cancel_stage_task(task, task_project_id, api_url, request_fn)
+                if ok:
+                    cancel_status = str((data or {}).get("status") or "").strip().lower()
+                    if cancel_status == "failed":
+                        st.warning(message)
+                    elif cancel_status == "completed":
+                        st.info(message)
+                    else:
+                        st.toast(message)
+                    st.rerun()
+                st.warning(f"Cancel failed: {message}")
+        elif stage_secondary_action == "resume":
+            if st.button("Resume", key=f"task_resume_stage_{task['id']}"):
+                with st.spinner("Resuming staging..."):
+                    ok, message, _data = resume_stage_task(task, task_project_id, api_url, request_fn)
+                if ok:
+                    st.toast(message)
+                    st.rerun()
+                st.warning(f"Resume failed: {message}")
+        elif task.get("kind") in {"result_review", "recovery"} and status in {"PENDING", "FOLLOW_UP"}:
             if st.button("Done", key=f"task_done_{task['id']}"):
                 if apply_task_action(task_project_id, task["id"], "complete", api_url, request_fn):
                     st.rerun()

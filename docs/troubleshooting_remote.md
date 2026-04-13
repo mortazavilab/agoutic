@@ -219,6 +219,19 @@ If large binary transfers are still slow:
 On older clusters AGOUTIC retries without `--skip-compress` so transfers still
 work, but they may use more CPU than newer rsync builds.
 
+### Large Transfer Marked as Stalled
+
+If staging fails with a message like `Rsync transfer stalled - no output for ...`
+but the source data is very large, the transfer may simply need a longer idle
+budget between visible progress updates.
+
+**Fixes:**
+1. Retry or resume the staging task first; AGOUTIC preserves partial data in `.rsync-partial`
+2. Increase the idle watchdog if your environment legitimately goes quiet for long stretches:
+   `export STAGE_IDLE_TIMEOUT_SECONDS=1800`
+3. If the cluster is especially slow, raise it further and keep the existing overall cap from `STAGE_MAX_TOTAL_TIMEOUT_SECONDS`
+4. Check whether the cluster filesystem or network is actually hung before disabling the watchdog entirely
+
 ### Permission Denied During Transfer
 
 ```

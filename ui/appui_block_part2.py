@@ -1,8 +1,74 @@
 import datetime
+import os
 
 import streamlit as st
 from components.cards import info_callout, metadata_row, section_header, status_chip
 from components.progress import progress_stats, segmented_progress, stepper, timeline
+
+
+_STAGING_UI_STALE_SECONDS = float(os.getenv("STAGING_UI_STALE_SECONDS", "90"))
+_STAGING_UI_REFRESH_RETRY_SECONDS = float(os.getenv("STAGING_UI_REFRESH_RETRY_SECONDS", "15"))
+
+
+def _parse_stage_timestamp(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime.datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=datetime.timezone.utc)
+        return value.astimezone(datetime.timezone.utc)
+    raw_value = str(value).strip()
+    if not raw_value:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _staging_block_needs_refresh(block: dict, content: dict) -> bool:
+    staging_task_id = content.get("staging_task_id")
+    if not staging_task_id or _STAGING_UI_STALE_SECONDS <= 0:
+        return False
+    updated_at = _parse_stage_timestamp(
+        content.get("last_updated") or content.get("updated_at") or block.get("created_at")
+    )
+    if updated_at is None:
+        return False
+    age_seconds = (datetime.datetime.now(datetime.timezone.utc) - updated_at).total_seconds()
+    return age_seconds >= _STAGING_UI_STALE_SECONDS
+
+
+def _refresh_staging_block_status(*, staging_task_id, block_id, project_id, api_url, request_fn, pause_refresh):
+    refresh_key = f"_staging_refresh_attempt_{staging_task_id}"
+    now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    last_attempt = float(st.session_state.get(refresh_key, 0.0) or 0.0)
+    if now_ts - last_attempt < _STAGING_UI_REFRESH_RETRY_SECONDS:
+        return False, None
+
+    st.session_state[refresh_key] = now_ts
+    pause_refresh(4)
+    try:
+        resp = request_fn(
+            "POST",
+            f"{api_url}/remote/stage/{staging_task_id}/refresh",
+            json={"project_id": project_id, "block_id": block_id},
+            timeout=15,
+        )
+    except Exception as exc:
+        return False, f"Error refreshing staging status: {exc}"
+
+    if resp.status_code == 200:
+        return True, None
+
+    try:
+        detail = resp.json().get("detail")
+    except Exception:
+        detail = None
+    return False, detail or getattr(resp, "text", "")[:200] or "Unable to refresh staging status."
 
 
 def render_block_part2(
@@ -239,7 +305,21 @@ def render_block_part2(
                 st.caption(message)
                 st.progress(max(min(progress, 100), 0) / 100)
                 staging_task_id = content.get("staging_task_id")
-                if staging_task_id and st.button("🛑 Cancel Staging", type="primary", key=f"cancel_stage_{block_id}"):
+                if _staging_block_needs_refresh(block, content):
+                    st.info("Refreshing status before showing staging actions...")
+                    _refreshed, _refresh_error = _refresh_staging_block_status(
+                        staging_task_id=staging_task_id,
+                        block_id=block_id,
+                        project_id=active_id,
+                        api_url=API_URL,
+                        request_fn=make_authenticated_request,
+                        pause_refresh=_pause_auto_refresh,
+                    )
+                    if _refreshed:
+                        st.rerun()
+                    if _refresh_error:
+                        st.caption(_refresh_error)
+                elif staging_task_id and st.button("🛑 Cancel Staging", type="primary", key=f"cancel_stage_{block_id}"):
                     _pause_auto_refresh(4)
                     try:
                         _cancel_resp = make_authenticated_request(
@@ -250,7 +330,14 @@ def render_block_part2(
                         )
                         if _cancel_resp.status_code == 200:
                             _cancel_data = _cancel_resp.json()
-                            st.success(_cancel_data.get("message", "Staging cancelled."))
+                            _cancel_status = str(_cancel_data.get("status") or "").strip().lower()
+                            _cancel_message = _cancel_data.get("message", "Staging cancelled.")
+                            if _cancel_status == "failed":
+                                st.warning(_cancel_message)
+                            elif _cancel_status == "completed":
+                                st.info(_cancel_message)
+                            else:
+                                st.success(_cancel_message)
                             st.rerun()
                         elif _cancel_resp.status_code == 404:
                             st.warning("Staging task not found. It may have already finished or the server was restarted.")
@@ -292,6 +379,27 @@ def render_block_part2(
             elif block.get("status") == "CANCELLED":
                 status_chip("cancelled", label="Staging Cancelled", icon="🛑")
                 st.warning(message)
+                staging_task_id = content.get("staging_task_id")
+                if staging_task_id and st.button("🔄 Resume Staging", type="primary", key=f"resume_stage_{block_id}"):
+                    _pause_auto_refresh(4)
+                    try:
+                        _resume_resp = make_authenticated_request(
+                            "POST",
+                            f"{API_URL}/remote/stage/{staging_task_id}/resume",
+                            json={"project_id": active_id, "block_id": block_id},
+                            timeout=15,
+                        )
+                        if _resume_resp.status_code == 200:
+                            st.success("Resuming staging from the existing cache path.")
+                            st.rerun()
+                        elif _resume_resp.status_code == 404:
+                            st.warning("Staging task not found. It may have already been cleaned up.")
+                        elif _resume_resp.status_code in {409, 429}:
+                            st.warning(_resume_resp.json().get("detail", "Cannot resume staging task."))
+                        else:
+                            st.error(f"Resume failed: {_resume_resp.status_code} — {_resume_resp.text[:200]}")
+                    except Exception as _re:
+                        st.error(f"Error resuming staging task: {_re}")
                 _render_stage_part("References", stage_parts.get("references") or {
                     "status": "CANCELLED",
                     "progress_percent": 0,
@@ -307,6 +415,27 @@ def render_block_part2(
             else:
                 status_chip("failed", label="Staging Failed", icon="❌")
                 st.error(content.get("error") or message)
+                staging_task_id = content.get("staging_task_id")
+                if staging_task_id and st.button("🔄 Resume Staging", type="primary", key=f"resume_failed_stage_{block_id}"):
+                    _pause_auto_refresh(4)
+                    try:
+                        _resume_resp = make_authenticated_request(
+                            "POST",
+                            f"{API_URL}/remote/stage/{staging_task_id}/resume",
+                            json={"project_id": active_id, "block_id": block_id},
+                            timeout=15,
+                        )
+                        if _resume_resp.status_code == 200:
+                            st.success("Resuming staging from the existing cache path.")
+                            st.rerun()
+                        elif _resume_resp.status_code == 404:
+                            st.warning("Staging task not found. It may have already been cleaned up.")
+                        elif _resume_resp.status_code in {409, 429}:
+                            st.warning(_resume_resp.json().get("detail", "Cannot resume staging task."))
+                        else:
+                            st.error(f"Resume failed: {_resume_resp.status_code} — {_resume_resp.text[:200]}")
+                    except Exception as _re:
+                        st.error(f"Error resuming staging task: {_re}")
                 _render_stage_part("References", stage_parts.get("references") or {
                     "status": "FAILED",
                     "progress_percent": 0,

@@ -333,6 +333,13 @@ class LaunchpadMCPTools:
             raise RuntimeError(
                 f"Failed to submit job: HTTP {e.response.status_code} from {e.request.url}"
             )
+        except httpx.ReadTimeout as e:
+            raise RuntimeError(
+                "Failed to submit job: request timed out while waiting for Launchpad /jobs/submit. "
+                "If this run still needs remote staging, prefer the background staging flow or increase "
+                "LAUNCHPAD_SUBMIT_TIMEOUT. "
+                f"Underlying error: {_describe_exception(e)}"
+            )
         except Exception as e:
             raise RuntimeError(f"Failed to submit job: {_describe_exception(e)}")
 

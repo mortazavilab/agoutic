@@ -674,6 +674,7 @@ class TestProjectTasks:
             "payload": {
                 "sample_name": "beta-sample",
                 "mode": "DNA",
+                "staging_task_id": "stage-beta-1",
                 "progress_percent": 45,
             },
             "status": "RUNNING",
@@ -697,6 +698,7 @@ class TestProjectTasks:
         assert running_task["project_name"] == "Beta Project"
         assert running_task["kind"] == "stage_transfer"
         assert running_task["metadata"]["sample_name"] == "beta-sample"
+        assert running_task["metadata"]["staging_task_id"] == "stage-beta-1"
 
     def test_all_tasks_excludes_archived_projects_by_default(self, client):
         project_id = client.post("/projects", json={"name": "Archive Me"}).json()["id"]

@@ -1,5 +1,26 @@
 ## [Unreleased]
 
+### Bug Fixes
+
+- **Large rsync staging transfers no longer false-stall on carriage-return
+  progress updates** — the direct and brokered rsync watchdogs now treat any
+  stdout activity as progress instead of waiting for newline-delimited output,
+  which avoids aborting long single-file transfers that only emit `\r`
+  progress frames. The default staging idle watchdog was also relaxed from
+  600 s to 1800 s while the existing total transfer ceiling remains in place.
+  (`launchpad/backends/file_transfer.py`,
+  `launchpad/backends/local_user_broker.py`)
+
+### Tests
+
+- **Rsync progress watchdog regression coverage** — added focused tests for
+  both direct and brokered transfer runners to ensure carriage-return rsync
+  progress output counts as activity and does not trigger a false stall.
+  (`tests/launchpad/test_file_transfer.py`,
+  `tests/launchpad/test_local_auth_sessions.py`)
+
+## [3.6.3] - 2026-04-13
+
 ### Features
 
 - **GTF-backed gene and transcript annotation with colocated caches** —
@@ -34,6 +55,24 @@
   `launchpad/app.py`, `launchpad/backends/staging_worker.py`,
   `launchpad/backends/local_user_broker.py`)
 
+- **Stage-only transfers can now be resumed from the UI and API** — cancelled
+  or failed `STAGING_TASK` blocks now expose a resume control, Launchpad can
+  queue a replacement staging task from the persisted request parameters,
+  Cortex swaps the block over to the new task id, resets the related workflow
+  steps to `RUNNING`/`PENDING`, and restarts background polling without making
+  the user re-submit the original staging request.
+  (`ui/appui_block_part2.py`, `cortex/app.py`, `cortex/remote_stage_status.py`,
+  `launchpad/app.py`, `launchpad/backends/staging_worker.py`,
+  `launchpad/schemas.py`)
+
+- **Stage transfers can now be refreshed, cancelled, and resumed from the
+  Task Center** — `stage_transfer` tasks now carry the Launchpad staging task
+  id, stale running transfers reconcile through the Cortex refresh endpoint
+  before showing actions, fresh running transfers can be cancelled, and failed
+  or cancelled transfers can be resumed directly from the tasks page.
+  (`ui/appui_tasks.py`, `ui/appui_block_part2.py`, `cortex/app.py`,
+  `cortex/task_service.py`)
+
 ### Bug Fixes
 
 - **Server startup no longer emits a `runpy` warning while checking shared GTF
@@ -48,11 +87,19 @@
   `.rsync-partial`, timeout and lost-task messages point users to that
   recovery path, direct and brokered rsync processes are terminated as a full
   process group on cancellation/timeouts, and SLURM input-cache reuse now
-  refreshes remote directories that contain symlinks, partial-transfer state,
-  or size mismatches instead of trusting incomplete cached inputs.
+  refreshes remote directories that contain symlinks or size mismatches while
+  resuming deterministic cache paths that still contain `.rsync-partial`
+  state from an interrupted transfer instead of restarting from zero.
   (`launchpad/backends/file_transfer.py`,
   `launchpad/backends/local_user_broker.py`,
   `launchpad/backends/slurm_backend.py`, `cortex/job_polling.py`)
+
+- **Broker-backed staging transfers now fail fast when rsync goes silent** —
+  the local auth broker now applies the same idle-stall watchdog used by the
+  direct rsync path, so dead brokered transfers stop after prolonged silence
+  instead of sitting in `RUNNING` until the full transfer timeout expires.
+  (`launchpad/backends/file_transfer.py`,
+  `launchpad/backends/local_user_broker.py`)
 
 ### Tests
 
@@ -74,6 +121,18 @@
   `tests/launchpad/test_file_transfer.py`,
   `tests/launchpad/test_slurm_backend.py`,
   `tests/cortex/test_block_endpoints.py`)
+
+- **Staging resume and broker-watchdog regression coverage** — added focused
+  tests for broker idle-timeout forwarding and stall handling, replacement
+  staging task creation, Launchpad resume responses, Cortex resume/refresh
+  propagation, task-page staging action helpers, and partial-cache resume
+  instead of cache deletion.
+  (`tests/launchpad/test_local_auth_sessions.py`,
+  `tests/launchpad/test_staging_worker.py`,
+  `tests/launchpad/test_app_status_endpoint.py`,
+  `tests/cortex/test_block_endpoints.py`,
+  `tests/launchpad/test_slurm_backend.py`,
+  `tests/ui/test_app_source_helpers.py`)
 
 ### Documentation
 

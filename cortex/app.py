@@ -143,6 +143,7 @@ from cortex.remote_orchestration import (
     _initial_stage_parts,
     _final_stage_parts,
     _failed_stage_parts,
+    _resuming_stage_parts,
     _cancelled_stage_parts,
     _workflow_step_index,
     _workflow_next_step,
@@ -324,6 +325,7 @@ async def _recover_orphaned_background_tasks() -> None:
                     ssh_profile_id=str(payload.get("ssh_profile_id") or ""),
                     ssh_profile_nickname=payload.get("ssh_profile_nickname"),
                     workflow_block_id=workflow_block_id,
+                    gate_block_id=payload.get("gate_block_id"),
                     stage_input_step_id=stage_input_step_id,
                     complete_stage_only_step_id=payload.get("complete_stage_only_step_id"),
                     gate_payload={
@@ -429,9 +431,223 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
         raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
 
 
-class CancelStagingTaskBody(BaseModel):
+class StageTaskBlockActionBody(BaseModel):
     project_id: str
     block_id: str
+
+
+def _sync_terminal_staging_block(
+    session,
+    block: ProjectBlock,
+    payload: dict,
+    *,
+    task_id: str,
+    task_status: str,
+    error_msg: str | None = None,
+    stage_result: dict | None = None,
+) -> dict:
+    stage_parts = payload.get("stage_parts") or {}
+    workflow_plan_block_id = payload.get("workflow_plan_block_id")
+    stage_input_step_id = payload.get("stage_input_step_id")
+    complete_stage_only_step_id = payload.get("complete_stage_only_step_id")
+    workflow_block = None
+    if workflow_plan_block_id:
+        workflow_block = session.execute(
+            select(ProjectBlock).where(ProjectBlock.id == workflow_plan_block_id)
+        ).scalar_one_or_none()
+
+    normalized = str(task_status or "").strip().lower()
+    if normalized == "completed" and isinstance(stage_result, dict):
+        stage_parts = _final_stage_parts(stage_result, stage_parts)
+        remote_data_path = stage_result.get("remote_data_path", "")
+        _update_project_block_payload(
+            session,
+            block.id,
+            {
+                "status": "COMPLETED",
+                "progress_percent": _stage_part_progress(stage_parts),
+                "message": f"Remote staging complete: {remote_data_path}",
+                "remote_data_path": remote_data_path,
+                "remote_reference_paths": stage_result.get("remote_reference_paths"),
+                "data_cache_status": stage_result.get("data_cache_status"),
+                "reference_cache_statuses": stage_result.get("reference_cache_statuses"),
+                "reference_asset_evidence": stage_result.get("reference_asset_evidence"),
+                "stage_parts": stage_parts,
+                "error": None,
+            },
+            status="DONE",
+        )
+        if workflow_block is not None and stage_input_step_id:
+            decision = "reuse" if stage_result.get("data_cache_status") == "reused" else "stage"
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                stage_input_step_id,
+                "COMPLETED",
+                extra={
+                    "decision": decision,
+                    "staged_input_directory": remote_data_path,
+                    "reference_cache_statuses": stage_result.get("reference_cache_statuses"),
+                    "error": None,
+                },
+            )
+        if workflow_block is not None and complete_stage_only_step_id:
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                complete_stage_only_step_id,
+                "COMPLETED",
+                extra={"staged_input_directory": remote_data_path, "error": None},
+            )
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "message": "Staging was already complete. Refreshed the block state.",
+        }
+
+    if normalized == "cancelled":
+        cancel_msg = str(error_msg or "Remote staging cancelled by user.").strip()
+        stage_parts = _cancelled_stage_parts(stage_parts, cancel_msg)
+        _update_project_block_payload(
+            session,
+            block.id,
+            {
+                "status": "CANCELLED",
+                "message": cancel_msg,
+                "error": None,
+                "stage_parts": stage_parts,
+                "progress_percent": _stage_part_progress(stage_parts),
+            },
+            status="CANCELLED",
+        )
+        if workflow_block is not None and stage_input_step_id:
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                stage_input_step_id,
+                "CANCELLED",
+                extra={"error": cancel_msg},
+            )
+        if workflow_block is not None and complete_stage_only_step_id:
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                complete_stage_only_step_id,
+                "CANCELLED",
+                extra={"error": cancel_msg},
+            )
+        return {
+            "task_id": task_id,
+            "status": "cancelled",
+            "message": "Staging was already cancelled. Refreshed the block state.",
+        }
+
+    fail_msg = str(error_msg or "Remote staging failed").strip()
+    stage_parts = _failed_stage_parts(stage_parts, fail_msg)
+    _update_project_block_payload(
+        session,
+        block.id,
+        {
+            "status": "FAILED",
+            "message": fail_msg,
+            "error": fail_msg,
+            "stage_parts": stage_parts,
+            "progress_percent": _stage_part_progress(stage_parts),
+        },
+        status="FAILED",
+    )
+    if workflow_block is not None and stage_input_step_id:
+        _set_workflow_step_status(
+            session,
+            workflow_block,
+            stage_input_step_id,
+            "FAILED",
+            extra={"error": fail_msg},
+        )
+    return {
+        "task_id": task_id,
+        "status": "failed",
+        "message": "Staging had already failed. Refreshed the block state.",
+    }
+
+
+def _sync_active_staging_block(
+    session,
+    block: ProjectBlock,
+    payload: dict,
+    *,
+    task_id: str,
+    task_status: str,
+    progress: dict | None = None,
+) -> dict:
+    progress = progress or {}
+    stage_parts = dict(payload.get("stage_parts") or {})
+    normalized = str(task_status or "running").strip().lower()
+
+    pct = progress.get("file_percent", 0)
+    speed = progress.get("speed", "")
+    xfr = progress.get("files_transferred", 0)
+    total = progress.get("files_total", 0)
+
+    if normalized == "queued":
+        wait_reason = str(progress.get("wait_reason") or "").strip()
+        msg = wait_reason or "Staging is queued and waiting to resume."
+        current_progress = stage_parts.get("data", {}).get("progress_percent", 35)
+        try:
+            current_progress = int(current_progress or 35)
+        except (TypeError, ValueError):
+            current_progress = 35
+        if stage_parts.get("data", {}).get("status") != "COMPLETED":
+            stage_parts["data"] = _make_stage_part("PENDING", max(35, current_progress), msg)
+    else:
+        if total:
+            msg = f"Uploading {xfr}/{total} files ({pct}% current file) {speed}".strip()
+        elif pct:
+            msg = f"Uploading... {pct}% {speed}".strip()
+        else:
+            msg = "Staging in progress..."
+        if stage_parts.get("data", {}).get("status") != "COMPLETED":
+            stage_parts["data"] = _make_stage_part("RUNNING", max(35, pct), msg)
+
+    _update_project_block_payload(
+        session,
+        block.id,
+        {
+            "status": "RUNNING",
+            "message": msg,
+            "error": None,
+            "stage_parts": stage_parts,
+            "progress_percent": _stage_part_progress(stage_parts),
+        },
+        status="RUNNING",
+    )
+    return {
+        "task_id": task_id,
+        "status": normalized,
+        "message": "Staging status refreshed.",
+    }
+
+
+def _sync_missing_staging_block(
+    session,
+    block: ProjectBlock,
+    payload: dict,
+    *,
+    task_id: str,
+) -> dict:
+    fail_msg = (
+        "Staging task lost — Launchpad no longer has this task. "
+        "Partial files are preserved on the remote profile in .rsync-partial. "
+        "Use Resume Staging to continue from the cached transfer path."
+    )
+    return _sync_terminal_staging_block(
+        session,
+        block,
+        payload,
+        task_id=task_id,
+        task_status="failed",
+        error_msg=fail_msg,
+    )
 
 
 @app.post("/jobs/{run_uuid}/cancel")
@@ -475,7 +691,7 @@ async def cancel_job_proxy(run_uuid: str, request: Request):
 async def cancel_staging_task_proxy(
     request: Request,
     task_id: str = FastAPIPath(..., min_length=1),
-    body: CancelStagingTaskBody = Body(...),
+    body: StageTaskBlockActionBody = Body(...),
 ):
     """Cancel a queued or running staging task and update the local block immediately."""
     user = request.state.user
@@ -516,6 +732,24 @@ async def cancel_staging_task_proxy(
             if resp.status_code == 404:
                 raise HTTPException(status_code=404, detail="Staging task not found")
             if resp.status_code == 409:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    status_resp = await client.get(
+                        f"{launchpad_rest}/remote/stage/{task_id}",
+                        headers=headers,
+                    )
+                if status_resp.status_code == 200:
+                    status_data = status_resp.json() or {}
+                    latest_status = str(status_data.get("status") or "").strip().lower()
+                    if latest_status in {"failed", "cancelled", "completed"}:
+                        return _sync_terminal_staging_block(
+                            session,
+                            block,
+                            payload,
+                            task_id=task_id,
+                            task_status=latest_status,
+                            error_msg=status_data.get("error"),
+                            stage_result=status_data.get("result") if isinstance(status_data.get("result"), dict) else None,
+                        )
                 raise HTTPException(status_code=409, detail=resp.json().get("detail", "Cannot cancel staging task"))
             resp.raise_for_status()
         except HTTPException:
@@ -564,6 +798,230 @@ async def cancel_staging_task_proxy(
                     "CANCELLED",
                     extra={"error": cancel_msg},
                 )
+
+        return result
+    finally:
+        session.close()
+
+
+@app.post("/remote/stage/{task_id}/refresh")
+async def refresh_staging_task_proxy(
+    request: Request,
+    task_id: str = FastAPIPath(..., min_length=1),
+    body: StageTaskBlockActionBody = Body(...),
+):
+    """Refresh a staging block from Launchpad so stale UI state can be reconciled."""
+    user = request.state.user
+    require_project_access(body.project_id, user, min_role="viewer")
+
+    session = SessionLocal()
+    try:
+        block = session.execute(
+            select(ProjectBlock).where(
+                ProjectBlock.id == body.block_id,
+                ProjectBlock.project_id == body.project_id,
+            )
+        ).scalar_one_or_none()
+        if block is None:
+            raise HTTPException(status_code=404, detail="Staging block not found")
+        if block.type != "STAGING_TASK":
+            raise HTTPException(status_code=400, detail="Block is not a staging task")
+
+        payload = get_block_payload(block)
+        if str(payload.get("staging_task_id") or "") != task_id:
+            raise HTTPException(status_code=400, detail="Block does not match staging task")
+
+        from cortex.config import INTERNAL_API_SECRET
+
+        launchpad_rest = SERVICE_REGISTRY.get("launchpad", {}).get(
+            "rest_url", os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
+        )
+        headers = {}
+        if INTERNAL_API_SECRET:
+            headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    f"{launchpad_rest}/remote/stage/{task_id}",
+                    headers=headers,
+                )
+            if resp.status_code == 404:
+                return _sync_missing_staging_block(
+                    session,
+                    block,
+                    payload,
+                    task_id=task_id,
+                )
+            resp.raise_for_status()
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to proxy staging refresh to Launchpad", task_id=task_id, error=str(e))
+            raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
+
+        status_data = resp.json() or {}
+        latest_status = str(status_data.get("status") or "").strip().lower()
+        if latest_status in {"completed", "failed", "cancelled"}:
+            return _sync_terminal_staging_block(
+                session,
+                block,
+                payload,
+                task_id=task_id,
+                task_status=latest_status,
+                error_msg=status_data.get("error"),
+                stage_result=status_data.get("result") if isinstance(status_data.get("result"), dict) else None,
+            )
+        if latest_status in {"queued", "running"}:
+            return _sync_active_staging_block(
+                session,
+                block,
+                payload,
+                task_id=task_id,
+                task_status=latest_status,
+                progress=status_data.get("progress") if isinstance(status_data.get("progress"), dict) else None,
+            )
+
+        return {
+            "task_id": task_id,
+            "status": latest_status or "unknown",
+            "message": "No staging refresh changes were applied.",
+        }
+    finally:
+        session.close()
+
+
+@app.post("/remote/stage/{task_id}/resume")
+async def resume_staging_task_proxy(
+    request: Request,
+    task_id: str = FastAPIPath(..., min_length=1),
+    body: StageTaskBlockActionBody = Body(...),
+):
+    """Resume a failed or cancelled staging task and restart status polling."""
+    user = request.state.user
+    require_project_access(body.project_id, user, min_role="editor")
+
+    session = SessionLocal()
+    try:
+        block = session.execute(
+            select(ProjectBlock).where(
+                ProjectBlock.id == body.block_id,
+                ProjectBlock.project_id == body.project_id,
+            )
+        ).scalar_one_or_none()
+        if block is None:
+            raise HTTPException(status_code=404, detail="Staging block not found")
+        if block.type != "STAGING_TASK":
+            raise HTTPException(status_code=400, detail="Block is not a staging task")
+
+        payload = get_block_payload(block)
+        if str(payload.get("staging_task_id") or "") != task_id:
+            raise HTTPException(status_code=400, detail="Block does not match staging task")
+
+        from cortex.config import INTERNAL_API_SECRET
+
+        launchpad_rest = SERVICE_REGISTRY.get("launchpad", {}).get(
+            "rest_url", os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
+        )
+        headers = {}
+        if INTERNAL_API_SECRET:
+            headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    f"{launchpad_rest}/remote/stage/{task_id}/resume",
+                    headers=headers,
+                )
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail="Staging task not found")
+            if resp.status_code == 409:
+                raise HTTPException(status_code=409, detail=resp.json().get("detail", "Cannot resume staging task"))
+            if resp.status_code == 429:
+                raise HTTPException(status_code=429, detail=resp.json().get("detail", "Too many concurrent staging tasks"))
+            resp.raise_for_status()
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to proxy staging resume to Launchpad", task_id=task_id, error=str(e))
+            raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
+
+        result = resp.json() or {}
+        new_task_id = str(result.get("task_id") or "").strip()
+        if not new_task_id:
+            raise HTTPException(status_code=502, detail="Launchpad did not return a replacement staging task id")
+
+        stage_parts = _resuming_stage_parts(payload.get("stage_parts"))
+        resume_msg = "Resuming remote staging..."
+        _update_project_block_payload(
+            session,
+            block.id,
+            {
+                "status": "RUNNING",
+                "message": resume_msg,
+                "error": None,
+                "traceback": None,
+                "staging_task_id": new_task_id,
+                "progress_percent": _stage_part_progress(stage_parts),
+                "stage_parts": stage_parts,
+            },
+            status="RUNNING",
+        )
+
+        workflow_plan_block_id = payload.get("workflow_plan_block_id")
+        stage_input_step_id = payload.get("stage_input_step_id")
+        complete_stage_only_step_id = payload.get("complete_stage_only_step_id")
+        if workflow_plan_block_id:
+            workflow_block = session.execute(
+                select(ProjectBlock).where(ProjectBlock.id == workflow_plan_block_id)
+            ).scalar_one_or_none()
+            if workflow_block is not None and stage_input_step_id:
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    stage_input_step_id,
+                    "RUNNING",
+                    extra={
+                        "error": None,
+                        "block_id": block.id,
+                        "source_path": payload.get("input_directory"),
+                        "remote_base_path": payload.get("remote_base_path"),
+                    },
+                )
+            if workflow_block is not None and complete_stage_only_step_id:
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    complete_stage_only_step_id,
+                    "PENDING",
+                    extra={"error": None},
+                )
+
+        asyncio.create_task(
+            job_polling.poll_staging_status(
+                task_id=new_task_id,
+                project_id=block.project_id,
+                block_id=block.id,
+                owner_id=block.owner_id,
+                job_data={
+                    "sample_name": payload.get("sample_name", ""),
+                    "mode": payload.get("mode", ""),
+                    "input_directory": payload.get("input_directory"),
+                    "remote_base_path": payload.get("remote_base_path"),
+                },
+                ssh_profile_id=str(payload.get("ssh_profile_id") or ""),
+                ssh_profile_nickname=payload.get("ssh_profile_nickname"),
+                workflow_block_id=workflow_plan_block_id,
+                gate_block_id=payload.get("gate_block_id"),
+                stage_input_step_id=stage_input_step_id,
+                complete_stage_only_step_id=complete_stage_only_step_id,
+                gate_payload={
+                    "skill": payload.get("skill", "remote_execution"),
+                    "model": payload.get("model", "default"),
+                },
+                initial_stage_parts=stage_parts,
+            )
+        )
 
         return result
     finally:

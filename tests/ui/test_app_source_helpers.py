@@ -391,6 +391,138 @@ class TestTaskHelpers:
         fake_st.switch_page.assert_called_once_with("appUI.py")
         fake_st.rerun.assert_not_called()
 
+    def test_stage_task_secondary_action_requires_refresh_for_stale_running_transfer(self):
+        fn = _load_function("_stage_task_secondary_action")
+
+        action = fn(
+            {
+                "kind": "stage_transfer",
+                "status": "FOLLOW_UP",
+                "metadata": {
+                    "staging_task_id": "stg-1",
+                    "is_stale": True,
+                    "stale_original_status": "RUNNING",
+                },
+            }
+        )
+
+        assert action == "refresh"
+
+    def test_stage_task_secondary_action_allows_cancel_for_live_running_transfer(self):
+        fn = _load_function("_stage_task_secondary_action")
+
+        action = fn(
+            {
+                "kind": "stage_transfer",
+                "status": "RUNNING",
+                "metadata": {"staging_task_id": "stg-1"},
+            }
+        )
+
+        assert action == "cancel"
+
+    def test_stage_task_secondary_action_allows_resume_for_failed_transfer(self):
+        fn = _load_function("_stage_task_secondary_action")
+
+        action = fn(
+            {
+                "kind": "stage_transfer",
+                "status": "FAILED",
+                "metadata": {"staging_task_id": "stg-1"},
+            }
+        )
+
+        assert action == "resume"
+
+    def test_stage_task_secondary_action_allows_resume_for_cancelled_transfer(self):
+        fn = _load_function("_stage_task_secondary_action")
+
+        action = fn(
+            {
+                "kind": "stage_transfer",
+                "status": "CANCELLED",
+                "metadata": {"staging_task_id": "stg-1"},
+            }
+        )
+
+        assert action == "resume"
+
+    def test_stage_task_request_posts_refresh_endpoint(self):
+        identity = _load_function("_stage_task_identity", {"json": json})
+        request = MagicMock(
+            return_value=SimpleNamespace(
+                status_code=200,
+                json=lambda: {"status": "running", "message": "Staging status refreshed."},
+            )
+        )
+        fn = _load_function(
+            "_stage_task_request",
+            {
+                "_stage_task_identity": identity,
+                "_STAGE_TASK_ACTION_TIMEOUT_SECONDS": 15,
+            },
+        )
+
+        ok, message, data = fn(
+            "refresh",
+            {
+                "project_id": "project-b",
+                "source_id": "block-9",
+                "metadata": {"staging_task_id": "stg-1"},
+            },
+            "project-a",
+            "http://api.test",
+            request,
+        )
+
+        assert ok is True
+        assert message == "Staging status refreshed."
+        assert data["status"] == "running"
+        request.assert_called_once_with(
+            "POST",
+            "http://api.test/remote/stage/stg-1/refresh",
+            json={"project_id": "project-b", "block_id": "block-9"},
+            timeout=15,
+        )
+
+    def test_stage_task_request_posts_resume_endpoint(self):
+        identity = _load_function("_stage_task_identity", {"json": json})
+        request = MagicMock(
+            return_value=SimpleNamespace(
+                status_code=200,
+                json=lambda: {"status": "queued"},
+            )
+        )
+        fn = _load_function(
+            "_stage_task_request",
+            {
+                "_stage_task_identity": identity,
+                "_STAGE_TASK_ACTION_TIMEOUT_SECONDS": 15,
+            },
+        )
+
+        ok, message, data = fn(
+            "resume",
+            {
+                "project_id": "project-b",
+                "source_id": "block-9",
+                "metadata": {"staging_task_id": "stg-1"},
+            },
+            "project-a",
+            "http://api.test",
+            request,
+        )
+
+        assert ok is True
+        assert message == "Resuming staging from the existing cache path."
+        assert data["status"] == "queued"
+        request.assert_called_once_with(
+            "POST",
+            "http://api.test/remote/stage/stg-1/resume",
+            json={"project_id": "project-b", "block_id": "block-9"},
+            timeout=15,
+        )
+
     def test_count_top_level_tasks_ignores_children(self):
         fn = _load_function("count_top_level_tasks")
 

@@ -26,6 +26,7 @@ logger = get_logger(__name__)
 
 _DEFAULT_STAGE_TIMEOUT_SECONDS = 3600.0
 _DEFAULT_STAGE_TIMEOUT_RESERVE_SECONDS = 120.0
+_RSYNC_PROGRESS_CHUNK_SIZE = 4096
 
 _RSYNC_SKIP_COMPRESS_SUFFIXES = (
     "3g2", "3gp", "7z", "aac", "ace", "apk", "avi", "bam", "bai",
@@ -144,7 +145,7 @@ def _remaining_timeout_seconds(deadline: float | None) -> float | None:
     return max(0.001, deadline - asyncio.get_running_loop().time())
 
 
-_DEFAULT_STAGE_IDLE_TIMEOUT_SECONDS = 600.0
+_DEFAULT_STAGE_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_STAGE_MAX_TOTAL_TIMEOUT_SECONDS = 28800.0  # 8 hours
 
 
@@ -157,6 +158,19 @@ def _stage_idle_timeout_seconds() -> float:
         except ValueError:
             pass
     return _DEFAULT_STAGE_IDLE_TIMEOUT_SECONDS
+
+
+def _drain_rsync_output_segments(buffer: str) -> tuple[list[str], str]:
+    segments: list[str] = []
+    start = 0
+    for index, char in enumerate(buffer):
+        if char not in {"\n", "\r"}:
+            continue
+        segment = buffer[start:index]
+        if segment:
+            segments.append(segment)
+        start = index + 1
+    return segments, buffer[start:]
 
 
 def _stage_max_total_timeout_seconds() -> float:
@@ -223,7 +237,7 @@ class FileTransferManager:
     """Handles file transfers between local and remote systems."""
 
     # Regex for rsync --progress output parsing
-    _RE_PROGRESS_LINE = re.compile(r"^\s+[\d,]+\s+(\d+)%\s+([\d.]+\S+/s)")
+    _RE_PROGRESS_LINE = re.compile(r"^[\d,]+\s+(\d+)%\s+([\d.]+\S+/s)")
     _RE_OVERALL_PROGRESS = re.compile(r"\(xfr#(\d+),\s*(?:to|ir)-chk=(\d+)/(\d+)\)")
     _RE_FILENAME = re.compile(r"^[^\s].*[/.]")  # non-indented line with path separators or extension
 
@@ -252,30 +266,38 @@ class FileTransferManager:
             )
 
             async def _stream_with_idle_timeout() -> tuple[int, str, str]:
-                stdout_lines: list[str] = []
+                stdout_chunks: list[str] = []
+                progress_buffer = ""
                 stalled = False
                 while True:
                     try:
-                        raw_line = await asyncio.wait_for(
-                            proc.stdout.readline(), timeout=idle_timeout,
+                        raw_chunk = await asyncio.wait_for(
+                            proc.stdout.read(_RSYNC_PROGRESS_CHUNK_SIZE), timeout=idle_timeout,
                         )
                     except asyncio.TimeoutError:
                         stalled = True
                         break
-                    if not raw_line:
+                    if not raw_chunk:
                         break
-                    decoded = raw_line.decode(errors="replace")
-                    stdout_lines.append(decoded)
-                    for segment in decoded.rstrip("\n").split("\r"):
+                    decoded = raw_chunk.decode(errors="replace")
+                    stdout_chunks.append(decoded)
+                    progress_buffer += decoded
+                    segments, progress_buffer = _drain_rsync_output_segments(progress_buffer)
+                    for segment in segments:
                         info = self._parse_rsync_progress_line(segment)
                         if info:
                             on_progress(info)
+
+                if progress_buffer:
+                    info = self._parse_rsync_progress_line(progress_buffer)
+                    if info:
+                        on_progress(info)
 
                 if stalled:
                     await _terminate_process_tree(proc)
                 stderr_bytes = await proc.stderr.read()
                 await proc.wait()
-                stdout_text = "".join(stdout_lines)
+                stdout_text = "".join(stdout_chunks)
                 stderr_text = stderr_bytes.decode(errors="replace")
                 if stalled:
                     idle_msg = (
@@ -380,6 +402,7 @@ class FileTransferManager:
                 "copy_dirlinks": copy_dirlinks,
                 "use_skip_compress": use_skip_compress,
                 "timeout_seconds": timeout_seconds or LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
+                "idle_timeout_seconds": _stage_idle_timeout_seconds(),
                 "request_id": transfer_id,
             },
         )

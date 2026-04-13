@@ -56,6 +56,7 @@ from launchpad.schemas import (
     StageRemoteSampleResponse,
     StageTaskAcceptedResponse,
     StageTaskCancelResponse,
+    StageTaskResumeResponse,
     StagingTaskStatusResponse,
     JobStatusResponse,
     JobStatusExtendedResponse,
@@ -794,41 +795,46 @@ async def cancel_staging_task_endpoint(task_id: str = FastAPIPath(..., min_lengt
     )
 
 
+@app.post("/remote/stage/{task_id}/resume", response_model=StageTaskResumeResponse)
+async def resume_staging_task_endpoint(task_id: str = FastAPIPath(..., min_length=1)):
+    """Resume staging by queueing a replacement task from persisted parameters."""
+    from launchpad.backends.staging_worker import resume_staging_task
+
+    try:
+        task = await resume_staging_task(task_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return StageTaskResumeResponse(
+        task_id=task.task_id,
+        status=task.status,
+        resumed_from_task_id=task_id,
+    )
+
+
 @app.post("/remote/stage/{task_id}/retry", response_model=StageTaskAcceptedResponse)
 async def retry_staging_task(task_id: str = FastAPIPath(..., min_length=1)):
     """Re-queue a failed staging task using its stored parameters."""
-    from launchpad.backends.staging_worker import (
-        StagingTaskState,
-        get_staging_tasks,
-        active_task_count,
-        new_task_id,
-        persist_staging_task,
-        start_staging_task,
-        staging_task_state_from_record,
-        MAX_CONCURRENT_STAGING_TASKS,
-    )
+    from launchpad.backends.staging_worker import requeue_staging_task
 
-    staging_tasks = get_staging_tasks()
-    old_task = staging_tasks.get(task_id)
-    if old_task is None:
-        task_record = await get_staging_task_record(task_id)
-        if task_record is not None:
-            old_task = staging_task_state_from_record(task_record)
-        else:
-            raise HTTPException(status_code=404, detail=f"Staging task {task_id} not found")
-    if old_task.status not in ("failed",):
-        raise HTTPException(status_code=409, detail=f"Only failed tasks can be retried (current status: {old_task.status})")
-    if active_task_count() >= MAX_CONCURRENT_STAGING_TASKS:
-        raise HTTPException(status_code=429, detail="Too many concurrent staging tasks")
+    try:
+        task = await requeue_staging_task(
+            task_id,
+            allowed_statuses={"failed"},
+            action_name="retried",
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    new_id = new_task_id()
-    task = StagingTaskState(task_id=new_id, params=dict(old_task.params))
-    await persist_staging_task(task, force=True, raise_on_error=True)
-    staging_tasks[new_id] = task
-    start_staging_task(task)
-    logger.info("Retrying staging task", old_task_id=task_id, new_task_id=new_id)
-
-    return StageTaskAcceptedResponse(task_id=new_id, status=task.status)
+    return StageTaskAcceptedResponse(task_id=task.task_id, status=task.status)
 
 
 @app.get("/remote/files")

@@ -316,6 +316,375 @@ class TestCreateBlock:
             "complete_stage_only": "CANCELLED",
         }
 
+    def test_cancel_staging_task_proxy_refreshes_failed_block_when_launchpad_is_already_terminal(self, client, session_factory, monkeypatch):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "WORKFLOW_PLAN",
+            {
+                "status": "RUNNING",
+                "steps": [
+                    {"id": "stage_input", "kind": "REMOTE_STAGE", "title": "Stage input", "status": "RUNNING"},
+                    {"id": "complete_stage_only", "kind": "COMPLETE_STAGE_ONLY", "title": "Finish stage-only flow", "status": "PENDING"},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-blk",
+        )
+        stage_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "STAGING_TASK",
+            {
+                "sample_name": "IGVFFI6571ANCX",
+                "mode": "DNA",
+                "staging_task_id": "stg-failed",
+                "workflow_plan_block_id": workflow_block.id,
+                "stage_input_step_id": "stage_input",
+                "complete_stage_only_step_id": "complete_stage_only",
+                "progress_percent": 67,
+                "message": "Staging in progress...",
+                "stage_parts": {
+                    "references": {"status": "COMPLETED", "progress_percent": 100, "message": "Reference assets are ready."},
+                    "data": {"status": "RUNNING", "progress_percent": 67, "message": "Uploading sample data"},
+                },
+            },
+            status="RUNNING",
+            owner_id="u-blk",
+        )
+        sess.commit()
+        sess.close()
+
+        class _FakeResponse:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+            def raise_for_status(self):
+                return None
+
+        class _FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def post(self, url, headers=None):
+                assert url.endswith("/remote/stage/stg-failed/cancel")
+                return _FakeResponse(409, {"detail": "Cannot cancel staging task with status failed"})
+
+            async def get(self, url, headers=None):
+                assert url.endswith("/remote/stage/stg-failed")
+                return _FakeResponse(
+                    200,
+                    {
+                        "task_id": "stg-failed",
+                        "status": "failed",
+                        "error": "Upload stalled for too long.",
+                        "progress": {},
+                        "result": None,
+                    },
+                )
+
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", _FakeAsyncClient)
+
+        resp = client.post(
+            "/remote/stage/stg-failed/cancel",
+            json={"project_id": "proj-blk", "block_id": stage_block.id},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "failed"
+
+        sess = session_factory()
+        refreshed_stage = sess.execute(select(ProjectBlock).where(ProjectBlock.id == stage_block.id)).scalar_one()
+        refreshed_workflow = sess.execute(select(ProjectBlock).where(ProjectBlock.id == workflow_block.id)).scalar_one()
+        stage_payload = get_block_payload(refreshed_stage)
+        workflow_payload = get_block_payload(refreshed_workflow)
+        sess.close()
+
+        assert refreshed_stage.status == "FAILED"
+        assert stage_payload["message"] == "Upload stalled for too long."
+        assert stage_payload["stage_parts"]["data"]["status"] == "FAILED"
+        assert refreshed_workflow.status == "FAILED"
+        assert {step["id"]: step["status"] for step in workflow_payload["steps"]} == {
+            "stage_input": "FAILED",
+            "complete_stage_only": "PENDING",
+        }
+
+    def test_resume_staging_task_proxy_updates_block_and_workflow(self, client, session_factory, monkeypatch):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "WORKFLOW_PLAN",
+            {
+                "status": "CANCELLED",
+                "steps": [
+                    {"id": "stage_input", "kind": "REMOTE_STAGE", "title": "Stage input", "status": "CANCELLED"},
+                    {"id": "complete_stage_only", "kind": "COMPLETE_STAGE_ONLY", "title": "Finish stage-only flow", "status": "CANCELLED"},
+                ],
+            },
+            status="CANCELLED",
+            owner_id="u-blk",
+        )
+        stage_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "STAGING_TASK",
+            {
+                "sample_name": "IGVFFI6571ANCX",
+                "mode": "DNA",
+                "input_directory": "/tmp/IGVFFI6571ANCX.bam",
+                "ssh_profile_id": "profile-1",
+                "ssh_profile_nickname": "hpc3",
+                "remote_base_path": "/remote/agoutic",
+                "staging_task_id": "stg-1",
+                "workflow_plan_block_id": workflow_block.id,
+                "stage_input_step_id": "stage_input",
+                "complete_stage_only_step_id": "complete_stage_only",
+                "progress_percent": 70,
+                "message": "Remote staging cancelled by user.",
+                "stage_parts": {
+                    "references": {"status": "COMPLETED", "progress_percent": 100, "message": "Reference assets are ready."},
+                    "data": {"status": "CANCELLED", "progress_percent": 67, "message": "Cancelled while uploading sample data."},
+                },
+            },
+            status="CANCELLED",
+            owner_id="u-blk",
+        )
+        sess.commit()
+        sess.close()
+
+        scheduled = []
+
+        class _FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "task_id": "stg-2",
+                    "status": "queued",
+                    "resumed_from_task_id": "stg-1",
+                }
+
+            def raise_for_status(self):
+                return None
+
+        class _FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def post(self, url, headers=None):
+                assert url.endswith("/remote/stage/stg-1/resume")
+                return _FakeResponse()
+
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr("cortex.app.job_polling.poll_staging_status", lambda **kwargs: scheduled.append(kwargs))
+        monkeypatch.setattr("cortex.app.asyncio.create_task", lambda coro: None)
+
+        resp = client.post(
+            "/remote/stage/stg-1/resume",
+            json={"project_id": "proj-blk", "block_id": stage_block.id},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["task_id"] == "stg-2"
+
+        sess = session_factory()
+        refreshed_stage = sess.execute(select(ProjectBlock).where(ProjectBlock.id == stage_block.id)).scalar_one()
+        refreshed_workflow = sess.execute(select(ProjectBlock).where(ProjectBlock.id == workflow_block.id)).scalar_one()
+        stage_payload = get_block_payload(refreshed_stage)
+        workflow_payload = get_block_payload(refreshed_workflow)
+        sess.close()
+
+        assert refreshed_stage.status == "RUNNING"
+        assert stage_payload["staging_task_id"] == "stg-2"
+        assert stage_payload["message"] == "Resuming remote staging..."
+        assert stage_payload["stage_parts"]["references"]["status"] == "COMPLETED"
+        assert stage_payload["stage_parts"]["data"]["status"] == "RUNNING"
+        assert refreshed_workflow.status == "RUNNING"
+        assert {step["id"]: step["status"] for step in workflow_payload["steps"]} == {
+            "stage_input": "RUNNING",
+            "complete_stage_only": "PENDING",
+        }
+        assert scheduled == [
+            {
+                "task_id": "stg-2",
+                "project_id": "proj-blk",
+                "block_id": stage_block.id,
+                "owner_id": "u-blk",
+                "job_data": {
+                    "sample_name": "IGVFFI6571ANCX",
+                    "mode": "DNA",
+                    "input_directory": "/tmp/IGVFFI6571ANCX.bam",
+                    "remote_base_path": "/remote/agoutic",
+                },
+                "ssh_profile_id": "profile-1",
+                "ssh_profile_nickname": "hpc3",
+                "workflow_block_id": workflow_block.id,
+                "stage_input_step_id": "stage_input",
+                "complete_stage_only_step_id": "complete_stage_only",
+                "gate_payload": {"skill": "remote_execution", "model": "default"},
+                "initial_stage_parts": stage_payload["stage_parts"],
+            }
+        ]
+
+    def test_refresh_staging_task_proxy_updates_running_block(self, client, session_factory, monkeypatch):
+        sess = session_factory()
+        stage_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "STAGING_TASK",
+            {
+                "sample_name": "ENCFF433WOA",
+                "mode": "RNA",
+                "staging_task_id": "stg-refresh",
+                "progress_percent": 35,
+                "message": "Staging in progress...",
+                "stage_parts": {
+                    "references": {"status": "COMPLETED", "progress_percent": 100, "message": "Reference assets are ready."},
+                    "data": {"status": "RUNNING", "progress_percent": 35, "message": "Staging in progress..."},
+                },
+            },
+            status="RUNNING",
+            owner_id="u-blk",
+        )
+        sess.commit()
+        sess.close()
+
+        class _FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "task_id": "stg-refresh",
+                    "status": "running",
+                    "progress": {
+                        "file_percent": 82,
+                        "speed": "120MB/s",
+                        "files_transferred": 1,
+                        "files_total": 3,
+                    },
+                }
+
+            def raise_for_status(self):
+                return None
+
+        class _FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, url, headers=None):
+                assert url.endswith("/remote/stage/stg-refresh")
+                return _FakeResponse()
+
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", _FakeAsyncClient)
+
+        resp = client.post(
+            "/remote/stage/stg-refresh/refresh",
+            json={"project_id": "proj-blk", "block_id": stage_block.id},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "running"
+
+        sess = session_factory()
+        refreshed_stage = sess.execute(select(ProjectBlock).where(ProjectBlock.id == stage_block.id)).scalar_one()
+        stage_payload = get_block_payload(refreshed_stage)
+        sess.close()
+
+        assert refreshed_stage.status == "RUNNING"
+        assert stage_payload["message"] == "Uploading 1/3 files (82% current file) 120MB/s"
+        assert stage_payload["stage_parts"]["data"]["status"] == "RUNNING"
+        assert stage_payload["stage_parts"]["data"]["progress_percent"] == 82
+        assert stage_payload["last_updated"]
+
+    def test_refresh_staging_task_proxy_marks_missing_task_failed(self, client, session_factory, monkeypatch):
+        sess = session_factory()
+        stage_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "STAGING_TASK",
+            {
+                "sample_name": "IGVFFI6571ANCX",
+                "mode": "DNA",
+                "staging_task_id": "stg-missing",
+                "progress_percent": 67,
+                "message": "Staging in progress...",
+                "stage_parts": {
+                    "references": {"status": "COMPLETED", "progress_percent": 100, "message": "Reference assets are ready."},
+                    "data": {"status": "RUNNING", "progress_percent": 67, "message": "Uploading sample data"},
+                },
+            },
+            status="RUNNING",
+            owner_id="u-blk",
+        )
+        sess.commit()
+        sess.close()
+
+        class _FakeResponse:
+            status_code = 404
+
+            def json(self):
+                return {"detail": "Not found"}
+
+            def raise_for_status(self):
+                return None
+
+        class _FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, url, headers=None):
+                assert url.endswith("/remote/stage/stg-missing")
+                return _FakeResponse()
+
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", _FakeAsyncClient)
+
+        resp = client.post(
+            "/remote/stage/stg-missing/refresh",
+            json={"project_id": "proj-blk", "block_id": stage_block.id},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "failed"
+
+        sess = session_factory()
+        refreshed_stage = sess.execute(select(ProjectBlock).where(ProjectBlock.id == stage_block.id)).scalar_one()
+        stage_payload = get_block_payload(refreshed_stage)
+        sess.close()
+
+        assert refreshed_stage.status == "FAILED"
+        assert "Launchpad no longer has this task" in stage_payload["message"]
+        assert stage_payload["stage_parts"]["data"]["status"] == "FAILED"
+
     def test_create_block_unauthenticated(self, session_factory, seed_data):
         with patch("cortex.db.SessionLocal", session_factory), \
              patch("cortex.app.SessionLocal", session_factory), \

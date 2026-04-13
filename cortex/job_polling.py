@@ -447,6 +447,7 @@ async def poll_staging_status(
     ssh_profile_id: str,
     ssh_profile_nickname: str | None,
     workflow_block_id: str | None = None,
+    gate_block_id: str | None = None,
     stage_input_step_id: str | None = None,
     complete_stage_only_step_id: str | None = None,
     gate_payload: dict | None = None,
@@ -631,13 +632,51 @@ async def poll_staging_status(
                         owner_id=owner_id,
                     )
 
+                    if gate_block_id and not complete_stage_only_step_id:
+                        gate_block = session.query(ProjectBlock).filter(
+                            ProjectBlock.id == gate_block_id
+                        ).first()
+                        if gate_block is not None:
+                            continue_payload = get_block_payload(gate_block)
+                            params_key = "edited_params" if isinstance(continue_payload.get("edited_params"), dict) else "extracted_params"
+                            continue_params = dict(continue_payload.get(params_key) or {})
+                            continue_params["staged_remote_input_path"] = remote_data_path
+                            if workflow_block_id:
+                                continue_params["workflow_block_id"] = workflow_block_id
+                            if not continue_params.get("result_destination"):
+                                continue_params["result_destination"] = job_data.get("result_destination") or "both"
+
+                            cache_preflight = continue_params.get("cache_preflight")
+                            if isinstance(cache_preflight, dict):
+                                updated_preflight = dict(cache_preflight)
+                                data_action = dict(updated_preflight.get("data_action") or {})
+                                if remote_data_path:
+                                    data_action["remote_path"] = remote_data_path
+                                updated_preflight["data_action"] = data_action
+                                continue_params["cache_preflight"] = updated_preflight
+
+                            continue_payload[params_key] = continue_params
+                            gate_block.payload_json = json.dumps(continue_payload)
+                            session.commit()
+
+                            from cortex.workflow_submission import submit_job_after_approval
+
+                            asyncio.create_task(submit_job_after_approval(project_id, gate_block_id))
+                            logger.info(
+                                "Continuing remote workflow after staging",
+                                task_id=task_id,
+                                project_id=project_id,
+                                gate_block_id=gate_block_id,
+                                remote_data_path=remote_data_path,
+                            )
+
                     logger.info("Staging completed", task_id=task_id, project_id=project_id)
                     _done = True
                     break
 
                 elif task_status == "failed":
-                    stage_parts = _failed_stage_parts(stage_parts)
                     fail_msg = error_msg or "Remote staging failed"
+                    stage_parts = _failed_stage_parts(stage_parts, fail_msg)
                     _update_project_block_payload(
                         session,
                         block_id,
@@ -716,7 +755,7 @@ async def poll_staging_status(
                             "Partial files are preserved on the remote profile in .rsync-partial. "
                             "Re-submit the staging request to resume."
                         )
-                        stage_parts = _failed_stage_parts(stage_parts)
+                        stage_parts = _failed_stage_parts(stage_parts, fail_msg)
                         _update_project_block_payload(
                             session,
                             block_id,
@@ -756,7 +795,7 @@ async def poll_staging_status(
                 "The transfer may still be running on the remote host. "
                 "Check the remote profile or re-submit to resume."
             )
-            stage_parts = _failed_stage_parts(stage_parts)
+            stage_parts = _failed_stage_parts(stage_parts, fail_msg)
             _update_project_block_payload(
                 session,
                 block_id,

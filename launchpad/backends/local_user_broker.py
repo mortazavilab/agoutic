@@ -36,7 +36,30 @@ _RSYNC_SKIP_COMPRESS_SUFFIXES = (
 )
 _RSYNC_SKIP_COMPRESS = "/".join(_RSYNC_SKIP_COMPRESS_SUFFIXES)
 _RSYNC_PARTIAL_DIR = ".rsync-partial"
+_RSYNC_PROGRESS_CHUNK_SIZE = 4096
 _ACTIVE_PROCESSES: dict[str, asyncio.subprocess.Process] = {}
+
+
+def _seconds_label(value: float | None) -> float | int | None:
+    if value is None:
+        return None
+    return int(value) if float(value).is_integer() else value
+
+
+def _rsync_stall_stderr(idle_timeout_seconds: float | None) -> str:
+    return (
+        "Rsync transfer stalled "
+        f"- no output for {_seconds_label(idle_timeout_seconds)}s. "
+        f"Partial files are preserved for retry in {_RSYNC_PARTIAL_DIR}."
+    )
+
+
+def _rsync_timeout_stderr(timeout_seconds: float | None) -> str:
+    return (
+        "Rsync transfer exceeded its timeout budget "
+        f"after {_seconds_label(timeout_seconds)}s while waiting for rsync to finish. "
+        f"Partial files may already exist in {_RSYNC_PARTIAL_DIR} at the transfer destination."
+    )
 
 
 def _normalize_local_rsync_source(source: str) -> str:
@@ -198,6 +221,9 @@ async def _run_subprocess(
     command: list[str],
     timeout_seconds: float | None = None,
     request_id: str | None = None,
+    idle_timeout_seconds: float | None = None,
+    stall_message: str | None = None,
+    timeout_message: str | None = None,
 ) -> dict[str, Any]:
     proc = await asyncio.create_subprocess_exec(
         *command,
@@ -208,10 +234,48 @@ async def _run_subprocess(
     if request_id:
         _ACTIVE_PROCESSES[request_id] = proc
     try:
-        if timeout_seconds and timeout_seconds > 0:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        if idle_timeout_seconds and idle_timeout_seconds > 0:
+            async def _communicate_with_idle_timeout() -> tuple[bytes, bytes, int]:
+                stdout_chunks: list[bytes] = []
+                stalled = False
+                while True:
+                    try:
+                        raw_chunk = await asyncio.wait_for(
+                            proc.stdout.read(_RSYNC_PROGRESS_CHUNK_SIZE), timeout=idle_timeout_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        stalled = True
+                        break
+                    if not raw_chunk:
+                        break
+                    stdout_chunks.append(raw_chunk)
+
+                if stalled:
+                    await _terminate_process_tree(proc)
+
+                stderr_bytes = await proc.stderr.read()
+                await proc.wait()
+                stdout_bytes = b"".join(stdout_chunks)
+                if stalled:
+                    stall_text = stall_message or _rsync_stall_stderr(idle_timeout_seconds)
+                    stderr_text = stderr_bytes.decode().strip()
+                    if stderr_text:
+                        stall_text = f"{stall_text}: {stderr_text}"
+                    return stdout_bytes, stall_text.encode(), 124
+                return stdout_bytes, stderr_bytes, proc.returncode
+
+            run_coro = _communicate_with_idle_timeout()
         else:
-            stdout, stderr = await proc.communicate()
+            async def _communicate() -> tuple[bytes, bytes, int]:
+                stdout_bytes, stderr_bytes = await proc.communicate()
+                return stdout_bytes, stderr_bytes, proc.returncode
+
+            run_coro = _communicate()
+
+        if timeout_seconds and timeout_seconds > 0:
+            stdout, stderr, returncode = await asyncio.wait_for(run_coro, timeout=timeout_seconds)
+        else:
+            stdout, stderr, returncode = await run_coro
     except asyncio.CancelledError:
         await _terminate_process_tree(proc)
         await proc.communicate()
@@ -219,9 +283,8 @@ async def _run_subprocess(
     except asyncio.TimeoutError:
         await _terminate_process_tree(proc)
         stdout, stderr = await proc.communicate()
-        timeout_label = int(timeout_seconds) if timeout_seconds else timeout_seconds
         stderr_text = (stderr.decode() if stderr else "").strip()
-        timeout_msg = f"Operation timed out after {timeout_label}s"
+        timeout_msg = timeout_message or f"Operation timed out after {_seconds_label(timeout_seconds)}s"
         if stderr_text:
             timeout_msg = f"{timeout_msg}: {stderr_text}"
         return {
@@ -234,10 +297,10 @@ async def _run_subprocess(
         if request_id and _ACTIVE_PROCESSES.get(request_id) is proc:
             _ACTIVE_PROCESSES.pop(request_id, None)
     return {
-        "ok": proc.returncode == 0,
+        "ok": returncode == 0,
         "stdout": stdout.decode(),
         "stderr": stderr.decode(),
-        "exit_status": proc.returncode,
+        "exit_status": returncode,
     }
 
 
@@ -295,6 +358,7 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
         include_patterns = request.get("include_patterns") or []
         exclude_patterns = request.get("exclude_patterns") or []
         timeout_seconds = request.get("timeout_seconds")
+        idle_timeout_seconds = request.get("idle_timeout_seconds")
         copy_links = bool(request.get("copy_links"))
         copy_dirlinks = bool(request.get("copy_dirlinks"))
         use_skip_compress = bool(request.get("use_skip_compress", True))
@@ -326,6 +390,9 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
             cmd,
             timeout_seconds=_remaining_timeout_seconds(deadline),
             request_id=request_id,
+            idle_timeout_seconds=idle_timeout_seconds,
+            stall_message=_rsync_stall_stderr(idle_timeout_seconds),
+            timeout_message=_rsync_timeout_stderr(timeout_seconds),
         )
         if _should_retry_without_skip_compress(
             exit_code=result.get("exit_status"),
@@ -352,6 +419,9 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
                 fallback_cmd,
                 timeout_seconds=_remaining_timeout_seconds(deadline),
                 request_id=request_id,
+                idle_timeout_seconds=idle_timeout_seconds,
+                stall_message=_rsync_stall_stderr(idle_timeout_seconds),
+                timeout_message=_rsync_timeout_stderr(timeout_seconds),
             )
         result["bytes_transferred"] = _parse_rsync_bytes(result.get("stdout", ""))
         result["request_id"] = request_id

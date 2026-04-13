@@ -25,6 +25,7 @@ from cortex.remote_stage_status import (
     _initial_stage_parts,
     _final_stage_parts,
     _failed_stage_parts,
+    _resuming_stage_parts,
     _cancelled_stage_parts,
 )
 from cortex.task_service import sync_project_tasks

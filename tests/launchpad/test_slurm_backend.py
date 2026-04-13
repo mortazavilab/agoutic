@@ -272,7 +272,7 @@ async def test_stage_sample_inputs_refreshes_size_mismatched_remote_cache(monkey
         input_directory="data/ENCFF921XAH.bam",
         reference_genome=["mm39"],
     )
-    data_cache_path = "/remote/agoutic/data/fingerprint123456"
+    data_cache_path = "/remote/agoutic/data/fingerprint12345"
     fake_conn = _FakeStageConn(existing_paths={data_cache_path})
     uploaded = []
     upsert_input_cache_calls = []
@@ -308,7 +308,7 @@ async def test_stage_sample_inputs_refreshes_size_mismatched_remote_cache(monkey
     monkeypatch.setattr("launchpad.db.upsert_remote_input_cache_entry", fake_upsert_remote_input_cache_entry)
     monkeypatch.setattr("launchpad.db.upsert_remote_staged_sample", fake_upsert_remote_staged_sample)
     monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda _ref: None)
-    monkeypatch.setattr(backend, "_compute_input_fingerprint_async", AsyncMock(return_value="fingerprint1234567890"))
+    monkeypatch.setattr(backend, "_compute_input_fingerprint_async", AsyncMock(return_value="fingerprint12345"))
     monkeypatch.setattr(backend, "_compute_input_size_async", AsyncMock(return_value=999))
     monkeypatch.setattr(backend, "_inspect_remote_cache_dir", fake_inspect_remote_cache_dir)
     monkeypatch.setattr(backend._transfer_manager, "upload_inputs", fake_upload_inputs)
@@ -335,9 +335,93 @@ async def test_stage_sample_inputs_refreshes_size_mismatched_remote_cache(monkey
             "user_id": "user-1",
             "ssh_profile_id": "profile-1",
             "reference_id": "mm39",
-            "input_fingerprint": "fingerprint1234567890",
+            "input_fingerprint": "fingerprint12345",
             "remote_path": data_cache_path,
             "size_bytes": 999,
+            "status": "READY",
+            "increment_use_count": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stage_sample_inputs_resumes_partial_remote_cache_without_deleting_dir(monkeypatch):
+    backend = SlurmBackend()
+    profile = _make_profile()
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        sample_name="IGVFFI6571ANCX",
+        mode="DNA",
+        input_directory="data/IGVFFI6571ANCX.bam",
+        reference_genome=["mm39"],
+    )
+    data_cache_path = "/remote/agoutic/data/fingerprint12345"
+    fake_conn = _FakeStageConn(existing_paths={data_cache_path})
+    uploaded = []
+    upsert_input_cache_calls = []
+
+    async def fake_get_remote_reference_cache_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_get_remote_input_cache_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_upsert_remote_reference_cache_entry(**_kwargs):
+        return None
+
+    async def fake_upsert_remote_input_cache_entry(**kwargs):
+        upsert_input_cache_calls.append(kwargs)
+        return None
+
+    async def fake_upsert_remote_staged_sample(**_kwargs):
+        return None
+
+    async def fake_upload_inputs(**kwargs):
+        uploaded.append(kwargs)
+        return {"ok": True, "message": "Upload completed", "bytes_transferred": 36}
+
+    monkeypatch.setattr("launchpad.db.get_remote_reference_cache_entry", fake_get_remote_reference_cache_entry)
+    monkeypatch.setattr("launchpad.db.get_remote_input_cache_entry", fake_get_remote_input_cache_entry)
+    monkeypatch.setattr("launchpad.db.upsert_remote_reference_cache_entry", fake_upsert_remote_reference_cache_entry)
+    monkeypatch.setattr("launchpad.db.upsert_remote_input_cache_entry", fake_upsert_remote_input_cache_entry)
+    monkeypatch.setattr("launchpad.db.upsert_remote_staged_sample", fake_upsert_remote_staged_sample)
+    monkeypatch.setattr(backend, "_resolve_reference_source_dir", lambda _ref: None)
+    monkeypatch.setattr(backend, "_compute_input_fingerprint_async", AsyncMock(return_value="fingerprint12345"))
+    monkeypatch.setattr(backend, "_compute_input_size_async", AsyncMock(return_value=99))
+    monkeypatch.setattr(
+        backend,
+        "_inspect_remote_cache_dir",
+        AsyncMock(return_value={"size_bytes": 36, "has_symlinks": False, "has_partial_dir": True}),
+    )
+    monkeypatch.setattr(backend._transfer_manager, "upload_inputs", fake_upload_inputs)
+
+    result = await backend._stage_sample_inputs(
+        params=params,
+        profile=profile,
+        conn=fake_conn,
+        run_uuid=None,
+    )
+
+    assert result["data_cache_status"] == "resumed"
+    assert uploaded == [
+        {
+            "profile": profile,
+            "local_path": "data/IGVFFI6571ANCX.bam",
+            "remote_path": data_cache_path,
+            "on_progress": None,
+        }
+    ]
+    assert fake_conn.run_calls == []
+    assert fake_conn.mkdir_calls == []
+    assert upsert_input_cache_calls == [
+        {
+            "user_id": "user-1",
+            "ssh_profile_id": "profile-1",
+            "reference_id": "mm39",
+            "input_fingerprint": "fingerprint12345",
+            "remote_path": data_cache_path,
+            "size_bytes": 99,
             "status": "READY",
             "increment_use_count": True,
         }

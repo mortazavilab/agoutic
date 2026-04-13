@@ -44,6 +44,7 @@ from cortex.app import (
 )
 from cortex.job_parameters import extract_job_parameters_from_conversation
 from cortex.job_polling import (
+    poll_staging_status,
     poll_job_status,
     _auto_trigger_analysis,
     _completed_job_results_ready,
@@ -56,6 +57,13 @@ from cortex.remote_orchestration import (
     _ensure_remote_sample_workflow,
 )
 from launchpad.models import RemoteStagedSample
+
+
+def _close_scheduled_coroutine(target):
+    close = getattr(target, "close", None)
+    if callable(close):
+        close()
+    return MagicMock()
 
 
 def test_initial_stage_parts_describe_preflight_reference_actions_without_implying_active_transfer():
@@ -1119,7 +1127,7 @@ class TestSubmitJobAfterApproval:
         assert mock_aio.create_task.called
 
     @pytest.mark.asyncio
-    async def test_resolves_slurm_profile_nickname_before_submission(self, session_factory, seed_data):
+    async def test_remote_submission_dispatches_background_stage_when_local_input_not_staged(self, session_factory, seed_data):
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
             "extracted_params": {
                 "sample_name": "remote-test",
@@ -1128,25 +1136,45 @@ class TestSubmitJobAfterApproval:
                 "reference_genome": ["mm39"],
                 "execution_mode": "slurm",
                 "ssh_profile_nickname": "hpc3",
+                "remote_base_path": "/remote/u1/agoutic",
             },
         })
 
         mock_client = AsyncMock()
         mock_client.call_tool = AsyncMock(return_value={
-            "run_uuid": "remote-uuid", "work_directory": "/work/remote",
+            "task_id": "stg-remote-001", "status": "accepted",
         })
+        poll_sentinel = object()
+
+        def _fake_poll_staging_status(*args, **kwargs):
+            return poll_sentinel
 
         with _patch_session(session_factory), \
              patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
              patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
              patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.job_polling.poll_staging_status", new=_fake_poll_staging_status), \
              patch("cortex.workflow_submission.asyncio") as mock_aio:
-            mock_aio.create_task = MagicMock(side_effect=lambda coro: (coro.close(), MagicMock())[1])
+            mock_aio.create_task = MagicMock(side_effect=_close_scheduled_coroutine)
             await submit_job_after_approval("proj-bg", gate.id)
 
+        assert mock_client.call_tool.call_args.args[0] == "stage_remote_sample"
         submitted = mock_client.call_tool.call_args.kwargs
-        assert submitted["execution_mode"] == "slurm"
         assert submitted["ssh_profile_id"] == "profile-123"
+        assert mock_aio.create_task.call_args.args[0] is poll_sentinel
+
+        sess = session_factory()
+        workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
+        workflow_payload = get_block_payload(workflow_block)
+        staging_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "STAGING_TASK").one()
+        staging_payload = get_block_payload(staging_block)
+        assert staging_block.status == "RUNNING"
+        assert staging_payload["staging_task_id"] == "stg-remote-001"
+        assert staging_payload["gate_block_id"] == gate.id
+        assert workflow_payload["steps"][1]["status"] == "RUNNING"
+        assert workflow_payload["steps"][2]["status"] == "PENDING"
+        assert sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all() == []
+        sess.close()
 
     @pytest.mark.asyncio
     async def test_remote_submission_preserves_null_max_gpu_tasks(self, session_factory, seed_data):
@@ -1174,7 +1202,7 @@ class TestSubmitJobAfterApproval:
              patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
              patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
              patch("cortex.workflow_submission.asyncio") as mock_aio:
-            mock_aio.create_task = MagicMock()
+            mock_aio.create_task = MagicMock(side_effect=_close_scheduled_coroutine)
             await submit_job_after_approval("proj-bg", gate.id)
 
         submitted = mock_client.call_tool.call_args.kwargs
@@ -1221,7 +1249,7 @@ class TestSubmitJobAfterApproval:
              patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
              patch("cortex.workflow_submission.job_polling.poll_staging_status", new=_fake_poll_staging_status), \
              patch("cortex.workflow_submission.asyncio") as mock_aio:
-            mock_aio.create_task = MagicMock()
+            mock_aio.create_task = MagicMock(side_effect=_close_scheduled_coroutine)
             await submit_job_after_approval("proj-bg", gate.id)
 
         assert mock_client.call_tool.await_count == 1
@@ -1643,47 +1671,152 @@ class TestStartupRecovery:
         sess.close()
 
     @pytest.mark.asyncio
-    async def test_slurm_submission_without_run_uuid_marks_stage_input_failed(self, session_factory, seed_data):
-        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
-            "extracted_params": {
-                "sample_name": "no-run-uuid",
+    async def test_completed_remote_staging_continues_submission_after_background_transfer(self, session_factory, seed_data):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "workflow_type": "remote_sample_intake",
+                "title": "Run remote analysis for Jamshid",
+                "sample_name": "Jamshid",
+                "mode": "CDNA",
+                "gate_block_id": "gate-stage-complete",
+                "steps": [
+                    {"id": "check_remote_stage", "kind": "check_remote_stage", "status": "COMPLETED", "order_index": 0},
+                    {"id": "stage_input", "kind": "remote_stage", "status": "RUNNING", "order_index": 1},
+                    {"id": "run_dogme", "kind": "run", "status": "PENDING", "order_index": 2},
+                    {"id": "analyze_results", "kind": "analysis", "status": "PENDING", "order_index": 3},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        gate = _create_block_internal(
+            sess,
+            "proj-bg",
+            "APPROVAL_GATE",
+            {
+                "extracted_params": {
+                    "sample_name": "Jamshid",
+                    "mode": "CDNA",
+                    "input_directory": "/data/pod5",
+                    "reference_genome": ["mm39"],
+                    "execution_mode": "slurm",
+                    "ssh_profile_id": "profile-123",
+                    "ssh_profile_nickname": "hpc3",
+                    "remote_base_path": "/remote/u1/agoutic",
+                    "cache_preflight": {
+                        "status": "ready",
+                        "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
+                        "data_action": {"action": "stage"},
+                    },
+                    "workflow_block_id": workflow_block.id,
+                },
+                "model": "default",
+            },
+            status="APPROVED",
+            owner_id="u-bg",
+        )
+        stage_parts = _initial_stage_parts(
+            {
+                "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
+                "data_action": {"action": "stage"},
+            }
+        )
+        stage_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "STAGING_TASK",
+            {
+                "sample_name": "Jamshid",
                 "mode": "CDNA",
                 "input_directory": "/data/pod5",
-                "reference_genome": ["mm39"],
-                "execution_mode": "slurm",
+                "ssh_profile_id": "profile-123",
                 "ssh_profile_nickname": "hpc3",
                 "remote_base_path": "/remote/u1/agoutic",
-                "cache_preflight": {
-                    "status": "ready",
-                    "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
-                    "data_action": {"action": "stage"},
-                },
+                "gate_block_id": gate.id,
+                "workflow_plan_block_id": workflow_block.id,
+                "staging_task_id": "stg-complete-001",
+                "stage_input_step_id": "stage_input",
+                "complete_stage_only_step_id": None,
+                "skill": "remote_execution",
+                "model": "default",
+                "progress_percent": 45,
+                "message": "Uploading sample data",
+                "stage_parts": stage_parts,
+                "status": "RUNNING",
             },
-        })
-
-        async def _passthrough_prepare(session, project_id, owner_id, params):
-            return dict(params)
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.commit()
+        sess.close()
 
         mock_client = AsyncMock()
-        mock_client.call_tool = AsyncMock(return_value={})
+        mock_client.call_tool = AsyncMock(return_value={
+            "task_id": "stg-complete-001",
+            "status": "completed",
+            "progress": {},
+            "error": None,
+            "result": {
+                "remote_data_path": "/remote/u1/agoutic/data/fp1",
+                "data_cache_status": "staged",
+                "remote_reference_paths": {"mm39": "/remote/u1/agoutic/ref/mm39"},
+                "reference_cache_statuses": {"mm39": "reused"},
+                "reference_asset_evidence": {},
+            },
+        })
+        mock_submit = AsyncMock(return_value=None)
 
         with _patch_session(session_factory), \
-             patch("cortex.workflow_submission._prepare_remote_execution_params", new=_passthrough_prepare), \
-             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
-             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
-             patch("cortex.workflow_submission.asyncio") as mock_aio:
-            mock_aio.create_task = MagicMock()
-            await submit_job_after_approval("proj-bg", gate.id)
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.submit_job_after_approval", new=mock_submit), \
+             patch("cortex.job_polling.asyncio.sleep", new=AsyncMock(return_value=None)), \
+             patch("cortex.job_polling.asyncio.create_task") as mock_create_task:
+            mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+            await poll_staging_status(
+                task_id="stg-complete-001",
+                project_id="proj-bg",
+                block_id=stage_block.id,
+                owner_id="u-bg",
+                job_data={
+                    "sample_name": "Jamshid",
+                    "mode": "CDNA",
+                    "input_directory": "/data/pod5",
+                    "remote_base_path": "/remote/u1/agoutic",
+                    "result_destination": "both",
+                },
+                ssh_profile_id="profile-123",
+                ssh_profile_nickname="hpc3",
+                workflow_block_id=workflow_block.id,
+                gate_block_id=gate.id,
+                stage_input_step_id="stage_input",
+                complete_stage_only_step_id=None,
+                gate_payload={"skill": "remote_execution", "model": "default"},
+                initial_stage_parts=stage_parts,
+            )
+
+        assert mock_submit.call_args.args == ("proj-bg", gate.id)
 
         sess = session_factory()
-        workflow_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "WORKFLOW_PLAN").one()
-        workflow_payload = get_block_payload(workflow_block)
-        step_status = {step["id"]: step["status"] for step in workflow_payload["steps"]}
-        assert step_status["check_remote_stage"] == "COMPLETED"
-        assert step_status["stage_input"] == "FAILED"
-        assert step_status["run_dogme"] == "FAILED"
+        refreshed_stage = sess.query(ProjectBlock).filter(ProjectBlock.id == stage_block.id).one()
+        refreshed_stage_payload = get_block_payload(refreshed_stage)
+        refreshed_gate = sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one()
+        refreshed_gate_payload = get_block_payload(refreshed_gate)
+        refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        refreshed_workflow_payload = get_block_payload(refreshed_workflow)
         sess.close()
+
+        assert refreshed_stage.status == "DONE"
+        assert refreshed_stage_payload["remote_data_path"] == "/remote/u1/agoutic/data/fp1"
+        assert refreshed_gate_payload["extracted_params"]["staged_remote_input_path"] == "/remote/u1/agoutic/data/fp1"
+        assert refreshed_gate_payload["extracted_params"]["workflow_block_id"] == workflow_block.id
+        step_status = {step["id"]: step["status"] for step in refreshed_workflow_payload["steps"]}
+        assert step_status["stage_input"] == "COMPLETED"
+        assert step_status["run_dogme"] == "PENDING"
 
 
 @pytest.mark.asyncio
@@ -2092,6 +2225,91 @@ class TestPollJobStatus:
         sess = session_factory()
         updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
         assert updated.status == "FAILED"
+        sess.close()
+
+    @pytest.mark.anyio
+    async def test_poll_staging_status_marks_block_failed(self, session_factory, seed_data):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "status": "RUNNING",
+                "steps": [
+                    {"id": "stage_input", "kind": "REMOTE_STAGE", "status": "RUNNING"},
+                    {"id": "complete_stage_only", "kind": "COMPLETE_STAGE_ONLY", "status": "PENDING"},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        initial_parts = _initial_stage_parts(
+            {
+                "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
+                "data_action": {"action": "stage"},
+            }
+        )
+        stage_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "STAGING_TASK",
+            {
+                "sample_name": "Jamshid",
+                "mode": "RNA",
+                "staging_task_id": "stg-failed-001",
+                "workflow_plan_block_id": workflow_block.id,
+                "stage_input_step_id": "stage_input",
+                "complete_stage_only_step_id": "complete_stage_only",
+                "message": "Staging in progress...",
+                "stage_parts": initial_parts,
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(
+            return_value={
+                "task_id": "stg-failed-001",
+                "status": "failed",
+                "error": "Upload stalled for too long.",
+                "progress": {},
+                "result": None,
+            }
+        )
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            mock_sleep.return_value = None
+            await poll_staging_status(
+                task_id="stg-failed-001",
+                project_id="proj-bg",
+                block_id=stage_block.id,
+                owner_id="u-bg",
+                job_data={"sample_name": "Jamshid", "mode": "RNA", "input_directory": "/data/Jamshid.bam"},
+                ssh_profile_id="profile-123",
+                ssh_profile_nickname="hpc3",
+                workflow_block_id=workflow_block.id,
+                stage_input_step_id="stage_input",
+                complete_stage_only_step_id="complete_stage_only",
+                gate_payload={"skill": "remote_execution", "model": "default"},
+                initial_stage_parts=initial_parts,
+            )
+
+        sess = session_factory()
+        updated_stage = sess.query(ProjectBlock).filter(ProjectBlock.id == stage_block.id).first()
+        updated_stage_payload = get_block_payload(updated_stage)
+        updated_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).first()
+        updated_workflow_payload = get_block_payload(updated_workflow)
+        assert updated_stage.status == "FAILED"
+        assert updated_stage_payload["error"] == "Upload stalled for too long."
+        assert updated_stage_payload["stage_parts"]["data"]["status"] == "FAILED"
+        assert updated_workflow.status == "FAILED"
+        assert updated_workflow_payload["steps"][0]["status"] == "FAILED"
         sess.close()
 
     @pytest.mark.anyio

@@ -128,6 +128,8 @@ def _final_stage_parts(stage_result: dict, existing_parts: dict | None = None) -
     data_status = (stage_result.get("data_cache_status") or "staged").strip().lower()
     if data_status == "reused":
         data_message = "Sample data already staged on the remote profile."
+    elif data_status == "resumed":
+        data_message = "Sample data resumed from a previous partial transfer and staged to the remote profile."
     elif data_status == "fallback":
         data_message = "Sample data staged to the remote profile via fallback."
     else:
@@ -181,6 +183,49 @@ def _failed_stage_parts(parts: dict | None, error_message: str) -> dict:
                 "status": "FAILED",
                 "message": error_message,
             })
+    return parts
+
+
+def _resuming_stage_parts(parts: dict | None) -> dict:
+    parts = {
+        "references": dict((parts or {}).get("references") or _make_stage_part("RUNNING", 40, "Checking and preparing reference assets on the remote profile...")),
+        "data": dict((parts or {}).get("data") or _make_stage_part("PENDING", 0, "Waiting for reference staging to finish.")),
+    }
+
+    references = parts["references"]
+    data = parts["data"]
+
+    if references.get("status") == "COMPLETED":
+        references["progress_percent"] = 100
+        if not references.get("message"):
+            references["message"] = "Reference assets are ready on the remote profile."
+        if data.get("status") != "COMPLETED":
+            try:
+                current_progress = int(data.get("progress_percent") or 0)
+            except (TypeError, ValueError):
+                current_progress = 0
+            data.update({
+                "status": "RUNNING",
+                "progress_percent": max(35, current_progress),
+                "message": "Resuming sample data staging on the remote profile...",
+            })
+        return parts
+
+    try:
+        reference_progress = int(references.get("progress_percent") or 0)
+    except (TypeError, ValueError):
+        reference_progress = 0
+    references.update({
+        "status": "RUNNING",
+        "progress_percent": max(40, reference_progress),
+        "message": "Checking and preparing reference assets on the remote profile...",
+    })
+    if data.get("status") != "COMPLETED":
+        data.update({
+            "status": "PENDING",
+            "progress_percent": 0,
+            "message": "Waiting for reference staging to finish.",
+        })
     return parts
 
 

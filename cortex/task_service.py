@@ -636,6 +636,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                             "mode": payload.get("mode"),
                             "progress_percent": payload.get("progress_percent", 0),
                             "remote_data_path": payload.get("remote_data_path"),
+                            "staging_task_id": payload.get("staging_task_id"),
                         },
                     },
                     activity_at=_block_activity_at(block, payload),
