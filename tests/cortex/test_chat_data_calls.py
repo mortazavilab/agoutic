@@ -1557,6 +1557,42 @@ class TestBrowsingToolBypass:
         assert resp.status_code == 200
         assert mock_mcp.call_tool.await_count == 1
 
+    def test_get_slurm_defaults_rewrites_legacy_profile_id_for_explicit_cluster(self, SL, seed, tmp_path):
+        """Legacy get_slurm_defaults(profile_id=...) tags should be repaired before MCP execution."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            assert tool_name == "get_slurm_defaults"
+            assert kwargs.get("user_id") == "u-plot"
+            assert kwargs.get("project_id") == "proj-plot"
+            assert kwargs.get("profile_nickname") == "hpc3"
+            assert "profile_id" not in kwargs
+            assert "ssh_profile_id" not in kwargs
+            return {"found": False, "source": "none"}
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "Checking saved defaults now.\n"
+                "[[DATA_CALL: service=launchpad, tool=get_slurm_defaults, profile_id=<localCluster_id>, project_id=<project_id>]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "Analyze the mouse DNA sample called JamshidDNA at /media/backup_disk/agoutic_root/testdata/GDNA/pod5 on hpc3",
+            skill="remote_execution",
+        )
+        assert resp.status_code == 200
+        assert mock_mcp.call_tool.await_count == 1
+
     def test_submit_dogme_job_injects_user_and_project_scope(self, SL, seed, tmp_path):
         """Direct Launchpad submit calls should be repaired with missing identity scope."""
         mock_mcp = AsyncMock()

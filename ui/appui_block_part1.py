@@ -5,31 +5,121 @@ from components.cards import info_callout, metadata_row, section_header, status_
 from components.forms import grouped_section, review_panel
 
 
-_DEFAULT_CLUSTER_MODKIT_BINARY_DIR = "/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_candle"
+_DEFAULT_CLUSTER_MODKIT_BINARY_DIR = "/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_tch"
 _DEFAULT_CLUSTER_MODKIT_MODEL_NAME = "r1041_e82_400bps_hac_v5.2.0@v0.1.0"
 
 
-def _build_cluster_modkit_profile(modkit_dir: str) -> str:
+def _split_cluster_modkit_paths(modkit_dir: str) -> tuple[str, str, str]:
     cleaned_dir = str(modkit_dir or "").strip().rstrip("/")
     if not cleaned_dir:
+        return "", "", ""
+    dist_leaf = os.path.basename(cleaned_dir)
+    parent_dir = os.path.dirname(cleaned_dir).rstrip("/")
+    if dist_leaf.startswith("dist_modkit_") and parent_dir:
+        return parent_dir, cleaned_dir, dist_leaf
+    return cleaned_dir, cleaned_dir, ""
+
+
+def _default_cluster_modkit_bind_paths(modkit_dir: str) -> list[str]:
+    modkit_base, binary_dir, dist_leaf = _split_cluster_modkit_paths(modkit_dir)
+    if dist_leaf and modkit_base:
+        return [modkit_base]
+    if binary_dir:
+        return [binary_dir]
+    return []
+
+
+def _build_cluster_modkit_profile(modkit_dir: str) -> str:
+    modkit_base, _binary_dir, dist_leaf = _split_cluster_modkit_paths(modkit_dir)
+    if not modkit_base:
         return ""
+    path_export = "export PATH=${MODKITBASE}:${PATH}\n"
+    model_export = f"export MODKITMODEL=${{MODKITBASE}}/models/{_DEFAULT_CLUSTER_MODKIT_MODEL_NAME}\n"
+    libtorch_exports = ""
+    if dist_leaf:
+        path_export = f"export PATH=${{MODKITBASE}}/{dist_leaf}:${{PATH}}\n"
+        model_export = f"export MODKITMODEL=${{MODKITBASE}}/{dist_leaf}/models/{_DEFAULT_CLUSTER_MODKIT_MODEL_NAME}\n"
+        if "tch" in dist_leaf.lower():
+            libtorch_exports = (
+                "export LIBTORCH=${MODKITBASE}/libtorch\n"
+                "export LD_LIBRARY_PATH=${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}\n"
+                "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}\n"
+            )
     return (
-        f"export MODKITBASE={cleaned_dir}\n"
-        "export PATH=${MODKITBASE}:${PATH}\n"
-        f"export MODKITMODEL=${{MODKITBASE}}/models/{_DEFAULT_CLUSTER_MODKIT_MODEL_NAME}\n"
+        f"export MODKITBASE={modkit_base}\n"
+        f"{path_export}"
+        f"{model_export}"
+        f"{libtorch_exports}"
     )
 
 
 _DEFAULT_CLUSTER_MODKIT_PROFILE = _build_cluster_modkit_profile(_DEFAULT_CLUSTER_MODKIT_BINARY_DIR)
-_DEFAULT_CLUSTER_MODKIT_BIND_PATHS = [_DEFAULT_CLUSTER_MODKIT_BINARY_DIR]
+_DEFAULT_CLUSTER_MODKIT_BIND_PATHS = _default_cluster_modkit_bind_paths(_DEFAULT_CLUSTER_MODKIT_BINARY_DIR)
 
 
-def _extract_modkit_base_from_profile(profile_text: str) -> str:
-    for line in str(profile_text or "").splitlines():
+def _extract_modkit_binary_dir_from_profile(profile_text: str) -> str:
+    modkit_base = ""
+    lines = str(profile_text or "").splitlines()
+
+    for line in lines:
         cleaned = line.strip()
         if cleaned.startswith("export MODKITBASE="):
-            return cleaned.split("=", 1)[1].strip()
-    return ""
+            modkit_base = cleaned.split("=", 1)[1].strip().rstrip("/")
+            break
+
+    for line in lines:
+        cleaned = line.strip()
+        if not cleaned.startswith("export PATH="):
+            continue
+        path_value = cleaned.split("=", 1)[1].strip()
+        if modkit_base and path_value == "${MODKITBASE}:${PATH}":
+            return modkit_base
+        if modkit_base and path_value.startswith("${MODKITBASE}/") and path_value.endswith(":${PATH}"):
+            relative_dir = path_value[len("${MODKITBASE}/"):-len(":${PATH}")].strip().strip("/")
+            if relative_dir:
+                return f"{modkit_base}/{relative_dir}"
+        if path_value.endswith(":${PATH}"):
+            first_segment = path_value[:-len(":${PATH}")].split(":", 1)[0].strip().rstrip("/")
+            if first_segment.startswith("/") and "modkit" in first_segment.lower():
+                return first_segment
+
+    for line in lines:
+        cleaned = line.strip()
+        if not cleaned.startswith("export MODKITMODEL="):
+            continue
+        model_value = cleaned.split("=", 1)[1].strip().rstrip("/")
+        if modkit_base and model_value.startswith("${MODKITBASE}/") and "/models/" in model_value:
+            relative_dir = model_value[len("${MODKITBASE}/"):].split("/models/", 1)[0].strip().strip("/")
+            if relative_dir:
+                return f"{modkit_base}/{relative_dir}"
+            return modkit_base
+        if model_value.startswith("/") and "/models/" in model_value:
+            return model_value.split("/models/", 1)[0].rstrip("/")
+
+    return modkit_base
+
+
+def _resolve_custom_cluster_modkit_values(
+    *,
+    modkit_dir: str,
+    use_default_bind_paths: bool,
+    custom_bind_paths_text: str,
+    manual_profile_override: bool,
+    manual_profile_text: str,
+) -> dict:
+    resolved_modkit_dir = str(modkit_dir or "").strip().rstrip("/") or _DEFAULT_CLUSTER_MODKIT_BINARY_DIR
+    generated_profile = _build_cluster_modkit_profile(resolved_modkit_dir)
+    default_bind_paths_text = _paths_to_text(_default_cluster_modkit_bind_paths(resolved_modkit_dir))
+    resolved_bind_paths_text = default_bind_paths_text if use_default_bind_paths else _paths_to_text(custom_bind_paths_text)
+    resolved_profile = generated_profile
+    if manual_profile_override and str(manual_profile_text or "").strip():
+        resolved_profile = str(manual_profile_text)
+    return {
+        "modkit_dir": resolved_modkit_dir,
+        "generated_profile": generated_profile,
+        "resolved_bind_paths_text": resolved_bind_paths_text,
+        "resolved_profile": resolved_profile,
+    }
 
 
 def _paths_to_text(value) -> str:
@@ -268,6 +358,16 @@ def render_block_part1(
 
             if status == "APPROVED":
                 st.success("✅ Approved")
+                if isinstance(approved_params, dict):
+                    _approved_custom_profile = str(approved_params.get("custom_dogme_profile") or "")
+                    _approved_bind_paths = approved_params.get("custom_dogme_bind_paths") or []
+                    if _approved_custom_profile.strip() or _approved_bind_paths:
+                        with st.expander("🧬 Submitted Custom Dogme Settings", expanded=False):
+                            st.caption("These are the custom DNA overrides that were approved for this run.")
+                            st.markdown("**Bind Paths**")
+                            st.code(_paths_to_text(_approved_bind_paths).strip() or "(none)", language="text")
+                            st.markdown("**dogme.profile**")
+                            st.code(_approved_custom_profile.strip() or "(empty)", language="bash")
                 # Show what parameters were used
                 if approved_params:
                     with st.expander("📋 Parameters Used", expanded=False):
@@ -774,7 +874,7 @@ def render_block_part1(
                         custom_dogme_profile_value = extracted_params.get("custom_dogme_profile") or ""
                         custom_dogme_bind_paths_text = _paths_to_text(extracted_params.get("custom_dogme_bind_paths"))
                         custom_modkit_binary_dir = (
-                            _extract_modkit_base_from_profile(custom_dogme_profile_value)
+                            _extract_modkit_binary_dir_from_profile(custom_dogme_profile_value)
                             or _DEFAULT_CLUSTER_MODKIT_BINARY_DIR
                         )
                         allow_custom_dogme_profile = execution_mode == "slurm" and mode == "DNA"
@@ -902,58 +1002,66 @@ def render_block_part1(
                                     value=bool(custom_dogme_profile_value),
                                     help="Enable this when DNA Dogme should source a cluster-hosted modkit or extra environment variables instead of the default profile.",
                                 )
-                                if use_custom_dogme_profile:
-                                    custom_modkit_binary_dir = st.text_input(
-                                        "Cluster Modkit Binary Directory",
-                                        value=custom_modkit_binary_dir,
-                                        help="Directory inside the HPC filesystem that contains the modkit binary Dogme should find first on PATH for this DNA run.",
-                                    ).strip()
-                                    generated_dogme_profile = _build_cluster_modkit_profile(
-                                        custom_modkit_binary_dir or _DEFAULT_CLUSTER_MODKIT_BINARY_DIR
-                                    )
-                                    current_bind_paths = _text_to_paths(custom_dogme_bind_paths_text)
-                                    use_default_bind_paths = st.checkbox(
-                                        "Bind the modkit directory automatically",
-                                        value=not current_bind_paths or current_bind_paths == [custom_modkit_binary_dir],
-                                        help="When enabled, the modkit directory above is submitted as the only extra Apptainer bind path for this DNA run.",
-                                    )
-                                    manual_profile_override = st.checkbox(
-                                        "Edit dogme.profile manually",
-                                        value=bool(custom_dogme_profile_value.strip()) and custom_dogme_profile_value.strip() != generated_dogme_profile.strip(),
-                                        help="Disable this to generate the profile directly from the modkit directory above. Enable it only when you need extra exports beyond the standard PATH-based template.",
-                                    )
-                                    if not custom_dogme_profile_value.strip():
-                                        custom_dogme_profile_value = generated_dogme_profile
-                                    st.caption(
-                                        "These host paths will be bound into the Apptainer container for this DNA run. "
-                                        "Make sure every path referenced by the profile is visible on the compute nodes."
-                                    )
-                                    if use_default_bind_paths:
-                                        custom_dogme_bind_paths_text = custom_modkit_binary_dir
-                                        st.caption("Bind Paths")
-                                        st.code(custom_dogme_bind_paths_text.strip() or "(none)", language="text")
-                                    else:
-                                        custom_dogme_bind_paths_text = st.text_area(
-                                            "Custom Dogme Bind Paths",
-                                            value=custom_dogme_bind_paths_text,
-                                            height=80,
-                                            help="One path per line. These are added to the SLURM Apptainer bind list before Dogme runs.",
-                                        )
-                                    if manual_profile_override:
-                                        custom_dogme_profile_value = st.text_area(
-                                            "Custom dogme.profile",
-                                            value=custom_dogme_profile_value,
-                                            height=180,
-                                            help="Shell exports sourced before each Dogme task. Disable manual editing to regenerate the standard PATH-based profile from the modkit directory above.",
-                                        )
-                                    else:
-                                        custom_dogme_profile_value = generated_dogme_profile
-                                    with st.expander("Preview Submitted Custom Dogme Settings", expanded=False):
+                                custom_modkit_binary_dir = st.text_input(
+                                    "Cluster Modkit Binary Directory",
+                                    value=custom_modkit_binary_dir,
+                                    help="Directory inside the HPC filesystem that contains the modkit binary Dogme should find first on PATH for this DNA run.",
+                                ).strip()
+                                current_bind_paths = _text_to_paths(custom_dogme_bind_paths_text)
+                                _normalized_modkit_dir = custom_modkit_binary_dir or _DEFAULT_CLUSTER_MODKIT_BINARY_DIR
+                                _generated_dogme_profile = _build_cluster_modkit_profile(_normalized_modkit_dir)
+                                _default_bind_paths = _default_cluster_modkit_bind_paths(_normalized_modkit_dir)
+                                _existing_manual_profile = (
+                                    custom_dogme_profile_value
+                                    if custom_dogme_profile_value.strip() and custom_dogme_profile_value.strip() != _generated_dogme_profile.strip()
+                                    else ""
+                                )
+                                use_default_bind_paths = st.checkbox(
+                                    "Bind the modkit directory automatically",
+                                    value=not current_bind_paths or current_bind_paths == _default_bind_paths,
+                                    help="When enabled, the required modkit path is submitted automatically as the extra Apptainer bind path set for this DNA run.",
+                                )
+                                manual_profile_override = st.checkbox(
+                                    "Edit dogme.profile manually",
+                                    value=bool(_existing_manual_profile.strip()),
+                                    help="Enable this only when you need exports beyond the standard PATH-based template. Otherwise the generated profile below is used automatically.",
+                                )
+                                st.caption(
+                                    "These host paths will be bound into the Apptainer container for this DNA run. "
+                                    "Make sure every path referenced by the profile is visible on the compute nodes."
+                                )
+                                custom_dogme_bind_paths_text = st.text_area(
+                                    "Custom Dogme Bind Paths",
+                                    value=custom_dogme_bind_paths_text,
+                                    height=80,
+                                    help="One path per line. Ignored when automatic binding is enabled. For the tch build, binding the shared modkit root is what exposes both the binary and its sibling libtorch directory.",
+                                )
+                                manual_dogme_profile_text = st.text_area(
+                                    "Manual dogme.profile Override",
+                                    value=_existing_manual_profile or _generated_dogme_profile,
+                                    height=180,
+                                    help="Optional shell exports sourced before each Dogme task. Ignored unless manual editing is enabled.",
+                                )
+                                _resolved_custom_modkit = _resolve_custom_cluster_modkit_values(
+                                    modkit_dir=custom_modkit_binary_dir,
+                                    use_default_bind_paths=use_default_bind_paths,
+                                    custom_bind_paths_text=custom_dogme_bind_paths_text,
+                                    manual_profile_override=manual_profile_override,
+                                    manual_profile_text=manual_dogme_profile_text,
+                                )
+                                with st.expander("Preview Submitted Custom Dogme Settings", expanded=use_custom_dogme_profile):
+                                    if use_custom_dogme_profile:
                                         st.caption("These exact values will be submitted if you approve this DNA run.")
-                                        st.markdown("**Bind Paths**")
-                                        st.code(custom_dogme_bind_paths_text.strip() or "(none)", language="text")
-                                        st.markdown("**dogme.profile**")
-                                        st.code(custom_dogme_profile_value.strip() or "(empty)", language="bash")
+                                    else:
+                                        st.caption("Enable the checkbox above to submit these custom DNA overrides.")
+                                    st.markdown("**Bind Paths**")
+                                    st.code(_resolved_custom_modkit["resolved_bind_paths_text"].strip() or "(none)", language="text")
+                                    st.markdown("**dogme.profile**")
+                                    st.code(_resolved_custom_modkit["resolved_profile"].strip() or "(empty)", language="bash")
+
+                                if use_custom_dogme_profile:
+                                    custom_dogme_profile_value = _resolved_custom_modkit["resolved_profile"]
+                                    custom_dogme_bind_paths_text = _resolved_custom_modkit["resolved_bind_paths_text"]
                                 else:
                                     custom_dogme_profile_value = ""
                                     custom_dogme_bind_paths_text = ""

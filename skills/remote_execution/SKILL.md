@@ -69,14 +69,17 @@ Before asking any questions, use only available Launchpad tools to derive defaul
    ```
 2. If a profile is selected/known, fetch SLURM defaults:
    ```
-   [[DATA_CALL: service=launchpad, tool=get_slurm_defaults, user_id=<user_id>, project_id=<project_id>]]
+   [[DATA_CALL: service=launchpad, tool=get_slurm_defaults, user_id=<user_id>, project_id=<project_id>, profile_nickname=<nickname>]]
    ```
+   Use `profile_nickname` when the user explicitly names a cluster/profile in
+   the message. `get_slurm_defaults` also accepts `ssh_profile_id`, but it does
+   not accept `profile_id`.
 
 There is no `get_user_preferences` MCP tool. Do not call it.
 
 Use these values as prefilled suggestions:
 - Execution mode: infer from user intent (`slurm` or an explicit cluster/profile nickname implies SLURM; otherwise ask)
-- SSH profile: use explicit nickname from user message when present; else ask user to pick from listed profiles
+- SSH profile: use the explicit nickname from the user message when present, even if saved preferences point to a different profile; else ask user to pick from listed profiles
 - Result destination: default to `local` unless user specifies `remote` or `both`
 - Remote base path: use the saved profile `remote_base_path`
 

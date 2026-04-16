@@ -213,6 +213,10 @@ _BASE_PARAM_ALIASES: dict[str, dict[str, str]] = {
         "file_path": "file_name",
         "filename": "file_name",
     },
+    # Launchpad param aliases for remote execution tools
+    "get_slurm_defaults": {
+        "profile_id": "ssh_profile_id",
+    },
     # edgePython param aliases (hallucinated parameter names for lookup_gene)
     "lookup_gene": {
         "gene_name": "gene_symbols",
@@ -238,6 +242,14 @@ def _looks_like_placeholder(value: str | None) -> bool:
         (stripped.startswith("<") and stripped.endswith(">"))
         or (stripped.startswith("{") and stripped.endswith("}"))
     )
+
+
+def _normalize_get_slurm_defaults_params(params: dict | None) -> dict:
+    normalized = dict(params or {})
+    legacy_profile_id = normalized.pop("profile_id", None)
+    if legacy_profile_id and not normalized.get("ssh_profile_id"):
+        normalized["ssh_profile_id"] = legacy_profile_id
+    return normalized
 
 
 def _extract_remote_profile_nickname(user_message: str) -> str | None:
@@ -513,7 +525,7 @@ def _augment_remote_execution_calls(
         for call in launchpad_calls:
             if call.get("tool") != "get_slurm_defaults":
                 continue
-            params = dict(call.get("params") or {})
+            params = _normalize_get_slurm_defaults_params(call.get("params"))
             if _looks_like_placeholder(params.get("ssh_profile_id")):
                 params.pop("ssh_profile_id", None)
                 if nickname and not params.get("profile_nickname"):
@@ -527,7 +539,7 @@ def _augment_remote_execution_calls(
     for call in launchpad_calls:
         if call.get("tool") != "get_slurm_defaults":
             continue
-        params = dict(call.get("params") or {})
+        params = _normalize_get_slurm_defaults_params(call.get("params"))
         if _looks_like_placeholder(params.get("ssh_profile_id")):
             params.pop("ssh_profile_id", None)
             if nickname and not params.get("profile_nickname"):

@@ -10,10 +10,13 @@
   profile only for DNA runs, validates the extra remote bind paths before
   submission, and ignores the custom override fields for RNA/cDNA so the
   standard non-DNA profile behavior is preserved. The default cluster-modkit
-  template now targets the candle distribution, prepends that directory to
-  `PATH`, drops the torch/libtorch exports, and now exposes the cluster
+  template now targets the PyTorch `tch` distribution, exports
+  `MODKITBASE` as the shared modkit root, prepends the `dist_modkit..._tch`
+  binary directory to `PATH`, exports `LIBTORCH` plus
+  `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` from the sibling `libtorch/lib`
+  directory, and now exposes the cluster
   modkit binary directory as its own DNA-only gate field so users can switch
-  candle builds without hand-editing the generated profile template.
+  modkit builds without hand-editing the generated profile template.
   (`ui/appui_block_part1.py`, `cortex/workflow_submission.py`,
   `launchpad/backends/base.py`, `launchpad/schemas.py`,
   `launchpad/app.py`, `launchpad/mcp_tools.py`,
@@ -30,6 +33,23 @@
   `cortex/task_service.py`, `ui/appui_block_part2.py`, `ui/appUI.py`)
 
 ### Bug Fixes
+
+- **Remote SLURM defaults lookup now repairs legacy `profile_id` tool calls
+  before they reach Launchpad** — Cortex now normalizes model-emitted
+  `get_slurm_defaults(profile_id=...)` calls to the supported
+  `ssh_profile_id`/`profile_nickname` shape, so explicit requests like "run
+  this on hpc3" no longer fail with an MCP validation error when the model
+  mixes old parameter names with a saved-profile placeholder.
+  (`cortex/tool_dispatch.py`, `tests/cortex/test_chat_data_calls.py`,
+  `skills/remote_execution/SKILL.md`)
+
+- **DNA approval gates now keep custom cluster-modkit controls visible before
+  approval and preserve the submitted preview afterward** — the SLURM DNA gate
+  no longer hides the modkit directory, bind-path input, or manual
+  `dogme.profile` editor behind a checkbox that cannot rerender inside the
+  approval form, and approved gates now show a dedicated expander with the
+  exact custom bind paths and `dogme.profile` text used for the run.
+  (`ui/appui_block_part1.py`, `tests/ui/test_appui_block_part1_helpers.py`)
 
 - **Remote staging now surfaces byte-level transfer updates in the UI** —
   Launchpad tracks current-file transferred bytes and total-size estimates from
