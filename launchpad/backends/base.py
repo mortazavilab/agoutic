@@ -32,6 +32,8 @@ class SubmitParams:
     resume_from_dir: str | None = None
     rerun_in_place: bool = False
     parent_block_id: str | None = None
+    custom_dogme_profile: str | None = None
+    custom_dogme_bind_paths: list[str] = field(default_factory=list)
 
     # Remote execution (SLURM backend only)
     ssh_profile_id: str | None = None

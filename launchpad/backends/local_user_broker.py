@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import uuid
 from pathlib import Path
@@ -37,7 +38,12 @@ _RSYNC_SKIP_COMPRESS_SUFFIXES = (
 _RSYNC_SKIP_COMPRESS = "/".join(_RSYNC_SKIP_COMPRESS_SUFFIXES)
 _RSYNC_PARTIAL_DIR = ".rsync-partial"
 _RSYNC_PROGRESS_CHUNK_SIZE = 4096
+_RSYNC_RESPONSE_OUTPUT_LIMIT = int(os.getenv("LOCAL_AUTH_BROKER_RSYNC_OUTPUT_LIMIT", "16384"))
+_RE_PROGRESS_LINE = re.compile(r"^([\d,]+)\s+(\d+)%\s+([\d.]+\S+/s)")
+_RE_OVERALL_PROGRESS = re.compile(r"\(xfr#(\d+),\s*(?:to|ir)-chk=(\d+)/(\d+)\)")
+_RE_FILENAME = re.compile(r"^[^\s].*[/.]")
 _ACTIVE_PROCESSES: dict[str, asyncio.subprocess.Process] = {}
+_ACTIVE_REQUEST_PROGRESS: dict[str, dict[str, Any]] = {}
 
 
 def _seconds_label(value: float | None) -> float | int | None:
@@ -69,6 +75,80 @@ def _normalize_local_rsync_source(source: str) -> str:
     if candidate.exists() and candidate.is_dir() and not normalized.endswith("/"):
         return normalized + "/"
     return normalized
+
+
+def _drain_rsync_output_segments(buffer: str) -> tuple[list[str], str]:
+    segments: list[str] = []
+    start = 0
+    for index, char in enumerate(buffer):
+        if char not in {"\n", "\r"}:
+            continue
+        segment = buffer[start:index]
+        if segment:
+            segments.append(segment)
+        start = index + 1
+    return segments, buffer[start:]
+
+
+def _estimate_total_bytes_from_progress(transferred_bytes: int, percent: int) -> int | None:
+    if transferred_bytes < 0 or percent <= 0:
+        return None
+    if percent >= 100:
+        return transferred_bytes
+    estimated = round((transferred_bytes * 100) / percent)
+    return max(transferred_bytes, int(estimated))
+
+
+def _parse_rsync_progress_line(line: str) -> dict[str, Any] | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    m_progress = _RE_PROGRESS_LINE.search(stripped)
+    if m_progress:
+        current_file_bytes = int(m_progress.group(1).replace(",", ""))
+        file_percent = int(m_progress.group(2))
+        info: dict[str, Any] = {
+            "current_file_bytes_transferred": current_file_bytes,
+            "current_file_total_bytes_estimate": _estimate_total_bytes_from_progress(
+                current_file_bytes, file_percent,
+            ),
+            "file_percent": file_percent,
+            "speed": m_progress.group(3),
+        }
+        m_overall = _RE_OVERALL_PROGRESS.search(stripped)
+        if m_overall:
+            info["files_transferred"] = int(m_overall.group(1))
+            info["files_remaining"] = int(m_overall.group(2))
+            info["files_total"] = int(m_overall.group(3))
+        return info
+
+    if stripped.startswith(("receiving ", "sending ", "created ", "total size", "sent ", "building ")):
+        return None
+
+    if _RE_FILENAME.match(stripped):
+        return {"current_file": stripped}
+
+    return None
+
+
+def _update_request_progress(request_id: str | None, progress_update: dict[str, Any] | None) -> None:
+    if not request_id or not isinstance(progress_update, dict) or not progress_update:
+        return
+    current = dict(_ACTIVE_REQUEST_PROGRESS.get(request_id) or {})
+    current.update(progress_update)
+    _ACTIVE_REQUEST_PROGRESS[request_id] = current
+
+
+def _compact_rsync_response_output(output: str, *, label: str) -> str:
+    text = str(output or "")
+    if _RSYNC_RESPONSE_OUTPUT_LIMIT <= 0 or len(text) <= _RSYNC_RESPONSE_OUTPUT_LIMIT:
+        return text
+
+    prefix = f"[truncated rsync {label}; omitted {len(text) - _RSYNC_RESPONSE_OUTPUT_LIMIT} chars]\n"
+    tail_budget = max(_RSYNC_RESPONSE_OUTPUT_LIMIT - len(prefix), 0)
+    tail = text[-tail_budget:] if tail_budget else ""
+    return prefix + tail
 
 
 def _build_rsync_command(
@@ -237,6 +317,7 @@ async def _run_subprocess(
         if idle_timeout_seconds and idle_timeout_seconds > 0:
             async def _communicate_with_idle_timeout() -> tuple[bytes, bytes, int]:
                 stdout_chunks: list[bytes] = []
+                progress_buffer = ""
                 stalled = False
                 while True:
                     try:
@@ -249,6 +330,15 @@ async def _run_subprocess(
                     if not raw_chunk:
                         break
                     stdout_chunks.append(raw_chunk)
+                    if request_id:
+                        decoded = raw_chunk.decode(errors="replace")
+                        progress_buffer += decoded
+                        segments, progress_buffer = _drain_rsync_output_segments(progress_buffer)
+                        for segment in segments:
+                            _update_request_progress(request_id, _parse_rsync_progress_line(segment))
+
+                if progress_buffer and request_id:
+                    _update_request_progress(request_id, _parse_rsync_progress_line(progress_buffer))
 
                 if stalled:
                     await _terminate_process_tree(proc)
@@ -326,6 +416,22 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
         await _terminate_process_tree(proc)
         return {"ok": True, "request_id": request_id, "cancelled": True}
 
+    if op == "get_request_status":
+        request_id = str(request.get("request_id") or "").strip()
+        if not request_id:
+            return {"ok": False, "error": "request_id is required", "active": False}
+        progress = dict(_ACTIVE_REQUEST_PROGRESS.get(request_id) or {})
+        active = request_id in _ACTIVE_PROCESSES
+        if not active and not progress:
+            return {"ok": False, "error": f"No active request {request_id}", "active": False}
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "active": active,
+            "status": "running" if active else "finished",
+            "progress": progress,
+        }
+
     if op == "ssh_run":
         profile = request["profile"]
         remote_command = request["command"]
@@ -363,6 +469,7 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
         copy_dirlinks = bool(request.get("copy_dirlinks"))
         use_skip_compress = bool(request.get("use_skip_compress", True))
         request_id = str(request.get("request_id") or "").strip() or uuid.uuid4().hex
+        _ACTIVE_REQUEST_PROGRESS[request_id] = {}
 
         cmd = _build_rsync_command(
             ssh_command=" ".join(_build_ssh_transport(profile)),
@@ -423,7 +530,10 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
                 stall_message=_rsync_stall_stderr(idle_timeout_seconds),
                 timeout_message=_rsync_timeout_stderr(timeout_seconds),
             )
+        result["progress"] = dict(_ACTIVE_REQUEST_PROGRESS.pop(request_id, {}) or {})
         result["bytes_transferred"] = _parse_rsync_bytes(result.get("stdout", ""))
+        result["stdout"] = _compact_rsync_response_output(result.get("stdout", ""), label="stdout")
+        result["stderr"] = _compact_rsync_response_output(result.get("stderr", ""), label="stderr")
         result["request_id"] = request_id
         logger.info(
             "Local auth broker finished rsync_transfer host=%s user=%s timeout=%ss exit_status=%s bytes=%s source=%s dest=%s",

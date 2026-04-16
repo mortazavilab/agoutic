@@ -41,6 +41,15 @@ INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 # Path to Dogme pipeline repository
 DOGME_REPO = Path(os.getenv("DOGME_REPO", AGOUTIC_CODE / "dogme"))
 
+# Container-internal modkit paths used by DNA mode dogme.profile.
+DOGME_DNA_MODKITBASE = Path((os.getenv("DOGME_DNA_MODKITBASE") or "/usr/local/lib/modkit").strip())
+DOGME_DNA_MODKITMODEL = Path(
+    (
+        os.getenv("DOGME_DNA_MODKITMODEL")
+        or str(DOGME_DNA_MODKITBASE / "models" / "r1041_e82_400bps_hac_v5.2.0@v0.1.0")
+    ).strip()
+)
+
 # Path to Nextflow executable
 NEXTFLOW_BIN = Path(os.getenv("NEXTFLOW_BIN", "/usr/local/bin/nextflow"))
 

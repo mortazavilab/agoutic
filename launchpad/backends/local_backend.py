@@ -36,6 +36,7 @@ class LocalBackend:
             per_mod=params.per_mod,
             accuracy=params.accuracy,
             max_gpu_tasks=params.max_gpu_tasks,
+            custom_dogme_profile=params.custom_dogme_profile,
             rerun_in_place=params.rerun_in_place,
             user_id=params.user_id,
             project_id=params.project_id,

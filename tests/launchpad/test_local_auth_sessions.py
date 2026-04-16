@@ -2,6 +2,7 @@
 
 import asyncio
 import errno
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -419,6 +420,116 @@ async def test_local_broker_cancel_request_terminates_active_process(monkeypatch
     assert result == {"ok": True, "request_id": "req-1", "cancelled": True}
     assert len(terminated) == 1
     assert "req-1" not in local_user_broker_module._ACTIVE_PROCESSES
+
+
+@pytest.mark.asyncio
+async def test_local_broker_get_request_status_returns_progress_snapshot():
+    local_user_broker_module._ACTIVE_REQUEST_PROGRESS["req-2"] = {
+        "current_file": "IGVFFI6571ANCX.bam",
+        "file_percent": 67,
+    }
+    try:
+        result = await _handle_request(
+            {
+                "auth_token": "token-123",
+                "op": "get_request_status",
+                "request_id": "req-2",
+            },
+            shutdown_event=asyncio.Event(),
+            auth_token="token-123",
+        )
+    finally:
+        local_user_broker_module._ACTIVE_REQUEST_PROGRESS.pop("req-2", None)
+
+    assert result == {
+        "ok": True,
+        "request_id": "req-2",
+        "active": False,
+        "status": "finished",
+        "progress": {
+            "current_file": "IGVFFI6571ANCX.bam",
+            "file_percent": 67,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_local_auth_invoke_reads_large_single_line_broker_response(monkeypatch, tmp_path):
+    async def _handle_client(reader, writer):
+        await reader.readline()
+        payload = {"ok": True, "blob": "x" * 200000}
+        writer.write((json.dumps(payload) + "\n").encode())
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(_handle_client, host="127.0.0.1", port=0)
+    socket_info = server.sockets[0].getsockname()
+    helper_port = int(socket_info[1])
+    now = datetime.now(timezone.utc)
+    session = LocalAuthSession(
+        session_id="sess-large-response",
+        profile_id="profile-1",
+        user_id="user-1",
+        local_username="alice",
+        helper_host="127.0.0.1",
+        helper_port=helper_port,
+        port_file=str(tmp_path / "helper.port"),
+        pid_file=str(tmp_path / "helper.pid"),
+        log_file=str(tmp_path / "helper.log"),
+        auth_token="token-123",
+        helper_pid=None,
+        created_at=now,
+        last_used_at=now,
+    )
+    monkeypatch.setattr("launchpad.backends.local_auth_sessions._write_session_metadata", lambda _session: None)
+
+    try:
+        result = await LocalAuthSessionManager().invoke(session, {"op": "ping", "timeout_seconds": 5})
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert result["ok"] is True
+    assert len(result["blob"]) == 200000
+
+
+@pytest.mark.asyncio
+async def test_local_broker_rsync_transfer_trims_large_stdout_in_response(monkeypatch, tmp_path):
+    local_file = tmp_path / "IGVFFI6571ANCX.bam"
+    local_file.write_text("BAM")
+    huge_stdout = ("progress\r" * 4000) + "total size is 20971520  speedup is 1.00\n"
+
+    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None, idle_timeout_seconds=None, stall_message=None, timeout_message=None):
+        return {"ok": True, "stdout": huge_stdout, "stderr": "", "exit_status": 0}
+
+    monkeypatch.setattr("launchpad.backends.local_user_broker._run_subprocess", fake_run_subprocess)
+
+    result = await _handle_request(
+        {
+            "auth_token": "token-123",
+            "op": "rsync_transfer",
+            "profile": {
+                "ssh_host": "hpc3.example.edu",
+                "ssh_port": 22,
+                "ssh_username": "seyedam",
+                "auth_method": "key_file",
+                "key_file_path": "~/.ssh/id_ed25519",
+            },
+            "source": str(local_file),
+            "dest": "seyedam@hpc3.example.edu:/scratch/seyedam/agoutic/data/sample",
+            "copy_links": True,
+            "timeout_seconds": 30,
+        },
+        shutdown_event=asyncio.Event(),
+        auth_token="token-123",
+    )
+
+    assert result["ok"] is True
+    assert result["bytes_transferred"] == 20971520
+    assert "total size is 20971520" in result["stdout"]
+    assert "[truncated rsync stdout; omitted" in result["stdout"]
+    assert len(result["stdout"]) < len(huge_stdout)
 
 
 @pytest.mark.asyncio

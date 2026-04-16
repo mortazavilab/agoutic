@@ -346,7 +346,7 @@ class LocalAuthSessionManager:
             try:
                 writer.write((json.dumps(request) + "\n").encode())
                 await writer.drain()
-                return await reader.readline()
+                return await reader.read()
             finally:
                 writer.close()
                 await writer.wait_closed()
@@ -420,7 +420,7 @@ class LocalAuthSessionManager:
                     reader, writer = await asyncio.open_connection(helper_host, helper_port)
                     writer.write((json.dumps({"op": "ping", "auth_token": auth_token}) + "\n").encode())
                     await writer.drain()
-                    raw = await reader.readline()
+                    raw = await reader.read()
                     writer.close()
                     await writer.wait_closed()
                     if raw:

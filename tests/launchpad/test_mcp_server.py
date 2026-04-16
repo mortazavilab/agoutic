@@ -99,6 +99,8 @@ async def test_submit_dogme_job_forwards_cache_fields(monkeypatch):
         per_mod=None,
         accuracy=None,
         max_gpu_tasks=None,
+        custom_dogme_profile=None,
+        custom_dogme_bind_paths=None,
         resume_from_dir=None,
         execution_mode="slurm",
         ssh_profile_id="profile-1",
@@ -174,6 +176,24 @@ async def test_submit_dogme_job_forwards_remote_input_path(monkeypatch):
     assert parsed["run_uuid"] == "run-remote"
     submit_mock.assert_awaited_once()
     assert submit_mock.await_args.kwargs["remote_input_path"] == "/remote/agoutic/incoming/Jamshid"
+
+
+@pytest.mark.asyncio
+async def test_submit_dogme_job_forwards_custom_profile_fields(monkeypatch):
+    submit_mock = AsyncMock(return_value={"run_uuid": "run-custom", "status": "PENDING"})
+    monkeypatch.setattr(mcp_server.tools, "submit_dogme_job", submit_mock)
+
+    await mcp_server.submit_dogme_job(
+        sample_name="Jamshid",
+        mode="DNA",
+        input_directory="/data/pod5",
+        project_id="proj-1",
+        custom_dogme_profile="export MODKITBASE=/cluster/modkit\n",
+        custom_dogme_bind_paths=["/cluster/modkit"],
+    )
+
+    assert submit_mock.await_args.kwargs["custom_dogme_profile"] == "export MODKITBASE=/cluster/modkit\n"
+    assert submit_mock.await_args.kwargs["custom_dogme_bind_paths"] == ["/cluster/modkit"]
 
 
 @pytest.mark.asyncio

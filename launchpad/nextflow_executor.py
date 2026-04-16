@@ -14,6 +14,8 @@ from common.logging_config import get_logger
 from common.workflow_paths import next_workflow_number, workflow_dir_name
 from launchpad.config import (
     DOGME_REPO,
+    DOGME_DNA_MODKITBASE,
+    DOGME_DNA_MODKITMODEL,
     NEXTFLOW_BIN,
     LAUNCHPAD_WORK_DIR,
     LAUNCHPAD_LOGS_DIR,
@@ -26,6 +28,35 @@ from launchpad.config import (
 )
 
 logger = get_logger(__name__)
+
+_MINIMAL_DOGME_PROFILE = "# Dogme environment profile\n# Add environment variables here if needed\n"
+
+
+def _ensure_trailing_newline(content: str) -> str:
+    if content.endswith("\n"):
+        return content
+    return f"{content}\n"
+
+
+def resolve_dogme_profile_content(mode: str, custom_profile: str | None = None) -> str:
+    """Return the staged dogme.profile content for a workflow mode."""
+    normalized_mode = str(mode or "").strip().upper()
+    if normalized_mode == DogmeMode.DNA.value and str(custom_profile or "").strip():
+        return _ensure_trailing_newline(str(custom_profile))
+
+    if normalized_mode == DogmeMode.DNA.value:
+        return (
+            "# Dogme environment profile\n"
+            "# DNA mode modkit paths inside the dogme container image\n"
+            f"export MODKITBASE={DOGME_DNA_MODKITBASE}\n"
+            f"export MODKITMODEL={DOGME_DNA_MODKITMODEL}\n"
+        )
+
+    dogme_profile_src = DOGME_REPO / "dogme.profile"
+    if dogme_profile_src.exists():
+        return _ensure_trailing_newline(dogme_profile_src.read_text())
+
+    return _MINIMAL_DOGME_PROFILE
 
 class NextflowConfig:
     """Generates Nextflow configuration for Dogme pipeline."""
@@ -398,6 +429,7 @@ class NextflowExecutor:
         per_mod: int = 5,
         accuracy: str = "sup",
         max_gpu_tasks: Optional[int] = None,
+        custom_dogme_profile: str | None = None,
         workflow_index: Optional[int] = None,
         rerun_in_place: bool = False,
         archive_sample_names: Optional[list[str]] = None,
@@ -621,19 +653,9 @@ class NextflowExecutor:
             except Exception as e:
                 raise RuntimeError(f"Failed to create pod5 symlink: {e}")
         
-        # Copy or create dogme.profile
-        dogme_profile_src = DOGME_REPO / "dogme.profile"
         dogme_profile_dst = work_dir / "dogme.profile"
-        
-        if dogme_profile_src.exists():
-            # Copy from repo
-            import shutil
-            shutil.copy2(dogme_profile_src, dogme_profile_dst)
-            logger.debug("Copied dogme.profile", source=str(dogme_profile_src))
-        else:
-            # Create a minimal one
-            dogme_profile_dst.write_text("# Dogme environment profile\n# Add environment variables here if needed\n")
-            logger.debug("Created minimal dogme.profile")
+        dogme_profile_dst.write_text(resolve_dogme_profile_content(mode, custom_profile=custom_dogme_profile))
+        logger.debug("Staged dogme.profile", mode=mode, path=str(dogme_profile_dst))
         
         # Generate configuration
         config_string = NextflowConfig.generate_config(

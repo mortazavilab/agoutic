@@ -187,6 +187,8 @@ class LaunchpadMCPTools:
         per_mod: Optional[int] = None,
         accuracy: Optional[str] = None,
         max_gpu_tasks: Optional[int] = None,
+        custom_dogme_profile: Optional[str] = None,
+        custom_dogme_bind_paths: Optional[list[str]] = None,
         user_id: Optional[str] = None,
         username: Optional[str] = None,
         project_slug: Optional[str] = None,
@@ -234,6 +236,8 @@ class LaunchpadMCPTools:
             per_mod: Optional per-modification threshold
             accuracy: Optional basecalling accuracy level (e.g., "sup", "hac")
             max_gpu_tasks: Optional max concurrent GPU tasks (dorado/openChromatin) per run (default: no maximum, max: 16)
+            custom_dogme_profile: Optional full dogme.profile override sourced before each Dogme task
+            custom_dogme_bind_paths: Optional remote bind paths required by a custom dogme.profile when using SLURM
         
         Returns:
             {"run_uuid": str, "sample_name": str, "status": str, "work_directory": str}
@@ -267,6 +271,10 @@ class LaunchpadMCPTools:
             payload["accuracy"] = accuracy
         if max_gpu_tasks is not None:
             payload["max_gpu_tasks"] = max_gpu_tasks
+        if custom_dogme_profile is not None:
+            payload["custom_dogme_profile"] = custom_dogme_profile
+        if custom_dogme_bind_paths:
+            payload["custom_dogme_bind_paths"] = custom_dogme_bind_paths
         if user_id is not None:
             payload["user_id"] = user_id
         if username is not None:

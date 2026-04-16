@@ -614,6 +614,7 @@ def _sync_active_staging_block(
         block.id,
         {
             "status": "RUNNING",
+            "staging_task_id": task_id,
             "message": msg,
             "error": None,
             "stage_parts": stage_parts,
@@ -953,21 +954,52 @@ async def resume_staging_task_proxy(
             raise HTTPException(status_code=502, detail="Launchpad did not return a replacement staging task id")
 
         stage_parts = _resuming_stage_parts(payload.get("stage_parts"))
-        resume_msg = "Resuming remote staging..."
-        _update_project_block_payload(
-            session,
-            block.id,
-            {
-                "status": "RUNNING",
-                "message": resume_msg,
-                "error": None,
-                "traceback": None,
-                "staging_task_id": new_task_id,
-                "progress_percent": _stage_part_progress(stage_parts),
-                "stage_parts": stage_parts,
-            },
-            status="RUNNING",
-        )
+        current_status_payload = None
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                status_resp = await client.get(
+                    f"{launchpad_rest}/remote/stage/{new_task_id}",
+                    headers=headers,
+                )
+            if status_resp.status_code == 200:
+                current_status_payload = status_resp.json() or {}
+        except Exception:
+            logger.debug(
+                "Unable to fetch resumed staging task status immediately",
+                task_id=new_task_id,
+                exc_info=True,
+            )
+
+        local_payload = dict(payload)
+        local_payload["stage_parts"] = stage_parts
+        latest_status = str(
+            (current_status_payload or {}).get("status") or result.get("status") or "queued"
+        ).strip().lower()
+        latest_progress = (current_status_payload or {}).get("progress")
+        if not isinstance(latest_progress, dict):
+            latest_progress = {}
+
+        if latest_status in {"queued", "running"}:
+            _sync_active_staging_block(
+                session,
+                block,
+                local_payload,
+                task_id=new_task_id,
+                task_status=latest_status,
+                progress=latest_progress,
+            )
+        else:
+            _sync_terminal_staging_block(
+                session,
+                block,
+                local_payload,
+                task_id=new_task_id,
+                task_status=latest_status,
+                error_msg=(current_status_payload or {}).get("error"),
+                stage_result=(current_status_payload or {}).get("result")
+                if isinstance((current_status_payload or {}).get("result"), dict)
+                else None,
+            )
 
         workflow_plan_block_id = payload.get("workflow_plan_block_id")
         stage_input_step_id = payload.get("stage_input_step_id")
@@ -998,31 +1030,38 @@ async def resume_staging_task_proxy(
                     extra={"error": None},
                 )
 
-        asyncio.create_task(
-            job_polling.poll_staging_status(
-                task_id=new_task_id,
-                project_id=block.project_id,
-                block_id=block.id,
-                owner_id=block.owner_id,
-                job_data={
-                    "sample_name": payload.get("sample_name", ""),
-                    "mode": payload.get("mode", ""),
-                    "input_directory": payload.get("input_directory"),
-                    "remote_base_path": payload.get("remote_base_path"),
-                },
-                ssh_profile_id=str(payload.get("ssh_profile_id") or ""),
-                ssh_profile_nickname=payload.get("ssh_profile_nickname"),
-                workflow_block_id=workflow_plan_block_id,
-                gate_block_id=payload.get("gate_block_id"),
-                stage_input_step_id=stage_input_step_id,
-                complete_stage_only_step_id=complete_stage_only_step_id,
-                gate_payload={
-                    "skill": payload.get("skill", "remote_execution"),
-                    "model": payload.get("model", "default"),
-                },
-                initial_stage_parts=stage_parts,
+        session.refresh(block)
+        updated_stage_payload = get_block_payload(block)
+        poller_stage_parts = updated_stage_payload.get("stage_parts") if isinstance(updated_stage_payload, dict) else None
+        if not isinstance(poller_stage_parts, dict):
+            poller_stage_parts = stage_parts
+
+        if latest_status in {"queued", "running"}:
+            asyncio.create_task(
+                job_polling.poll_staging_status(
+                    task_id=new_task_id,
+                    project_id=block.project_id,
+                    block_id=block.id,
+                    owner_id=block.owner_id,
+                    job_data={
+                        "sample_name": payload.get("sample_name", ""),
+                        "mode": payload.get("mode", ""),
+                        "input_directory": payload.get("input_directory"),
+                        "remote_base_path": payload.get("remote_base_path"),
+                    },
+                    ssh_profile_id=str(payload.get("ssh_profile_id") or ""),
+                    ssh_profile_nickname=payload.get("ssh_profile_nickname"),
+                    workflow_block_id=workflow_plan_block_id,
+                    gate_block_id=payload.get("gate_block_id"),
+                    stage_input_step_id=stage_input_step_id,
+                    complete_stage_only_step_id=complete_stage_only_step_id,
+                    gate_payload={
+                        "skill": payload.get("skill", "remote_execution"),
+                        "model": payload.get("model", "default"),
+                    },
+                    initial_stage_parts=poller_stage_parts,
+                )
             )
-        )
 
         return result
     finally:

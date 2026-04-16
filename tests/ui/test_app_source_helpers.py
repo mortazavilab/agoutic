@@ -25,6 +25,7 @@ _EXTRACTED_MODULES = {
     "appui_renderers": _UI_DIR / "appui_renderers.py",
     "appui_tasks": _UI_DIR / "appui_tasks.py",
 }
+_BLOCK_PART2_PATH = _UI_DIR / "appui_block_part2.py"
 
 
 def _parse_appui_imports():
@@ -149,6 +150,17 @@ def _load_function(name: str, extra_globals: dict | None = None):
     return namespace[name]
 
 
+def _load_block_part2_function(name: str, extra_globals: dict | None = None):
+    namespace: dict = {"datetime": dt}
+    if extra_globals:
+        namespace.update(extra_globals)
+    if name != "_parse_stage_timestamp":
+        namespace["_parse_stage_timestamp"] = _ast_load_fn_from_file(
+            "_parse_stage_timestamp", _BLOCK_PART2_PATH, namespace
+        )
+    return _ast_load_fn_from_file(name, _BLOCK_PART2_PATH, namespace)
+
+
 class TestCreateProjectServerSide:
     def test_returns_server_project_id_on_success(self):
         response = SimpleNamespace(
@@ -236,6 +248,74 @@ class TestPauseAutoRefresh:
         fn(2)
 
         assert fake_st.session_state["_suppress_auto_refresh_until"] == 110.0
+
+
+class TestStagingBlockNeedsRefresh:
+    def test_running_block_refreshes_quickly_without_transfer_snapshot(self):
+        fn = _load_block_part2_function(
+            "_staging_block_needs_refresh",
+            {
+                "_STAGING_UI_STALE_SECONDS": 90.0,
+                "_STAGING_UI_ACTIVE_REFRESH_SECONDS": 8.0,
+            },
+        )
+        updated_at = (
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=6)
+        ).isoformat().replace("+00:00", "Z")
+
+        assert fn(
+            {"status": "RUNNING", "created_at": updated_at},
+            {"staging_task_id": "stg-1", "last_updated": updated_at},
+        ) is True
+
+    def test_running_block_with_transfer_snapshot_uses_active_refresh_window(self):
+        fn = _load_block_part2_function(
+            "_staging_block_needs_refresh",
+            {
+                "_STAGING_UI_STALE_SECONDS": 90.0,
+                "_STAGING_UI_ACTIVE_REFRESH_SECONDS": 8.0,
+            },
+        )
+        fresh_updated_at = (
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=7)
+        ).isoformat().replace("+00:00", "Z")
+        stale_updated_at = (
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=9)
+        ).isoformat().replace("+00:00", "Z")
+
+        assert fn(
+            {"status": "RUNNING", "created_at": fresh_updated_at},
+            {
+                "staging_task_id": "stg-1",
+                "last_updated": fresh_updated_at,
+                "transfer_progress": {"file_percent": 67},
+            },
+        ) is False
+        assert fn(
+            {"status": "RUNNING", "created_at": stale_updated_at},
+            {
+                "staging_task_id": "stg-1",
+                "last_updated": stale_updated_at,
+                "transfer_progress": {"file_percent": 67},
+            },
+        ) is True
+
+    def test_non_running_block_keeps_long_stale_window(self):
+        fn = _load_block_part2_function(
+            "_staging_block_needs_refresh",
+            {
+                "_STAGING_UI_STALE_SECONDS": 90.0,
+                "_STAGING_UI_ACTIVE_REFRESH_SECONDS": 8.0,
+            },
+        )
+        updated_at = (
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=20)
+        ).isoformat().replace("+00:00", "Z")
+
+        assert fn(
+            {"status": "FAILED", "created_at": updated_at},
+            {"staging_task_id": "stg-1", "last_updated": updated_at},
+        ) is False
 
 
 class TestAutoRefreshIsSuppressed:

@@ -703,9 +703,11 @@ class TestSubmitJobAfterApproval:
             },
             "edited_params": {
                 "sample_name": "edited_sample",
-                "mode": "RNA",
+                "mode": "DNA",
                 "input_directory": "/data/edited",
                 "reference_genome": ["GRCh38"],
+                "custom_dogme_profile": "export MODKITBASE=/cluster/modkit\n",
+                "custom_dogme_bind_paths": ["/cluster/modkit"],
             },
         })
 
@@ -726,6 +728,8 @@ class TestSubmitJobAfterApproval:
         call_args = mock_client.call_tool.call_args
         assert call_args.kwargs.get("sample_name") == "edited_sample" or \
                (len(call_args.args) > 1 and "edited_sample" in str(call_args))
+        assert call_args.kwargs["custom_dogme_profile"] == "export MODKITBASE=/cluster/modkit\n"
+        assert call_args.kwargs["custom_dogme_bind_paths"] == ["/cluster/modkit"]
 
         sess = session_factory()
         job_blocks = sess.query(ProjectBlock).filter(
@@ -734,6 +738,37 @@ class TestSubmitJobAfterApproval:
         assert len(job_blocks) == 1
         assert get_block_payload(job_blocks[0])["sample_name"] == "edited_sample"
         sess.close()
+
+    @pytest.mark.asyncio
+    async def test_non_dna_submission_keeps_custom_dogme_fields_empty(self, session_factory, seed_data):
+        """Non-DNA approval payloads should submit without custom dogme override values."""
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "edited_params": {
+                "sample_name": "edited_rna",
+                "mode": "RNA",
+                "input_directory": "/data/rna",
+                "reference_genome": ["GRCh38"],
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "rna-uuid",
+            "work_directory": "/work/rna",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["sample_name"] == "edited_rna"
+        assert submitted["mode"] == "RNA"
+        assert submitted["custom_dogme_profile"] is None
+        assert submitted["custom_dogme_bind_paths"] == []
 
     @pytest.mark.asyncio
     async def test_no_params_creates_error(self, session_factory, seed_data):

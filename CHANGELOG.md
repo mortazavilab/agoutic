@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+### Features
+
+- **SLURM DNA approvals can now override `dogme.profile` with cluster-hosted
+  modkit settings at run time** — the approval gate now offers a DNA-only
+  custom `dogme.profile` option for SLURM runs, lets users enter extra remote
+  bind paths and environment exports, and shows a preview of the exact bind
+  list and profile text that will be submitted. Launchpad stages the custom
+  profile only for DNA runs, validates the extra remote bind paths before
+  submission, and ignores the custom override fields for RNA/cDNA so the
+  standard non-DNA profile behavior is preserved.
+  (`ui/appui_block_part1.py`, `cortex/workflow_submission.py`,
+  `launchpad/backends/base.py`, `launchpad/schemas.py`,
+  `launchpad/app.py`, `launchpad/mcp_tools.py`,
+  `launchpad/mcp_server.py`, `launchpad/nextflow_executor.py`,
+  `launchpad/backends/local_backend.py`,
+  `launchpad/backends/slurm_backend.py`)
+
 ### Bug Fixes
 
 - **Remote staging now surfaces byte-level transfer updates in the UI** —
@@ -10,6 +27,39 @@
   (`launchpad/backends/file_transfer.py`,
   `launchpad/backends/slurm_backend.py`, `cortex/job_polling.py`,
   `cortex/app.py`, `ui/appui_block_part2.py`)
+
+- **Broker-backed staging now reports live progress and no longer treats NFS
+  placeholder files as stale cache corruption** — Launchpad now polls the
+  local auth broker for in-flight rsync progress so the staging UI updates
+  during brokered transfers, and remote cache inspection ignores transient
+  `.nfs*` placeholders when deciding whether an interrupted staged-input cache
+  can be resumed instead of being deleted.
+  (`launchpad/backends/file_transfer.py`,
+  `launchpad/backends/local_user_broker.py`,
+  `launchpad/backends/slurm_backend.py`)
+
+- **Running staging cards now refresh often enough to actually show live
+  transfer progress** — the Streamlit staging UI no longer waits up to 90 s
+  before asking Cortex for a fresher running-task snapshot, and it retries on
+  a shorter cadence so resumed broker-backed rsync transfers surface byte
+  counters while the page is open.
+  (`ui/appui_block_part2.py`)
+
+- **Large brokered rsync transfers no longer fail after the copy finishes just
+  because the broker response is too large** — Launchpad now reads local auth
+  broker replies to EOF instead of using line-length-limited framing, and the
+  broker compacts oversized rsync stdout before returning it so completed large
+  single-file uploads do not get misreported as failed at response-parse time.
+  (`launchpad/backends/local_auth_sessions.py`,
+  `launchpad/backends/local_user_broker.py`,
+  `launchpad/backends/file_transfer.py`)
+
+- **Resumed stage-only transfers now show Launchpad's real queued state
+  immediately instead of pretending rsync is already running** — after Resume
+  Staging, Cortex now syncs the replacement staging task's current status right
+  away, so stage-only blocks can surface "waiting for unlock/resume" messages
+  when no brokered rsync has actually restarted yet.
+  (`cortex/app.py`)
 
 - **Large rsync staging transfers no longer false-stall on carriage-return
   progress updates** — the direct and brokered rsync watchdogs now treat any
@@ -25,12 +75,47 @@
 
 ### Tests
 
+- **Custom `dogme.profile` runtime override regression coverage** — added
+  focused tests for DNA-only profile override resolution, non-DNA ignore
+  behavior, SLURM remote bind/profile staging, Launchpad MCP payload
+  forwarding, and Cortex approval-path propagation of the DNA-only custom
+  fields.
+  (`tests/launchpad/test_nextflow_executor.py`,
+  `tests/test_slurm_backend_cache_flow.py`,
+  `tests/launchpad/test_mcp_server.py`,
+  `tests/launchpad/test_mcp_tools.py`,
+  `tests/cortex/test_background_tasks.py`)
+
 - **Staging transfer byte-progress regression coverage** — added focused tests
   for rsync byte parsing, Cortex staging-payload persistence of transfer
   snapshots, and refresh-path propagation of transfer byte details.
   (`tests/launchpad/test_file_transfer.py`,
   `tests/cortex/test_background_tasks.py`,
   `tests/cortex/test_block_endpoints.py`)
+
+- **Broker progress and NFS-resume regression coverage** — added focused tests
+  for broker request-status snapshots, live broker progress polling in the file
+  transfer layer, and resumable staged-input caches that contain transient
+  `.nfs*` placeholders.
+  (`tests/launchpad/test_local_auth_sessions.py`,
+  `tests/launchpad/test_file_transfer.py`,
+  `tests/launchpad/test_slurm_backend.py`)
+
+- **Running staging UI refresh regression coverage** — added focused tests for
+  the active refresh thresholds that govern when a visible `STAGING_TASK`
+  snapshot is refreshed while a transfer is still running.
+  (`tests/ui/test_app_source_helpers.py`)
+
+- **Broker large-response regression coverage** — added focused tests for
+  local auth broker responses that exceed `StreamReader.readline()` limits and
+  for oversized rsync stdout payloads being compacted before they are returned
+  to Launchpad.
+  (`tests/launchpad/test_local_auth_sessions.py`)
+
+- **Stage-only resume status regression coverage** — added focused tests for
+  resumed staging blocks that should immediately reflect a queued replacement
+  task waiting on Launchpad auth/restart recovery.
+  (`tests/cortex/test_block_endpoints.py`)
 
 - **Rsync progress watchdog regression coverage** — added focused tests for
   both direct and brokered transfer runners to ensure carriage-return rsync

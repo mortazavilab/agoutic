@@ -108,6 +108,77 @@ async def test_upload_single_file_prefers_active_broker_session_without_trailing
 
 
 @pytest.mark.asyncio
+async def test_upload_broker_polls_live_progress(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_file = tmp_path / "IGVFFI6571ANCX.bam"
+    local_file.write_text("BAM")
+    fake_session = SimpleNamespace(session_id="sess-1")
+    progress_updates = []
+    transfer_released = False
+
+    class FakeSessionManager:
+        async def get_active_session(self, profile):
+            return fake_session
+
+        async def invoke(self, session, payload):
+            nonlocal transfer_released
+            if payload["op"] == "get_request_status":
+                transfer_released = True
+                return {
+                    "ok": True,
+                    "active": True,
+                    "status": "running",
+                    "progress": {
+                        "current_file": "IGVFFI6571ANCX.bam",
+                        "current_file_bytes_transferred": 670,
+                        "current_file_total_bytes_estimate": 1000,
+                        "file_percent": 67,
+                        "files_transferred": 0,
+                        "files_total": 1,
+                        "speed": "120MB/s",
+                    },
+                }
+            if payload["op"] == "rsync_transfer":
+                while not transfer_released:
+                    await asyncio.sleep(0)
+                return {
+                    "ok": True,
+                    "bytes_transferred": 1000,
+                    "progress": {
+                        "current_file": "IGVFFI6571ANCX.bam",
+                        "current_file_bytes_transferred": 1000,
+                        "current_file_total_bytes_estimate": 1000,
+                        "file_percent": 100,
+                        "files_transferred": 1,
+                        "files_total": 1,
+                        "speed": "120MB/s",
+                    },
+                    "stdout": "",
+                }
+            raise AssertionError(f"Unexpected broker op: {payload['op']}")
+
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(_seconds):
+        await real_sleep(0)
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+    monkeypatch.setattr("launchpad.backends.file_transfer.asyncio.sleep", fake_sleep)
+
+    result = await manager.upload_inputs(
+        profile=key_file_profile,
+        local_path=str(local_file),
+        remote_path="/scratch/seyedam/agoutic/data/sample",
+        on_progress=progress_updates.append,
+        transfer_id="req-live-progress",
+    )
+
+    assert result == {"ok": True, "message": "Upload completed", "bytes_transferred": 1000}
+    assert any(update.get("file_percent") == 67 for update in progress_updates)
+    assert any(update.get("file_percent") == 100 for update in progress_updates)
+
+
+@pytest.mark.asyncio
 async def test_download_passes_include_patterns_to_broker_session(monkeypatch, tmp_path, key_file_profile):
     manager = FileTransferManager()
     local_dir = tmp_path / "workflow2"

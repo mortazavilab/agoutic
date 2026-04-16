@@ -23,8 +23,8 @@ from launchpad.backends.stage_machine import RunStage
 from launchpad.backends.resource_validator import validate_resources
 from launchpad.backends.path_validator import validate_remote_paths, check_all_paths_ok
 from launchpad.backends.file_transfer import FileTransferManager
-from launchpad.config import REFERENCE_GENOMES
-from launchpad.nextflow_executor import NextflowConfig
+from launchpad.config import REFERENCE_GENOMES, DogmeMode
+from launchpad.nextflow_executor import NextflowConfig, resolve_dogme_profile_content
 
 logger = get_logger(__name__)
 
@@ -1652,6 +1652,16 @@ class SlurmBackend:
             cleaned = str(remote_ref_root or "").strip()
             if cleaned:
                 bind_paths.append(cleaned)
+        if str(params.mode or "").strip().upper() == DogmeMode.DNA.value:
+            for extra_bind_path in params.custom_dogme_bind_paths or []:
+                cleaned = str(extra_bind_path or "").strip()
+                if not cleaned:
+                    continue
+                if not await conn.path_exists(cleaned):
+                    raise FileNotFoundError(
+                        f"Custom Dogme bind path does not exist on the remote host: {cleaned}"
+                    )
+                bind_paths.append(cleaned)
 
         config = NextflowConfig.generate_config(
             sample_name=params.sample_name,
@@ -1678,9 +1688,13 @@ class SlurmBackend:
         quoted_config_path = shlex.quote(config_path)
         profile_path = f"{remote_work}/dogme.profile"
         quoted_profile_path = shlex.quote(profile_path)
+        profile_content = resolve_dogme_profile_content(
+            params.mode,
+            custom_profile=params.custom_dogme_profile,
+        )
         await conn.mkdir_p(remote_work)
         await conn.run(f"cat > {quoted_config_path} << 'AGOUTIC_EOF'\n{config}\nAGOUTIC_EOF", check=True)
-        await conn.run(f"cat > {quoted_profile_path} << 'AGOUTIC_EOF'\nAGOUTIC_EOF", check=True)
+        await conn.run(f"cat > {quoted_profile_path} << 'AGOUTIC_EOF'\n{profile_content}AGOUTIC_EOF", check=True)
         return config_path
 
     async def _ensure_workflow_input_links(
@@ -1916,14 +1930,18 @@ class SlurmBackend:
                 data_refresh_reason = data_refresh_reason or "remote cache inspection failed"
             elif data_cache_info.get("has_symlinks"):
                 data_refresh_reason = "cached input contains symlinks"
-            elif data_cache_info.get("has_partial_dir"):
-                remote_size_bytes = int(data_cache_info.get("size_bytes") or 0)
+            elif data_cache_info.get("has_partial_dir") or data_cache_info.get("has_nfs_placeholders"):
+                remote_size_bytes = int(
+                    data_cache_info.get("largest_file_size")
+                    or data_cache_info.get("size_bytes")
+                    or 0
+                )
                 if remote_size_bytes <= input_size_bytes and data_cache_path == target_data_remote:
                     resume_partial_transfer = True
                     data_refresh_reason = None
                 else:
                     data_refresh_reason = (
-                        f"cached input contains {self._RSYNC_PARTIAL_DIR} "
+                        f"cached input contains resumable transfer remnants "
                         f"(remote={remote_size_bytes}, expected={input_size_bytes})"
                     )
             elif int(data_cache_info.get("size_bytes") or 0) != input_size_bytes:
@@ -2079,7 +2097,7 @@ class SlurmBackend:
             "python3 - <<'PY'\n"
             "import json, os\n"
             f"path = {path!r}\n"
-            "summary = {'size_bytes': 0, 'has_symlinks': False, 'has_partial_dir': False}\n"
+            "summary = {'size_bytes': 0, 'largest_file_size': 0, 'has_symlinks': False, 'has_partial_dir': False, 'has_nfs_placeholders': False}\n"
             "for root, dirs, files in os.walk(path, followlinks=False):\n"
             f"    if {self._RSYNC_PARTIAL_DIR!r} in dirs:\n"
             "        summary['has_partial_dir'] = True\n"
@@ -2088,11 +2106,16 @@ class SlurmBackend:
             "        if os.path.islink(candidate):\n"
             "            summary['has_symlinks'] = True\n"
             "    for name in files:\n"
+            "        if name.startswith('.nfs'):\n"
+            "            summary['has_nfs_placeholders'] = True\n"
+            "            continue\n"
             "        candidate = os.path.join(root, name)\n"
             "        if os.path.islink(candidate):\n"
             "            continue\n"
             "        try:\n"
-            "            summary['size_bytes'] += int(os.stat(candidate, follow_symlinks=False).st_size)\n"
+            "            file_size = int(os.stat(candidate, follow_symlinks=False).st_size)\n"
+            "            summary['size_bytes'] += file_size\n"
+            "            summary['largest_file_size'] = max(summary['largest_file_size'], file_size)\n"
             "        except OSError:\n"
             "            pass\n"
             "print(json.dumps(summary))\n"
@@ -2110,8 +2133,10 @@ class SlurmBackend:
             return None
         return {
             "size_bytes": int(payload.get("size_bytes") or 0),
+            "largest_file_size": int(payload.get("largest_file_size") or 0),
             "has_symlinks": bool(payload.get("has_symlinks")),
             "has_partial_dir": bool(payload.get("has_partial_dir")),
+            "has_nfs_placeholders": bool(payload.get("has_nfs_placeholders")),
         }
 
     @staticmethod

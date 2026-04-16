@@ -4,6 +4,7 @@ File transfer over SSH — upload inputs and download outputs.
 from __future__ import annotations
 
 import asyncio
+import uuid
 import os
 import re
 import shlex
@@ -133,6 +134,7 @@ def _remaining_timeout_seconds(deadline: float | None) -> float | None:
 
 _DEFAULT_STAGE_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_STAGE_MAX_TOTAL_TIMEOUT_SECONDS = 28800.0  # 8 hours
+_BROKER_PROGRESS_POLL_INTERVAL_SECONDS = 1.0
 
 
 def _stage_idle_timeout_seconds() -> float:
@@ -378,36 +380,72 @@ class FileTransferManager:
         if session is None:
             return None
 
-        response = await session_manager.invoke(
-            session,
-            {
-                "op": "rsync_transfer",
-                "profile": {
-                    "ssh_host": profile.ssh_host,
-                    "ssh_port": profile.ssh_port,
-                    "ssh_username": profile.ssh_username,
-                    "auth_method": profile.auth_method,
-                    "key_file_path": profile.key_file_path,
-                },
-                "source": source,
-                "dest": dest,
-                "include_patterns": include_patterns or [],
-                "exclude_patterns": exclude_patterns or [],
-                "copy_links": copy_links,
-                "copy_dirlinks": copy_dirlinks,
-                "use_skip_compress": use_skip_compress,
-                "timeout_seconds": timeout_seconds or LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
-                "idle_timeout_seconds": _stage_idle_timeout_seconds(),
-                "request_id": transfer_id,
+        request_id = transfer_id or uuid.uuid4().hex
+        request_payload = {
+            "op": "rsync_transfer",
+            "profile": {
+                "ssh_host": profile.ssh_host,
+                "ssh_port": profile.ssh_port,
+                "ssh_username": profile.ssh_username,
+                "auth_method": profile.auth_method,
+                "key_file_path": profile.key_file_path,
             },
-        )
+            "source": source,
+            "dest": dest,
+            "include_patterns": include_patterns or [],
+            "exclude_patterns": exclude_patterns or [],
+            "copy_links": copy_links,
+            "copy_dirlinks": copy_dirlinks,
+            "use_skip_compress": use_skip_compress,
+            "timeout_seconds": timeout_seconds or LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS,
+            "idle_timeout_seconds": _stage_idle_timeout_seconds(),
+            "request_id": request_id,
+        }
+
+        response_task = asyncio.create_task(session_manager.invoke(session, request_payload))
+        poller_task: asyncio.Task | None = None
+        if on_progress:
+            async def _poll_broker_progress() -> None:
+                last_progress: dict | None = None
+                while not response_task.done():
+                    await asyncio.sleep(_BROKER_PROGRESS_POLL_INTERVAL_SECONDS)
+                    if response_task.done():
+                        break
+                    try:
+                        status = await session_manager.invoke(
+                            session,
+                            {
+                                "op": "get_request_status",
+                                "request_id": request_id,
+                                "timeout_seconds": 5,
+                            },
+                        )
+                    except Exception:
+                        continue
+                    progress = status.get("progress")
+                    if not status.get("ok") or not isinstance(progress, dict) or not progress:
+                        continue
+                    snapshot = dict(progress)
+                    if snapshot == last_progress:
+                        continue
+                    last_progress = snapshot
+                    on_progress(snapshot)
+
+            poller_task = asyncio.create_task(_poll_broker_progress())
+
+        try:
+            response = await response_task
+        finally:
+            if poller_task is not None:
+                poller_task.cancel()
+                try:
+                    await poller_task
+                except asyncio.CancelledError:
+                    pass
+
         if response.get("ok"):
-            if on_progress and response.get("stdout"):
-                for line in response["stdout"].splitlines():
-                    for segment in line.split("\r"):
-                        info = self._parse_rsync_progress_line(segment)
-                        if info:
-                            on_progress(info)
+            if on_progress and isinstance(response.get("progress"), dict) and response.get("progress"):
+                on_progress(dict(response["progress"]))
             return {
                 "ok": True,
                 "message": f"{direction.title()} completed",

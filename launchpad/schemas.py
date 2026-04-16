@@ -48,6 +48,8 @@ class SubmitJobRequest(BaseModel):
     per_mod: Optional[int] = 5  # Percentage threshold for modifications
     accuracy: Optional[str] = "sup"  # Basecalling accuracy (sup/hac/fast)
     max_gpu_tasks: Optional[int] = None  # None lets Nextflow manage concurrency without maxForks
+    custom_dogme_profile: Optional[str] = None
+    custom_dogme_bind_paths: list[str] = Field(default_factory=list)
 
     # Standalone script execution (local only)
     script_id: Optional[str] = None
@@ -71,6 +73,21 @@ class SubmitJobRequest(BaseModel):
         if value < 1 or value > MAX_GPU_TASKS_LIMIT:
             raise ValueError(f"max_gpu_tasks must be between 1 and {MAX_GPU_TASKS_LIMIT}")
         return value
+
+    @field_validator("custom_dogme_bind_paths", mode="before")
+    @classmethod
+    def normalize_custom_dogme_bind_paths(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+
+        normalized: list[str] = []
+        for item in value:
+            cleaned = str(item or "").strip()
+            if cleaned and cleaned not in normalized:
+                normalized.append(cleaned)
+        return normalized
 
     @model_validator(mode="after")
     def validate_remote_execution(self):

@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-from launchpad.config import REFERENCE_GENOMES
-from launchpad.nextflow_executor import NextflowConfig, NextflowExecutor
+import launchpad.nextflow_executor as nextflow_module
+from launchpad.config import REFERENCE_GENOMES, DOGME_DNA_MODKITBASE, DOGME_DNA_MODKITMODEL
+from launchpad.nextflow_executor import NextflowConfig, NextflowExecutor, resolve_dogme_profile_content
 
 
 class TestGenerateConfig:
@@ -180,6 +181,54 @@ class TestGenerateConfig:
 
         assert "kallistoIndex = '/remote/ref/mm39/mm39.idx'" in config
         assert "t2g = '/remote/ref/mm39/mm39.t2g'" in config
+
+
+class TestResolveDogmeProfileContent:
+    def test_dna_mode_uses_container_modkit_paths(self):
+        profile = resolve_dogme_profile_content("DNA")
+
+        assert f"export MODKITBASE={DOGME_DNA_MODKITBASE}" in profile
+        assert f"export MODKITMODEL={DOGME_DNA_MODKITMODEL}" in profile
+        assert "LIBTORCH" not in profile
+        assert "DYLD_LIBRARY_PATH" not in profile
+        assert "LD_LIBRARY_PATH" not in profile
+
+    def test_custom_profile_override_takes_precedence(self):
+        profile = resolve_dogme_profile_content("DNA", custom_profile="export MODKITBASE=/remote/modkit")
+
+        assert profile == "export MODKITBASE=/remote/modkit\n"
+
+    def test_non_dna_ignores_custom_profile_override(self, monkeypatch, tmp_path):
+        dogme_repo = tmp_path / "dogme"
+        dogme_repo.mkdir()
+        (dogme_repo / "dogme.profile").write_text("export EXISTING_PROFILE=1\n")
+
+        monkeypatch.setattr(nextflow_module, "DOGME_REPO", dogme_repo)
+
+        assert (
+            resolve_dogme_profile_content("RNA", custom_profile="export MODKITBASE=/remote/modkit")
+            == "export EXISTING_PROFILE=1\n"
+        )
+
+    def test_non_dna_mode_uses_repo_profile_when_present(self, monkeypatch, tmp_path):
+        dogme_repo = tmp_path / "dogme"
+        dogme_repo.mkdir()
+        (dogme_repo / "dogme.profile").write_text("export EXISTING_PROFILE=1\n")
+
+        monkeypatch.setattr(nextflow_module, "DOGME_REPO", dogme_repo)
+
+        assert resolve_dogme_profile_content("RNA") == "export EXISTING_PROFILE=1\n"
+
+    def test_non_dna_mode_falls_back_to_minimal_profile_when_missing(self, monkeypatch, tmp_path):
+        dogme_repo = tmp_path / "dogme"
+        dogme_repo.mkdir()
+
+        monkeypatch.setattr(nextflow_module, "DOGME_REPO", dogme_repo)
+
+        assert resolve_dogme_profile_content("CDNA") == (
+            "# Dogme environment profile\n"
+            "# Add environment variables here if needed\n"
+        )
 
 
 class TestWriteConfigFile:

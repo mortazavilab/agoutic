@@ -5,6 +5,34 @@ from components.cards import info_callout, metadata_row, section_header, status_
 from components.forms import grouped_section, review_panel
 
 
+_DEFAULT_CLUSTER_MODKIT_PROFILE = (
+    "export MODKITBASE=/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0\n"
+    "export MODKITMODEL=${MODKITBASE}/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0\n"
+    "# the following is only needed if using the torch version of modkit\n"
+    "export LIBTORCH=${MODKITBASE}/libtorch\n"
+    "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib\n"
+    "export LD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}\n"
+)
+_DEFAULT_CLUSTER_MODKIT_BIND_PATHS = ["/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0"]
+
+
+def _paths_to_text(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    return "\n".join(str(item).strip() for item in value if str(item or "").strip())
+
+
+def _text_to_paths(value: str) -> list[str]:
+    normalized: list[str] = []
+    for line in str(value or "").replace(",", "\n").splitlines():
+        cleaned = line.strip()
+        if cleaned and cleaned not in normalized:
+            normalized.append(cleaned)
+    return normalized
+
+
 def render_block_part1(
     *,
     btype,
@@ -727,6 +755,9 @@ def render_block_part1(
                         remote_base_path = extracted_params.get("remote_base_path", "") or ""
                         local_workflow_directory = extracted_params.get("local_workflow_directory", "") or ""
                         result_destination_default = extracted_params.get("result_destination") or "local"
+                        custom_dogme_profile_value = extracted_params.get("custom_dogme_profile") or ""
+                        custom_dogme_bind_paths_text = _paths_to_text(extracted_params.get("custom_dogme_bind_paths"))
+                        allow_custom_dogme_profile = execution_mode == "slurm" and mode == "DNA"
 
                         if execution_mode == "slurm":
                             grouped_section("Remote Profile & SLURM")
@@ -843,8 +874,53 @@ def render_block_part1(
                                 index=["local", "remote", "both"].index(result_destination_default) if result_destination_default in ["local", "remote", "both"] else 0,
                                 help="Choose whether results stay remote, sync back locally, or both."
                             )
+
+                            if allow_custom_dogme_profile:
+                                grouped_section("Custom Cluster Modkit")
+                                use_custom_dogme_profile = st.checkbox(
+                                    "Use a custom dogme.profile for this run",
+                                    value=bool(custom_dogme_profile_value),
+                                    help="Enable this when DNA Dogme should source a cluster-hosted modkit or extra environment variables instead of the default profile.",
+                                )
+                                if use_custom_dogme_profile:
+                                    if not custom_dogme_profile_value:
+                                        custom_dogme_profile_value = _DEFAULT_CLUSTER_MODKIT_PROFILE
+                                    if not custom_dogme_bind_paths_text:
+                                        custom_dogme_bind_paths_text = "\n".join(_DEFAULT_CLUSTER_MODKIT_BIND_PATHS)
+                                    st.caption(
+                                        "These host paths will be bound into the Apptainer container for this DNA run. "
+                                        "Make sure every path referenced by the profile is visible on the compute nodes."
+                                    )
+                                    custom_dogme_bind_paths_text = st.text_area(
+                                        "Custom Dogme Bind Paths",
+                                        value=custom_dogme_bind_paths_text,
+                                        height=80,
+                                        help="One path per line. These are added to the SLURM Apptainer bind list before Dogme runs.",
+                                    )
+                                    custom_dogme_profile_value = st.text_area(
+                                        "Custom dogme.profile",
+                                        value=custom_dogme_profile_value,
+                                        height=180,
+                                        help="Shell exports sourced before each Dogme task. Edit the defaults to point at the right cluster paths or add any extra environment variables you need.",
+                                    )
+                                    with st.expander("Preview Submitted Custom Dogme Settings", expanded=False):
+                                        st.caption("These exact values will be submitted if you approve this DNA run.")
+                                        st.markdown("**Bind Paths**")
+                                        st.code(custom_dogme_bind_paths_text.strip() or "(none)", language="text")
+                                        st.markdown("**dogme.profile**")
+                                        st.code(custom_dogme_profile_value.strip() or "(empty)", language="bash")
+                                else:
+                                    custom_dogme_profile_value = ""
+                                    custom_dogme_bind_paths_text = ""
+                            else:
+                                custom_dogme_profile_value = ""
+                                custom_dogme_bind_paths_text = ""
+                                if mode in {"RNA", "CDNA"}:
+                                    st.caption("Custom cluster modkit overrides are available only for DNA runs.")
                         else:
                             result_destination = None
+                            custom_dogme_profile_value = ""
+                            custom_dogme_bind_paths_text = ""
                         
                         # Advanced parameters in expander
                         with st.expander("⚙️ Advanced Parameters (optional)"):
@@ -920,6 +996,8 @@ def render_block_part1(
                                 "per_mod": per_mod,
                                 "accuracy": accuracy,
                                 "max_gpu_tasks": max_gpu_tasks,
+                                "custom_dogme_profile": (custom_dogme_profile_value.strip() or None) if allow_custom_dogme_profile else None,
+                                "custom_dogme_bind_paths": _text_to_paths(custom_dogme_bind_paths_text) if allow_custom_dogme_profile else [],
                                 "execution_mode": execution_mode,
                             }
                             if execution_mode == "slurm":

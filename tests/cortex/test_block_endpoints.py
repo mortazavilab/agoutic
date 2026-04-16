@@ -493,6 +493,20 @@ class TestCreateBlock:
                 assert url.endswith("/remote/stage/stg-1/resume")
                 return _FakeResponse()
 
+            async def get(self, url, headers=None):
+                assert url.endswith("/remote/stage/stg-2")
+                return SimpleNamespace(
+                    status_code=200,
+                    json=lambda: {
+                        "task_id": "stg-2",
+                        "status": "queued",
+                        "progress": {
+                            "wait_reason": "Waiting for the Remote Profile unlock to be re-established after restart before staging can resume.",
+                            "waiting_for_auth": True,
+                        },
+                    },
+                )
+
         monkeypatch.setattr("cortex.app.httpx.AsyncClient", _FakeAsyncClient)
         monkeypatch.setattr("cortex.app.job_polling.poll_staging_status", lambda **kwargs: scheduled.append(kwargs))
         monkeypatch.setattr("cortex.app.asyncio.create_task", lambda coro: None)
@@ -514,35 +528,33 @@ class TestCreateBlock:
 
         assert refreshed_stage.status == "RUNNING"
         assert stage_payload["staging_task_id"] == "stg-2"
-        assert stage_payload["message"] == "Resuming remote staging..."
+        assert stage_payload["message"] == "Staging is queued and waiting to resume."
         assert stage_payload["stage_parts"]["references"]["status"] == "COMPLETED"
-        assert stage_payload["stage_parts"]["data"]["status"] == "RUNNING"
+        assert stage_payload["stage_parts"]["data"]["status"] == "PENDING"
         assert refreshed_workflow.status == "RUNNING"
         assert {step["id"]: step["status"] for step in workflow_payload["steps"]} == {
             "stage_input": "RUNNING",
             "complete_stage_only": "PENDING",
         }
-        assert scheduled == [
-            {
-                "task_id": "stg-2",
-                "project_id": "proj-blk",
-                "block_id": stage_block.id,
-                "owner_id": "u-blk",
-                "job_data": {
-                    "sample_name": "IGVFFI6571ANCX",
-                    "mode": "DNA",
-                    "input_directory": "/tmp/IGVFFI6571ANCX.bam",
-                    "remote_base_path": "/remote/agoutic",
-                },
-                "ssh_profile_id": "profile-1",
-                "ssh_profile_nickname": "hpc3",
-                "workflow_block_id": workflow_block.id,
-                "stage_input_step_id": "stage_input",
-                "complete_stage_only_step_id": "complete_stage_only",
-                "gate_payload": {"skill": "remote_execution", "model": "default"},
-                "initial_stage_parts": stage_payload["stage_parts"],
-            }
-        ]
+        assert len(scheduled) == 1
+        scheduled_kwargs = scheduled[0]
+        assert scheduled_kwargs["task_id"] == "stg-2"
+        assert scheduled_kwargs["project_id"] == "proj-blk"
+        assert scheduled_kwargs["block_id"] == stage_block.id
+        assert scheduled_kwargs["owner_id"] == "u-blk"
+        assert scheduled_kwargs["job_data"] == {
+            "sample_name": "IGVFFI6571ANCX",
+            "mode": "DNA",
+            "input_directory": "/tmp/IGVFFI6571ANCX.bam",
+            "remote_base_path": "/remote/agoutic",
+        }
+        assert scheduled_kwargs["ssh_profile_id"] == "profile-1"
+        assert scheduled_kwargs["ssh_profile_nickname"] == "hpc3"
+        assert scheduled_kwargs["workflow_block_id"] == workflow_block.id
+        assert scheduled_kwargs["stage_input_step_id"] == "stage_input"
+        assert scheduled_kwargs["complete_stage_only_step_id"] == "complete_stage_only"
+        assert scheduled_kwargs["gate_payload"] == {"skill": "remote_execution", "model": "default"}
+        assert scheduled_kwargs["initial_stage_parts"] == stage_payload["stage_parts"]
 
     def test_refresh_staging_task_proxy_updates_running_block(self, client, session_factory, monkeypatch):
         sess = session_factory()

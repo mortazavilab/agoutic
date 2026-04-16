@@ -7,7 +7,8 @@ from components.progress import progress_stats, segmented_progress, stepper, tim
 
 
 _STAGING_UI_STALE_SECONDS = float(os.getenv("STAGING_UI_STALE_SECONDS", "90"))
-_STAGING_UI_REFRESH_RETRY_SECONDS = float(os.getenv("STAGING_UI_REFRESH_RETRY_SECONDS", "15"))
+_STAGING_UI_ACTIVE_REFRESH_SECONDS = float(os.getenv("STAGING_UI_ACTIVE_REFRESH_SECONDS", "8"))
+_STAGING_UI_REFRESH_RETRY_SECONDS = float(os.getenv("STAGING_UI_REFRESH_RETRY_SECONDS", "5"))
 
 
 def _parse_stage_timestamp(value):
@@ -31,15 +32,29 @@ def _parse_stage_timestamp(value):
 
 def _staging_block_needs_refresh(block: dict, content: dict) -> bool:
     staging_task_id = content.get("staging_task_id")
-    if not staging_task_id or _STAGING_UI_STALE_SECONDS <= 0:
+    if not staging_task_id:
         return False
     updated_at = _parse_stage_timestamp(
         content.get("last_updated") or content.get("updated_at") or block.get("created_at")
     )
     if updated_at is None:
         return False
+    thresholds: list[float] = []
+    if _STAGING_UI_STALE_SECONDS > 0:
+        thresholds.append(_STAGING_UI_STALE_SECONDS)
+
+    block_status = str(block.get("status") or "").upper()
+    transfer_progress = content.get("transfer_progress")
+    has_transfer_progress = isinstance(transfer_progress, dict) and bool(transfer_progress)
+    if block_status == "RUNNING" and _STAGING_UI_ACTIVE_REFRESH_SECONDS > 0:
+        thresholds.append(_STAGING_UI_ACTIVE_REFRESH_SECONDS)
+        if not has_transfer_progress:
+            thresholds.append(min(_STAGING_UI_ACTIVE_REFRESH_SECONDS, 5.0))
+
+    if not thresholds:
+        return False
     age_seconds = (datetime.datetime.now(datetime.timezone.utc) - updated_at).total_seconds()
-    return age_seconds >= _STAGING_UI_STALE_SECONDS
+    return age_seconds >= min(thresholds)
 
 
 def _refresh_staging_block_status(*, staging_task_id, block_id, project_id, api_url, request_fn, pause_refresh):
