@@ -4,6 +4,7 @@ Handles job submission, monitoring, and result parsing.
 """
 import asyncio
 import json
+import re
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -30,6 +31,8 @@ from launchpad.config import (
 logger = get_logger(__name__)
 
 _MINIMAL_DOGME_PROFILE = "# Dogme environment profile\n# Add environment variables here if needed\n"
+_DEFAULT_PROCESS_BEFORE_SCRIPT = "export PATH=/opt/conda/bin:$PATH"
+_PROFILE_EXPORT_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _ensure_trailing_newline(content: str) -> str:
@@ -38,25 +41,114 @@ def _ensure_trailing_newline(content: str) -> str:
     return f"{content}\n"
 
 
-def resolve_dogme_profile_content(mode: str, custom_profile: str | None = None) -> str:
-    """Return the staged dogme.profile content for a workflow mode."""
+def _default_dna_dogme_profile_content() -> str:
+    return (
+        "# Dogme environment profile\n"
+        "# DNA mode modkit paths inside the dogme container image\n"
+        f"export MODKITBASE=${{MODKITBASE:-{DOGME_DNA_MODKITBASE}}}\n"
+        "export MODKITMODEL=${MODKITMODEL:-${MODKITBASE}/models/"
+        f"{DOGME_DNA_MODKITMODEL.name}}}\n"
+    )
+
+
+def _resolve_task_scoped_dogme_exports(profile_content: str) -> list[str]:
+    task_scoped_exports: list[str] = []
+    known_exports: dict[str, str] = {}
+
+    for line in _ensure_trailing_newline(profile_content).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("export "):
+            export_name, has_equals, raw_value = stripped[len("export ") :].partition("=")
+            if has_equals:
+                resolved_value = _PROFILE_EXPORT_REFERENCE_RE.sub(
+                    lambda match: known_exports.get(match.group(1), match.group(0)),
+                    raw_value.strip(),
+                )
+                export_name = export_name.strip()
+                known_exports[export_name] = resolved_value
+                task_scoped_exports.append(f"export {export_name}={resolved_value}")
+
+    return task_scoped_exports
+
+
+def resolve_dogme_profile_parts(mode: str, custom_profile: str | None = None) -> tuple[str, list[str]]:
+    """Return the staged dogme.profile content plus OpenChromatin-only runtime exports."""
     normalized_mode = str(mode or "").strip().upper()
     if normalized_mode == DogmeMode.DNA.value and str(custom_profile or "").strip():
-        return _ensure_trailing_newline(str(custom_profile))
+        return _default_dna_dogme_profile_content(), _resolve_task_scoped_dogme_exports(str(custom_profile))
 
     if normalized_mode == DogmeMode.DNA.value:
-        return (
-            "# Dogme environment profile\n"
-            "# DNA mode modkit paths inside the dogme container image\n"
-            f"export MODKITBASE={DOGME_DNA_MODKITBASE}\n"
-            f"export MODKITMODEL={DOGME_DNA_MODKITMODEL}\n"
-        )
+        return (_default_dna_dogme_profile_content(), [])
 
     dogme_profile_src = DOGME_REPO / "dogme.profile"
     if dogme_profile_src.exists():
-        return _ensure_trailing_newline(dogme_profile_src.read_text())
+        return _ensure_trailing_newline(dogme_profile_src.read_text()), []
 
-    return _MINIMAL_DOGME_PROFILE
+    return _MINIMAL_DOGME_PROFILE, []
+
+
+def _quote_nextflow_single_quoted(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _render_before_script(commands: list[str]) -> str:
+    normalized: list[str] = []
+    for command in commands:
+        cleaned = str(command or "").strip()
+        if cleaned and cleaned not in normalized:
+            normalized.append(cleaned)
+    return _quote_nextflow_single_quoted("; ".join(normalized))
+
+
+def _parse_export_statement(command: str) -> tuple[str, str] | None:
+    cleaned = str(command or "").strip()
+    if not cleaned.startswith("export "):
+        return None
+    name, has_equals, value = cleaned[len("export ") :].partition("=")
+    variable_name = name.strip()
+    if not has_equals or not variable_name:
+        return None
+    return variable_name, value.strip()
+
+
+def _render_apptainer_env_options(exports: list[str]) -> str:
+    assignments: list[str] = []
+    for command in exports:
+        parsed = _parse_export_statement(command)
+        if not parsed:
+            continue
+        variable_name, value = parsed
+        if variable_name == "PATH":
+            if value.endswith(":${PATH}"):
+                assignments.append(f"PREPEND_PATH={value[:-len(':${PATH}')]}")
+            elif value.endswith(":$PATH"):
+                assignments.append(f"PREPEND_PATH={value[:-len(':$PATH')]}")
+            else:
+                assignments.append(f"PATH={value.replace('$', r'\\$')}")
+            continue
+        if variable_name in {"LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"}:
+            default_suffix = f":${{{variable_name}:-}}"
+            plain_suffix = f":${variable_name}"
+            if value.endswith(default_suffix):
+                assignments.append(f"{variable_name}={value[:-len(default_suffix)]}:\\${variable_name}")
+                continue
+            if value.endswith(plain_suffix):
+                assignments.append(f"{variable_name}={value[:-len(plain_suffix)]}:\\${variable_name}")
+                continue
+        assignments.append(f"{variable_name}={value.replace('$', r'\\$')}")
+    if not assignments:
+        return ""
+    return "--env '" + ",".join(assignments).replace("'", "'\\''") + "'"
+
+
+def resolve_dogme_profile_content(mode: str, custom_profile: str | None = None) -> str:
+    """Return the staged dogme.profile content for a workflow mode."""
+    return resolve_dogme_profile_parts(mode, custom_profile=custom_profile)[0]
+
+
+def resolve_dogme_profile_task_runtime_exports(mode: str, custom_profile: str | None = None) -> list[str]:
+    """Return exports that should only apply to OpenChromatin tasks."""
+    return resolve_dogme_profile_parts(mode, custom_profile=custom_profile)[1]
 
 class NextflowConfig:
     """Generates Nextflow configuration for Dogme pipeline."""
@@ -80,6 +172,8 @@ class NextflowConfig:
         slurm_cpu_account: str | None = None,
         slurm_gpu_account: str | None = None,
         slurm_bind_paths: Optional[list[str]] = None,
+        slurm_modkit_bind_paths: Optional[list[str]] = None,
+        modkit_task_runtime_exports: Optional[list[str]] = None,
         apptainer_cache_dir: Optional[str] = None,
     ) -> str:
         """
@@ -143,13 +237,31 @@ class NextflowConfig:
             cleaned = str(bind_path or "").strip()
             if cleaned and cleaned not in normalized_bind_paths:
                 normalized_bind_paths.append(cleaned)
+        normalized_modkit_bind_paths: list[str] = []
+        for bind_path in (slurm_modkit_bind_paths or normalized_bind_paths):
+            cleaned = str(bind_path or "").strip()
+            if cleaned and cleaned not in normalized_modkit_bind_paths:
+                normalized_modkit_bind_paths.append(cleaned)
         slurm_bind_args = ""
         if normalized_bind_paths:
             slurm_bind_args = f"--bind {','.join(normalized_bind_paths)}"
+        slurm_modkit_bind_args = ""
+        if normalized_modkit_bind_paths:
+            slurm_modkit_bind_args = f"--bind {','.join(normalized_modkit_bind_paths)}"
         slurm_container_base_options = "--no-mount hostfs"
         if slurm_bind_args:
             slurm_container_base_options = f"{slurm_container_base_options} {slurm_bind_args}"
+        slurm_openchromatin_container_base_options = "--no-mount hostfs"
+        if slurm_modkit_bind_args:
+            slurm_openchromatin_container_base_options = f"{slurm_openchromatin_container_base_options} {slurm_modkit_bind_args}"
         resolved_apptainer_cache_dir = str(apptainer_cache_dir or "").strip() or "${launchDir}/.nxf-apptainer-cache"
+        base_before_script = _render_before_script([_DEFAULT_PROCESS_BEFORE_SCRIPT])
+        has_openchromatin_task_runtime_exports = bool(modkit_task_runtime_exports)
+        openchromatin_env_options = _render_apptainer_env_options(modkit_task_runtime_exports or [])
+        if openchromatin_env_options:
+            slurm_openchromatin_container_base_options = (
+                f"{slurm_openchromatin_container_base_options} {openchromatin_env_options}"
+            )
         
         # Build config string matching example format
         config_lines = []
@@ -217,7 +329,7 @@ class NextflowConfig:
             config_lines.append(f"    containerOptions = \"{slurm_container_base_options}\"")
         else:
             config_lines.append(f"    containerOptions = \"-v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
-        config_lines.append("    beforeScript = 'export PATH=/opt/conda/bin:$PATH'")
+        config_lines.append(f"    beforeScript = {base_before_script}")
         config_lines.append("")
         if is_slurm:
             config_lines.append("    // --- Slurm Executor ---")
@@ -263,6 +375,13 @@ class NextflowConfig:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("    ")
+        config_lines.append("    withName: 'modkitTask' {")
+        config_lines.append("        memory = '32 GB'")
+        config_lines.append("        cpus = 12")
+        if is_slurm:
+            config_lines.append(f"        containerOptions = \"{slurm_container_base_options}\"")
+        config_lines.append("    }")
+        config_lines.append("    ")
         config_lines.append("    withName: 'openChromatinTaskBg' {")
         if is_slurm:
             config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
@@ -272,7 +391,7 @@ class NextflowConfig:
         if max_gpu_tasks is not None:
             config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
-            gpu_container_options = f"--nv {slurm_container_base_options}"
+            gpu_container_options = f"--nv {slurm_openchromatin_container_base_options}"
             config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
@@ -287,7 +406,7 @@ class NextflowConfig:
         if max_gpu_tasks is not None:
             config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
-            gpu_container_options = f"--nv {slurm_container_base_options}"
+            gpu_container_options = f"--nv {slurm_openchromatin_container_base_options}"
             config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
@@ -653,8 +772,12 @@ class NextflowExecutor:
             except Exception as e:
                 raise RuntimeError(f"Failed to create pod5 symlink: {e}")
         
+        dogme_profile_content, modkit_task_runtime_exports = resolve_dogme_profile_parts(
+            mode,
+            custom_profile=custom_dogme_profile,
+        )
         dogme_profile_dst = work_dir / "dogme.profile"
-        dogme_profile_dst.write_text(resolve_dogme_profile_content(mode, custom_profile=custom_dogme_profile))
+        dogme_profile_dst.write_text(dogme_profile_content)
         logger.debug("Staged dogme.profile", mode=mode, path=str(dogme_profile_dst))
         
         # Generate configuration
@@ -669,6 +792,7 @@ class NextflowExecutor:
             per_mod=per_mod,
             accuracy=accuracy,
             max_gpu_tasks=max_gpu_tasks,
+            modkit_task_runtime_exports=modkit_task_runtime_exports,
         )
         
         config_path = work_dir / "nextflow.config"

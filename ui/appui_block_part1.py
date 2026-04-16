@@ -23,6 +23,8 @@ def _split_cluster_modkit_paths(modkit_dir: str) -> tuple[str, str, str]:
 def _default_cluster_modkit_bind_paths(modkit_dir: str) -> list[str]:
     modkit_base, binary_dir, dist_leaf = _split_cluster_modkit_paths(modkit_dir)
     if dist_leaf and modkit_base:
+        if "tch" in dist_leaf.lower():
+            return [modkit_base, "/lib64/libgomp.so.1"]
         return [modkit_base]
     if binary_dir:
         return [binary_dir]

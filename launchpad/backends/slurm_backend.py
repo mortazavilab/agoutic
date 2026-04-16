@@ -24,7 +24,11 @@ from launchpad.backends.resource_validator import validate_resources
 from launchpad.backends.path_validator import validate_remote_paths, check_all_paths_ok
 from launchpad.backends.file_transfer import FileTransferManager
 from launchpad.config import REFERENCE_GENOMES, DogmeMode
-from launchpad.nextflow_executor import NextflowConfig, resolve_dogme_profile_content
+from launchpad.nextflow_executor import (
+    NextflowConfig,
+    resolve_dogme_profile_content,
+    resolve_dogme_profile_task_runtime_exports,
+)
 
 logger = get_logger(__name__)
 
@@ -37,6 +41,12 @@ class SlurmBackend:
     _RSYNC_PARTIAL_DIR = ".rsync-partial"
     _RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "kallisto", "openChromatin", "stats")
     _RESULT_SYNC_FILE_PATTERNS = ("*.config", "*.html", "*.txt", "*.csv", "*.tsv")
+    _OPENCHROMATIN_LIBGOMP_CANDIDATES = (
+        "/lib64/libgomp.so.1",
+        "/usr/lib64/libgomp.so.1",
+        "/lib/x86_64-linux-gnu/libgomp.so.1",
+        "/usr/lib/x86_64-linux-gnu/libgomp.so.1",
+    )
 
     @staticmethod
     def _effective_work_directory(job) -> str | None:
@@ -1559,6 +1569,44 @@ class SlurmBackend:
         cpu_partition = (profile.default_slurm_partition or params.slurm_partition or "standard").strip() or "standard"
         return cpu_account, cpu_partition
 
+    async def _resolve_custom_dogme_bind_paths(
+        self,
+        *,
+        conn,
+        extra_bind_paths: list[str] | None,
+    ) -> list[str]:
+        resolved_paths: list[str] = []
+
+        for extra_bind_path in extra_bind_paths or []:
+            cleaned = str(extra_bind_path or "").strip()
+            if not cleaned:
+                continue
+
+            if cleaned == "/lib64":
+                for candidate in self._OPENCHROMATIN_LIBGOMP_CANDIDATES:
+                    if await conn.path_exists(candidate):
+                        cleaned = candidate
+                        break
+                else:
+                    logger.warning(
+                        "Falling back to broad /lib64 bind for custom OpenChromatin runtime because no libgomp candidate was found"
+                    )
+
+            elif cleaned == "/lib64/libgomp.so.1":
+                for candidate in (cleaned, *self._OPENCHROMATIN_LIBGOMP_CANDIDATES[1:]):
+                    if await conn.path_exists(candidate):
+                        cleaned = candidate
+                        break
+
+            if not await conn.path_exists(cleaned):
+                raise FileNotFoundError(
+                    f"Custom Dogme bind path does not exist on the remote host: {cleaned}"
+                )
+            if cleaned not in resolved_paths:
+                resolved_paths.append(cleaned)
+
+        return resolved_paths
+
     async def _write_remote_nextflow_config(
         self,
         *,
@@ -1645,23 +1693,23 @@ class SlurmBackend:
         remote_roots = self._derive_remote_roots(params, profile)
 
         bind_paths: list[str] = [remote_work]
+        modkit_bind_paths: list[str] = list(bind_paths)
         remote_input = str(cache_resolution.get("remote_input") or "").strip()
         if remote_input:
             bind_paths.append(remote_input)
+            modkit_bind_paths.append(remote_input)
         for remote_ref_root in remote_reference_paths.values():
             cleaned = str(remote_ref_root or "").strip()
             if cleaned:
                 bind_paths.append(cleaned)
+                modkit_bind_paths.append(cleaned)
         if str(params.mode or "").strip().upper() == DogmeMode.DNA.value:
-            for extra_bind_path in params.custom_dogme_bind_paths or []:
-                cleaned = str(extra_bind_path or "").strip()
-                if not cleaned:
-                    continue
-                if not await conn.path_exists(cleaned):
-                    raise FileNotFoundError(
-                        f"Custom Dogme bind path does not exist on the remote host: {cleaned}"
-                    )
-                bind_paths.append(cleaned)
+            modkit_bind_paths.extend(
+                await self._resolve_custom_dogme_bind_paths(
+                    conn=conn,
+                    extra_bind_paths=params.custom_dogme_bind_paths,
+                )
+            )
 
         config = NextflowConfig.generate_config(
             sample_name=params.sample_name,
@@ -1681,6 +1729,11 @@ class SlurmBackend:
             slurm_cpu_account=cpu_account,
             slurm_gpu_account=gpu_account,
             slurm_bind_paths=bind_paths,
+            modkit_task_runtime_exports=resolve_dogme_profile_task_runtime_exports(
+                params.mode,
+                custom_profile=params.custom_dogme_profile,
+            ),
+            slurm_modkit_bind_paths=modkit_bind_paths,
             apptainer_cache_dir=f"{remote_roots['remote_base_path']}/.nxf-apptainer-cache",
         )
 

@@ -363,9 +363,10 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
 
     dogme_profile_write = [c for c in conn.commands if "cat >" in c and "/dogme.profile <<" in c]
     assert dogme_profile_write, "Expected remote dogme.profile write command"
-    assert "export MODKITBASE=/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_candle" in dogme_profile_write[0]
-    assert "export PATH=${MODKITBASE}:${PATH}" in dogme_profile_write[0]
-    assert "export MODKITMODEL=${MODKITBASE}/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0" in dogme_profile_write[0]
+    assert f"export MODKITBASE=${{MODKITBASE:-{DOGME_DNA_MODKITBASE}}}" in dogme_profile_write[0]
+    assert f"export MODKITMODEL=${{MODKITMODEL:-${{MODKITBASE}}/models/{DOGME_DNA_MODKITMODEL.name}}}" in dogme_profile_write[0]
+    assert "dist_modkit_v0.5.0_5120ef7_candle" not in dogme_profile_write[0]
+    assert "export PATH=${MODKITBASE}:${PATH}" not in dogme_profile_write[0]
     assert "LIBTORCH" not in dogme_profile_write[0]
     assert "DYLD_LIBRARY_PATH" not in dogme_profile_write[0]
     assert "LD_LIBRARY_PATH" not in dogme_profile_write[0]
@@ -469,6 +470,175 @@ async def test_submit_ignores_custom_profile_fields_for_non_dna(monkeypatch, pro
     dogme_profile_write = [c for c in conn.commands if "cat >" in c and "/dogme.profile <<" in c]
     assert dogme_profile_write, "Expected remote dogme.profile write command"
     assert "export MODKITBASE=/cluster/modkit" not in dogme_profile_write[0]
+
+
+@pytest.mark.anyio
+async def test_submit_scopes_custom_dogme_bind_paths_to_openchromatin_tasks(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeConn(existing_paths={"/cluster/modkit", "/lib64", "/lib64/libgomp.so.1"})
+
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        project_slug="proj-1",
+        sample_name="sample",
+        mode="DNA",
+        input_directory="/tmp/input",
+        reference_genome=["mm39"],
+        ssh_profile_id="profile-1",
+        workflow_number=4,
+        remote_base_path="/remote/eli/agoutic",
+        custom_dogme_profile="export MODKITBASE=/cluster/modkit\n",
+        custom_dogme_bind_paths=["/cluster/modkit", "/lib64"],
+    )
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _fallback(*args, **kwargs):
+        return {
+            "remote_input": "/remote/eli/agoutic/data/fallback-input",
+            "reference_cache_status": "fallback",
+            "data_cache_status": "fallback",
+            "remote_reference_paths": {
+                "mm39": "/remote/eli/agoutic/ref/mm39",
+            },
+        }
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _ensure_assets(*args, **kwargs):
+        return ({
+            "mm39": {
+                "requires_kallisto": False,
+                "missing_required_assets": [],
+                "all_required_present": True,
+            }
+        }, {"mm39": "fallback"})
+
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+    monkeypatch.setattr(backend, "_resolve_staging_cache", _fallback)
+    monkeypatch.setattr(backend, "_ensure_reference_assets_present", _ensure_assets)
+    monkeypatch.setattr(backend, "_update_job_stage", _noop)
+    monkeypatch.setattr(backend, "_update_job_slurm_info", _noop)
+
+    from launchpad.backends import slurm_backend as slurm_module
+
+    async def _validate_remote_paths(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(slurm_module, "validate_remote_paths", _validate_remote_paths)
+    monkeypatch.setattr(slurm_module, "check_all_paths_ok", lambda *_: (True, []))
+    monkeypatch.setattr(slurm_module, "generate_sbatch_script", lambda **kwargs: kwargs["nextflow_command"])
+
+    await backend.submit("run-modkit-scope", params)
+
+    config_write = [c for c in conn.commands if "nextflow.config" in c and "cat >" in c]
+    assert config_write, "Expected remote nextflow.config write command"
+    config_text = config_write[0]
+    assert "containerOptions = \"--no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39\"" in config_text
+    assert "withName: 'modkitTask' {" in config_text
+    assert "withName: 'modkitTask' {\n        memory = '32 GB'\n        cpus = 12\n        containerOptions = \"--no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39\"" in config_text
+    assert "containerOptions = \"--nv --no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39\"" in config_text
+    assert "withName: 'openChromatinTaskBg' {" in config_text
+    assert "withName: 'openChromatinTaskBed' {" in config_text
+    assert config_text.count("containerOptions = \"--nv --no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39,/cluster/modkit,/lib64/libgomp.so.1 --env 'MODKITBASE=/cluster/modkit'\"") == 2
+
+
+@pytest.mark.asyncio
+async def test_submit_scopes_custom_dogme_runtime_exports_to_openchromatin_only(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeConn(existing_paths={"/cluster/modkit", "/lib64", "/lib64/libgomp.so.1"})
+
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        project_slug="proj-1",
+        sample_name="sample",
+        mode="DNA",
+        input_directory="/tmp/input",
+        reference_genome=["mm39"],
+        ssh_profile_id="profile-1",
+        workflow_number=4,
+        remote_base_path="/remote/eli/agoutic",
+        custom_dogme_profile=(
+            "export MODKITBASE=/cluster/modkit\n"
+            "export PATH=${MODKITBASE}:${PATH}\n"
+            "export MODKITMODEL=${MODKITBASE}/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0\n"
+            "export LIBTORCH=${MODKITBASE}/libtorch\n"
+            "export LD_LIBRARY_PATH=${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}\n"
+            "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}\n"
+        ),
+        custom_dogme_bind_paths=["/cluster/modkit", "/lib64"],
+    )
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _fallback(*args, **kwargs):
+        return {
+            "remote_input": "/remote/eli/agoutic/data/fallback-input",
+            "reference_cache_status": "fallback",
+            "data_cache_status": "fallback",
+            "remote_reference_paths": {
+                "mm39": "/remote/eli/agoutic/ref/mm39",
+            },
+        }
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _ensure_assets(*args, **kwargs):
+        return ({
+            "mm39": {
+                "requires_kallisto": False,
+                "missing_required_assets": [],
+                "all_required_present": True,
+            }
+        }, {"mm39": "fallback"})
+
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+    monkeypatch.setattr(backend, "_resolve_staging_cache", _fallback)
+    monkeypatch.setattr(backend, "_ensure_reference_assets_present", _ensure_assets)
+    monkeypatch.setattr(backend, "_update_job_stage", _noop)
+    monkeypatch.setattr(backend, "_update_job_slurm_info", _noop)
+
+    from launchpad.backends import slurm_backend as slurm_module
+
+    async def _validate_remote_paths(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(slurm_module, "validate_remote_paths", _validate_remote_paths)
+    monkeypatch.setattr(slurm_module, "check_all_paths_ok", lambda *_: (True, []))
+    monkeypatch.setattr(slurm_module, "generate_sbatch_script", lambda **kwargs: kwargs["nextflow_command"])
+
+    await backend.submit("run-runtime-scope", params)
+
+    config_write = [c for c in conn.commands if "nextflow.config" in c and "cat >" in c]
+    assert config_write, "Expected remote nextflow.config write command"
+    config_text = config_write[0]
+    assert config_text.count("--env 'MODKITBASE=/cluster/modkit,PREPEND_PATH=/cluster/modkit,MODKITMODEL=/cluster/modkit/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0,LIBTORCH=/cluster/modkit/libtorch,LD_LIBRARY_PATH=/cluster/modkit/libtorch/lib:\\$LD_LIBRARY_PATH,DYLD_LIBRARY_PATH=/cluster/modkit/libtorch/lib:\\$DYLD_LIBRARY_PATH'") == 2
+    assert config_text.count("beforeScript = 'export PATH=/opt/conda/bin:$PATH'") == 1
+
+    dogme_profile_write = [c for c in conn.commands if "cat >" in c and "/dogme.profile <<" in c]
+    assert dogme_profile_write, "Expected remote dogme.profile write command"
+    assert f"export MODKITBASE=${{MODKITBASE:-{DOGME_DNA_MODKITBASE}}}" in dogme_profile_write[0]
+    assert f"export MODKITMODEL=${{MODKITMODEL:-${{MODKITBASE}}/models/{DOGME_DNA_MODKITMODEL.name}}}" in dogme_profile_write[0]
+    assert "export MODKITBASE=/cluster/modkit" not in dogme_profile_write[0]
+    assert "export PATH=${MODKITBASE}:${PATH}" not in dogme_profile_write[0]
+    assert "export MODKITMODEL=${MODKITBASE}/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0" not in dogme_profile_write[0]
+    assert "LIBTORCH" not in dogme_profile_write[0]
+    assert "LD_LIBRARY_PATH" not in dogme_profile_write[0]
+    assert "DYLD_LIBRARY_PATH" not in dogme_profile_write[0]
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,12 @@ from pathlib import Path
 
 import launchpad.nextflow_executor as nextflow_module
 from launchpad.config import REFERENCE_GENOMES, DOGME_DNA_MODKITBASE, DOGME_DNA_MODKITMODEL
-from launchpad.nextflow_executor import NextflowConfig, NextflowExecutor, resolve_dogme_profile_content
+from launchpad.nextflow_executor import (
+    NextflowConfig,
+    NextflowExecutor,
+    resolve_dogme_profile_content,
+    resolve_dogme_profile_task_runtime_exports,
+)
 
 
 class TestGenerateConfig:
@@ -182,21 +187,113 @@ class TestGenerateConfig:
         assert "kallistoIndex = '/remote/ref/mm39/mm39.idx'" in config
         assert "t2g = '/remote/ref/mm39/mm39.t2g'" in config
 
+    def test_slurm_custom_modkit_bind_paths_are_scoped_to_openchromatin_tasks(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-modkit",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_bind_paths=["/remote/workflow4", "/remote/ref/mm39"],
+            slurm_modkit_bind_paths=["/remote/workflow4", "/remote/ref/mm39", "/cluster/modkit", "/lib64"],
+        )
+
+        assert "containerOptions = \"--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39\"" in config
+        assert "containerOptions = \"--nv --no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39\"" in config
+        assert "withName: 'modkitTask' {" in config
+        assert "withName: 'modkitTask' {\n        memory = '32 GB'\n        cpus = 12\n        containerOptions = \"--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39\"" in config
+        assert "withName: 'openChromatinTaskBg' {" in config
+        assert "withName: 'openChromatinTaskBed' {" in config
+        assert config.count(
+            "containerOptions = \"--nv --no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39,/cluster/modkit,/lib64\""
+        ) == 2
+
+    def test_slurm_openchromatin_runtime_exports_are_scoped_away_from_dorado_and_modkit_tasks(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-runtime",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            modkit_task_runtime_exports=[
+                "export MODKITBASE=/cluster/modkit",
+                "export PATH=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch:${PATH}",
+                "export MODKITMODEL=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0",
+                "export LIBTORCH=/cluster/modkit/libtorch",
+                "export LD_LIBRARY_PATH=${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}",
+                "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}",
+            ],
+        )
+
+        assert "process {\n    // <-- Container Settings --->\n    container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'\n    // Remote SLURM runs bind only workflow-specific remote paths.\n    containerOptions = \"--no-mount hostfs\"\n    beforeScript = 'export PATH=/opt/conda/bin:$PATH'" in config
+        assert "withName: 'modkitTask' {\n        memory = '32 GB'\n        cpus = 12\n        containerOptions = \"--no-mount hostfs\"" in config
+        assert "beforeScript = 'export PATH=/opt/conda/bin:$PATH; export LIBTORCH=/cluster/modkit/libtorch" not in config
+        assert config.count("--env 'MODKITBASE=/cluster/modkit,PREPEND_PATH=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch,MODKITMODEL=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0,LIBTORCH=/cluster/modkit/libtorch,LD_LIBRARY_PATH=${LIBTORCH}/lib:\\$LD_LIBRARY_PATH,DYLD_LIBRARY_PATH=${LIBTORCH}/lib:\\$DYLD_LIBRARY_PATH'") == 2
+        assert "containerOptions = \"--nv --no-mount hostfs --env 'MODKITBASE=/cluster/modkit,PREPEND_PATH=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch,MODKITMODEL=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0,LIBTORCH=/cluster/modkit/libtorch,LD_LIBRARY_PATH=${LIBTORCH}/lib:\\$LD_LIBRARY_PATH,DYLD_LIBRARY_PATH=${LIBTORCH}/lib:\\$DYLD_LIBRARY_PATH'\"" in config
+        assert "withName: 'openChromatinTaskBg' {" in config
+        assert "withName: 'openChromatinTaskBed' {" in config
+
 
 class TestResolveDogmeProfileContent:
     def test_dna_mode_uses_container_modkit_paths(self):
         profile = resolve_dogme_profile_content("DNA")
 
-        assert f"export MODKITBASE={DOGME_DNA_MODKITBASE}" in profile
-        assert f"export MODKITMODEL={DOGME_DNA_MODKITMODEL}" in profile
+        assert f"export MODKITBASE=${{MODKITBASE:-{DOGME_DNA_MODKITBASE}}}" in profile
+        assert f"export MODKITMODEL=${{MODKITMODEL:-${{MODKITBASE}}/models/{DOGME_DNA_MODKITMODEL.name}}}" in profile
         assert "LIBTORCH" not in profile
         assert "DYLD_LIBRARY_PATH" not in profile
         assert "LD_LIBRARY_PATH" not in profile
 
-    def test_custom_profile_override_takes_precedence(self):
+    def test_custom_profile_keeps_staged_dna_profile_container_safe(self):
         profile = resolve_dogme_profile_content("DNA", custom_profile="export MODKITBASE=/remote/modkit")
 
-        assert profile == "export MODKITBASE=/remote/modkit\n"
+        assert profile == (
+            "# Dogme environment profile\n"
+            "# DNA mode modkit paths inside the dogme container image\n"
+            f"export MODKITBASE=${{MODKITBASE:-{DOGME_DNA_MODKITBASE}}}\n"
+            f"export MODKITMODEL=${{MODKITMODEL:-${{MODKITBASE}}/models/{DOGME_DNA_MODKITMODEL.name}}}\n"
+        )
+
+    def test_custom_profile_runtime_exports_are_removed_from_global_profile(self):
+        profile = resolve_dogme_profile_content(
+            "DNA",
+            custom_profile=(
+                "export MODKITBASE=/remote/modkit\n"
+                "export PATH=${MODKITBASE}:${PATH}\n"
+                "export LIBTORCH=${MODKITBASE}/libtorch\n"
+                "export LD_LIBRARY_PATH=${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}\n"
+                "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}\n"
+            ),
+        )
+
+        assert profile == (
+            "# Dogme environment profile\n"
+            "# DNA mode modkit paths inside the dogme container image\n"
+            f"export MODKITBASE=${{MODKITBASE:-{DOGME_DNA_MODKITBASE}}}\n"
+            f"export MODKITMODEL=${{MODKITMODEL:-${{MODKITBASE}}/models/{DOGME_DNA_MODKITMODEL.name}}}\n"
+        )
+
+    def test_custom_profile_runtime_exports_are_available_for_openchromatin_tasks(self):
+        runtime_exports = resolve_dogme_profile_task_runtime_exports(
+            "DNA",
+            custom_profile=(
+                "export MODKITBASE=/remote/modkit\n"
+                "export PATH=${MODKITBASE}:${PATH}\n"
+                "export MODKITMODEL=${MODKITBASE}/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0\n"
+                "export LIBTORCH=${MODKITBASE}/libtorch\n"
+                "export LD_LIBRARY_PATH=${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}\n"
+                "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}\n"
+            ),
+        )
+
+        assert runtime_exports == [
+            "export MODKITBASE=/remote/modkit",
+            "export PATH=/remote/modkit:${PATH}",
+            "export MODKITMODEL=/remote/modkit/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0",
+            "export LIBTORCH=/remote/modkit/libtorch",
+            "export LD_LIBRARY_PATH=/remote/modkit/libtorch/lib:${LD_LIBRARY_PATH:-}",
+            "export DYLD_LIBRARY_PATH=/remote/modkit/libtorch/lib:${DYLD_LIBRARY_PATH:-}",
+        ]
 
     def test_non_dna_ignores_custom_profile_override(self, monkeypatch, tmp_path):
         dogme_repo = tmp_path / "dogme"

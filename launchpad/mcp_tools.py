@@ -236,7 +236,7 @@ class LaunchpadMCPTools:
             per_mod: Optional per-modification threshold
             accuracy: Optional basecalling accuracy level (e.g., "sup", "hac")
             max_gpu_tasks: Optional max concurrent GPU tasks (dorado/openChromatin) per run (default: no maximum, max: 16)
-            custom_dogme_profile: Optional full dogme.profile override sourced before each Dogme task
+            custom_dogme_profile: Optional DNA host-modkit override; Launchpad keeps the staged workflow profile container-safe and applies the custom host exports only to the OpenChromatin tasks
             custom_dogme_bind_paths: Optional remote bind paths required by a custom dogme.profile when using SLURM
         
         Returns:

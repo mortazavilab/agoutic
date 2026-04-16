@@ -16,7 +16,11 @@
   `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` from the sibling `libtorch/lib`
   directory, and now exposes the cluster
   modkit binary directory as its own DNA-only gate field so users can switch
-  modkit builds without hand-editing the generated profile template.
+  modkit builds without hand-editing the generated profile template. On the
+  Launchpad side, those extra `tch` bind paths are now scoped to the tasks
+  that actually invoke modkit (`modkitTask`, `openChromatinTaskBg`, and
+  `openChromatinTaskBed`) so dorado keeps the container's original runtime
+  library view.
   (`ui/appui_block_part1.py`, `cortex/workflow_submission.py`,
   `launchpad/backends/base.py`, `launchpad/schemas.py`,
   `launchpad/app.py`, `launchpad/mcp_tools.py`,
@@ -50,6 +54,24 @@
   approval form, and approved gates now show a dedicated expander with the
   exact custom bind paths and `dogme.profile` text used for the run.
   (`ui/appui_block_part1.py`, `tests/ui/test_appui_block_part1_helpers.py`)
+
+- **Custom DNA libtorch loader exports no longer leak into dorado tasks** —
+  Launchpad now strips `LIBTORCH`, `LD_LIBRARY_PATH`, and
+  `DYLD_LIBRARY_PATH` out of the staged workflow `dogme.profile`, keeps the
+  default DNA container modkit profile in place for `modkitTask`, writes the
+  staged DNA profile with `${VAR:-default}` guards, and injects the custom
+  host-side PyTorch modkit exports only into Apptainer launch `--env` for
+  `openChromatinTaskBg` and `openChromatinTaskBed`. For the host OpenMP
+  dependency, remote SLURM staging now narrows legacy `/lib64` custom bind
+  requests to `libgomp.so.1` when that file is present, so dorado and the
+  regular CPU modkit pileup step stay on the container runtime while the
+  OpenChromatin GPU steps can still use the cluster `tch` build without
+  replacing the container's full system library directory.
+  (`launchpad/nextflow_executor.py`, `launchpad/backends/slurm_backend.py`,
+  `ui/appui_block_part1.py`,
+  `tests/launchpad/test_nextflow_executor.py`,
+  `tests/test_slurm_backend_cache_flow.py`,
+  `tests/ui/test_appui_block_part1_helpers.py`)
 
 - **Remote staging now surfaces byte-level transfer updates in the UI** —
   Launchpad tracks current-file transferred bytes and total-size estimates from
