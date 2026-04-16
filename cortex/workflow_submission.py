@@ -539,6 +539,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     "sample_name": job_data["sample_name"],
                     "mode": job_data["mode"],
                     "input_directory": job_data.get("input_directory"),
+                    "local_workflow_directory": job_params.get("local_workflow_directory"),
                     "ssh_profile_id": ssh_profile_id,
                     "ssh_profile_nickname": ssh_profile_nickname,
                     "remote_base_path": job_data.get("remote_base_path"),
@@ -857,6 +858,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     {
                         "sample_name": locals().get("job_data", {}).get("sample_name", ""),
                         "mode": locals().get("job_data", {}).get("mode", ""),
+                        "local_workflow_directory": locals().get("job_params", {}).get("local_workflow_directory"),
                         "status": "FAILED",
                         "progress_percent": _stage_part_progress(current_stage_parts),
                         "error": error_msg,

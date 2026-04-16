@@ -288,7 +288,7 @@ async def test_submit_uses_fallback_when_cache_resolution_fails(monkeypatch, pro
 @pytest.mark.anyio
 async def test_submit_writes_remote_config_and_references_it(monkeypatch, profile):
     backend = SlurmBackend()
-    conn = _FakeConn(existing_paths={"/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0"})
+    conn = _FakeConn(existing_paths={"/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_candle"})
 
     params = SubmitParams(
         project_id="proj-1",
@@ -304,13 +304,11 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
         workflow_number=4,
         remote_base_path="/remote/eli/agoutic",
         custom_dogme_profile=(
-            "export MODKITBASE=/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0\n"
-            "export MODKITMODEL=${MODKITBASE}/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0\n"
-            "export LIBTORCH=${MODKITBASE}/libtorch\n"
-            "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib\n"
-            "export LD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}\n"
+            "export MODKITBASE=/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_candle\n"
+            "export PATH=${MODKITBASE}:${PATH}\n"
+            "export MODKITMODEL=${MODKITBASE}/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0\n"
         ),
-        custom_dogme_bind_paths=["/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0"],
+        custom_dogme_bind_paths=["/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_candle"],
     )
 
     async def _load_profile(*args, **kwargs):
@@ -361,15 +359,16 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
 
     config_write = [c for c in conn.commands if "nextflow.config" in c and "cat >" in c]
     assert config_write, "Expected remote nextflow.config write command"
-    assert "/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0" in config_write[0]
+    assert "/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_candle" in config_write[0]
 
     dogme_profile_write = [c for c in conn.commands if "cat >" in c and "/dogme.profile <<" in c]
     assert dogme_profile_write, "Expected remote dogme.profile write command"
-    assert "export MODKITBASE=/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0" in dogme_profile_write[0]
-    assert "export MODKITMODEL=${MODKITBASE}/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0" in dogme_profile_write[0]
-    assert "export LIBTORCH=${MODKITBASE}/libtorch" in dogme_profile_write[0]
-    assert "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib" in dogme_profile_write[0]
-    assert "export LD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}" in dogme_profile_write[0]
+    assert "export MODKITBASE=/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_candle" in dogme_profile_write[0]
+    assert "export PATH=${MODKITBASE}:${PATH}" in dogme_profile_write[0]
+    assert "export MODKITMODEL=${MODKITBASE}/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0" in dogme_profile_write[0]
+    assert "LIBTORCH" not in dogme_profile_write[0]
+    assert "DYLD_LIBRARY_PATH" not in dogme_profile_write[0]
+    assert "LD_LIBRARY_PATH" not in dogme_profile_write[0]
 
     sbatch_cmds = [c for c in conn.commands if "sbatch --parsable" in c]
     assert sbatch_cmds, "Expected sbatch submission command"

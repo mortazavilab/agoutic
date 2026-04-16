@@ -495,31 +495,85 @@ def render_block_part2(
                 })
                 if remote_data_path:
                     st.caption(f"Remote data path: `{remote_data_path}`")
+            elif block.get("status") == "DELETED":
+                status_chip("pending", label="Workflow Deleted", icon="🗑️")
+                st.info(message or "Workflow folder deleted.")
+                deleted_path = content.get("deleted_path")
+                if deleted_path:
+                    st.caption(f"Deleted workflow path: `{deleted_path}`")
             else:
                 status_chip("failed", label="Staging Failed", icon="❌")
                 st.error(content.get("error") or message)
                 _render_stage_transfer_snapshot(content.get("transfer_progress"))
                 staging_task_id = content.get("staging_task_id")
-                if staging_task_id and st.button("🔄 Resume Staging", type="primary", key=f"resume_failed_stage_{block_id}"):
-                    _pause_auto_refresh(4)
+                _failed_workflow_name = ""
+                _local_workflow_dir = str(content.get("local_workflow_directory") or "").strip()
+                if _local_workflow_dir:
                     try:
-                        _resume_resp = make_authenticated_request(
-                            "POST",
-                            f"{API_URL}/remote/stage/{staging_task_id}/resume",
-                            json={"project_id": active_id, "block_id": block_id},
-                            timeout=15,
-                        )
-                        if _resume_resp.status_code == 200:
-                            st.success("Resuming staging from the existing cache path.")
+                        import pathlib as _pl
+                        _failed_workflow_name = _pl.PurePosixPath(_local_workflow_dir).name
+                    except Exception:
+                        _failed_workflow_name = ""
+                _failed_has_delete_target = bool(
+                    _local_workflow_dir or content.get("workflow_plan_block_id") or content.get("gate_block_id")
+                )
+                _resume_col, _delete_col = st.columns(2)
+                with _resume_col:
+                    if staging_task_id and st.button("🔄 Resume Staging", type="primary", key=f"resume_failed_stage_{block_id}"):
+                        _pause_auto_refresh(4)
+                        try:
+                            _resume_resp = make_authenticated_request(
+                                "POST",
+                                f"{API_URL}/remote/stage/{staging_task_id}/resume",
+                                json={"project_id": active_id, "block_id": block_id},
+                                timeout=15,
+                            )
+                            if _resume_resp.status_code == 200:
+                                st.success("Resuming staging from the existing cache path.")
+                                st.rerun()
+                            elif _resume_resp.status_code == 404:
+                                st.warning("Staging task not found. It may have already been cleaned up.")
+                            elif _resume_resp.status_code in {409, 429}:
+                                st.warning(_resume_resp.json().get("detail", "Cannot resume staging task."))
+                            else:
+                                st.error(f"Resume failed: {_resume_resp.status_code} — {_resume_resp.text[:200]}")
+                        except Exception as _re:
+                            st.error(f"Error resuming staging task: {_re}")
+                with _delete_col:
+                    _confirm_key = f"del_confirm_stage_{block_id}"
+                    if _failed_has_delete_target:
+                        if st.session_state.get(_confirm_key):
+                            st.warning(
+                                f"⚠️ This will permanently delete `{_failed_workflow_name or 'workflow folder'}` from the local project workspace. "
+                                "Remote staged files will not be removed."
+                            )
+                            _yes_col, _no_col = st.columns(2)
+                            with _yes_col:
+                                if st.button("Yes, delete workflow", key=f"failed_stage_del_yes_{block_id}", type="primary"):
+                                    _pause_auto_refresh(4)
+                                    try:
+                                        _delete_resp = make_authenticated_request(
+                                            "POST",
+                                            f"{API_URL}/remote/stage/{staging_task_id}/delete-workflow",
+                                            json={"project_id": active_id, "block_id": block_id},
+                                            timeout=30,
+                                        )
+                                        if _delete_resp.status_code == 200:
+                                            st.success(_delete_resp.json().get("message", "Workflow deleted."))
+                                            st.session_state.pop(_confirm_key, None)
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Delete failed: {_delete_resp.status_code} — {_delete_resp.text[:200]}")
+                                    except Exception as _de:
+                                        st.error(f"Error deleting workflow: {_de}")
+                            with _no_col:
+                                if st.button("No, keep it", key=f"failed_stage_del_no_{block_id}"):
+                                    st.session_state.pop(_confirm_key, None)
+                                    st.rerun()
+                        elif st.button(f"🗑️ Delete {_failed_workflow_name or 'Workflow Folder'}", key=f"failed_stage_del_btn_{block_id}"):
+                            st.session_state[_confirm_key] = True
+                            _pause_auto_refresh(4)
                             st.rerun()
-                        elif _resume_resp.status_code == 404:
-                            st.warning("Staging task not found. It may have already been cleaned up.")
-                        elif _resume_resp.status_code in {409, 429}:
-                            st.warning(_resume_resp.json().get("detail", "Cannot resume staging task."))
-                        else:
-                            st.error(f"Resume failed: {_resume_resp.status_code} — {_resume_resp.text[:200]}")
-                    except Exception as _re:
-                        st.error(f"Error resuming staging task: {_re}")
                 _render_stage_part("References", stage_parts.get("references") or {
                     "status": "FAILED",
                     "progress_percent": 0,

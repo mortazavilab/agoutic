@@ -360,11 +360,24 @@ class TestHasPendingDestructiveConfirmation:
 
         assert fn() is True
 
+    def test_detects_staging_delete_confirmation(self):
+        fake_st = SimpleNamespace(session_state={"del_confirm_stage_block-1": True})
+        fn = _load_function("_has_pending_destructive_confirmation", {"st": fake_st})
+
+        assert fn() is True
+
     def test_returns_false_without_pending_confirmation(self):
         fake_st = SimpleNamespace(session_state={"_confirm_archive_project_id": None})
         fn = _load_function("_has_pending_destructive_confirmation", {"st": fake_st})
 
         assert fn() is False
+
+
+class TestWorkflowStatusPresentation:
+    def test_deleted_workflow_uses_deleted_chip(self):
+        fn = _load_function("_workflow_status_presentation")
+
+        assert fn("DELETED") == ("pending", "Deleted", "🗑️")
 
 
 class TestTaskHelpers:

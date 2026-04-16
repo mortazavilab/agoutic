@@ -428,10 +428,10 @@ def _active_workflow_ids(blocks: list[ProjectBlock]) -> set[str]:
     """Return the set of WORKFLOW_PLAN block IDs that should be visible.
 
     Logic:
-    * Walk blocks newest-first and find the latest WORKFLOW_PLAN whose
-      payload status is NOT ``COMPLETED`` or ``FAILED``.  That is the
+        * Walk blocks newest-first and find the latest WORKFLOW_PLAN whose
+            payload status is NOT ``COMPLETED``, ``FAILED``, or ``DELETED``.  That is the
       *active* workflow — all older workflow plans are superseded.
-    * If every workflow plan is completed/failed, keep only the most
+        * If every workflow plan is completed/failed/deleted, keep only the most
       recent one so its final results remain visible.
     * Standalone blocks (DOWNLOAD_TASK, EXECUTION_JOB without a
       ``workflow_plan_block_id``) are never filtered here.
@@ -446,7 +446,7 @@ def _active_workflow_ids(blocks: list[ProjectBlock]) -> set[str]:
     sorted_plans = sorted(workflow_plans, key=lambda b: b.seq, reverse=True)
     for plan in sorted_plans:
         p = get_block_payload(plan)
-        if p.get("status") not in ("COMPLETED", "FAILED"):
+        if p.get("status") not in ("COMPLETED", "FAILED", "DELETED"):
             return {plan.id}
 
     # All completed/failed — show the most recent only.
@@ -481,6 +481,8 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
         if block.type == "WORKFLOW_PLAN":
             # Skip superseded workflow plans
             if active_wf_ids and block.id not in active_wf_ids:
+                continue
+            if payload.get("status") == "DELETED" or block.status == "DELETED":
                 continue
             source_key = f"workflow-plan:{block.id}"
             seen_sources.add(source_key)
@@ -607,6 +609,8 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             # Skip staging tasks belonging to superseded workflows
             _wf_plan_id = payload.get("workflow_plan_block_id")
             if active_wf_ids and _wf_plan_id and _wf_plan_id not in active_wf_ids:
+                continue
+            if block.status == "DELETED" or payload.get("status") == "DELETED":
                 continue
             task_status = {
                 "RUNNING": "RUNNING",

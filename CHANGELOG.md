@@ -9,13 +9,25 @@
   list and profile text that will be submitted. Launchpad stages the custom
   profile only for DNA runs, validates the extra remote bind paths before
   submission, and ignores the custom override fields for RNA/cDNA so the
-  standard non-DNA profile behavior is preserved.
+  standard non-DNA profile behavior is preserved. The default cluster-modkit
+  template now targets the candle distribution, prepends that directory to
+  `PATH`, drops the torch/libtorch exports, and now exposes the cluster
+  modkit binary directory as its own DNA-only gate field so users can switch
+  candle builds without hand-editing the generated profile template.
   (`ui/appui_block_part1.py`, `cortex/workflow_submission.py`,
   `launchpad/backends/base.py`, `launchpad/schemas.py`,
   `launchpad/app.py`, `launchpad/mcp_tools.py`,
   `launchpad/mcp_server.py`, `launchpad/nextflow_executor.py`,
   `launchpad/backends/local_backend.py`,
   `launchpad/backends/slurm_backend.py`)
+
+- **Failed remote staging cards can now delete the reserved local workflow
+  folder directly from the UI** — DNA/RNA staging failures now offer a delete
+  action that removes the local workflow directory reserved by the approval
+  gate, marks the staging and workflow-plan blocks as deleted, and clears the
+  associated project tasks without touching any remote staged cache paths.
+  (`cortex/app.py`, `cortex/workflow_submission.py`,
+  `cortex/task_service.py`, `ui/appui_block_part2.py`, `ui/appUI.py`)
 
 ### Bug Fixes
 

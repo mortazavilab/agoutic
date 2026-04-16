@@ -436,6 +436,50 @@ class StageTaskBlockActionBody(BaseModel):
     block_id: str
 
 
+def _resolve_staging_workflow_directory(
+    session,
+    payload: dict,
+    *,
+    project_id: str,
+    user,
+) -> Path | None:
+    raw_candidates: list[str] = []
+
+    direct_candidate = str(payload.get("local_workflow_directory") or "").strip()
+    if direct_candidate:
+        raw_candidates.append(direct_candidate)
+
+    gate_block_id = str(payload.get("gate_block_id") or "").strip()
+    if gate_block_id:
+        gate_block = session.execute(
+            select(ProjectBlock).where(ProjectBlock.id == gate_block_id)
+        ).scalar_one_or_none()
+        if gate_block is not None:
+            gate_payload = get_block_payload(gate_block)
+            gate_params = gate_payload.get("edited_params") or gate_payload.get("extracted_params") or {}
+            gate_candidate = str(gate_params.get("local_workflow_directory") or "").strip()
+            if gate_candidate:
+                raw_candidates.append(gate_candidate)
+
+    if not raw_candidates:
+        return None
+
+    project_dir = _resolve_project_dir(session, user, project_id).resolve(strict=False)
+    workflow_root = (project_dir / "workflow").resolve(strict=False)
+    for candidate in raw_candidates:
+        candidate_path = Path(candidate).resolve(strict=False)
+        try:
+            candidate_path.relative_to(workflow_root)
+            return candidate_path
+        except ValueError:
+            continue
+
+    raise HTTPException(
+        status_code=400,
+        detail="Stored workflow directory is outside the project workflow root.",
+    )
+
+
 def _sync_terminal_staging_block(
     session,
     block: ProjectBlock,
@@ -650,6 +694,127 @@ def _sync_missing_staging_block(
         task_status="failed",
         error_msg=fail_msg,
     )
+
+
+@app.post("/remote/stage/{task_id}/delete-workflow")
+async def delete_staging_workflow_proxy(
+    request: Request,
+    task_id: str = FastAPIPath(..., min_length=1),
+    body: StageTaskBlockActionBody = Body(...),
+):
+    """Delete the reserved local workflow folder for a failed/cancelled staging task."""
+    user = request.state.user
+    require_project_access(body.project_id, user, min_role="editor")
+
+    session = SessionLocal()
+    try:
+        block = session.execute(
+            select(ProjectBlock).where(
+                ProjectBlock.id == body.block_id,
+                ProjectBlock.project_id == body.project_id,
+            )
+        ).scalar_one_or_none()
+        if block is None:
+            raise HTTPException(status_code=404, detail="Staging block not found")
+        if block.type != "STAGING_TASK":
+            raise HTTPException(status_code=400, detail="Block is not a staging task")
+
+        payload = get_block_payload(block)
+        if str(payload.get("staging_task_id") or "") != task_id:
+            raise HTTPException(status_code=400, detail="Block does not match staging task")
+
+        block_status = str(block.status or payload.get("status") or "").upper()
+        if block_status == "DELETED":
+            return {
+                "task_id": task_id,
+                "status": "deleted",
+                "message": payload.get("message") or "Workflow folder already deleted.",
+                "deleted_path": payload.get("deleted_path"),
+                "file_count": int(payload.get("deleted_file_count") or 0),
+            }
+        if block_status not in {"FAILED", "CANCELLED"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Workflow deletion is only available after staging has failed or been cancelled.",
+            )
+
+        workflow_dir = _resolve_staging_workflow_directory(
+            session,
+            payload,
+            project_id=body.project_id,
+            user=user,
+        )
+        if workflow_dir is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No local workflow directory was recorded for this staging task.",
+            )
+
+        deleted_path = None
+        file_count = 0
+        if workflow_dir.exists():
+            for _root, _dirs, _files in os.walk(workflow_dir):
+                file_count += len(_files)
+            shutil.rmtree(workflow_dir)
+            deleted_path = str(workflow_dir)
+
+        workflow_name = workflow_dir.name or "workflow"
+        if deleted_path:
+            message = (
+                f"Workflow folder `{workflow_name}` deleted ({file_count} files removed). "
+                "Remote staged files were not removed."
+            )
+        else:
+            message = (
+                f"Workflow folder `{workflow_name}` was already absent on disk. "
+                "Remote staged files were not removed."
+            )
+
+        _update_project_block_payload(
+            session,
+            block.id,
+            {
+                "status": "DELETED",
+                "message": message,
+                "error": None,
+                "deleted_path": deleted_path,
+                "deleted_file_count": file_count,
+                "local_workflow_directory": str(workflow_dir),
+            },
+            status="DELETED",
+        )
+
+        workflow_plan_block_id = str(payload.get("workflow_plan_block_id") or "").strip()
+        if workflow_plan_block_id:
+            workflow_block = session.execute(
+                select(ProjectBlock).where(ProjectBlock.id == workflow_plan_block_id)
+            ).scalar_one_or_none()
+            if workflow_block is not None:
+                workflow_payload = get_block_payload(workflow_block)
+                workflow_payload.update(
+                    {
+                        "status": "DELETED",
+                        "message": message,
+                        "deleted_path": deleted_path,
+                        "deleted_file_count": file_count,
+                        "local_workflow_directory": str(workflow_dir),
+                        "last_updated": datetime.datetime.utcnow().isoformat() + "Z",
+                    }
+                )
+                workflow_block.payload_json = json.dumps(workflow_payload)
+                workflow_block.status = "DELETED"
+                session.commit()
+                sync_project_tasks(session, workflow_block.project_id)
+
+        return {
+            "task_id": task_id,
+            "status": "deleted",
+            "message": message,
+            "deleted_path": deleted_path,
+            "file_count": file_count,
+        }
+    finally:
+        session.close()
 
 
 @app.post("/jobs/{run_uuid}/cancel")

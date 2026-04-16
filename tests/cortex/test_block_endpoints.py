@@ -28,9 +28,10 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from common.database import Base
+from cortex.config import AGOUTIC_DATA
 from cortex.models import (
     User, Session as SessionModel, Project, ProjectAccess,
-    ProjectBlock, Conversation, ConversationMessage, JobResult,
+    ProjectBlock, Conversation, ConversationMessage, JobResult, ProjectTask,
 )
 from cortex.app import (
     app, _create_block_internal,
@@ -38,6 +39,7 @@ from cortex.app import (
     _chat_progress,
 )
 from cortex.llm_validators import get_block_payload
+from cortex.task_service import sync_project_tasks
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +706,117 @@ class TestCreateBlock:
         assert refreshed_stage.status == "FAILED"
         assert "Launchpad no longer has this task" in stage_payload["message"]
         assert stage_payload["stage_parts"]["data"]["status"] == "FAILED"
+
+    def test_delete_failed_staging_workflow_removes_local_folder_and_marks_blocks_deleted(self, client, session_factory):
+        sess = session_factory()
+        workflow_dir = AGOUTIC_DATA / "users" / "blkuser" / "block-proj" / "workflow" / "failed-stage-delete"
+        if workflow_dir.exists():
+            import shutil as _shutil
+            _shutil.rmtree(workflow_dir)
+        workflow_dir.mkdir(parents=True)
+        (workflow_dir / "nextflow.config").write_text("process {}\n")
+        (workflow_dir / "dogme.profile").write_text("export MODKITBASE=/cluster/modkit\n")
+
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "WORKFLOW_PLAN",
+            {
+                "status": "FAILED",
+                "sample_name": "IGVFFI6571ANCX",
+                "steps": [
+                    {"id": "stage_input", "kind": "REMOTE_STAGE", "title": "Stage input", "status": "FAILED"},
+                ],
+            },
+            status="FAILED",
+            owner_id="u-blk",
+        )
+        stage_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "STAGING_TASK",
+            {
+                "sample_name": "IGVFFI6571ANCX",
+                "mode": "DNA",
+                "staging_task_id": "stg-delete-1",
+                "workflow_plan_block_id": workflow_block.id,
+                "local_workflow_directory": str(workflow_dir),
+                "progress_percent": 67,
+                "message": "Upload stalled for too long.",
+                "stage_parts": {
+                    "references": {"status": "COMPLETED", "progress_percent": 100, "message": "Reference assets are ready."},
+                    "data": {"status": "FAILED", "progress_percent": 67, "message": "Upload stalled for too long."},
+                },
+            },
+            status="FAILED",
+            owner_id="u-blk",
+        )
+        sync_project_tasks(sess, "proj-blk")
+        assert sess.execute(select(ProjectTask)).scalars().all()
+        sess.commit()
+        sess.close()
+
+        resp = client.post(
+            "/remote/stage/stg-delete-1/delete-workflow",
+            json={"project_id": "proj-blk", "block_id": stage_block.id},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "deleted"
+        assert body["deleted_path"] == str(workflow_dir)
+        assert body["file_count"] == 2
+        assert not workflow_dir.exists()
+
+        sess = session_factory()
+        refreshed_stage = sess.execute(select(ProjectBlock).where(ProjectBlock.id == stage_block.id)).scalar_one()
+        refreshed_workflow = sess.execute(select(ProjectBlock).where(ProjectBlock.id == workflow_block.id)).scalar_one()
+        stage_payload = get_block_payload(refreshed_stage)
+        workflow_payload = get_block_payload(refreshed_workflow)
+        remaining_tasks = sess.execute(
+            select(ProjectTask).where(ProjectTask.archived_at.is_(None))
+        ).scalars().all()
+        sess.close()
+
+        assert refreshed_stage.status == "DELETED"
+        assert refreshed_workflow.status == "DELETED"
+        assert stage_payload["deleted_path"] == str(workflow_dir)
+        assert stage_payload["deleted_file_count"] == 2
+        assert workflow_payload["status"] == "DELETED"
+        assert workflow_payload["deleted_file_count"] == 2
+        assert remaining_tasks == []
+
+    def test_delete_failed_staging_workflow_rejects_running_block(self, client, session_factory):
+        sess = session_factory()
+        stage_block = _create_block_internal(
+            sess,
+            "proj-blk",
+            "STAGING_TASK",
+            {
+                "sample_name": "ENCFF433WOA",
+                "mode": "RNA",
+                "staging_task_id": "stg-running-delete",
+                "local_workflow_directory": str(AGOUTIC_DATA / "users" / "blkuser" / "block-proj" / "workflow" / "running-stage-delete"),
+                "progress_percent": 20,
+                "message": "Uploading sample data",
+                "stage_parts": {
+                    "references": {"status": "COMPLETED", "progress_percent": 100, "message": "Reference assets are ready."},
+                    "data": {"status": "RUNNING", "progress_percent": 20, "message": "Uploading sample data"},
+                },
+            },
+            status="RUNNING",
+            owner_id="u-blk",
+        )
+        sess.commit()
+        sess.close()
+
+        resp = client.post(
+            "/remote/stage/stg-running-delete/delete-workflow",
+            json={"project_id": "proj-blk", "block_id": stage_block.id},
+        )
+
+        assert resp.status_code == 409
+        assert "only available after staging has failed or been cancelled" in resp.json()["detail"]
 
     def test_create_block_unauthenticated(self, session_factory, seed_data):
         with patch("cortex.db.SessionLocal", session_factory), \

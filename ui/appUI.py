@@ -456,6 +456,8 @@ def render_block(block, expected_project_id: str = ""):
         normalized = (raw_status or "pending").strip().lower()
         if normalized in {"completed", "complete", "done", "approved"}:
             return "complete", raw_status.replace("_", " ").title(), "✅"
+        if normalized == "deleted":
+            return "pending", raw_status.replace("_", " ").title(), "🗑️"
         if normalized in {"failed", "rejected", "cancelled"}:
             return "failed", raw_status.replace("_", " ").title(), "❌"
         if normalized in {"running", "active"}:
