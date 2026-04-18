@@ -39,6 +39,8 @@ class SubmitParams:
     ssh_profile_id: str | None = None
     slurm_account: str | None = None
     slurm_partition: str | None = None
+    slurm_gpu_account: str | None = None
+    slurm_gpu_partition: str | None = None
     slurm_cpus: int | None = None
     slurm_memory_gb: int | None = None
     slurm_walltime: str | None = None

@@ -1156,8 +1156,8 @@ async def test_write_remote_nextflow_config_uses_profile_cpu_defaults_separately
         mode="RNA",
         input_directory="/remote/input",
         reference_genome=["mm39"],
-        slurm_account="SEYEDAM_LAB_GPU",
-        slurm_partition="gpu",
+        slurm_gpu_account="SEYEDAM_LAB_GPU",
+        slurm_gpu_partition="gpu",
     )
     profile = SSHProfileData(
         id="profile-1",
@@ -1199,6 +1199,60 @@ async def test_write_remote_nextflow_config_uses_profile_cpu_defaults_separately
     assert captured["slurm_gpu_account"] == "SEYEDAM_LAB_GPU"
     assert captured["slurm_gpu_partition"] == "gpu"
     assert captured["apptainer_cache_dir"] == "/remote/agoutic/.nxf-apptainer-cache"
+
+
+@pytest.mark.asyncio
+async def test_write_remote_nextflow_config_prefers_explicit_account_overrides(monkeypatch):
+    backend = SlurmBackend()
+    params = SubmitParams(
+        sample_name="sample-override",
+        mode="DNA",
+        input_directory="/remote/input",
+        reference_genome=["mm39"],
+        slurm_account="CPU_OVERRIDE",
+        slurm_partition="cpu-override",
+        slurm_gpu_account="GPU_OVERRIDE",
+        slurm_gpu_partition="gpu-override",
+    )
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+        default_slurm_account="PROFILE_CPU",
+        default_slurm_partition="profile-cpu",
+        default_slurm_gpu_account="PROFILE_GPU",
+        default_slurm_gpu_partition="profile-gpu",
+    )
+    conn = _FakeWriteConn()
+    captured = {}
+
+    def fake_generate_config(**kwargs):
+        captured.update(kwargs)
+        return "process {}"
+
+    monkeypatch.setattr("launchpad.backends.slurm_backend.NextflowConfig.generate_config", fake_generate_config)
+
+    config_path = await backend._write_remote_nextflow_config(
+        params=params,
+        profile=profile,
+        conn=conn,
+        remote_work="/remote/agoutic/workflow2",
+        cache_resolution={},
+    )
+
+    assert config_path == "/remote/agoutic/workflow2/nextflow.config"
+    assert captured["slurm_cpu_account"] == "CPU_OVERRIDE"
+    assert captured["slurm_cpu_partition"] == "cpu-override"
+    assert captured["slurm_gpu_account"] == "GPU_OVERRIDE"
+    assert captured["slurm_gpu_partition"] == "gpu-override"
 
 
 @pytest.mark.asyncio

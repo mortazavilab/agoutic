@@ -197,6 +197,8 @@ class LaunchpadMCPTools:
         ssh_profile_id: Optional[str] = None,
         slurm_account: Optional[str] = None,
         slurm_partition: Optional[str] = None,
+        slurm_gpu_account: Optional[str] = None,
+        slurm_gpu_partition: Optional[str] = None,
         slurm_cpus: Optional[int] = None,
         slurm_memory_gb: Optional[int] = None,
         slurm_walltime: Optional[str] = None,
@@ -289,6 +291,10 @@ class LaunchpadMCPTools:
             payload["slurm_account"] = slurm_account
         if slurm_partition is not None:
             payload["slurm_partition"] = slurm_partition
+        if slurm_gpu_account is not None:
+            payload["slurm_gpu_account"] = slurm_gpu_account
+        if slurm_gpu_partition is not None:
+            payload["slurm_gpu_partition"] = slurm_gpu_partition
         if slurm_cpus is not None:
             payload["slurm_cpus"] = slurm_cpus
         if slurm_memory_gb is not None:
@@ -904,6 +910,8 @@ TOOL_REGISTRY = {
                 "ssh_profile_id": {"type": "string", "description": "Saved SSH profile to use for SLURM execution"},
                 "slurm_account": {"type": "string", "description": "SLURM account/allocation"},
                 "slurm_partition": {"type": "string", "description": "SLURM partition"},
+                "slurm_gpu_account": {"type": "string", "description": "Optional GPU account/allocation override"},
+                "slurm_gpu_partition": {"type": "string", "description": "Optional GPU partition override"},
                 "slurm_cpus": {"type": "integer", "description": "Requested CPU count"},
                 "slurm_memory_gb": {"type": "integer", "description": "Requested memory in GB"},
                 "slurm_walltime": {"type": "string", "description": "Requested walltime (HH:MM:SS or D-HH:MM:SS)"},

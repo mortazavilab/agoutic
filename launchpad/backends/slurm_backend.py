@@ -41,11 +41,26 @@ class SlurmBackend:
     _RSYNC_PARTIAL_DIR = ".rsync-partial"
     _RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "kallisto", "openChromatin", "stats")
     _RESULT_SYNC_FILE_PATTERNS = ("*.config", "*.html", "*.txt", "*.csv", "*.tsv")
-    _OPENCHROMATIN_LIBGOMP_CANDIDATES = (
-        "/lib64/libgomp.so.1",
-        "/usr/lib64/libgomp.so.1",
-        "/lib/x86_64-linux-gnu/libgomp.so.1",
-        "/usr/lib/x86_64-linux-gnu/libgomp.so.1",
+    _OPENCHROMATIN_WRAPPER_DIRNAME = ".agoutic-openchrom-bin"
+    _OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS = (
+        (
+            "/lib64/libgomp.so.1",
+            "/usr/lib64/libgomp.so.1",
+            "/lib/x86_64-linux-gnu/libgomp.so.1",
+            "/usr/lib/x86_64-linux-gnu/libgomp.so.1",
+        ),
+        (
+            "/lib64/libstdc++.so.6",
+            "/usr/lib64/libstdc++.so.6",
+            "/lib/x86_64-linux-gnu/libstdc++.so.6",
+            "/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+        ),
+        (
+            "/lib64/libgcc_s.so.1",
+            "/usr/lib64/libgcc_s.so.1",
+            "/lib/x86_64-linux-gnu/libgcc_s.so.1",
+            "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+        ),
     )
 
     @staticmethod
@@ -57,9 +72,81 @@ class SlurmBackend:
             return local_work_dir
         return remote_work_dir or local_work_dir
 
+    @classmethod
+    def _is_openchromatin_runtime_library_input(cls, bind_path: str) -> bool:
+        cleaned = str(bind_path or "").strip()
+        return any(cleaned in candidate_group for candidate_group in cls._OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS)
+
+    async def _resolve_openchromatin_runtime_library_paths(self, *, conn) -> list[str] | None:
+        resolved_paths: list[str] = []
+
+        for candidate_group in self._OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS:
+            resolved_candidate = None
+            for candidate in candidate_group:
+                if await conn.path_exists(candidate):
+                    resolved_candidate = candidate
+                    break
+            if not resolved_candidate:
+                return None
+            resolved_paths.append(resolved_candidate)
+
+        return resolved_paths
+
     def __init__(self):
         self._ssh_manager = SSHConnectionManager()
         self._transfer_manager = FileTransferManager()
+
+    @classmethod
+    def _build_openchromatin_wrapper_runtime_exports(
+        cls,
+        *,
+        runtime_exports: list[str],
+        remote_work: str,
+    ) -> list[str]:
+        wrapper_dir = f"{str(remote_work).rstrip('/')}/{cls._OPENCHROMATIN_WRAPPER_DIRNAME}"
+        resolved_exports = [str(command or "").strip() for command in runtime_exports if str(command or "").strip()]
+        resolved_exports.append(f"export PATH={wrapper_dir}:${{PATH}}")
+        return resolved_exports
+
+    @classmethod
+    def _openchromatin_wrapper_script_content(cls) -> str:
+        return (
+            "#!/bin/bash\n"
+            "set -e\n"
+            "wrapper_dir=\"$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\"\n"
+            "clean_path=\"${PATH#${wrapper_dir}:}\"\n"
+            "real_modkit=\"$(PATH=\"$clean_path\" command -v modkit || true)\"\n"
+            "if [[ -z \"$real_modkit\" ]]; then\n"
+            "  echo 'Failed to locate the real modkit binary behind the AGOUTIC OpenChromatin wrapper.' >&2\n"
+            "  exit 127\n"
+            "fi\n"
+            "if [[ \"${1:-}\" == \"open-chromatin\" && \"${2:-}\" == \"predict\" ]]; then\n"
+            "  has_device=0\n"
+            "  for arg in \"$@\"; do\n"
+            "    if [[ \"$arg\" == \"--device\" || \"$arg\" == --device=* ]]; then\n"
+            "      has_device=1\n"
+            "      break\n"
+            "    fi\n"
+            "  done\n"
+            "  if [[ $has_device -eq 0 ]]; then\n"
+            "    exec \"$real_modkit\" open-chromatin predict --device 0 \"${@:3}\"\n"
+            "  fi\n"
+            "fi\n"
+            "exec \"$real_modkit\" \"$@\"\n"
+        )
+
+    async def _stage_openchromatin_wrapper(self, *, conn, remote_work: str) -> str:
+        wrapper_dir = f"{str(remote_work).rstrip('/')}/{self._OPENCHROMATIN_WRAPPER_DIRNAME}"
+        wrapper_path = f"{wrapper_dir}/modkit"
+        await conn.mkdir_p(wrapper_dir)
+        await conn.run(
+            f"cat > {shlex.quote(wrapper_path)} << 'AGOUTIC_EOF'\n"
+            f"{self._openchromatin_wrapper_script_content()}"
+            "AGOUTIC_EOF",
+            check=True,
+        )
+        await conn.run(f"chmod 755 {shlex.quote(wrapper_path)}", check=True)
+        return wrapper_dir
 
     @staticmethod
     def _parse_scheduler_queue_text(
@@ -1565,8 +1652,8 @@ class SlurmBackend:
         The controller only orchestrates the workflow; GPU requests belong to
         the individual pipeline tasks configured in nextflow.config.
         """
-        cpu_account = (profile.default_slurm_account or params.slurm_account or "default").strip() or "default"
-        cpu_partition = (profile.default_slurm_partition or params.slurm_partition or "standard").strip() or "standard"
+        cpu_account = (params.slurm_account or profile.default_slurm_account or "default").strip() or "default"
+        cpu_partition = (params.slurm_partition or profile.default_slurm_partition or "standard").strip() or "standard"
         return cpu_account, cpu_partition
 
     async def _resolve_custom_dogme_bind_paths(
@@ -1582,21 +1669,40 @@ class SlurmBackend:
             if not cleaned:
                 continue
 
-            if cleaned == "/lib64":
-                for candidate in self._OPENCHROMATIN_LIBGOMP_CANDIDATES:
-                    if await conn.path_exists(candidate):
-                        cleaned = candidate
-                        break
-                else:
-                    logger.warning(
-                        "Falling back to broad /lib64 bind for custom OpenChromatin runtime because no libgomp candidate was found"
-                    )
+            is_runtime_library_input = self._is_openchromatin_runtime_library_input(cleaned)
+            if cleaned == "/lib64" or is_runtime_library_input:
+                runtime_library_paths = await self._resolve_openchromatin_runtime_library_paths(conn=conn)
+                if runtime_library_paths:
+                    for runtime_library_path in runtime_library_paths:
+                        if runtime_library_path not in resolved_paths:
+                            resolved_paths.append(runtime_library_path)
+                    continue
 
-            elif cleaned == "/lib64/libgomp.so.1":
-                for candidate in (cleaned, *self._OPENCHROMATIN_LIBGOMP_CANDIDATES[1:]):
-                    if await conn.path_exists(candidate):
-                        cleaned = candidate
+                if cleaned == "/lib64":
+                    logger.warning(
+                        "Falling back to broad /lib64 bind for custom OpenChromatin runtime because the host GCC runtime libraries were not all found"
+                    )
+                else:
+                    # Preserve backward compatibility for saved runs that listed only one runtime library path.
+                    # When the full host runtime set cannot be resolved, keep the specific requested file.
+                    for candidate_group in self._OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS:
+                        if cleaned not in candidate_group:
+                            continue
+                        for candidate in candidate_group:
+                            if await conn.path_exists(candidate):
+                                cleaned = candidate
+                                break
                         break
+
+            if not is_runtime_library_input:
+                for candidate_group in self._OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS:
+                    if cleaned not in candidate_group:
+                        continue
+                    for candidate in candidate_group:
+                        if await conn.path_exists(candidate):
+                            cleaned = candidate
+                            break
+                    break
 
             if not await conn.path_exists(cleaned):
                 raise FileNotFoundError(
@@ -1617,10 +1723,10 @@ class SlurmBackend:
         cache_resolution: dict,
     ) -> str:
         """Generate and write Nextflow config in the remote workflow directory."""
-        cpu_account = (profile.default_slurm_account or params.slurm_account or "default").strip() or "default"
-        cpu_partition = (profile.default_slurm_partition or params.slurm_partition or "standard").strip() or "standard"
-        gpu_account = (profile.default_slurm_gpu_account or params.slurm_account or cpu_account).strip() or cpu_account
-        gpu_partition = (profile.default_slurm_gpu_partition or params.slurm_partition or cpu_partition).strip() or cpu_partition
+        cpu_account = (params.slurm_account or profile.default_slurm_account or "default").strip() or "default"
+        cpu_partition = (params.slurm_partition or profile.default_slurm_partition or "standard").strip() or "standard"
+        gpu_account = (params.slurm_gpu_account or profile.default_slurm_gpu_account or cpu_account).strip() or cpu_account
+        gpu_partition = (params.slurm_gpu_partition or profile.default_slurm_gpu_partition or cpu_partition).strip() or cpu_partition
 
         # Prefer staged remote reference cache paths so config does not point at local host paths.
         ref_overrides: dict[str, dict[str, str]] = {}
@@ -1711,6 +1817,17 @@ class SlurmBackend:
                 )
             )
 
+        task_runtime_exports = resolve_dogme_profile_task_runtime_exports(
+            params.mode,
+            custom_profile=params.custom_dogme_profile,
+        )
+        if str(params.mode or "").strip().upper() == DogmeMode.DNA.value:
+            await self._stage_openchromatin_wrapper(conn=conn, remote_work=remote_work)
+            task_runtime_exports = self._build_openchromatin_wrapper_runtime_exports(
+                runtime_exports=task_runtime_exports,
+                remote_work=remote_work,
+            )
+
         config = NextflowConfig.generate_config(
             sample_name=params.sample_name,
             mode=params.mode,
@@ -1729,10 +1846,7 @@ class SlurmBackend:
             slurm_cpu_account=cpu_account,
             slurm_gpu_account=gpu_account,
             slurm_bind_paths=bind_paths,
-            modkit_task_runtime_exports=resolve_dogme_profile_task_runtime_exports(
-                params.mode,
-                custom_profile=params.custom_dogme_profile,
-            ),
+            modkit_task_runtime_exports=task_runtime_exports,
             slurm_modkit_bind_paths=modkit_bind_paths,
             apptainer_cache_dir=f"{remote_roots['remote_base_path']}/.nxf-apptainer-cache",
         )

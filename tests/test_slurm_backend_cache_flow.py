@@ -475,7 +475,15 @@ async def test_submit_ignores_custom_profile_fields_for_non_dna(monkeypatch, pro
 @pytest.mark.anyio
 async def test_submit_scopes_custom_dogme_bind_paths_to_openchromatin_tasks(monkeypatch, profile):
     backend = SlurmBackend()
-    conn = _FakeConn(existing_paths={"/cluster/modkit", "/lib64", "/lib64/libgomp.so.1"})
+    conn = _FakeConn(
+        existing_paths={
+            "/cluster/modkit",
+            "/lib64",
+            "/lib64/libgomp.so.1",
+            "/lib64/libstdc++.so.6",
+            "/lib64/libgcc_s.so.1",
+        }
+    )
 
     params = SubmitParams(
         project_id="proj-1",
@@ -489,7 +497,7 @@ async def test_submit_scopes_custom_dogme_bind_paths_to_openchromatin_tasks(monk
         workflow_number=4,
         remote_base_path="/remote/eli/agoutic",
         custom_dogme_profile="export MODKITBASE=/cluster/modkit\n",
-        custom_dogme_bind_paths=["/cluster/modkit", "/lib64"],
+        custom_dogme_bind_paths=["/cluster/modkit", "/lib64/libgomp.so.1"],
     )
 
     async def _load_profile(*args, **kwargs):
@@ -541,19 +549,29 @@ async def test_submit_scopes_custom_dogme_bind_paths_to_openchromatin_tasks(monk
     config_write = [c for c in conn.commands if "nextflow.config" in c and "cat >" in c]
     assert config_write, "Expected remote nextflow.config write command"
     config_text = config_write[0]
-    assert "containerOptions = \"--no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39\"" in config_text
+    assert "containerOptions = '--no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39'" in config_text
     assert "withName: 'modkitTask' {" in config_text
-    assert "withName: 'modkitTask' {\n        memory = '32 GB'\n        cpus = 12\n        containerOptions = \"--no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39\"" in config_text
-    assert "containerOptions = \"--nv --no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39\"" in config_text
+    assert "withName: 'modkitTask' {\n        memory = '32 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39'" in config_text
+    assert "containerOptions = '--nv --no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39'" in config_text
     assert "withName: 'openChromatinTaskBg' {" in config_text
     assert "withName: 'openChromatinTaskBed' {" in config_text
-    assert config_text.count("containerOptions = \"--nv --no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39,/cluster/modkit,/lib64/libgomp.so.1 --env 'MODKITBASE=/cluster/modkit'\"") == 2
+    assert config_text.count("containerOptions = '--nv --no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39,/cluster/modkit,/lib64/libgomp.so.1,/lib64/libstdc++.so.6,/lib64/libgcc_s.so.1 --env \\\'MODKITBASE=/cluster/modkit,PREPEND_PATH=/remote/eli/agoutic/proj-1/workflow4/.agoutic-openchrom-bin,LD_LIBRARY_PATH=/lib64:\\\\$LD_LIBRARY_PATH\\\''") == 2
+    wrapper_write = [c for c in conn.commands if "/.agoutic-openchrom-bin/modkit << 'AGOUTIC_EOF'" in c]
+    assert wrapper_write, "Expected OpenChromatin modkit wrapper to be staged"
 
 
 @pytest.mark.asyncio
 async def test_submit_scopes_custom_dogme_runtime_exports_to_openchromatin_only(monkeypatch, profile):
     backend = SlurmBackend()
-    conn = _FakeConn(existing_paths={"/cluster/modkit", "/lib64", "/lib64/libgomp.so.1"})
+    conn = _FakeConn(
+        existing_paths={
+            "/cluster/modkit",
+            "/lib64",
+            "/lib64/libgomp.so.1",
+            "/lib64/libstdc++.so.6",
+            "/lib64/libgcc_s.so.1",
+        }
+    )
 
     params = SubmitParams(
         project_id="proj-1",
@@ -574,7 +592,7 @@ async def test_submit_scopes_custom_dogme_runtime_exports_to_openchromatin_only(
             "export LD_LIBRARY_PATH=${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}\n"
             "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}\n"
         ),
-        custom_dogme_bind_paths=["/cluster/modkit", "/lib64"],
+        custom_dogme_bind_paths=["/cluster/modkit", "/lib64/libgomp.so.1"],
     )
 
     async def _load_profile(*args, **kwargs):
@@ -626,8 +644,10 @@ async def test_submit_scopes_custom_dogme_runtime_exports_to_openchromatin_only(
     config_write = [c for c in conn.commands if "nextflow.config" in c and "cat >" in c]
     assert config_write, "Expected remote nextflow.config write command"
     config_text = config_write[0]
-    assert config_text.count("--env 'MODKITBASE=/cluster/modkit,PREPEND_PATH=/cluster/modkit,MODKITMODEL=/cluster/modkit/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0,LIBTORCH=/cluster/modkit/libtorch,LD_LIBRARY_PATH=/cluster/modkit/libtorch/lib:\\$LD_LIBRARY_PATH,DYLD_LIBRARY_PATH=/cluster/modkit/libtorch/lib:\\$DYLD_LIBRARY_PATH'") == 2
+    assert config_text.count("--bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39,/cluster/modkit,/lib64/libgomp.so.1,/lib64/libstdc++.so.6,/lib64/libgcc_s.so.1 --env \\\'MODKITBASE=/cluster/modkit,PREPEND_PATH=/remote/eli/agoutic/proj-1/workflow4/.agoutic-openchrom-bin:/cluster/modkit,MODKITMODEL=/cluster/modkit/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0,LIBTORCH=/cluster/modkit/libtorch,LD_LIBRARY_PATH=/lib64:/cluster/modkit/libtorch/lib:\\\\$LD_LIBRARY_PATH,DYLD_LIBRARY_PATH=/cluster/modkit/libtorch/lib:\\\\$DYLD_LIBRARY_PATH\\\'") == 2
     assert config_text.count("beforeScript = 'export PATH=/opt/conda/bin:$PATH'") == 1
+    wrapper_write = [c for c in conn.commands if "/.agoutic-openchrom-bin/modkit << 'AGOUTIC_EOF'" in c]
+    assert wrapper_write, "Expected OpenChromatin modkit wrapper to be staged"
 
     dogme_profile_write = [c for c in conn.commands if "cat >" in c and "/dogme.profile <<" in c]
     assert dogme_profile_write, "Expected remote dogme.profile write command"

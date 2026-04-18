@@ -42,13 +42,42 @@ INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 DOGME_REPO = Path(os.getenv("DOGME_REPO", AGOUTIC_CODE / "dogme"))
 
 # Container-internal modkit paths used by DNA mode dogme.profile.
-DOGME_DNA_MODKITBASE = Path((os.getenv("DOGME_DNA_MODKITBASE") or "/usr/local/lib/modkit").strip())
+DOGME_DNA_MODKITBASE = Path((os.getenv("DOGME_DNA_MODKITBASE") or "/usr/local/lib/modkit-cpu").strip())
 DOGME_DNA_MODKITMODEL = Path(
     (
         os.getenv("DOGME_DNA_MODKITMODEL")
         or str(DOGME_DNA_MODKITBASE / "models" / "r1041_e82_400bps_hac_v5.2.0@v0.1.0")
     ).strip()
 )
+
+# Container-internal OpenChromatin GPU modkit paths used only for DNA OpenChromatin tasks.
+DOGME_DNA_OPENCHROM_MODKITBASE = Path(
+    (os.getenv("DOGME_DNA_OPENCHROM_MODKITBASE") or "/usr/local/lib/modkit-gpu").strip()
+)
+DOGME_DNA_OPENCHROM_BINARY_DIR = Path(
+    (
+        os.getenv("DOGME_DNA_OPENCHROM_BINARY_DIR")
+        or str(DOGME_DNA_OPENCHROM_MODKITBASE / "dist_modkit_v0.5.0_5120ef7_tch")
+    ).strip()
+)
+DOGME_DNA_OPENCHROM_MODEL = Path(
+    (
+        os.getenv("DOGME_DNA_OPENCHROM_MODEL")
+        or str(DOGME_DNA_OPENCHROM_BINARY_DIR / "models" / "r1041_e82_400bps_hac_v5.2.0@v0.1.0")
+    ).strip()
+)
+DOGME_DNA_OPENCHROM_LIBTORCH = Path(
+    (
+        os.getenv("DOGME_DNA_OPENCHROM_LIBTORCH")
+        or str(DOGME_DNA_OPENCHROM_MODKITBASE / "libtorch")
+    ).strip()
+)
+
+# Shared Apptainer image for SLURM DNA runs.
+DOGME_DNA_SLURM_CONTAINER = (
+    os.getenv("DOGME_DNA_SLURM_CONTAINER")
+    or "/share/crsp/lab/seyedam/share/agoutic/container/dogme-pipeline-openchrom-gpu-bedtools.sif"
+).strip()
 
 # Path to Nextflow executable
 NEXTFLOW_BIN = Path(os.getenv("NEXTFLOW_BIN", "/usr/local/bin/nextflow"))

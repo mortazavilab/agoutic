@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from datetime import datetime
 from typing import Optional
 import uuid
@@ -17,6 +17,11 @@ from launchpad.config import (
     DOGME_REPO,
     DOGME_DNA_MODKITBASE,
     DOGME_DNA_MODKITMODEL,
+    DOGME_DNA_OPENCHROM_BINARY_DIR,
+    DOGME_DNA_OPENCHROM_LIBTORCH,
+    DOGME_DNA_OPENCHROM_MODEL,
+    DOGME_DNA_OPENCHROM_MODKITBASE,
+    DOGME_DNA_SLURM_CONTAINER,
     NEXTFLOW_BIN,
     LAUNCHPAD_WORK_DIR,
     LAUNCHPAD_LOGS_DIR,
@@ -33,6 +38,18 @@ logger = get_logger(__name__)
 _MINIMAL_DOGME_PROFILE = "# Dogme environment profile\n# Add environment variables here if needed\n"
 _DEFAULT_PROCESS_BEFORE_SCRIPT = "export PATH=/opt/conda/bin:$PATH"
 _PROFILE_EXPORT_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_EXPORT_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_OPENCHROMATIN_LIBRARY_DIR_CANDIDATES = (
+    "/lib64",
+    "/usr/lib64",
+    "/lib/x86_64-linux-gnu",
+    "/usr/lib/x86_64-linux-gnu",
+)
+_OPENCHROMATIN_LIBRARY_FILE_SUFFIXES = (
+    "libgomp.so.1",
+    "libstdc++.so.6",
+    "libgcc_s.so.1",
+)
 
 
 def _ensure_trailing_newline(content: str) -> str:
@@ -49,6 +66,17 @@ def _default_dna_dogme_profile_content() -> str:
         "export MODKITMODEL=${MODKITMODEL:-${MODKITBASE}/models/"
         f"{DOGME_DNA_MODKITMODEL.name}}}\n"
     )
+
+
+def _default_dna_openchromatin_runtime_exports() -> list[str]:
+    return [
+        f"export MODKITBASE={DOGME_DNA_OPENCHROM_MODKITBASE}",
+        f"export PATH={DOGME_DNA_OPENCHROM_BINARY_DIR}:${{PATH}}",
+        f"export MODKITMODEL={DOGME_DNA_OPENCHROM_MODEL}",
+        f"export LIBTORCH={DOGME_DNA_OPENCHROM_LIBTORCH}",
+        "export LD_LIBRARY_PATH=/opt/conda/lib:${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}",
+        "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}",
+    ]
 
 
 def _resolve_task_scoped_dogme_exports(profile_content: str) -> list[str]:
@@ -78,7 +106,7 @@ def resolve_dogme_profile_parts(mode: str, custom_profile: str | None = None) ->
         return _default_dna_dogme_profile_content(), _resolve_task_scoped_dogme_exports(str(custom_profile))
 
     if normalized_mode == DogmeMode.DNA.value:
-        return (_default_dna_dogme_profile_content(), [])
+        return (_default_dna_dogme_profile_content(), _default_dna_openchromatin_runtime_exports())
 
     dogme_profile_src = DOGME_REPO / "dogme.profile"
     if dogme_profile_src.exists():
@@ -111,34 +139,181 @@ def _parse_export_statement(command: str) -> tuple[str, str] | None:
     return variable_name, value.strip()
 
 
-def _render_apptainer_env_options(exports: list[str]) -> str:
-    assignments: list[str] = []
+def _dedupe_paths(paths: list[str] | tuple[str, ...] | None) -> list[str]:
+    normalized: list[str] = []
+    for path in paths or []:
+        cleaned = str(path or "").strip()
+        if cleaned and cleaned not in normalized:
+            normalized.append(cleaned)
+    return normalized
+
+
+def _extract_bind_target(bind_path: str) -> str:
+    cleaned = str(bind_path or "").strip()
+    if not cleaned or ":" not in cleaned:
+        return cleaned
+    parts = cleaned.split(":")
+    if len(parts) >= 2 and parts[0].startswith("/") and parts[1].startswith("/"):
+        return parts[1]
+    return cleaned
+
+
+def _extract_openchromatin_library_dirs(bind_paths: list[str] | None) -> list[str]:
+    library_dirs: list[str] = []
+    for bind_path in bind_paths or []:
+        target = _extract_bind_target(bind_path)
+        if not target:
+            continue
+        if any(target.endswith(f"/{filename}") for filename in _OPENCHROMATIN_LIBRARY_FILE_SUFFIXES):
+            parent = str(PurePosixPath(target).parent).strip()
+            if parent and parent not in library_dirs:
+                library_dirs.append(parent)
+            continue
+        if target in _OPENCHROMATIN_LIBRARY_DIR_CANDIDATES and target not in library_dirs:
+            library_dirs.append(target)
+    return library_dirs
+
+
+def _render_library_path_assignment(
+    *,
+    variable_name: str,
+    value: str,
+    prefix_paths: list[str] | None = None,
+) -> str:
+    normalized_prefixes = _dedupe_paths(prefix_paths)
+    default_suffix = f":${{{variable_name}:-}}"
+    plain_suffix = f":${variable_name}"
+    if value.endswith(default_suffix):
+        base_value = value[:-len(default_suffix)]
+        segments = normalized_prefixes + ([base_value] if base_value else [])
+        if segments:
+            return f"{':'.join(segments)}:\\${variable_name}"
+        return f"\\${variable_name}"
+    if value.endswith(plain_suffix):
+        base_value = value[:-len(plain_suffix)]
+        segments = normalized_prefixes + ([base_value] if base_value else [])
+        if segments:
+            return f"{':'.join(segments)}:\\${variable_name}"
+        return f"\\${variable_name}"
+    if normalized_prefixes:
+        return ":".join(normalized_prefixes + [value])
+    return value.replace('$', r'\\$')
+
+
+def _resolve_known_export_references(
+    value: str,
+    known_values: dict[str, str],
+    *,
+    skip_names: set[str] | None = None,
+) -> str:
+    ignored = skip_names or set()
+
+    def _replace(match: re.Match[str]) -> str:
+        variable_name = match.group(1)
+        if variable_name in ignored:
+            return match.group(0)
+        return known_values.get(variable_name, match.group(0))
+
+    return _EXPORT_REFERENCE_RE.sub(_replace, value)
+
+
+def _render_apptainer_env_options(
+    exports: list[str],
+    *,
+    prepend_paths: list[str] | tuple[str, ...] | None = None,
+    library_path_prefixes: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    assignments: list[tuple[str, str]] = []
+    resolved_values: dict[str, str] = {}
+    normalized_prepend_paths = _dedupe_paths(prepend_paths)
+    normalized_library_prefixes = _dedupe_paths(library_path_prefixes)
+
+    def set_assignment(name: str, value: str, *, resolved_value: str | None = None) -> None:
+        for index, (existing_name, _existing_value) in enumerate(assignments):
+            if existing_name == name:
+                assignments[index] = (name, value)
+                resolved_values[name] = resolved_value if resolved_value is not None else value
+                return
+        assignments.append((name, value))
+        resolved_values[name] = resolved_value if resolved_value is not None else value
+
     for command in exports:
         parsed = _parse_export_statement(command)
         if not parsed:
             continue
         variable_name, value = parsed
         if variable_name == "PATH":
+            resolved_path_value = _resolve_known_export_references(
+                value,
+                resolved_values,
+                skip_names={"PATH"},
+            )
             if value.endswith(":${PATH}"):
-                assignments.append(f"PREPEND_PATH={value[:-len(':${PATH}')]}")
+                normalized_prepend_paths = _dedupe_paths(
+                    resolved_path_value[:-len(":${PATH}")].split(":") + normalized_prepend_paths
+                )
+                set_assignment(
+                    "PREPEND_PATH",
+                    ":".join(normalized_prepend_paths),
+                    resolved_value=":".join(normalized_prepend_paths),
+                )
             elif value.endswith(":$PATH"):
-                assignments.append(f"PREPEND_PATH={value[:-len(':$PATH')]}")
+                normalized_prepend_paths = _dedupe_paths(
+                    resolved_path_value[:-len(":$PATH")].split(":") + normalized_prepend_paths
+                )
+                set_assignment(
+                    "PREPEND_PATH",
+                    ":".join(normalized_prepend_paths),
+                    resolved_value=":".join(normalized_prepend_paths),
+                )
             else:
-                assignments.append(f"PATH={value.replace('$', r'\\$')}")
+                set_assignment(
+                    "PATH",
+                    resolved_path_value.replace('$', r'\\$'),
+                    resolved_value=resolved_path_value,
+                )
             continue
         if variable_name in {"LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"}:
-            default_suffix = f":${{{variable_name}:-}}"
-            plain_suffix = f":${variable_name}"
-            if value.endswith(default_suffix):
-                assignments.append(f"{variable_name}={value[:-len(default_suffix)]}:\\${variable_name}")
-                continue
-            if value.endswith(plain_suffix):
-                assignments.append(f"{variable_name}={value[:-len(plain_suffix)]}:\\${variable_name}")
-                continue
-        assignments.append(f"{variable_name}={value.replace('$', r'\\$')}")
+            prefix_paths = normalized_library_prefixes if variable_name == "LD_LIBRARY_PATH" else []
+            resolved_library_value = _resolve_known_export_references(
+                value,
+                resolved_values,
+                skip_names={variable_name},
+            )
+            rendered_library_value = _render_library_path_assignment(
+                variable_name=variable_name,
+                value=resolved_library_value,
+                prefix_paths=prefix_paths,
+            )
+            set_assignment(
+                variable_name,
+                rendered_library_value,
+                resolved_value=rendered_library_value,
+            )
+            continue
+        resolved_value = _resolve_known_export_references(
+            value,
+            resolved_values,
+            skip_names={variable_name},
+        )
+        set_assignment(
+            variable_name,
+            resolved_value.replace('$', r'\\$'),
+            resolved_value=resolved_value,
+        )
+    if normalized_prepend_paths and not any(name == "PREPEND_PATH" for name, _ in assignments):
+        resolved_prepend_path = ":".join(normalized_prepend_paths)
+        set_assignment("PREPEND_PATH", resolved_prepend_path, resolved_value=resolved_prepend_path)
+    if normalized_library_prefixes and not any(name == "LD_LIBRARY_PATH" for name, _ in assignments):
+        rendered_library_prefix = f"{':'.join(normalized_library_prefixes)}:\\$LD_LIBRARY_PATH"
+        set_assignment(
+            "LD_LIBRARY_PATH",
+            rendered_library_prefix,
+            resolved_value=rendered_library_prefix,
+        )
     if not assignments:
         return ""
-    return "--env '" + ",".join(assignments).replace("'", "'\\''") + "'"
+    return "--env '" + ",".join(f"{name}={value}" for name, value in assignments).replace("'", "'\\''") + "'"
 
 
 def resolve_dogme_profile_content(mode: str, custom_profile: str | None = None) -> str:
@@ -227,6 +402,9 @@ class NextflowConfig:
         if min_cov is None:
             min_cov = 1 if mode == "DNA" else 3
 
+        if str(mode or "").strip().upper() == DogmeMode.DNA.value and modkit_task_runtime_exports is None:
+            modkit_task_runtime_exports = _default_dna_openchromatin_runtime_exports()
+
         is_slurm = (execution_mode or "local").strip().lower() == "slurm"
         cpu_partition = (slurm_cpu_partition or "standard").strip() or "standard"
         gpu_partition = (slurm_gpu_partition or cpu_partition).strip() or cpu_partition
@@ -248,6 +426,7 @@ class NextflowConfig:
         slurm_modkit_bind_args = ""
         if normalized_modkit_bind_paths:
             slurm_modkit_bind_args = f"--bind {','.join(normalized_modkit_bind_paths)}"
+        openchromatin_library_dirs = _extract_openchromatin_library_dirs(normalized_modkit_bind_paths)
         slurm_container_base_options = "--no-mount hostfs"
         if slurm_bind_args:
             slurm_container_base_options = f"{slurm_container_base_options} {slurm_bind_args}"
@@ -257,12 +436,19 @@ class NextflowConfig:
         resolved_apptainer_cache_dir = str(apptainer_cache_dir or "").strip() or "${launchDir}/.nxf-apptainer-cache"
         base_before_script = _render_before_script([_DEFAULT_PROCESS_BEFORE_SCRIPT])
         has_openchromatin_task_runtime_exports = bool(modkit_task_runtime_exports)
-        openchromatin_env_options = _render_apptainer_env_options(modkit_task_runtime_exports or [])
+        openchromatin_env_options = _render_apptainer_env_options(
+            modkit_task_runtime_exports or [],
+            library_path_prefixes=openchromatin_library_dirs,
+        )
         if openchromatin_env_options:
             slurm_openchromatin_container_base_options = (
                 f"{slurm_openchromatin_container_base_options} {openchromatin_env_options}"
             )
         
+        container_image = "ghcr.io/mortazavilab/dogme-pipeline:latest"
+        if is_slurm and str(mode or "").strip().upper() == DogmeMode.DNA.value:
+            container_image = DOGME_DNA_SLURM_CONTAINER
+
         # Build config string matching example format
         config_lines = []
         config_lines.append("params {")
@@ -323,10 +509,12 @@ class NextflowConfig:
         config_lines.append("")
         config_lines.append("process {")
         config_lines.append("    // <-- Container Settings --->")
-        config_lines.append("    container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'")
+        config_lines.append(f"    container = '{container_image}'")
         if is_slurm:
             config_lines.append("    // Remote SLURM runs bind only workflow-specific remote paths.")
-            config_lines.append(f"    containerOptions = \"{slurm_container_base_options}\"")
+            config_lines.append(
+                f"    containerOptions = {_quote_nextflow_single_quoted(slurm_container_base_options)}"
+            )
         else:
             config_lines.append(f"    containerOptions = \"-v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append(f"    beforeScript = {base_before_script}")
@@ -370,7 +558,9 @@ class NextflowConfig:
             config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
             gpu_container_options = f"--nv {slurm_container_base_options}"
-            config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
+            config_lines.append(
+                f"        containerOptions = {_quote_nextflow_single_quoted(gpu_container_options)}"
+            )
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
@@ -379,7 +569,9 @@ class NextflowConfig:
         config_lines.append("        memory = '32 GB'")
         config_lines.append("        cpus = 12")
         if is_slurm:
-            config_lines.append(f"        containerOptions = \"{slurm_container_base_options}\"")
+            config_lines.append(
+                f"        containerOptions = {_quote_nextflow_single_quoted(slurm_container_base_options)}"
+            )
         config_lines.append("    }")
         config_lines.append("    ")
         config_lines.append("    withName: 'openChromatinTaskBg' {")
@@ -392,7 +584,9 @@ class NextflowConfig:
             config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
             gpu_container_options = f"--nv {slurm_openchromatin_container_base_options}"
-            config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
+            config_lines.append(
+                f"        containerOptions = {_quote_nextflow_single_quoted(gpu_container_options)}"
+            )
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
@@ -407,7 +601,9 @@ class NextflowConfig:
             config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
             gpu_container_options = f"--nv {slurm_openchromatin_container_base_options}"
-            config_lines.append(f"        containerOptions = \"{gpu_container_options}\"")
+            config_lines.append(
+                f"        containerOptions = {_quote_nextflow_single_quoted(gpu_container_options)}"
+            )
         else:
             config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")

@@ -106,6 +106,8 @@ async def test_submit_dogme_job_forwards_cache_fields(monkeypatch):
         ssh_profile_id="profile-1",
         slurm_account=None,
         slurm_partition=None,
+        slurm_gpu_account=None,
+        slurm_gpu_partition=None,
         slurm_cpus=None,
         slurm_memory_gb=None,
         slurm_walltime=None,

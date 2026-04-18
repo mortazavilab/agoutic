@@ -1,32 +1,20 @@
 ## [Unreleased]
 
+## [3.6.4] - 2026-04-18
+
 ### Features
 
-- **SLURM DNA approvals can now override `dogme.profile` with cluster-hosted
-  modkit settings at run time** — the approval gate now offers a DNA-only
-  custom `dogme.profile` option for SLURM runs, lets users enter extra remote
-  bind paths and environment exports, and shows a preview of the exact bind
-  list and profile text that will be submitted. Launchpad stages the custom
-  profile only for DNA runs, validates the extra remote bind paths before
-  submission, and ignores the custom override fields for RNA/cDNA so the
-  standard non-DNA profile behavior is preserved. The default cluster-modkit
-  template now targets the PyTorch `tch` distribution, exports
-  `MODKITBASE` as the shared modkit root, prepends the `dist_modkit..._tch`
-  binary directory to `PATH`, exports `LIBTORCH` plus
-  `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` from the sibling `libtorch/lib`
-  directory, and now exposes the cluster
-  modkit binary directory as its own DNA-only gate field so users can switch
-  modkit builds without hand-editing the generated profile template. On the
-  Launchpad side, those extra `tch` bind paths are now scoped to the tasks
-  that actually invoke modkit (`modkitTask`, `openChromatinTaskBg`, and
-  `openChromatinTaskBed`) so dorado keeps the container's original runtime
-  library view.
-  (`ui/appui_block_part1.py`, `cortex/workflow_submission.py`,
-  `launchpad/backends/base.py`, `launchpad/schemas.py`,
-  `launchpad/app.py`, `launchpad/mcp_tools.py`,
-  `launchpad/mcp_server.py`, `launchpad/nextflow_executor.py`,
-  `launchpad/backends/local_backend.py`,
-  `launchpad/backends/slurm_backend.py`)
+- **SLURM DNA runs now use the shared Dogme OpenChromatin GPU container with
+  task-scoped runtime wiring** — Launchpad now defaults DNA SLURM execution to
+  the shared
+  `/share/crsp/lab/seyedam/share/agoutic/container/dogme-pipeline-openchrom-gpu-bedtools.sif`
+  image, keeps the standard CPU modkit view for normal DNA tasks, and injects
+  the GPU-capable OpenChromatin runtime only where the Dogme workflow needs it.
+  The approval gate no longer exposes the older DNA-only custom cluster-modkit
+  profile and bind-path controls now that the shared SIF carries the supported
+  runtime.
+  (`launchpad/config.py`, `launchpad/nextflow_executor.py`,
+  `launchpad/backends/slurm_backend.py`, `ui/appui_block_part1.py`)
 
 - **Failed remote staging cards can now delete the reserved local workflow
   folder directly from the UI** — DNA/RNA staging failures now offer a delete
@@ -47,31 +35,35 @@
   (`cortex/tool_dispatch.py`, `tests/cortex/test_chat_data_calls.py`,
   `skills/remote_execution/SKILL.md`)
 
-- **DNA approval gates now keep custom cluster-modkit controls visible before
-  approval and preserve the submitted preview afterward** — the SLURM DNA gate
-  no longer hides the modkit directory, bind-path input, or manual
-  `dogme.profile` editor behind a checkbox that cannot rerender inside the
-  approval form, and approved gates now show a dedicated expander with the
-  exact custom bind paths and `dogme.profile` text used for the run.
-  (`ui/appui_block_part1.py`, `tests/ui/test_appui_block_part1_helpers.py`)
+- **DNA approval gates no longer show obsolete custom cluster-modkit controls**
+  — once the shared SLURM DNA SIF became the supported path, the approval UI
+  was simplified to remove the old custom `dogme.profile`, bind-path, and
+  cluster-modkit directory inputs that were only needed for the earlier
+  host-mounted modkit workflow.
+  (`ui/appui_block_part1.py`)
 
-- **Custom DNA libtorch loader exports no longer leak into dorado tasks** —
-  Launchpad now strips `LIBTORCH`, `LD_LIBRARY_PATH`, and
-  `DYLD_LIBRARY_PATH` out of the staged workflow `dogme.profile`, keeps the
-  default DNA container modkit profile in place for `modkitTask`, writes the
-  staged DNA profile with `${VAR:-default}` guards, and injects the custom
-  host-side PyTorch modkit exports only into Apptainer launch `--env` for
-  `openChromatinTaskBg` and `openChromatinTaskBed`. For the host OpenMP
-  dependency, remote SLURM staging now narrows legacy `/lib64` custom bind
-  requests to `libgomp.so.1` when that file is present, so dorado and the
-  regular CPU modkit pileup step stay on the container runtime while the
-  OpenChromatin GPU steps can still use the cluster `tch` build without
-  replacing the container's full system library directory.
+- **OpenChromatin SLURM tasks now survive Nextflow parsing, resolve libtorch
+  correctly, and force GPU selection reliably** — Launchpad now renders
+  task-scoped Apptainer `containerOptions` as Nextflow-safe single-quoted
+  strings, resolves concrete `LIBTORCH` library paths instead of relying on
+  nested `--env` expansion, and stages a workflow-local `modkit` wrapper for
+  OpenChromatin tasks so upstream Dogme runs `modkit open-chromatin predict`
+  with `--device 0` even though the pipeline itself does not expose that flag.
   (`launchpad/nextflow_executor.py`, `launchpad/backends/slurm_backend.py`,
-  `ui/appui_block_part1.py`,
   `tests/launchpad/test_nextflow_executor.py`,
-  `tests/test_slurm_backend_cache_flow.py`,
-  `tests/ui/test_appui_block_part1_helpers.py`)
+  `tests/test_slurm_backend_cache_flow.py`)
+
+- **Approval-gate GPU account and partition overrides now survive Launchpad
+  submission end to end** — explicit `slurm_gpu_account` and
+  `slurm_gpu_partition` values now exist in the shared submit params model,
+  beat saved-profile defaults in the SLURM backend, and are forwarded through
+  both the Launchpad MCP submit tool and server wrapper so edited GPU
+  allocations are no longer silently replaced during submission.
+  (`launchpad/backends/base.py`, `launchpad/backends/slurm_backend.py`,
+  `launchpad/mcp_tools.py`, `launchpad/mcp_server.py`,
+  `tests/launchpad/test_slurm_backend.py`,
+  `tests/launchpad/test_mcp_tools.py`,
+  `tests/launchpad/test_mcp_server.py`)
 
 - **Remote staging now surfaces byte-level transfer updates in the UI** —
   Launchpad tracks current-file transferred bytes and total-size estimates from

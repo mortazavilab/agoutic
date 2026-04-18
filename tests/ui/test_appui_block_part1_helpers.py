@@ -45,6 +45,8 @@ def test_default_cluster_modkit_profile_uses_tch_distribution_and_root_based_exp
     assert namespace["_DEFAULT_CLUSTER_MODKIT_BIND_PATHS"] == [
         "/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0",
         "/lib64/libgomp.so.1",
+        "/lib64/libstdc++.so.6",
+        "/lib64/libgcc_s.so.1",
     ]
     assert "dist_modkit_v0.5.0_5120ef7_tch" in namespace["_DEFAULT_CLUSTER_MODKIT_PROFILE"]
     assert namespace["_DEFAULT_CLUSTER_MODKIT_PROFILE"].startswith(
@@ -79,7 +81,12 @@ def test_default_cluster_modkit_bind_paths_use_modkit_root_for_dist_builds():
         "/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch"
     )
 
-    assert bind_paths == ["/cluster/modkit", "/lib64/libgomp.so.1"]
+    assert bind_paths == [
+        "/cluster/modkit",
+        "/lib64/libgomp.so.1",
+        "/lib64/libstdc++.so.6",
+        "/lib64/libgcc_s.so.1",
+    ]
 
 
 def test_extract_modkit_binary_dir_from_profile_reads_path_export():
@@ -141,7 +148,12 @@ def test_resolve_custom_cluster_modkit_values_uses_root_based_tch_profile_when_b
     )
 
     assert resolved["modkit_dir"] == "/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch"
-    assert resolved["resolved_bind_paths_text"] == "/cluster/modkit\n/lib64/libgomp.so.1"
+    assert resolved["resolved_bind_paths_text"] == (
+        "/cluster/modkit\n"
+        "/lib64/libgomp.so.1\n"
+        "/lib64/libstdc++.so.6\n"
+        "/lib64/libgcc_s.so.1"
+    )
     assert resolved["resolved_profile"] == (
         "export MODKITBASE=/cluster/modkit\n"
         "export PATH=${MODKITBASE}/dist_modkit_v0.5.0_5120ef7_tch:${PATH}\n"

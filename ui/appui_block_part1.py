@@ -24,7 +24,12 @@ def _default_cluster_modkit_bind_paths(modkit_dir: str) -> list[str]:
     modkit_base, binary_dir, dist_leaf = _split_cluster_modkit_paths(modkit_dir)
     if dist_leaf and modkit_base:
         if "tch" in dist_leaf.lower():
-            return [modkit_base, "/lib64/libgomp.so.1"]
+            return [
+                modkit_base,
+                "/lib64/libgomp.so.1",
+                "/lib64/libstdc++.so.6",
+                "/lib64/libgcc_s.so.1",
+            ]
         return [modkit_base]
     if binary_dir:
         return [binary_dir]
@@ -879,7 +884,7 @@ def render_block_part1(
                             _extract_modkit_binary_dir_from_profile(custom_dogme_profile_value)
                             or _DEFAULT_CLUSTER_MODKIT_BINARY_DIR
                         )
-                        allow_custom_dogme_profile = execution_mode == "slurm" and mode == "DNA"
+                        allow_custom_dogme_profile = False
 
                         if execution_mode == "slurm":
                             grouped_section("Remote Profile & SLURM")
@@ -997,6 +1002,12 @@ def render_block_part1(
                                 help="Choose whether results stay remote, sync back locally, or both."
                             )
 
+                            if mode == "DNA":
+                                st.caption(
+                                    "DNA SLURM runs now use the shared Dogme SIF with the built-in OpenChromatin GPU runtime. "
+                                    "Custom cluster modkit and bind-path overrides are no longer needed in this approval form."
+                                )
+
                             if allow_custom_dogme_profile:
                                 grouped_section("Custom Cluster Modkit")
                                 use_custom_dogme_profile = st.checkbox(
@@ -1070,8 +1081,6 @@ def render_block_part1(
                             else:
                                 custom_dogme_profile_value = ""
                                 custom_dogme_bind_paths_text = ""
-                                if mode in {"RNA", "CDNA"}:
-                                    st.caption("Custom cluster modkit overrides are available only for DNA runs.")
                         else:
                             result_destination = None
                             custom_dogme_profile_value = ""
