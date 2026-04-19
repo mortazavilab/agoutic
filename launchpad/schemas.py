@@ -44,7 +44,7 @@ class SubmitJobRequest(BaseModel):
 
     # Advanced parameters (optional)
     modkit_filter_threshold: Optional[float] = 0.9  # Modification calling threshold
-    min_cov: Optional[int] = None  # Minimum coverage (defaults: 1 for DNA, 3 for RNA/CDNA)
+    min_cov: Optional[int] = None  # Minimum coverage (defaults: 3 reads unless explicitly overridden)
     per_mod: Optional[int] = 5  # Percentage threshold for modifications
     accuracy: Optional[str] = "sup"  # Basecalling accuracy (sup/hac/fast)
     max_gpu_tasks: Optional[int] = None  # None lets Nextflow manage concurrency without maxForks

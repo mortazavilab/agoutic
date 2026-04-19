@@ -398,6 +398,81 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
 
 
 @pytest.mark.anyio
+async def test_submit_defaults_controller_cpu_resources_to_12_and_64(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeConn(existing_paths={"/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_candle"})
+
+    params = SubmitParams(
+        project_id="proj-1",
+        user_id="user-1",
+        project_slug="proj-1",
+        sample_name="sample-defaults",
+        mode="DNA",
+        input_directory="/tmp/input",
+        reference_genome=["mm39"],
+        ssh_profile_id="profile-1",
+        workflow_number=5,
+        remote_base_path="/remote/eli/agoutic",
+    )
+
+    captured_sbatch: dict[str, object] = {}
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _fallback(*args, **kwargs):
+        return {
+            "remote_input": "/remote/eli/agoutic/data/fallback-input",
+            "reference_cache_status": "fallback",
+            "data_cache_status": "fallback",
+            "remote_reference_paths": {
+                "mm39": "/remote/eli/agoutic/ref/mm39",
+            },
+        }
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _ensure_assets(*args, **kwargs):
+        return ({
+            "mm39": {
+                "requires_kallisto": False,
+                "missing_required_assets": [],
+                "all_required_present": True,
+            }
+        }, {"mm39": "fallback"})
+
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+    monkeypatch.setattr(backend, "_resolve_staging_cache", _fallback)
+    monkeypatch.setattr(backend, "_ensure_reference_assets_present", _ensure_assets)
+    monkeypatch.setattr(backend, "_update_job_stage", _noop)
+    monkeypatch.setattr(backend, "_update_job_slurm_info", _noop)
+
+    from launchpad.backends import slurm_backend as slurm_module
+
+    async def _validate_remote_paths(*args, **kwargs):
+        return {}
+
+    def _capture_generate_sbatch_script(**kwargs):
+        captured_sbatch.update(kwargs)
+        return kwargs["nextflow_command"]
+
+    monkeypatch.setattr(slurm_module, "validate_remote_paths", _validate_remote_paths)
+    monkeypatch.setattr(slurm_module, "check_all_paths_ok", lambda *_: (True, []))
+    monkeypatch.setattr(slurm_module, "generate_sbatch_script", _capture_generate_sbatch_script)
+
+    await backend.submit("run-defaults", params)
+
+    assert captured_sbatch["cpus"] == 12
+    assert captured_sbatch["memory_gb"] == 64
+    assert captured_sbatch["walltime"] == "48:00:00"
+
+
+@pytest.mark.anyio
 async def test_submit_ignores_custom_profile_fields_for_non_dna(monkeypatch, profile):
     backend = SlurmBackend()
     conn = _FakeConn()
@@ -551,7 +626,7 @@ async def test_submit_scopes_custom_dogme_bind_paths_to_openchromatin_tasks(monk
     config_text = config_write[0]
     assert "containerOptions = '--no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39'" in config_text
     assert "withName: 'modkitTask' {" in config_text
-    assert "withName: 'modkitTask' {\n        memory = '32 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39'" in config_text
+    assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39'" in config_text
     assert "containerOptions = '--nv --no-mount hostfs --bind /remote/eli/agoutic/proj-1/workflow4,/remote/eli/agoutic/data/fallback-input,/remote/eli/agoutic/ref/mm39'" in config_text
     assert "withName: 'openChromatinTaskBg' {" in config_text
     assert "withName: 'openChromatinTaskBed' {" in config_text

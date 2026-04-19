@@ -404,8 +404,8 @@ async def _build_remote_stage_approval_context(
     partition = prepared.get("slurm_partition") or defaults_data.get("partition") or selected_defaults.get("default_slurm_partition") or "(unset)"
     remote_base_path = prepared.get("remote_base_path") or selected_defaults.get("remote_base_path") or "(unset)"
     result_destination = prepared.get("result_destination") or ("both" if remote_input_path else "local")
-    cpus = int(prepared.get("slurm_cpus") or 4)
-    memory_gb = int(prepared.get("slurm_memory_gb") or 16)
+    cpus = int(prepared.get("slurm_cpus") or 12)
+    memory_gb = int(prepared.get("slurm_memory_gb") or 64)
     walltime = prepared.get("slurm_walltime") or "04:00:00"
     gpus = int(prepared.get("slurm_gpus") or 1)
     data_path_line = (

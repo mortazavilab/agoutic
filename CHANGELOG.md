@@ -65,6 +65,35 @@
   `tests/launchpad/test_mcp_tools.py`,
   `tests/launchpad/test_mcp_server.py`)
 
+- **SLURM CPU defaults now stay on the intended controller resources instead of
+  falling back to undersized legacy values** — the staged Nextflow config,
+  controller sbatch wrapper, and approval-facing remote summary now align on
+  `12` CPUs and `64 GB` as the default CPU job fallback whenever no explicit
+  CPU resource override is approved, while still preserving explicit per-run
+  overrides and separate GPU account/partition routing.
+  (`launchpad/nextflow_executor.py`, `launchpad/backends/slurm_backend.py`,
+  `cortex/remote_orchestration.py`,
+  `tests/launchpad/test_nextflow_executor.py`,
+  `tests/launchpad/test_slurm_backend.py`,
+  `tests/test_slurm_backend_cache_flow.py`)
+
+- **Approval-gate CPU and GPU SLURM routing now stay separated during Cortex
+  submission** — Cortex no longer rewrites the approved CPU/controller
+  `slurm_account` and `slurm_partition` to GPU values when a run requests
+  GPUs, and it now forwards the GPU account/partition as separate fields so
+  the staged Nextflow config receives the exact CPU and GPU routing entered in
+  the approval gate.
+  (`cortex/workflow_submission.py`,
+  `tests/cortex/test_background_tasks.py`)
+
+- **Filterbed default filtering is now pinned to a 3-read minimum and 5 percent
+  threshold** — Launchpad no longer renders the earlier 1-read DNA fallback in
+  generated configs, so the default `filterbedTask` floor now stays at
+  `minCov = 3` with `perMod = 5` unless a run explicitly overrides those
+  values.
+  (`launchpad/nextflow_executor.py`, `launchpad/schemas.py`,
+  `tests/launchpad/test_nextflow_executor.py`)
+
 - **Remote staging now surfaces byte-level transfer updates in the UI** —
   Launchpad tracks current-file transferred bytes and total-size estimates from
   rsync progress, Cortex persists that snapshot on `STAGING_TASK` blocks, and

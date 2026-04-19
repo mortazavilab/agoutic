@@ -1256,6 +1256,66 @@ async def test_write_remote_nextflow_config_prefers_explicit_account_overrides(m
 
 
 @pytest.mark.asyncio
+async def test_write_remote_nextflow_config_forwards_explicit_cpu_resource_overrides(monkeypatch):
+    backend = SlurmBackend()
+    params = SubmitParams(
+        sample_name="sample-resources",
+        mode="DNA",
+        input_directory="/remote/input",
+        reference_genome=["mm39"],
+        slurm_account="SEYEDAM_LAB",
+        slurm_partition="standard",
+        slurm_gpu_account="BIOD132_CLASS_GPU",
+        slurm_gpu_partition="gpu",
+        slurm_cpus=4,
+        slurm_memory_gb=16,
+        slurm_walltime="48:00:00",
+    )
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+        default_slurm_account="PROFILE_CPU",
+        default_slurm_partition="profile-cpu",
+        default_slurm_gpu_account="PROFILE_GPU",
+        default_slurm_gpu_partition="profile-gpu",
+    )
+    conn = _FakeWriteConn()
+    captured = {}
+
+    def fake_generate_config(**kwargs):
+        captured.update(kwargs)
+        return "process {}"
+
+    monkeypatch.setattr("launchpad.backends.slurm_backend.NextflowConfig.generate_config", fake_generate_config)
+
+    config_path = await backend._write_remote_nextflow_config(
+        params=params,
+        profile=profile,
+        conn=conn,
+        remote_work="/remote/agoutic/workflow3",
+        cache_resolution={},
+    )
+
+    assert config_path == "/remote/agoutic/workflow3/nextflow.config"
+    assert captured["slurm_cpu_account"] == "SEYEDAM_LAB"
+    assert captured["slurm_cpu_partition"] == "standard"
+    assert captured["slurm_gpu_account"] == "BIOD132_CLASS_GPU"
+    assert captured["slurm_gpu_partition"] == "gpu"
+    assert captured["slurm_cpus"] == 4
+    assert captured["slurm_memory_gb"] == 16
+    assert captured["slurm_walltime"] == "48:00:00"
+
+
+@pytest.mark.asyncio
 async def test_stage_sample_inputs_refreshes_remote_cache_when_top_level_symlink_is_present(monkeypatch):
     backend = SlurmBackend()
     profile = SSHProfileData(

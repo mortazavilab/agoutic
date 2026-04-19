@@ -33,7 +33,8 @@ class TestGenerateConfig:
         assert "sample = 'sample-a'" in config
         assert "readType = 'DNA'" in config
         assert "modifications = '5mCG_5hmCG,6mA'" in config
-        assert "minCov = 1" in config
+        assert "minCov = 3" in config
+        assert "perMod = 5" in config
         assert "[name: 'GRCh38'" in config
         assert f"genome: '{REFERENCE_GENOMES['GRCh38']['fasta']}'" in config
         assert f"annot: '{REFERENCE_GENOMES['GRCh38']['gtf']}'" in config
@@ -153,6 +154,9 @@ class TestGenerateConfig:
             slurm_gpu_partition="gpu-part",
             slurm_cpu_account="cpu-acct",
             slurm_gpu_account="gpu-acct",
+            slurm_cpus=4,
+            slurm_memory_gb=16,
+            slurm_walltime="48:00:00",
             slurm_bind_paths=["/share/crsp/lab/seyedam/share/agoutic/seyedam/testslurm1"],
             apptainer_cache_dir="/share/crsp/lab/seyedam/share/agoutic/seyedam/.nxf-apptainer-cache",
             max_gpu_tasks=2,
@@ -164,6 +168,9 @@ class TestGenerateConfig:
         assert "gpuPartition = 'gpu-part'" in config
         assert "cpuAccount = 'cpu-acct'" in config
         assert "gpuAccount = 'gpu-acct'" in config
+        assert "    cpus = 4" in config
+        assert "    memory = '16 GB'" in config
+        assert "    time = '48:00:00'" in config
         assert "clusterOptions = \"--account=${cpuAccount}\"" in config
         assert "queue = \"${cpuPartition}\"" in config
         assert "clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"" in config
@@ -173,9 +180,54 @@ class TestGenerateConfig:
         assert "containerOptions = '--nv --no-mount hostfs --bind /share/crsp/lab/seyedam/share/agoutic/seyedam/testslurm1'" in config
         assert "apptainer {" in config
         assert "autoMounts = false" in config
+
+    def test_slurm_execution_keeps_cpu_defaults_separate_from_gpu_task_overrides(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-slurm-split",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_cpu_partition="standard",
+            slurm_gpu_partition="gpu",
+            slurm_cpu_account="SEYEDAM_LAB",
+            slurm_gpu_account="BIOD132_CLASS_GPU",
+            slurm_cpus=4,
+            slurm_memory_gb=16,
+            slurm_walltime="48:00:00",
+            apptainer_cache_dir="/share/crsp/lab/seyedam/share/agoutic/seyedam/.nxf-apptainer-cache",
+        )
+
+        assert "cpuPartition = 'standard'" in config
+        assert "gpuPartition = 'gpu'" in config
+        assert "cpuAccount = 'SEYEDAM_LAB'" in config
+        assert "gpuAccount = 'BIOD132_CLASS_GPU'" in config
+        assert "    cpus = 4" in config
+        assert "    memory = '16 GB'" in config
+        assert "    time = '48:00:00'" in config
+        assert "    clusterOptions = \"--account=${cpuAccount}\"" in config
+        assert "    queue = \"${cpuPartition}\"" in config
+        assert "withName: 'doradoTask' {\n        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"\n        queue = \"${gpuPartition}\"" in config
         assert 'cacheDir = "/share/crsp/lab/seyedam/share/agoutic/seyedam/.nxf-apptainer-cache"' in config
         assert "singularity {" not in config
         assert "docker {" not in config
+
+    def test_slurm_execution_defaults_cpu_resources_to_12_cpus_and_64_gb(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-slurm-defaults",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_cpu_partition="standard",
+            slurm_gpu_partition="gpu",
+            slurm_cpu_account="SEYEDAM_LAB",
+            slurm_gpu_account="BIOD132_CLASS_GPU",
+        )
+
+        assert "    cpus = 12" in config
+        assert "    memory = '64 GB'" in config
+        assert "    time = '8:00:00'" in config
 
     def test_slurm_dna_defaults_scope_container_gpu_modkit_to_openchromatin_tasks(self):
         config = NextflowConfig.generate_config(
@@ -188,7 +240,7 @@ class TestGenerateConfig:
         )
 
         assert f"container = '{DOGME_DNA_SLURM_CONTAINER}'" in config
-        assert "withName: 'modkitTask' {\n        memory = '32 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
+        assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
         assert config.count("containerOptions = '--nv --no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39 --env \\\'MODKITBASE=") == 2
         assert f"LIBTORCH={DOGME_DNA_OPENCHROM_LIBTORCH}" in config
         assert f"LD_LIBRARY_PATH=/opt/conda/lib:{DOGME_DNA_OPENCHROM_LIBTORCH}/lib:\\\\$LD_LIBRARY_PATH" in config
@@ -235,7 +287,7 @@ class TestGenerateConfig:
         assert "containerOptions = '--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
         assert "containerOptions = '--nv --no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
         assert "withName: 'modkitTask' {" in config
-        assert "withName: 'modkitTask' {\n        memory = '32 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
+        assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
         assert "withName: 'openChromatinTaskBg' {" in config
         assert "withName: 'openChromatinTaskBed' {" in config
         assert config.count("containerOptions = '--nv --no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39,/cluster/modkit,/lib64/libgomp.so.1,/lib64/libstdc++.so.6,/lib64/libgcc_s.so.1 --env \\\'MODKITBASE=") == 2
@@ -266,7 +318,7 @@ class TestGenerateConfig:
         )
 
         assert f"process {{\n    // <-- Container Settings --->\n    container = '{DOGME_DNA_SLURM_CONTAINER}'\n    // Remote SLURM runs bind only workflow-specific remote paths.\n    containerOptions = '--no-mount hostfs'\n    beforeScript = 'export PATH=/opt/conda/bin:$PATH'" in config
-        assert "withName: 'modkitTask' {\n        memory = '32 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs'" in config
+        assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs'" in config
         assert "beforeScript = 'export PATH=/opt/conda/bin:$PATH; export LIBTORCH=/cluster/modkit/libtorch" not in config
         assert config.count("--bind /cluster/modkit,/lib64/libgomp.so.1,/lib64/libstdc++.so.6,/lib64/libgcc_s.so.1 --env \\\'MODKITBASE=/cluster/modkit,PREPEND_PATH=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch,MODKITMODEL=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0,LIBTORCH=/cluster/modkit/libtorch,LD_LIBRARY_PATH=/lib64:/cluster/modkit/libtorch/lib:\\\\$LD_LIBRARY_PATH,DYLD_LIBRARY_PATH=/cluster/modkit/libtorch/lib:\\\\$DYLD_LIBRARY_PATH\\\'") == 2
         assert "containerOptions = '--nv --no-mount hostfs --bind /cluster/modkit,/lib64/libgomp.so.1,/lib64/libstdc++.so.6,/lib64/libgcc_s.so.1 --env \\\'MODKITBASE=/cluster/modkit,PREPEND_PATH=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch,MODKITMODEL=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0,LIBTORCH=/cluster/modkit/libtorch,LD_LIBRARY_PATH=/lib64:/cluster/modkit/libtorch/lib:\\\\$LD_LIBRARY_PATH,DYLD_LIBRARY_PATH=/cluster/modkit/libtorch/lib:\\\\$DYLD_LIBRARY_PATH\\\''" in config

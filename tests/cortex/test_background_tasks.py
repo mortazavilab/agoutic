@@ -1247,6 +1247,69 @@ class TestSubmitJobAfterApproval:
         assert submitted["max_gpu_tasks"] is None
 
     @pytest.mark.asyncio
+    async def test_remote_submission_keeps_cpu_and_gpu_accounts_separate(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "edited_params": {
+                "sample_name": "IGVFFI1476XCPC",
+                "mode": "DNA",
+                "input_type": "bam",
+                "entry_point": "remap",
+                "input_directory": "/media/backup_disk/agoutic_root/users/ali-mortazavi/data/2026-04-12/IGVFFI1476XCPC.bam",
+                "reference_genome": ["mm39"],
+                "execution_mode": "slurm",
+                "ssh_profile_id": "ca7a992b2c9b4e2db2d4d2f8393f4a65",
+                "ssh_profile_nickname": "hpc3",
+                "slurm_account": "BIOD132_CLASS",
+                "slurm_partition": "standard",
+                "slurm_gpu_account": "BIOD132_CLASS_GPU",
+                "slurm_gpu_partition": "gpu",
+                "slurm_cpus": 4,
+                "slurm_memory_gb": 16,
+                "slurm_walltime": "48:00:00",
+                "slurm_gpus": 1,
+                "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                "remote_reference_cache_root": "/share/crsp/lab/seyedam/share/agoutic/seyedam/ref",
+                "remote_data_cache_root": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data",
+                "cache_preflight": {
+                    "scope": "per_user_cross_project",
+                    "status": "ready",
+                    "reference_actions": [{"reference_id": "mm39", "action": "reuse"}],
+                    "data_action": {"action": "reuse"},
+                },
+                "staged_remote_input_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/778fbb3a707d09a5",
+                "result_destination": "local",
+            },
+        })
+
+        async def _passthrough_prepare(session, project_id, owner_id, params):
+            return dict(params)
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "remote-split-uuid", "work_directory": "/work/remote-split",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission._prepare_remote_execution_params", new=_passthrough_prepare), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("ca7a992b2c9b4e2db2d4d2f8393f4a65", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock(side_effect=_close_scheduled_coroutine)
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.call_args.args[0] == "submit_dogme_job"
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["slurm_account"] == "BIOD132_CLASS"
+        assert submitted["slurm_partition"] == "standard"
+        assert submitted["slurm_gpu_account"] == "BIOD132_CLASS_GPU"
+        assert submitted["slurm_gpu_partition"] == "gpu"
+        assert submitted["slurm_cpus"] == 4
+        assert submitted["slurm_memory_gb"] == 16
+        assert submitted["slurm_walltime"] == "48:00:00"
+        assert submitted["staged_remote_input_path"] == "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/778fbb3a707d09a5"
+
+    @pytest.mark.asyncio
     async def test_stage_only_remote_request_calls_stage_remote_sample(self, session_factory, seed_data):
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
             "gate_action": "remote_stage",

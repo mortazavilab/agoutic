@@ -249,9 +249,8 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
 
         selected_slurm_account = (job_params.get("slurm_resources") or {}).get("account") or job_params.get("slurm_account")
         selected_slurm_partition = (job_params.get("slurm_resources") or {}).get("partition") or job_params.get("slurm_partition")
-        if execution_mode == "slurm" and max(int(job_params.get("slurm_gpus") or 0), 0) > 0:
-            selected_slurm_account = job_params.get("slurm_gpu_account") or selected_slurm_account
-            selected_slurm_partition = job_params.get("slurm_gpu_partition") or selected_slurm_partition
+        selected_slurm_gpu_account = job_params.get("slurm_gpu_account")
+        selected_slurm_gpu_partition = job_params.get("slurm_gpu_partition")
 
         job_data = {
             "project_id": project_id,
@@ -278,6 +277,8 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "ssh_profile_id": ssh_profile_id,
             "slurm_account": selected_slurm_account,
             "slurm_partition": selected_slurm_partition,
+            "slurm_gpu_account": selected_slurm_gpu_account,
+            "slurm_gpu_partition": selected_slurm_gpu_partition,
             "slurm_cpus": (job_params.get("slurm_resources") or {}).get("cpus") or job_params.get("slurm_cpus"),
             "slurm_memory_gb": (job_params.get("slurm_resources") or {}).get("memory_gb") or job_params.get("slurm_memory_gb"),
             "slurm_walltime": (job_params.get("slurm_resources") or {}).get("walltime") or job_params.get("slurm_walltime"),

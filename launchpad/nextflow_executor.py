@@ -346,6 +346,9 @@ class NextflowConfig:
         slurm_gpu_partition: str | None = None,
         slurm_cpu_account: str | None = None,
         slurm_gpu_account: str | None = None,
+        slurm_cpus: int | None = None,
+        slurm_memory_gb: int | None = None,
+        slurm_walltime: str | None = None,
         slurm_bind_paths: Optional[list[str]] = None,
         slurm_modkit_bind_paths: Optional[list[str]] = None,
         modkit_task_runtime_exports: Optional[list[str]] = None,
@@ -398,9 +401,9 @@ class NextflowConfig:
         else:  # CDNA
             mods = ""  # Empty string for CDNA (no modifications)
         
-        # Determine minCov based on mode if not explicitly provided
+        # filterbedTask thresholds should never drop below 3 reads unless explicitly overridden.
         if min_cov is None:
-            min_cov = 1 if mode == "DNA" else 3
+            min_cov = 3
 
         if str(mode or "").strip().upper() == DogmeMode.DNA.value and modkit_task_runtime_exports is None:
             modkit_task_runtime_exports = _default_dna_openchromatin_runtime_exports()
@@ -410,6 +413,9 @@ class NextflowConfig:
         gpu_partition = (slurm_gpu_partition or cpu_partition).strip() or cpu_partition
         cpu_account = (slurm_cpu_account or "default").strip() or "default"
         gpu_account = (slurm_gpu_account or cpu_account).strip() or cpu_account
+        cpu_cpus = int(slurm_cpus) if slurm_cpus is not None else 12
+        cpu_memory_gb = int(slurm_memory_gb) if slurm_memory_gb is not None else 64
+        cpu_walltime = str(slurm_walltime or "8:00:00").strip() or "8:00:00"
         normalized_bind_paths: list[str] = []
         for bind_path in slurm_bind_paths or []:
             cleaned = str(bind_path or "").strip()
@@ -468,7 +474,7 @@ class NextflowConfig:
             config_lines.append(f"    modifications = ''")
         
         config_lines.append(f"    //change setting if necessary")
-        config_lines.append(f"    //minCov = 3 by default, but changed to 1 for microtest" if mode == "DNA" else f"    //change setting if necessary")
+        config_lines.append(f"    //filterbedTask defaults to a 3-read minimum")
         config_lines.append(f"    minCov = {min_cov}")
         config_lines.append(f"    perMod = {per_mod}")
         config_lines.append(f"    // change if the launch directory is not where the pod5 and output directories should go")
@@ -528,9 +534,9 @@ class NextflowConfig:
             config_lines.append(f"    gpuAccount = '{gpu_account}'")
             config_lines.append("")
             config_lines.append("    // General default settings - adjust as necessary")
-            config_lines.append("    cpus = 12")
-            config_lines.append("    memory = '64 GB'")
-            config_lines.append("    time = '8:00:00'")
+            config_lines.append(f"    cpus = {cpu_cpus}")
+            config_lines.append(f"    memory = '{cpu_memory_gb} GB'")
+            config_lines.append(f"    time = '{cpu_walltime}'")
             config_lines.append("    clusterOptions = \"--account=${cpuAccount}\"")
             config_lines.append("    queue = \"${cpuPartition}\"")
         else:
@@ -566,7 +572,7 @@ class NextflowConfig:
         config_lines.append("    }")
         config_lines.append("    ")
         config_lines.append("    withName: 'modkitTask' {")
-        config_lines.append("        memory = '32 GB'")
+        config_lines.append("        memory = '64 GB'")
         config_lines.append("        cpus = 12")
         if is_slurm:
             config_lines.append(
