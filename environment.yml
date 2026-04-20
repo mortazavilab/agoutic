@@ -42,6 +42,7 @@ dependencies:
     
     # --- Visualization ---
     - plotly>=5.18.0           # Interactive charts (st.plotly_chart)
+    - kaleido                  # Static Plotly export backend for PNG/SVG/PDF downloads
 
     # --- Enrichment Analysis ---
     - gprofiler-official        # GO & pathway enrichment (g:Profiler)

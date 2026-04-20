@@ -1053,21 +1053,28 @@ def auto_capture_plot(
 
     chart_types = [str(chart.get("type") or "plot") for chart in charts]
     df_ids: list[int] = []
+    source_df_ids: list[int] = []
     for chart in charts:
         df_id = chart.get("df_id")
         if isinstance(df_id, int) and df_id not in df_ids:
             df_ids.append(df_id)
+        for source_df_id in chart.get("source_df_ids") or []:
+            if isinstance(source_df_id, int) and source_df_id not in source_df_ids:
+                source_df_ids.append(source_df_id)
 
     structured = {
         "chart_count": len(charts),
         "chart_types": chart_types,
         "df_ids": df_ids,
+        "source_df_ids": source_df_ids,
         "charts": charts,
     }
     tags = {
         "chart_types": chart_types,
         "df_ids": df_ids,
     }
+    if source_df_ids:
+        tags["source_df_ids"] = source_df_ids
 
     first_chart = charts[0]
     first_title = str(first_chart.get("title") or "").strip()
@@ -1149,17 +1156,26 @@ def _build_plot_memory_content(charts: list[dict]) -> str:
     first_chart = charts[0] if charts else {}
     chart_type = str(first_chart.get("type") or "plot")
     df_id = first_chart.get("df_id")
+    source_df_ids = [value for value in (first_chart.get("source_df_ids") or []) if isinstance(value, int)]
+    source_labels = [str(value) for value in (first_chart.get("source_labels") or []) if str(value).strip()]
     title = str(first_chart.get("title") or "").strip()
     x_axis = str(first_chart.get("x") or "").strip()
     y_axis = str(first_chart.get("y") or "").strip()
+    set_columns = [str(value) for value in str(first_chart.get("sets") or "").split("|") if str(value).strip()]
 
     if len(charts) == 1:
-        if x_axis and y_axis:
+        if chart_type in {"venn", "upset"} and set_columns:
+            description = f"{chart_type} plot across {' / '.join(set_columns)}"
+        elif x_axis and y_axis:
             description = f"{chart_type} plot of {y_axis} by {x_axis}"
         elif x_axis:
             description = f"{chart_type} plot by {x_axis}"
         else:
             description = f"{chart_type} plot"
+        if source_labels:
+            description += f" comparing {' / '.join(source_labels)}"
+        elif source_df_ids:
+            description += f" comparing {', '.join(f'DF{value}' for value in source_df_ids)}"
         if isinstance(df_id, int):
             description += f" from DF{df_id}"
         if title:

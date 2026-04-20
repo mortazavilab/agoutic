@@ -28,6 +28,18 @@ def _select_plot_type(message: str) -> str:
     msg = message.lower()
     if any(w in msg for w in ("volcano", "de plot", "differential expression plot")):
         return "volcano"
+    if "upset" in msg:
+        return "upset"
+    if "venn" in msg:
+        return "venn"
+    if "violin" in msg:
+        return "violin"
+    if "strip" in msg:
+        return "strip"
+    if re.search(r"\bline\s+(?:chart|plot|graph)\b", msg):
+        return "line"
+    if re.search(r"\barea\s+(?:chart|plot|graph)\b", msg):
+        return "area"
     if any(w in msg for w in ("heatmap", "heat map", "cluster")):
         return "heatmap"
     if any(w in msg for w in ("box", "boxplot", "box plot", "distribution")):

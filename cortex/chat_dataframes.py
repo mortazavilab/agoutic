@@ -18,9 +18,12 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+import pandas as pd
+
 from atlas.config import CONSORTIUM_REGISTRY
 from common.logging_config import get_logger
 from cortex.config import SERVICE_REGISTRY
+from cortex.dataframe_actions import build_overlap_dataframe_payload
 from cortex.llm_validators import get_block_payload
 from cortex.tag_parser import user_wants_plot
 
@@ -44,6 +47,8 @@ _FILE_TOOLS = frozenset({"get_files_by_type"})
 _PLOT_KEYWORDS = frozenset({
     "plot", "chart", "pie", "histogram", "scatter", "bar chart",
     "box plot", "heatmap", "visualize", "graph", "distribution",
+    "venn", "upset", "violin plot", "strip plot", "line chart",
+    "line plot", "area chart", "area plot",
 })
 
 
@@ -87,6 +92,7 @@ def extract_embedded_dataframes(
                 "aggregate_dataframe",
                 "join_dataframes",
                 "pivot_dataframe",
+                "build_overlap_dataframe",
             } and "data" in r:
                 _extract_transform_result(r, embedded)
 
@@ -372,9 +378,15 @@ def rebind_plots_to_new_df(
     stale_df_ids = sorted({
         ps.get("df_id")
         for ps in plot_specs
-        if isinstance(ps.get("df_id"), int) and ps.get("df_id") != newest_turn_df_id
+        if (
+            isinstance(ps.get("df_id"), int)
+            and ps.get("df_id") != newest_turn_df_id
+            and not _plot_spec_has_multi_df_overlap_source(ps)
+        )
     })
     for ps in plot_specs:
+        if _plot_spec_has_multi_df_overlap_source(ps):
+            continue
         if ps.get("df_id") != newest_turn_df_id:
             ps["df_id"] = newest_turn_df_id
             ps["df"] = f"DF{newest_turn_df_id}"
@@ -387,6 +399,151 @@ def rebind_plots_to_new_df(
             new_df_id=newest_turn_df_id,
             stale_df_ids=stale_df_ids,
             rebound_count=rebound_count,
+        )
+
+
+def materialize_overlap_plot_dataframes(
+    plot_specs: list[dict],
+    embedded_dataframes: dict[str, dict],
+    history_blocks: list,
+    *,
+    current_dataframes: dict[str, dict] | None = None,
+) -> list[str]:
+    """Rewrite venn/upset overlap specs into single-dataframe membership specs.
+
+    Returns a list of human-readable build errors. Successful rewrites mutate
+    ``plot_specs`` in place and inject synthetic dataframes into
+    ``embedded_dataframes``.
+    """
+    if not plot_specs:
+        return []
+
+    errors: list[str] = []
+    synthetic_frames: dict[str, dict] = {}
+    pending_rewrites: list[tuple[int, dict, dict]] = []
+    build_cache: dict[tuple, dict] = {}
+    active_dataframes = current_dataframes or embedded_dataframes
+
+    for idx, spec in enumerate(list(plot_specs)):
+        if not _needs_overlap_materialization(spec):
+            continue
+        build_params = _build_overlap_plot_params(spec)
+        cache_key = _overlap_request_cache_key(build_params)
+        try:
+            payload = build_cache.get(cache_key)
+            if payload is None:
+                payload = build_overlap_dataframe_payload(
+                    build_params,
+                    history_blocks=history_blocks,
+                    current_dataframes=active_dataframes,
+                )
+                synthetic_key = _synthetic_overlap_key(payload, len(synthetic_frames))
+                synthetic_frames[synthetic_key] = payload
+                build_cache[cache_key] = payload
+            pending_rewrites.append((idx, spec, payload))
+        except Exception as exc:
+            errors.append(_format_overlap_materialization_error(spec, exc))
+            plot_specs[idx] = {"_drop": True}
+
+    if synthetic_frames:
+        assign_df_ids(embedded_dataframes, history_blocks, synthetic_frames)
+
+    for idx, original_spec, payload in pending_rewrites:
+        plot_specs[idx] = _rewrite_overlap_plot_spec(original_spec, payload)
+
+    plot_specs[:] = [spec for spec in plot_specs if not spec.get("_drop")]
+    return errors
+
+
+def materialize_direct_set_overlap_plot_dataframes(
+    plot_specs: list[dict],
+    embedded_dataframes: dict[str, dict],
+    history_blocks: list,
+    *,
+    current_dataframes: dict[str, dict] | None = None,
+) -> list[str]:
+    """Rewrite venn/upset specs with explicit sets into synthetic membership dataframes."""
+    if not plot_specs:
+        return []
+
+    errors: list[str] = []
+    synthetic_frames: dict[str, dict] = {}
+    pending_rewrites: list[tuple[int, dict, dict]] = []
+    build_cache: dict[tuple, dict] = {}
+    active_dataframes = current_dataframes or embedded_dataframes
+
+    for idx, spec in enumerate(list(plot_specs)):
+        if not _needs_direct_set_materialization(spec):
+            continue
+        cache_key = (
+            str(spec.get("type") or "").strip().lower(),
+            spec.get("df_id"),
+            str(spec.get("sets") or "").strip(),
+        )
+        try:
+            payload = build_cache.get(cache_key)
+            if payload is None:
+                payload = _build_direct_set_overlap_payload(
+                    spec,
+                    history_blocks,
+                    current_dataframes=active_dataframes,
+                )
+                synthetic_key = _synthetic_overlap_key(payload, len(synthetic_frames))
+                synthetic_frames[synthetic_key] = payload
+                build_cache[cache_key] = payload
+            pending_rewrites.append((idx, spec, payload))
+        except Exception as exc:
+            errors.append(_format_overlap_materialization_error(spec, exc))
+            plot_specs[idx] = {"_drop": True}
+
+    if synthetic_frames:
+        assign_df_ids(embedded_dataframes, history_blocks, synthetic_frames)
+
+    for idx, original_spec, payload in pending_rewrites:
+        plot_specs[idx] = _rewrite_overlap_plot_spec(original_spec, payload)
+
+    plot_specs[:] = [spec for spec in plot_specs if not spec.get("_drop")]
+    return errors
+
+
+def apply_overlap_message_hints(
+    plot_specs: list[dict],
+    user_message: str,
+    history_blocks: list,
+    current_dataframes: dict[str, dict] | None = None,
+) -> None:
+    """Fill in explicit overlap set columns when the user named them in text."""
+    if not plot_specs or not user_message:
+        return
+
+    for spec in plot_specs:
+        if not _needs_overlap_set_hydration(spec):
+            continue
+        df_id = spec.get("df_id")
+        if not isinstance(df_id, int):
+            continue
+        payload = _find_plot_dataframe_payload(
+            df_id,
+            history_blocks,
+            current_dataframes=current_dataframes,
+        )
+        if not payload:
+            continue
+        columns = list(payload.get("columns") or [])
+        set_limit = 3 if str(spec.get("type") or "").strip().lower() == "venn" else 6
+        explicit_sets = _extract_explicit_overlap_set_columns(
+            user_message,
+            columns,
+            max_count=set_limit,
+        )
+        if len(explicit_sets) < 2:
+            continue
+        spec["sets"] = "|".join(explicit_sets)
+        logger.info(
+            "Applied overlap plot message hints",
+            df_id=df_id,
+            chart_type=spec.get("type"),
+            sets=explicit_sets,
         )
 
 
@@ -460,9 +617,11 @@ def deduplicate_plot_specs(plot_specs: list[dict]) -> list[dict]:
             "df_id": ps.get("df_id"),
             "x": ps.get("x"),
             "y": ps.get("y"),
+            "sets": ps.get("sets"),
             "color": ps.get("color"),
             "palette": ps.get("palette"),
             "agg": ps.get("agg"),
+            "max_intersections": ps.get("max_intersections"),
         }
         key = tuple(
             sorted(
@@ -561,6 +720,18 @@ def collapse_competing_specs(
 
 def _detect_chart_type(message: str) -> str:
     msg = message.lower()
+    if "upset" in msg:
+        return "upset"
+    if "venn" in msg:
+        return "venn"
+    if "violin" in msg:
+        return "violin"
+    if "strip" in msg:
+        return "strip"
+    if re.search(r"\bline\s+(?:chart|plot|graph)\b", msg):
+        return "line"
+    if re.search(r"\barea\s+(?:chart|plot|graph)\b", msg):
+        return "area"
     if "pie" in msg:
         return "pie"
     if "scatter" in msg:
@@ -594,8 +765,9 @@ def _build_fallback_plot_spec(
         "type": auto_type,
         "df_id": df_id,
         "df": f"DF{df_id}",
-        "agg": "count",
     }
+    if auto_type == "bar":
+        auto_post_spec["agg"] = "count"
     if auto_x:
         auto_post_spec["x"] = auto_x
     return auto_post_spec
@@ -649,6 +821,383 @@ def _detect_x_column(message: str) -> str | None:
     return None
 
 
+def _needs_overlap_set_hydration(spec: dict) -> bool:
+    chart_type = str(spec.get("type") or "").strip().lower()
+    if chart_type not in {"venn", "upset"}:
+        return False
+    if spec.get("sets"):
+        return False
+    return not any(
+        spec.get(key)
+        for key in ("dfs", "df_ids", "sources", "match_cols", "match_on", "sample_col", "sample_values")
+    )
+
+
+def _needs_direct_set_materialization(spec: dict) -> bool:
+    chart_type = str(spec.get("type") or "").strip().lower()
+    if chart_type not in {"venn", "upset"}:
+        return False
+    if not spec.get("sets"):
+        return False
+    if any(
+        spec.get(key)
+        for key in ("dfs", "df_ids", "sources", "match_cols", "match_on", "sample_col", "sample_values")
+    ):
+        return False
+    return isinstance(spec.get("df_id"), int)
+
+
+def _find_plot_dataframe_payload(
+    df_id: int,
+    history_blocks: list,
+    *,
+    current_dataframes: dict[str, dict] | None = None,
+) -> dict | None:
+    if current_dataframes:
+        for payload in current_dataframes.values():
+            metadata = payload.get("metadata") or {}
+            if metadata.get("df_id") == df_id:
+                return payload
+
+    for block in reversed(history_blocks or []):
+        payload = get_block_payload(block)
+        for df_payload in (payload.get("_dataframes") or {}).values():
+            metadata = df_payload.get("metadata") or {}
+            if metadata.get("df_id") == df_id:
+                return df_payload
+    return None
+
+
+def find_dataframe_parse_source(df_id: int, history_blocks: list) -> dict | None:
+    """Return parse_csv provenance params for an existing dataframe when available."""
+    for block in reversed(history_blocks or []):
+        payload = get_block_payload(block)
+        dataframes = payload.get("_dataframes") or {}
+        matched_key = None
+        matched_label = None
+        for key, df_payload in dataframes.items():
+            metadata = df_payload.get("metadata") or {}
+            if metadata.get("df_id") != df_id:
+                continue
+            matched_key = key
+            matched_label = str(metadata.get("label") or key or "").strip()
+            break
+        if matched_key is None:
+            continue
+
+        candidates = {Path(str(matched_key)).name}
+        if matched_label:
+            candidates.add(Path(matched_label).name)
+
+        parse_entries = [
+            entry for entry in (payload.get("_provenance") or [])
+            if entry.get("success")
+            and entry.get("source") == "analyzer"
+            and entry.get("tool") == "parse_csv_file"
+        ]
+        for entry in parse_entries:
+            params = dict(entry.get("params") or {})
+            file_path = str(params.get("file_path") or "").strip()
+            if file_path and Path(file_path).name in candidates:
+                return params
+        if len(parse_entries) == 1:
+            return dict(parse_entries[0].get("params") or {})
+
+    return None
+
+
+def _extract_explicit_overlap_set_columns(
+    user_message: str,
+    available_columns: list[str],
+    *,
+    max_count: int,
+) -> list[str]:
+    if not user_message or not available_columns:
+        return []
+
+    patterns = [
+        r"\busing\s+(?:columns?\s+)?(.+?)(?:\s+as\s+(?:the\s+)?(?:samples?|sets?)\b|\s+where\b|[.;]|$)",
+        r"\b(?:samples?|sets?)\s*(?:=|:|are)?\s*(?:columns?\s+)?(.+?)(?:\s+where\b|[.;]|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, user_message, re.IGNORECASE)
+        if not match:
+            continue
+        resolved = _resolve_overlap_columns_fragment(match.group(1), available_columns)
+        if 2 <= len(resolved) <= max_count:
+            return resolved
+
+    using_match = re.search(r"\busing\s+(.+)$", user_message, re.IGNORECASE)
+    if using_match:
+        trailing_fragment = re.split(
+            r"\b(?:where|that|which)\b|[.;]",
+            using_match.group(1),
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        resolved = _resolve_overlap_columns_fragment(trailing_fragment, available_columns)
+        if 2 <= len(resolved) <= max_count:
+            return resolved
+
+    return []
+
+
+def _resolve_overlap_columns_fragment(fragment: str, available_columns: list[str]) -> list[str]:
+    if not fragment:
+        return []
+
+    normalized_fragment = re.sub(r"\band\b", ",", fragment, flags=re.IGNORECASE)
+    tokens = [
+        token.strip().strip('"').strip("'")
+        for token in re.split(r"\s*\|\s*|\s*,\s*|\s*;\s*", normalized_fragment)
+        if token.strip()
+    ]
+    resolved: list[str] = []
+    for token in tokens:
+        for column in available_columns:
+            if str(column).strip().lower() == token.lower() and column not in resolved:
+                resolved.append(column)
+                break
+    return resolved
+
+
+def _default_overlap_label(labels: list[str]) -> str:
+    if not labels:
+        return "overlap_dataframe"
+    preview = "_vs_".join(re.sub(r"\s+", "_", str(label).strip()) for label in labels[:3])
+    return f"overlap_{preview}"
+
+
+def _needs_overlap_materialization(spec: dict) -> bool:
+    chart_type = str(spec.get("type") or "").strip().lower()
+    if chart_type not in {"venn", "upset"}:
+        return False
+    return any(
+        spec.get(key)
+        for key in ("dfs", "df_ids", "sources", "match_cols", "match_on", "sample_col", "sample_values")
+    )
+
+
+def _parse_multi_value_param(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        candidates = value
+    else:
+        raw_value = str(value).strip()
+        if raw_value.startswith("[") and raw_value.endswith("]"):
+            raw_value = raw_value[1:-1]
+        candidates = re.split(r"[|;,]", raw_value)
+
+    normalized: list[str] = []
+    for item in candidates:
+        cleaned = str(item).strip()
+        if cleaned.startswith("["):
+            cleaned = cleaned[1:]
+        if cleaned.endswith("]"):
+            cleaned = cleaned[:-1]
+        cleaned = cleaned.strip().strip('"').strip("'")
+        if cleaned:
+            normalized.append(cleaned)
+    return normalized
+
+
+def _match_plot_column_name(columns: list[str], requested: str | None) -> str | None:
+    if not requested:
+        return None
+    lowered = str(requested).strip().lower()
+    for column in columns:
+        if str(column).strip().lower() == lowered:
+            return str(column)
+    return None
+
+
+def _coerce_overlap_membership_series(series: pd.Series, *, allow_positive_numeric: bool) -> pd.Series | None:
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False).astype(bool)
+
+    non_null = series.dropna()
+    if non_null.empty:
+        return None
+
+    numeric = pd.to_numeric(non_null, errors="coerce")
+    if numeric.notna().all():
+        if set(numeric.unique()).issubset({0, 1}):
+            return pd.to_numeric(series, errors="coerce").fillna(0).astype(int).astype(bool)
+        if allow_positive_numeric:
+            has_positive = bool((numeric > 0).any())
+            has_negative = bool((numeric < 0).any())
+            if has_positive and not has_negative:
+                return pd.to_numeric(series, errors="coerce").fillna(0).gt(0)
+        return None
+
+    true_tokens = {"1", "true", "t", "yes", "y", "present", "member", "in"}
+    false_tokens = {"0", "false", "f", "no", "n", "absent", "out"}
+    normalized = non_null.astype(str).str.strip().str.lower()
+    if set(normalized.unique()).issubset(true_tokens | false_tokens):
+        return series.fillna("false").astype(str).str.strip().str.lower().map(lambda value: value in true_tokens)
+
+    return None
+
+
+def _build_direct_set_overlap_payload(
+    spec: dict,
+    history_blocks: list,
+    *,
+    current_dataframes: dict[str, dict] | None = None,
+) -> dict:
+    df_id = spec.get("df_id")
+    if not isinstance(df_id, int):
+        raise ValueError("Direct set overlap materialization requires df_id.")
+
+    payload = _find_plot_dataframe_payload(
+        df_id,
+        history_blocks,
+        current_dataframes=current_dataframes,
+    )
+    if not payload:
+        raise ValueError(f"Dataframe DF{df_id} was not found for overlap plotting.")
+
+    metadata = payload.get("metadata") or {}
+    if metadata.get("kind") == "overlap_membership":
+        return payload
+
+    frame = pd.DataFrame(payload.get("data") or [], columns=payload.get("columns") or None)
+    if frame.empty:
+        raise ValueError("Overlap plot source dataframe is empty.")
+
+    requested_sets = _parse_multi_value_param(spec.get("sets"))
+    if not requested_sets:
+        raise ValueError("Overlap plot requires at least 2 explicit set columns.")
+
+    resolved_set_columns: list[str] = []
+    for requested in requested_sets:
+        matched = _match_plot_column_name(list(frame.columns), requested)
+        if not matched:
+            raise ValueError(f"Column '{requested}' was not found in the dataframe")
+        if matched not in resolved_set_columns:
+            resolved_set_columns.append(matched)
+
+    chart_type = str(spec.get("type") or "").strip().lower()
+    if chart_type == "venn" and len(resolved_set_columns) not in {2, 3}:
+        raise ValueError("Venn plots require exactly 2 or 3 set columns.")
+    if chart_type == "upset" and len(resolved_set_columns) < 2:
+        raise ValueError("UpSet plots require at least 2 set columns.")
+
+    overlap_df = pd.DataFrame({
+        "match_key": [str(index) for index in range(len(frame))],
+    })
+    for column in resolved_set_columns:
+        membership = _coerce_overlap_membership_series(
+            frame[column],
+            allow_positive_numeric=True,
+        )
+        if membership is None:
+            raise ValueError(f"Column '{column}' could not be interpreted as set membership.")
+        overlap_df[column] = membership.tolist()
+
+    label = _default_overlap_label(resolved_set_columns)
+    overlap_rows = overlap_df.to_dict(orient="records")
+    return {
+        "columns": list(overlap_df.columns),
+        "data": overlap_rows,
+        "row_count": len(overlap_rows),
+        "metadata": {
+            "operation": "build_overlap_dataframe",
+            "label": label,
+            "kind": "overlap_membership",
+            "set_columns": resolved_set_columns,
+            "source_df_id": df_id,
+            "source_df_ids": [df_id],
+            "source_labels": resolved_set_columns,
+            "match_key_column": "match_key",
+            "visible": True,
+        },
+    }
+
+
+def _plot_spec_has_multi_df_overlap_source(spec: dict) -> bool:
+    return bool(spec.get("dfs") or spec.get("df_ids") or spec.get("sources"))
+
+
+def _build_overlap_plot_params(spec: dict) -> dict:
+    params = {
+        "plot_type": str(spec.get("type") or "").strip().lower(),
+    }
+    for key in (
+        "df",
+        "df_id",
+        "dfs",
+        "df_ids",
+        "sources",
+        "match_cols",
+        "match_on",
+        "sample_col",
+        "sample_values",
+        "labels",
+    ):
+        if spec.get(key) is not None:
+            params[key] = spec.get(key)
+    return params
+
+
+def _overlap_request_cache_key(params: dict) -> tuple:
+    items = []
+    for key in sorted(params):
+        value = params[key]
+        if isinstance(value, list):
+            normalized = tuple(str(item) for item in value)
+        else:
+            normalized = str(value)
+        items.append((key, normalized))
+    return tuple(items)
+
+
+def _synthetic_overlap_key(payload: dict, sequence: int) -> str:
+    label = str((payload.get("metadata") or {}).get("label") or "overlap_dataframe")
+    cleaned = re.sub(r"\s+", "_", label.strip())
+    return f"{cleaned}_{sequence + 1}"
+
+
+def _rewrite_overlap_plot_spec(original_spec: dict, payload: dict) -> dict:
+    metadata = payload.get("metadata") or {}
+    df_id = metadata.get("df_id")
+    set_columns = list(metadata.get("set_columns") or [])
+    rewritten = {
+        "type": original_spec.get("type"),
+        "df_id": df_id,
+        "df": f"DF{df_id}" if isinstance(df_id, int) else original_spec.get("df"),
+        "sets": "|".join(set_columns),
+        "source_df_ids": metadata.get("source_df_ids"),
+        "source_labels": metadata.get("source_labels"),
+        "source_match_cols": metadata.get("source_match_cols"),
+        "match_key_column": metadata.get("match_key_column"),
+    }
+    if original_spec.get("title") is not None:
+        rewritten["title"] = original_spec.get("title")
+    if original_spec.get("palette") is not None:
+        rewritten["palette"] = original_spec.get("palette")
+    if original_spec.get("color") is not None:
+        rewritten["color"] = original_spec.get("color")
+    if original_spec.get("max_intersections") is not None:
+        rewritten["max_intersections"] = _coerce_int_like(original_spec.get("max_intersections"))
+    return rewritten
+
+
+def _format_overlap_materialization_error(spec: dict, exc: Exception) -> str:
+    chart_type = str(spec.get("type") or "plot").strip().lower() or "plot"
+    return f"Could not build {chart_type} overlap input: {exc}"
+
+
+def _coerce_int_like(value):
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return value
+
+
 def _normalize_plot_token(value: str | None) -> str:
     if not value:
         return ""
@@ -695,6 +1244,18 @@ def _apply_explicit_special_x(plot_specs: list[dict], explicit_special_x: str) -
 
 def _requested_plot_type(message: str) -> str:
     msg = (message or "").lower()
+    if "upset" in msg:
+        return "upset"
+    if "venn" in msg:
+        return "venn"
+    if "violin" in msg:
+        return "violin"
+    if "strip" in msg:
+        return "strip"
+    if re.search(r"\bline\s+(?:chart|plot|graph)\b", msg):
+        return "line"
+    if re.search(r"\barea\s+(?:chart|plot|graph)\b", msg):
+        return "area"
     if "pie" in msg:
         return "pie"
     if "scatter" in msg:

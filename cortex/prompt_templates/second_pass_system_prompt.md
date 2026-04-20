@@ -50,9 +50,11 @@ output a [[PLOT:...]] tag. The system renders the chart automatically.
 ✅ ALWAYS use the [[PLOT:...]] tag — it renders an interactive chart automatically.
 
 TAG FORMAT:
-[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>]]
+[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>, sets=<set_col1>|<set_col2>|<set_col3>, mode=<group|stack|percent>]]
+[[PLOT: type=<venn|upset>, dfs=DF1|DF2|DF3, match_cols=<col1>|<col2>|<col3>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
+[[PLOT: type=<venn|upset>, df=DF<N>, sample_col=<sample_column>, sample_values=<value1>|<value2>|<value3>, match_on=<id_column>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
 
-CHART TYPES: histogram, scatter, bar, box, heatmap, pie
+CHART TYPES: histogram, scatter, line, area, bar, box, violin, strip, heatmap, pie, venn, upset
 
 PARAMETER RULES:
 - df: Use the DataFrame ID from the data below (e.g. DF1, DF8). If there is
@@ -62,6 +64,12 @@ PARAMETER RULES:
 - x / y: MUST be actual column names from the data.
 - color: Use a real grouping column when one exists. If the user said "color by sample" and the source dataframe is wide, you may still emit color=sample; the renderer can auto-melt sample columns.
 - agg: For bar/pie charts counting rows per category, use agg=count.
+- sets: For venn/upset plots, use 2-6 boolean or binary membership columns joined with `|`.
+- dfs + match_cols: Use these for overlap plots that compare multiple different dataframes.
+- df + sample_col + match_on: Use these for overlap plots that split one dataframe into multiple sets by sample or condition.
+- labels: Use presentation labels when set names should differ from raw dataframe labels or sample values.
+- max_intersections: Optional cap for upset plots when the user asks for fewer intersections.
+- mode: For bar charts, use `mode=stack` or `mode=percent` when the user explicitly asks for stacked or normalized bars.
 - title: Short descriptive title.
 - xlabel / ylabel: Optional axis labels when the user explicitly asks for them.
 
@@ -69,6 +77,9 @@ EXAMPLES:
 [[PLOT: type=bar, df=DF1, x=Assay, agg=count, title=Experiments by Assay Type]]
 [[PLOT: type=pie, df=DF1, x=Assay, title=Assay Distribution]]
 [[PLOT: type=histogram, df=DF1, x=Score, title=Score Distribution]]
+[[PLOT: type=venn, df=DF2, sets=treated_sig|control_sig|rescue_sig, title=Shared Hits Across Conditions]]
+[[PLOT: type=upset, dfs=DF1|DF2, match_cols=gene_symbol|gene_id, labels=Treated|Control, max_intersections=6, title=Shared Genes]]
+[[PLOT: type=venn, df=DF3, sample_col=sample, sample_values=treated|control|rescue, match_on=gene_id, labels=Treated|Control|Rescue, title=Shared Hits Across Samples]]
 
 WHEN TO PLOT:
 - The user explicitly said "plot", "chart", "visualize", "graph", "histogram",

@@ -23,6 +23,22 @@ COLOR_INFO = "#6f8ea7"
 COLOR_BORDER = "#3a3f42"
 COLOR_BORDER_SOFT = "#2e3336"
 
+COLOR_PLOT_PAPER = "#ffffff"
+COLOR_PLOT_SURFACE = "#f8fafc"
+COLOR_PLOT_TEXT = "#1f2937"
+COLOR_PLOT_TEXT_MUTED = "#475569"
+COLOR_PLOT_GRID = "#dbe4ee"
+COLOR_PLOT_BORDER = "#d7dee8"
+COLOR_PLOT_SERIES = [
+    "#9fd3ff",
+    "#1f6fd1",
+    "#f7a3a8",
+    "#ff2b2b",
+    "#7ee094",
+    "#3bb4a6",
+    "#f7cb69",
+]
+
 RADIUS_SM = "10px"
 RADIUS_MD = "14px"
 RADIUS_LG = "16px"
@@ -59,18 +75,47 @@ def status_color(status: str) -> str:
 def get_plotly_template() -> dict:
     return {
         "layout": {
-            "paper_bgcolor": COLOR_BG_PRIMARY,
-            "plot_bgcolor": COLOR_BG_SECONDARY,
-            "font": {"color": COLOR_TEXT_PRIMARY, "size": 12},
-            "xaxis": {"gridcolor": COLOR_BORDER_SOFT, "tickfont": {"color": COLOR_TEXT_SECONDARY}},
-            "yaxis": {"gridcolor": COLOR_BORDER_SOFT, "tickfont": {"color": COLOR_TEXT_SECONDARY}},
-            "legend": {
-                "bgcolor": COLOR_BG_SECONDARY,
-                "bordercolor": COLOR_BORDER,
-                "borderwidth": 1,
-                "font": {"color": COLOR_TEXT_PRIMARY},
+            "paper_bgcolor": COLOR_PLOT_PAPER,
+            "plot_bgcolor": COLOR_PLOT_SURFACE,
+            "colorway": COLOR_PLOT_SERIES,
+            "font": {"color": COLOR_PLOT_TEXT, "size": 12},
+            "title": {
+                "font": {"color": COLOR_PLOT_TEXT},
+                "x": 0.03,
+                "xanchor": "left",
             },
-            "margin": {"l": 8, "r": 8, "t": 40, "b": 8},
+            "xaxis": {
+                "gridcolor": COLOR_PLOT_GRID,
+                "linecolor": COLOR_PLOT_BORDER,
+                "tickcolor": COLOR_PLOT_BORDER,
+                "tickfont": {"color": COLOR_PLOT_TEXT_MUTED},
+                "title": {"font": {"color": COLOR_PLOT_TEXT}},
+                "title_standoff": 14,
+                "automargin": True,
+                "zerolinecolor": COLOR_PLOT_GRID,
+            },
+            "yaxis": {
+                "gridcolor": COLOR_PLOT_GRID,
+                "linecolor": COLOR_PLOT_BORDER,
+                "tickcolor": COLOR_PLOT_BORDER,
+                "tickfont": {"color": COLOR_PLOT_TEXT_MUTED},
+                "title": {"font": {"color": COLOR_PLOT_TEXT}},
+                "title_standoff": 14,
+                "automargin": True,
+                "zerolinecolor": COLOR_PLOT_GRID,
+            },
+            "legend": {
+                "bgcolor": COLOR_PLOT_PAPER,
+                "bordercolor": COLOR_PLOT_BORDER,
+                "borderwidth": 1,
+                "font": {"color": COLOR_PLOT_TEXT},
+            },
+            "hoverlabel": {
+                "bgcolor": COLOR_PLOT_PAPER,
+                "bordercolor": COLOR_PLOT_BORDER,
+                "font": {"color": COLOR_PLOT_TEXT},
+            },
+            "margin": {"l": 84, "r": 24, "t": 72, "b": 72},
         }
     }
 
@@ -100,6 +145,24 @@ def inject_global_css() -> None:
             border: 1px solid {COLOR_BORDER_SOFT};
             border-radius: {RADIUS_MD};
             padding: 0.35rem 0.55rem;
+        }}
+        [data-testid="stPlotlyChart"],
+        [data-testid="stImage"] {{
+            background: rgba(255, 255, 255, 0.96);
+            border: 1px solid rgba(215, 222, 232, 0.85);
+            border-radius: {RADIUS_MD};
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+            padding: 0.65rem;
+        }}
+        [data-testid="stPlotlyChart"] {{
+            overflow: visible;
+        }}
+        [data-testid="stImage"] {{
+            overflow: hidden;
+        }}
+        [data-testid="stPlotlyChart"] > div,
+        [data-testid="stImage"] > div {{
+            background: transparent;
         }}
         div[data-baseweb="select"] > div,
         div[data-baseweb="input"] > div,

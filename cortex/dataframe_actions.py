@@ -5,6 +5,8 @@ import json
 import re
 from typing import Any
 
+import pandas as pd
+
 from common.logging_config import get_logger
 from cortex.dataframe_transforms import (
     aggregate_dataframe,
@@ -127,6 +129,25 @@ LOCAL_DATAFRAME_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "required": ["df_id", "index", "columns", "values"],
         },
     },
+    "build_overlap_dataframe": {
+        "description": "Build a reusable overlap-membership dataframe for venn/upset plots from either multiple dataframes or one dataframe split by sample.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "dfs": {"type": "string", "description": "Optional source dataframe ids separated by |, for example DF1|DF2|DF3."},
+                "sources": {"type": "string", "description": "Optional per-source mapping such as DF1:gene_id|DF2:ensembl_id."},
+                "match_cols": {"type": "string", "description": "Optional match columns for multi-dataframe mode, separated by | and aligned to dfs."},
+                "match_on": {"type": "string", "description": "Shared match column for all sources or the match column for single-dataframe split mode."},
+                "df_id": {"type": "integer", "description": "Single dataframe id for sample-splitting mode."},
+                "sample_col": {"type": "string", "description": "Required for single-dataframe split mode. Column containing sample/set identifiers."},
+                "sample_values": {"type": "string", "description": "Optional sample/set values separated by |. Omit to include all values from sample_col."},
+                "labels": {"type": "string", "description": "Optional display labels separated by |."},
+                "plot_type": {"type": "string", "enum": ["venn", "upset"], "description": "Optional overlap plot type for set-count validation."},
+                "output_label": {"type": "string", "description": "Optional label for the synthetic overlap dataframe."},
+            },
+            "required": [],
+        },
+    },
 }
 
 LOCAL_DATAFRAME_TOOL_NAMES = frozenset(LOCAL_DATAFRAME_TOOL_SCHEMAS)
@@ -164,6 +185,13 @@ def summarize_dataframe_action(tool_name: str, params: dict[str, Any]) -> str:
         return f"Join DF{params.get('left_df_id')} with DF{params.get('right_df_id')}"
     if tool_name == "pivot_dataframe":
         return f"Pivot DF{params.get('df_id')}"
+    if tool_name == "build_overlap_dataframe":
+        if params.get("df_ids"):
+            refs = ", ".join(f"DF{df_id}" for df_id in params.get("df_ids", []))
+            return f"Build overlap dataframe from {refs}"
+        if params.get("df_id"):
+            return f"Build overlap dataframe from DF{params.get('df_id')} split by {params.get('sample_col')}"
+        return "Build overlap dataframe"
     return "Execute dataframe action"
 
 
@@ -196,11 +224,27 @@ def execute_local_dataframe_call(
     params: dict[str, Any],
     *,
     history_blocks: list,
+    current_dataframes: dict[str, dict] | None = None,
 ) -> dict[str, Any]:
     normalized = _normalize_action_params(tool_name, params)
+    if tool_name == "build_overlap_dataframe":
+        return build_overlap_dataframe_payload(
+            normalized,
+            history_blocks=history_blocks,
+            current_dataframes=current_dataframes,
+        )
+
     if tool_name == "join_dataframes":
-        left_payload = _find_dataframe_payload(normalized["left_df_id"], history_blocks)
-        right_payload = _find_dataframe_payload(normalized["right_df_id"], history_blocks)
+        left_payload = _find_dataframe_payload(
+            normalized["left_df_id"],
+            history_blocks,
+            current_dataframes=current_dataframes,
+        )
+        right_payload = _find_dataframe_payload(
+            normalized["right_df_id"],
+            history_blocks,
+            current_dataframes=current_dataframes,
+        )
         left = payload_to_dataframe(left_payload)
         right = payload_to_dataframe(right_payload)
         normalized["on"] = _resolve_column_names(left, normalized.get("on")) if normalized.get("on") else None
@@ -226,7 +270,11 @@ def execute_local_dataframe_call(
             },
         )
 
-    source_payload = _find_dataframe_payload(normalized["df_id"], history_blocks)
+    source_payload = _find_dataframe_payload(
+        normalized["df_id"],
+        history_blocks,
+        current_dataframes=current_dataframes,
+    )
     frame = payload_to_dataframe(source_payload)
 
     if tool_name == "filter_dataframe":
@@ -305,6 +353,44 @@ def execute_local_dataframe_call(
         label=label,
         extra_metadata={"source_df_id": normalized["df_id"]},
     )
+
+
+def build_overlap_dataframe_payload(
+    params: dict[str, Any],
+    *,
+    history_blocks: list,
+    current_dataframes: dict[str, dict] | None = None,
+) -> dict[str, Any]:
+    normalized = _normalize_action_params("build_overlap_dataframe", params)
+    plot_type = str(normalized.get("plot_type") or "").strip().lower()
+
+    if normalized.get("df_ids"):
+        payload = _build_multi_dataframe_overlap_payload(
+            normalized,
+            history_blocks=history_blocks,
+            current_dataframes=current_dataframes,
+        )
+    elif normalized.get("df_id") is not None:
+        payload = _build_single_dataframe_overlap_payload(
+            normalized,
+            history_blocks=history_blocks,
+            current_dataframes=current_dataframes,
+        )
+    else:
+        raise ValueError(
+            "Overlap dataframe build requires either dfs/sources for multi-dataframe mode "
+            "or df_id + sample_col + match_on for single-dataframe split mode."
+        )
+
+    set_columns = list((payload.get("metadata") or {}).get("set_columns") or [])
+    if plot_type == "venn" and len(set_columns) not in {2, 3}:
+        raise ValueError("Venn plots require exactly 2 or 3 sets after overlap dataframe construction.")
+    if plot_type == "upset" and len(set_columns) < 2:
+        raise ValueError("UpSet plots require at least 2 sets after overlap dataframe construction.")
+    if len(set_columns) < 2:
+        raise ValueError("Overlap dataframe construction requires at least 2 sets.")
+
+    return payload
 
 
 def build_auto_dataframe_call(user_message: str) -> dict[str, Any] | None:
@@ -568,7 +654,15 @@ def build_auto_dataframe_call(user_message: str) -> dict[str, Any] | None:
     return None
 
 
-def _find_dataframe_payload(df_id: int, history_blocks: list) -> dict[str, Any]:
+def _find_dataframe_payload(
+    df_id: int,
+    history_blocks: list,
+    current_dataframes: dict[str, dict] | None = None,
+) -> dict[str, Any]:
+    for payload in (current_dataframes or {}).values():
+        metadata = payload.get("metadata") or {}
+        if metadata.get("df_id") == df_id:
+            return payload
     for block in reversed(history_blocks or []):
         if getattr(block, "type", None) != "AGENT_PLAN":
             continue
@@ -600,6 +694,27 @@ def _normalize_action_params(tool_name: str, params: dict[str, Any]) -> dict[str
         df_match = re.match(r"(?:DF)?\s*(\d+)", str(normalized["df"]), re.IGNORECASE)
         if df_match:
             normalized["df_id"] = int(df_match.group(1))
+
+    if tool_name == "build_overlap_dataframe":
+        normalized["df_ids"] = _normalize_overlap_df_ids(normalized)
+        if normalized.get("sources") and not normalized.get("match_cols"):
+            _, source_match_cols = _parse_overlap_sources(normalized.get("sources"))
+            normalized["match_cols"] = source_match_cols
+        else:
+            normalized["match_cols"] = _split_values(normalized.get("match_cols"))
+        if normalized.get("match_on") is not None:
+            normalized["match_on"] = str(normalized.get("match_on") or "").strip()
+        if normalized.get("sample_col") is not None:
+            normalized["sample_col"] = str(normalized.get("sample_col") or "").strip()
+        normalized["sample_values"] = _split_values(normalized.get("sample_values"))
+        normalized["labels"] = _split_values(normalized.get("labels"))
+        if normalized.get("output_label") is not None:
+            normalized["output_label"] = str(normalized.get("output_label") or "").strip()
+        if normalized.get("plot_type") is not None:
+            normalized["plot_type"] = str(normalized.get("plot_type") or "").strip().lower()
+        if normalized.get("df_id") is not None:
+            normalized["df_id"] = int(normalized["df_id"])
+        return normalized
 
     if tool_name == "filter_dataframe":
         normalized["df_id"] = int(normalized["df_id"])
@@ -769,3 +884,255 @@ def _list_source_columns(df_id: int, message: str) -> list[str]:
     if not match:
         return []
     return [match.group(1), match.group(2), match.group(3)]
+
+
+def _normalize_overlap_df_ids(params: dict[str, Any]) -> list[int]:
+    if params.get("df_ids"):
+        return [_normalize_df_ref(value) for value in params.get("df_ids")]
+    if params.get("sources"):
+        df_ids, _ = _parse_overlap_sources(params.get("sources"))
+        return df_ids
+    return [_normalize_df_ref(value) for value in _split_values(params.get("dfs"))]
+
+
+def _parse_overlap_sources(raw: Any) -> tuple[list[int], list[str]]:
+    df_ids: list[int] = []
+    match_cols: list[str] = []
+    for chunk in _split_values(raw):
+        if ":" not in chunk:
+            raise ValueError("Each overlap source must look like DF1:column_name.")
+        df_token, match_col = chunk.split(":", 1)
+        df_ids.append(_normalize_df_ref(df_token))
+        match_col = str(match_col).strip()
+        if not match_col:
+            raise ValueError("Each overlap source must include a non-empty match column.")
+        match_cols.append(match_col)
+    return df_ids, match_cols
+
+
+def _normalize_df_ref(raw: Any) -> int:
+    match = re.match(r"(?:DF)?\s*(\d+)", str(raw).strip(), re.IGNORECASE)
+    if not match:
+        raise ValueError(f"Invalid dataframe reference: {raw}")
+    return int(match.group(1))
+
+
+def _build_multi_dataframe_overlap_payload(
+    params: dict[str, Any],
+    *,
+    history_blocks: list,
+    current_dataframes: dict[str, dict] | None,
+) -> dict[str, Any]:
+    df_ids = list(params.get("df_ids") or [])
+    if len(df_ids) < 2:
+        raise ValueError("Multi-dataframe overlap requires at least 2 dataframe ids.")
+
+    match_cols = list(params.get("match_cols") or [])
+    shared_match = str(params.get("match_on") or "").strip()
+    if not match_cols and shared_match:
+        match_cols = [shared_match] * len(df_ids)
+    if len(match_cols) == 1 and len(df_ids) > 1:
+        match_cols = match_cols * len(df_ids)
+    if len(match_cols) != len(df_ids):
+        raise ValueError("Multi-dataframe overlap requires one match column per dataframe.")
+
+    explicit_labels = list(params.get("labels") or [])
+    if explicit_labels and len(explicit_labels) != len(df_ids):
+        raise ValueError("If labels are provided, their count must match the number of source dataframes.")
+
+    set_values_by_label: dict[str, list[str]] = {}
+    source_payloads: list[dict[str, Any]] = []
+    source_labels: list[str] = []
+    resolved_match_cols: list[str] = []
+    for idx, df_id in enumerate(df_ids):
+        payload = _find_dataframe_payload(df_id, history_blocks, current_dataframes=current_dataframes)
+        source_payloads.append(payload)
+        frame = payload_to_dataframe(payload)
+        resolved_match_col = _resolve_column_name(frame, match_cols[idx])
+        resolved_match_cols.append(resolved_match_col)
+        fallback_label = str((payload.get("metadata") or {}).get("label") or f"DF{df_id}")
+        source_label = explicit_labels[idx] if explicit_labels else fallback_label
+        source_labels.append(source_label)
+        set_values_by_label[source_label] = _extract_overlap_values(frame, resolved_match_col)
+
+    unique_labels = _deduplicate_labels(source_labels)
+    remapped_values = {
+        unique_labels[idx]: set_values_by_label[source_labels[idx]]
+        for idx in range(len(unique_labels))
+    }
+    return _overlap_payload_from_sets(
+        remapped_values,
+        source_payload=source_payloads[0],
+        label=params.get("output_label") or _default_overlap_label(unique_labels),
+        extra_metadata={
+            "source_df_ids": df_ids,
+            "source_labels": unique_labels,
+            "source_match_cols": resolved_match_cols,
+            "match_key_column": "match_key",
+        },
+    )
+
+
+def _build_single_dataframe_overlap_payload(
+    params: dict[str, Any],
+    *,
+    history_blocks: list,
+    current_dataframes: dict[str, dict] | None,
+) -> dict[str, Any]:
+    if params.get("df_id") is None:
+        raise ValueError("Single-dataframe overlap requires df_id.")
+    sample_col = str(params.get("sample_col") or "").strip()
+    if not sample_col:
+        raise ValueError("sample_col is required when building overlap data from one dataframe.")
+    match_on = str(params.get("match_on") or "").strip()
+    if not match_on:
+        raise ValueError("match_on is required when building overlap data from one dataframe.")
+
+    payload = _find_dataframe_payload(params["df_id"], history_blocks, current_dataframes=current_dataframes)
+    frame = payload_to_dataframe(payload)
+    resolved_sample_col = _resolve_column_name(frame, sample_col)
+    resolved_match_on = _resolve_column_name(frame, match_on)
+
+    explicit_sample_values = list(params.get("sample_values") or [])
+    if explicit_sample_values:
+        actual_sample_values = [
+            _resolve_sample_value(frame[resolved_sample_col], value)
+            for value in explicit_sample_values
+        ]
+    else:
+        actual_sample_values = _ordered_sample_values(frame[resolved_sample_col])
+    if len(actual_sample_values) < 2:
+        raise ValueError("Overlap dataframe construction requires at least 2 sample values.")
+
+    explicit_labels = list(params.get("labels") or [])
+    if explicit_labels and len(explicit_labels) != len(actual_sample_values):
+        raise ValueError("If labels are provided, their count must match the number of sample values.")
+
+    source_labels = explicit_labels or [str(value) for value in actual_sample_values]
+    unique_labels = _deduplicate_labels(source_labels)
+    set_values_by_label: dict[str, list[str]] = {}
+    for idx, sample_value in enumerate(actual_sample_values):
+        subset = frame.loc[frame[resolved_sample_col] == sample_value]
+        set_values_by_label[unique_labels[idx]] = _extract_overlap_values(subset, resolved_match_on)
+
+    return _overlap_payload_from_sets(
+        set_values_by_label,
+        source_payload=payload,
+        label=params.get("output_label") or _default_overlap_label(unique_labels),
+        extra_metadata={
+            "source_df_id": params["df_id"],
+            "source_df_ids": [params["df_id"]],
+            "source_labels": unique_labels,
+            "sample_col": resolved_sample_col,
+            "sample_values": [str(value) for value in actual_sample_values],
+            "source_match_cols": [resolved_match_on],
+            "match_key_column": "match_key",
+        },
+    )
+
+
+def _overlap_payload_from_sets(
+    set_values_by_label: dict[str, list[str]],
+    *,
+    source_payload: dict[str, Any],
+    label: str,
+    extra_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    ordered_keys = _ordered_overlap_keys(set_values_by_label.values())
+    rows: list[dict[str, Any]] = []
+    set_columns = list(set_values_by_label.keys())
+    membership_sets = {name: set(values) for name, values in set_values_by_label.items()}
+    for key in ordered_keys:
+        row = {"match_key": key}
+        for set_name in set_columns:
+            row[set_name] = key in membership_sets[set_name]
+        rows.append(row)
+
+    frame = pd.DataFrame(rows, columns=["match_key", *set_columns])
+    return dataframe_to_payload(
+        frame,
+        source_payload=source_payload,
+        operation="build_overlap_dataframe",
+        label=str(label).strip() or _default_overlap_label(set_columns),
+        extra_metadata={
+            **extra_metadata,
+            "kind": "overlap_membership",
+            "set_columns": set_columns,
+        },
+    )
+
+
+def _extract_overlap_values(frame: pd.DataFrame, column: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in frame[column].tolist():
+        normalized = _normalize_overlap_value(raw_value)
+        if normalized is None or normalized in seen:
+            continue
+        seen.add(normalized)
+        values.append(normalized)
+    return values
+
+
+def _normalize_overlap_value(raw_value: Any) -> str | None:
+    if raw_value is None or pd.isna(raw_value):
+        return None
+    text = str(raw_value).strip()
+    return text or None
+
+
+def _ordered_sample_values(series: pd.Series) -> list[Any]:
+    values: list[Any] = []
+    seen: set[str] = set()
+    for raw_value in series.tolist():
+        normalized = _normalize_overlap_value(raw_value)
+        if normalized is None or normalized in seen:
+            continue
+        seen.add(normalized)
+        values.append(raw_value)
+    return values
+
+
+def _resolve_sample_value(series: pd.Series, requested: Any):
+    requested_normalized = _normalize_overlap_value(requested)
+    if requested_normalized is None:
+        raise ValueError(f"Invalid sample value: {requested}")
+
+    exact_values = _ordered_sample_values(series)
+    for value in exact_values:
+        if str(value) == str(requested):
+            return value
+    for value in exact_values:
+        if _normalize_overlap_value(value).lower() == requested_normalized.lower():
+            return value
+    raise ValueError(f"Sample value '{requested}' was not found in column '{series.name}'.")
+
+
+def _ordered_overlap_keys(value_lists: list[list[str]]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for values in value_lists:
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            ordered.append(value)
+    return ordered
+
+
+def _deduplicate_labels(labels: list[str]) -> list[str]:
+    counts: dict[str, int] = {}
+    unique: list[str] = []
+    for raw_label in labels:
+        label = str(raw_label).strip() or "set"
+        next_count = counts.get(label, 0) + 1
+        counts[label] = next_count
+        unique.append(label if next_count == 1 else f"{label} ({next_count})")
+    return unique
+
+
+def _default_overlap_label(labels: list[str]) -> str:
+    if not labels:
+        return "overlap_dataframe"
+    preview = "_vs_".join(re.sub(r"\s+", "_", str(label).strip()) for label in labels[:3])
+    return f"overlap_{preview}"

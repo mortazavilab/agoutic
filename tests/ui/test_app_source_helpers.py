@@ -5,6 +5,7 @@ import base64
 import datetime as dt
 import json
 import re as _re_module
+from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -948,6 +949,38 @@ class TestRenderWorkflowPlotPayload:
         )
         fake_st.caption.assert_not_called()
 
+
+class TestRenderPlotBlock:
+    def test_plotly_charts_render_with_streamlit_theme_disabled(self):
+        fake_st = SimpleNamespace(
+            plotly_chart=MagicMock(),
+            warning=MagicMock(),
+            info=MagicMock(),
+        )
+        fn = _load_function(
+            "_render_plot_block",
+            {
+                "st": fake_st,
+                "defaultdict": defaultdict,
+                "_default_plot_export_name": lambda chart_type, df_label, fig: f"{df_label}_{chart_type}",
+                "_render_plot_publication_tools": lambda fig, plot_key_base, chart_type, default_name: (
+                    fig,
+                    {"figure_width": 900, "figure_height": 500},
+                ),
+                "_resolve_df_by_id": lambda df_id, all_blocks: (pd.DataFrame({"x": [1], "y": [2]}), "DF1"),
+                "_build_plotly_figure": lambda chart, df, label, plotly_template: go.Figure(go.Bar(x=[1], y=[2])),
+            },
+        )
+
+        fn(
+            {"charts": [{"type": "bar", "df_id": 1, "x": "x", "y": "y"}]},
+            [],
+            "block-1",
+        )
+
+        fake_st.plotly_chart.assert_called_once()
+        assert fake_st.plotly_chart.call_args.kwargs["theme"] is None
+
     def test_renders_inline_base64_image_artifacts(self):
         fake_st = SimpleNamespace(
             image=MagicMock(),
@@ -982,6 +1015,128 @@ class TestRenderWorkflowPlotPayload:
             use_container_width=True,
         )
         fake_st.caption.assert_not_called()
+
+
+class TestPublicationPlotHelpers:
+    def test_apply_publication_style_updates_fonts_layout_and_bar_labels(self):
+        fn = _load_function("_apply_publication_style")
+        fig = go.Figure(go.Bar(x=["Condition Alpha", "Condition Beta", "Condition Gamma"], y=[12, 30, 18]))
+        fig.update_layout(title="My Plot", xaxis_title="Condition", yaxis_title="Count")
+
+        styled = fn(
+            fig,
+            {
+                "figure_width": 1600,
+                "figure_height": 900,
+                "title_size": 30,
+                "axis_title_size": 20,
+                "tick_font_size": 15,
+                "legend_font_size": 14,
+                "legend_position": "top",
+                "show_grid": False,
+                "title_bold": True,
+                "axis_title_bold": True,
+                "x_tick_angle": "-45",
+                "show_value_labels": True,
+                "value_label_size": 16,
+                "value_label_angle": "45",
+                "value_label_bold": True,
+                "transparent_background": False,
+            },
+        )
+
+        assert styled.layout.width == 1600
+        assert styled.layout.height == 900
+        assert styled.layout.title.text == "<b>My Plot</b>"
+        assert styled.layout.xaxis.title.text == "<b>Condition</b>"
+        assert styled.layout.yaxis.title.text == "<b>Count</b>"
+        assert styled.layout.paper_bgcolor == "#ffffff"
+        assert styled.layout.xaxis.showgrid is False
+        assert styled.layout.xaxis.tickangle == -45
+        assert styled.layout.legend.orientation == "h"
+        assert list(styled.data[0].text) == ["12", "30", "18"]
+        assert styled.data[0].textangle == 45
+        assert styled.data[0].textfont["size"] == 16
+
+    def test_apply_publication_style_uses_offset_annotations_for_grouped_bar_labels(self):
+        fn = _load_function("_apply_publication_style")
+        fig = go.Figure()
+        fig.add_bar(name="Known", x=["s1", "s2"], y=[1000, 1100])
+        fig.add_bar(name="NIC", x=["s1", "s2"], y=[30, 25])
+        fig.update_layout(barmode="group", title="Grouped Plot", xaxis_title="Sample", yaxis_title="Count")
+
+        styled = fn(
+            fig,
+            {
+                "figure_width": 1400,
+                "figure_height": 900,
+                "title_size": 28,
+                "axis_title_size": 18,
+                "tick_font_size": 14,
+                "legend_font_size": 12,
+                "legend_position": "right",
+                "show_grid": True,
+                "title_bold": True,
+                "axis_title_bold": True,
+                "x_tick_angle": "auto",
+                "show_value_labels": True,
+                "value_label_size": 14,
+                "value_label_angle": "auto",
+                "value_label_bold": True,
+                "transparent_background": False,
+            },
+        )
+
+        assert len(styled.layout.annotations) == 2
+        assert all(trace.textposition == "outside" for trace in styled.data)
+        assert all(trace.textangle == 0 for trace in styled.data)
+        assert list(styled.data[0].text) == ["1k", "1.1k"]
+        assert list(styled.data[1].text) == ["", ""]
+        assert sorted(annotation.text for annotation in styled.layout.annotations) == ["25", "30"]
+
+    def test_apply_publication_style_rebuilds_grouped_bar_annotations_from_clean_state(self):
+        fn = _load_function("_apply_publication_style")
+        fig = go.Figure()
+        fig.add_bar(name="Known", x=["s1", "s2"], y=[1000, 1100])
+        fig.add_bar(name="NIC", x=["s1", "s2"], y=[30, 25])
+        fig.add_annotation(x="s1", y=30, text="stale")
+        fig.update_layout(barmode="group", title="Grouped Plot", xaxis_title="Sample", yaxis_title="Count")
+
+        styled = fn(
+            fig,
+            {
+                "figure_width": 1400,
+                "figure_height": 900,
+                "title_size": 28,
+                "axis_title_size": 18,
+                "tick_font_size": 14,
+                "legend_font_size": 12,
+                "legend_position": "right",
+                "show_grid": True,
+                "title_bold": True,
+                "axis_title_bold": True,
+                "x_tick_angle": "auto",
+                "show_value_labels": True,
+                "value_label_size": 14,
+                "value_label_angle": "45",
+                "value_label_bold": True,
+                "transparent_background": False,
+            },
+        )
+
+        assert len(styled.layout.annotations) == 2
+        assert sorted(annotation.text for annotation in styled.layout.annotations) == ["25", "30"]
+        assert all(annotation.textangle == 45 for annotation in styled.layout.annotations)
+
+    def test_build_plot_download_payload_supports_html_exports(self):
+        fn = _load_function("_build_plot_download_payload")
+        fig = go.Figure(go.Bar(x=["A"], y=[1]))
+
+        payload, file_name, error = fn(fig, {"export_format": "HTML", "file_stem": "publication_plot"})
+
+        assert error is None
+        assert file_name == "publication_plot.html"
+        assert b"plotly" in payload.lower()
 
 
 class TestBlockRequiresFullRefresh:
@@ -1127,6 +1282,30 @@ class TestBuildPlotlyFigure:
 
         assert fn({"type": "not-a-chart"}, sample_df, "Test DF") is None
 
+    def test_applies_explicit_light_plot_backgrounds(self, sample_df):
+        fn = _load_function(
+            "_build_plotly_figure",
+            {
+                "PLOTLY_TEMPLATE": {
+                    "layout": {
+                        "paper_bgcolor": "#ffffff",
+                        "plot_bgcolor": "#f8fafc",
+                        "colorway": ["#9fd3ff", "#1f6fd1", "#f7a3a8"],
+                        "title": {"x": 0.03, "xanchor": "left"},
+                    }
+                }
+            },
+        )
+
+        fig = fn({"type": "bar", "x": "Category", "y": "Count"}, sample_df, "Test DF")
+
+        assert fig is not None
+        assert fig.layout.paper_bgcolor == "#ffffff"
+        assert fig.layout.plot_bgcolor == "#f8fafc"
+        assert fig.layout.title.x == 0.03
+        assert fig.layout.xaxis.automargin is True
+        assert fig.layout.yaxis.automargin is True
+
     def test_bar_honors_literal_named_color(self, sample_df):
         fn = _load_function("_build_plotly_figure")
 
@@ -1151,6 +1330,39 @@ class TestBuildPlotlyFigure:
         assert fig is not None
         assert fig.data[0].marker.color == "red"
 
+    def test_bar_shows_value_labels_above_bars(self, sample_df):
+        fn = _load_function("_build_plotly_figure")
+
+        fig = fn({"type": "bar", "x": "Category", "y": "Count"}, sample_df, "Test DF")
+
+        assert fig is not None
+        assert list(fig.data[0].text) == ["5", "3", "2"]
+        assert fig.data[0].textposition == "outside"
+        assert fig.data[0].textangle == 0
+        assert fig.data[0].textfont.color == "#1f2937"
+        assert fig.layout.uniformtext.mode == "show"
+
+    def test_dense_grouped_bar_rotates_value_labels(self):
+        fn = _load_function("_build_plotly_figure")
+        df = pd.DataFrame(
+            {
+                "sample": ["s1", "s2", "s3", "s4"],
+                "ANTISENSE": [268, 221, 247, 300],
+                "KNOWN": [1000, 1100, 1050, 1200],
+                "NIC": [30, 25, 27, 29],
+            }
+        )
+
+        fig = fn({"type": "bar", "x": "sample", "agg": "sum"}, df, "Dense DF")
+
+        assert fig is not None
+        assert len(fig.layout.annotations) == 4
+        assert all(trace.textposition == "outside" for trace in fig.data)
+        assert all(trace.textangle == 0 for trace in fig.data)
+        assert list(fig.data[1].text) == ["1k", "1.1k", "1.1k", "1.2k"]
+        assert list(fig.data[2].text) == ["", "", "", ""]
+        assert sorted(annotation.text for annotation in fig.layout.annotations) == ["25", "27", "29", "30"]
+
     def test_bar_auto_melts_wide_dataframe_for_color_by_sample(self):
         fn = _load_function("_build_plotly_figure")
         df = pd.DataFrame(
@@ -1169,7 +1381,16 @@ class TestBuildPlotlyFigure:
         assert {trace.name for trace in fig.data} == {"sampleA", "sampleB", "sampleC"}
 
     def test_bar_with_sample_x_and_multiple_numeric_columns_renders_all_measures(self):
-        fn = _load_function("_build_plotly_figure")
+        fn = _load_function(
+            "_build_plotly_figure",
+            {
+                "PLOTLY_TEMPLATE": {
+                    "layout": {
+                        "colorway": ["#9fd3ff", "#1f6fd1", "#f7a3a8", "#ff2b2b"],
+                    }
+                }
+            },
+        )
         df = pd.DataFrame(
             {
                 "sample": ["s1", "s2", "s3"],
@@ -1183,6 +1404,7 @@ class TestBuildPlotlyFigure:
 
         assert fig is not None
         assert {trace.name for trace in fig.data} == {"ANTISENSE", "KNOWN", "NIC"}
+        assert [trace.marker.color for trace in fig.data] == ["#9fd3ff", "#1f6fd1", "#f7a3a8"]
 
     def test_bar_with_measure_x_and_multiple_numeric_columns_groups_by_sample(self):
         fn = _load_function("_build_plotly_figure")
@@ -1200,6 +1422,91 @@ class TestBuildPlotlyFigure:
         assert fig is not None
         assert {trace.name for trace in fig.data} == {"s1", "s2", "s3"}
         assert set(fig.data[0].x) == {"ANTISENSE", "KNOWN", "NIC"}
+
+    def test_line_with_sample_x_and_multiple_numeric_columns_renders_all_measures(self):
+        fn = _load_function("_build_plotly_figure")
+        df = pd.DataFrame(
+            {
+                "sample": ["s1", "s2", "s3"],
+                "Known": [100, 120, 115],
+                "Novel": [12, 15, 19],
+            }
+        )
+
+        fig = fn({"type": "line", "x": "sample"}, df, "Wide Sample DF")
+
+        assert fig is not None
+        assert {trace.name for trace in fig.data} == {"Known", "Novel"}
+        assert fig.data[0].mode == "lines+markers"
+
+    def test_violin_renders_distribution_by_group(self):
+        fn = _load_function("_build_plotly_figure")
+        df = pd.DataFrame(
+            {
+                "Condition": ["A", "A", "B", "B"],
+                "Score": [1.2, 1.5, 2.8, 3.1],
+            }
+        )
+
+        fig = fn({"type": "violin", "x": "Condition", "y": "Score"}, df, "Distribution DF")
+
+        assert fig is not None
+        assert all(trace.type == "violin" for trace in fig.data)
+
+    def test_venn_infers_boolean_set_columns_when_sets_omitted(self):
+        fn = _load_function("_build_plotly_figure")
+        df = pd.DataFrame(
+            {
+                "gene": ["g1", "g2", "g3", "g4"],
+                "treated": [True, True, False, False],
+                "control": [True, False, True, False],
+                "rescue": [False, True, True, False],
+            }
+        )
+
+        fig = fn({"type": "venn", "title": "Shared Genes"}, df, "Overlap DF")
+
+        assert fig is not None
+        assert len(fig.layout.shapes) == 3
+        assert fig.layout.title.text == "Shared Genes"
+
+    def test_upset_uses_set_columns_for_overlap_plot(self):
+        fn = _load_function("_build_plotly_figure")
+        df = pd.DataFrame(
+            {
+                "gene": ["g1", "g2", "g3", "g4", "g5"],
+                "treated": [True, True, False, False, True],
+                "control": [True, False, True, False, True],
+                "rescue": [False, True, True, False, False],
+            }
+        )
+
+        fig = fn({"type": "upset", "sets": "treated|control|rescue"}, df, "Overlap DF")
+
+        assert fig is not None
+        assert fig.data[0].type == "bar"
+        assert any(trace.type == "scatter" for trace in fig.data[1:])
+        assert fig.layout.title.text == "UpSet plot"
+
+    def test_upset_treats_positive_numeric_sets_as_present_when_explicit(self):
+        fn = _load_function("_build_plotly_figure")
+        df = pd.DataFrame(
+            {
+                "transcript_novelty": ["KNOWN", "KNOWN", "ISM", "ISM"],
+                "c2c12r1": [62, 0, 8, 0],
+                "c2c12r2": [67, 0, 5, 3],
+                "c2c12r3": [76, 1, 11, 1],
+            }
+        )
+
+        fig = fn({"type": "upset", "sets": "c2c12r1|c2c12r2|c2c12r3"}, df, "Overlap DF")
+
+        assert fig is not None
+        assert fig.data[0].type == "bar"
+        assert list(fig.data[0].y[:3]) == [2.0, 1.0, 1.0]
+        assert len(fig.data[0].y) == 7
+        assert list(fig.data[0].y).count(0.0) == 4
+        assert fig.layout.title.text == "UpSet plot"
 
     def test_bar_applies_title_and_y_axis_label(self):
         fn = _load_function("_build_plotly_figure")

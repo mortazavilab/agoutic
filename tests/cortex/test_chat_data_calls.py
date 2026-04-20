@@ -234,6 +234,542 @@ class TestPlotTagParsing:
         chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
         assert chart.get("ylabel") == "Reads"
 
+    def test_upset_plot_builds_server_side_overlap_dataframe(self, SL, seed, tmp_path):
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframes.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF1 (treated, 3 rows)", "DF2 (control, 3 rows)"],
+                    "latest_dataframe": "DF2",
+                },
+                "_dataframes": {
+                    "treated": {
+                        "columns": ["gene_symbol"],
+                        "data": [
+                            {"gene_symbol": "TP53"},
+                            {"gene_symbol": "EGFR"},
+                            {"gene_symbol": "MYC"},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 1, "visible": True, "label": "treated", "row_count": 3},
+                    },
+                    "control": {
+                        "columns": ["gene_id"],
+                        "data": [
+                            {"gene_id": "EGFR"},
+                            {"gene_id": "MYC"},
+                            {"gene_id": "STAT1"},
+                        ],
+                        "row_count": 3,
+                        "metadata": {"df_id": 2, "visible": True, "label": "control", "row_count": 3},
+                    },
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the overlap plot.\n"
+                "[[PLOT: type=upset, dfs=DF1|DF2, match_cols=gene_symbol|gene_id, labels=Treated|Control, title=Shared genes, max_intersections=5]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "make an upset plot comparing DF1 and DF2 by gene", skill="analyze_job_results")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
+        assert chart["type"] == "upset"
+        assert chart["df_id"] == 3
+        assert chart["sets"] == "Treated|Control"
+        assert chart["max_intersections"] == 5
+        assert chart["source_df_ids"] == [1, 2]
+        assert chart["source_match_cols"] == ["gene_symbol", "gene_id"]
+
+        agent_payload = (data.get("agent_block") or {}).get("payload") or {}
+        embedded = agent_payload.get("_dataframes") or {}
+        assert len(embedded) == 1
+        overlap_payload = next(iter(embedded.values()))
+        assert overlap_payload["metadata"]["df_id"] == 3
+        assert overlap_payload["metadata"]["kind"] == "overlap_membership"
+        assert overlap_payload["metadata"]["set_columns"] == ["Treated", "Control"]
+        overlap_rows = {row["match_key"]: row for row in overlap_payload["data"]}
+        assert overlap_rows["EGFR"] == {"match_key": "EGFR", "Treated": True, "Control": True}
+        assert overlap_rows["TP53"] == {"match_key": "TP53", "Treated": True, "Control": False}
+
+    def test_upset_plot_uses_explicit_sample_columns_from_user_message(self, SL, seed, tmp_path):
+        mock_mcp = AsyncMock()
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF3 (reconciled_abundance.tsv, 7 rows)"],
+                    "latest_dataframe": "DF3",
+                },
+                "_dataframes": {
+                    "reconciled_abundance.tsv": {
+                        "columns": [
+                            "gene_ID",
+                            "transcript_ID",
+                            "transcript_novelty",
+                            "c2c12r1",
+                            "c2c12r2",
+                            "c2c12r3",
+                        ],
+                        "data": [
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000130201",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 62,
+                                "c2c12r2": 67,
+                                "c2c12r3": 76,
+                            },
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000045689",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 0,
+                                "c2c12r2": 0,
+                                "c2c12r3": 1,
+                            },
+                            {
+                                "gene_ID": "ENSMUSG00000025903",
+                                "transcript_ID": "ENSMUST00000115529",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 8,
+                                "c2c12r2": 5,
+                                "c2c12r3": 11,
+                            },
+                            {
+                                "gene_ID": "ENSMUSG00000025903",
+                                "transcript_ID": "ENSMUST00000134384",
+                                "transcript_novelty": "ISM",
+                                "c2c12r1": 0,
+                                "c2c12r2": 3,
+                                "c2c12r3": 1,
+                            },
+                        ],
+                        "row_count": 7,
+                        "metadata": {
+                            "df_id": 3,
+                            "visible": True,
+                            "label": "reconciled_abundance.tsv",
+                            "row_count": 7,
+                            "is_truncated": True,
+                        },
+                    }
+                },
+                "_provenance": [{
+                    "source": "analyzer",
+                    "tool": "parse_csv_file",
+                    "params": {
+                        "file_path": "reconciled_abundance.tsv",
+                        "work_dir": "/tmp/workflow-reconcile",
+                    },
+                    "timestamp": "2026-04-20T15:31:00Z",
+                    "success": True,
+                    "rows": 7,
+                }],
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        mock_mcp.connect = AsyncMock()
+        mock_mcp.disconnect = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "work_dir": "/tmp/workflow-reconcile",
+            "file_path": "reconciled_abundance.tsv",
+            "columns": [
+                "gene_ID",
+                "transcript_ID",
+                "transcript_novelty",
+                "c2c12r1",
+                "c2c12r2",
+                "c2c12r3",
+            ],
+            "row_count": 7,
+            "preview_rows": 7,
+            "data": [
+                {
+                    "gene_ID": "ENSMUSG00000033845",
+                    "transcript_ID": "ENSMUST00000130201",
+                    "transcript_novelty": "KNOWN",
+                    "c2c12r1": 62,
+                    "c2c12r2": 67,
+                    "c2c12r3": 76,
+                },
+                {
+                    "gene_ID": "ENSMUSG00000033845",
+                    "transcript_ID": "ENSMUST00000045689",
+                    "transcript_novelty": "KNOWN",
+                    "c2c12r1": 0,
+                    "c2c12r2": 0,
+                    "c2c12r3": 1,
+                },
+                {
+                    "gene_ID": "ENSMUSG00000025903",
+                    "transcript_ID": "ENSMUST00000115529",
+                    "transcript_novelty": "KNOWN",
+                    "c2c12r1": 8,
+                    "c2c12r2": 5,
+                    "c2c12r3": 11,
+                },
+                {
+                    "gene_ID": "ENSMUSG00000025903",
+                    "transcript_ID": "ENSMUST00000134384",
+                    "transcript_novelty": "ISM",
+                    "c2c12r1": 0,
+                    "c2c12r2": 3,
+                    "c2c12r3": 1,
+                },
+                {
+                    "gene_ID": "ENSMUSG00000025903",
+                    "transcript_ID": "ENSMUST00000150971",
+                    "transcript_novelty": "KNOWN",
+                    "c2c12r1": 4,
+                    "c2c12r2": 4,
+                    "c2c12r3": 5,
+                },
+                {
+                    "gene_ID": "ENSMUSG00000033845",
+                    "transcript_ID": "ENSMUST00000156816",
+                    "transcript_novelty": "KNOWN",
+                    "c2c12r1": 214,
+                    "c2c12r2": 167,
+                    "c2c12r3": 170,
+                },
+                {
+                    "gene_ID": "ENSMUSG00000033845",
+                    "transcript_ID": "ENSMUST00000132625",
+                    "transcript_novelty": "KNOWN",
+                    "c2c12r1": 2,
+                    "c2c12r2": 0,
+                    "c2c12r3": 2,
+                },
+            ],
+            "metadata": {
+                "separator": "\t",
+                "column_count": 6,
+                "total_rows": 7,
+                "is_truncated": False,
+            },
+        })
+
+        def think(msg, skill, history):
+            return (
+                "Here is the overlap plot.\n"
+                "[[PLOT: type=upset, df=DF3, x=transcript_novelty, title=Transcript novelty overlap]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.chat_stages.response_assembly.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
+            skill="analyze_job_results",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
+        assert chart["type"] == "upset"
+        assert chart["df_id"] == 4
+        assert chart["sets"] == "c2c12r1|c2c12r2|c2c12r3"
+        assert chart["source_df_ids"] == [3]
+
+        mock_mcp.call_tool.assert_awaited_once_with(
+            "parse_csv_file",
+            file_path="reconciled_abundance.tsv",
+            work_dir="/tmp/workflow-reconcile",
+            max_rows=None,
+        )
+
+        agent_payload = (data.get("agent_block") or {}).get("payload") or {}
+        embedded = agent_payload.get("_dataframes") or {}
+        overlap_payload = next(iter(embedded.values()))
+        assert overlap_payload["metadata"]["kind"] == "overlap_membership"
+        assert overlap_payload["metadata"]["source_df_ids"] == [3]
+        assert overlap_payload["row_count"] == 7
+
+    def test_upset_plot_rehydrates_locally_when_analyzer_is_unavailable(self, SL, seed, tmp_path):
+        mock_mcp = AsyncMock()
+        work_dir = tmp_path / "workflow-reconcile"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "reconciled_abundance.tsv").write_text(
+            "gene_ID\ttranscript_ID\ttranscript_novelty\tc2c12r1\tc2c12r2\tc2c12r3\n"
+            "ENSMUSG00000033845\tENSMUST00000130201\tKNOWN\t62\t67\t76\n"
+            "ENSMUSG00000033845\tENSMUST00000045689\tKNOWN\t0\t0\t1\n"
+            "ENSMUSG00000025903\tENSMUST00000115529\tKNOWN\t8\t5\t11\n"
+            "ENSMUSG00000025903\tENSMUST00000134384\tISM\t0\t3\t1\n"
+            "ENSMUSG00000025903\tENSMUST00000150971\tKNOWN\t4\t4\t5\n"
+            "ENSMUSG00000033845\tENSMUST00000156816\tKNOWN\t214\t167\t170\n"
+            "ENSMUSG00000033845\tENSMUST00000132625\tKNOWN\t2\t0\t2\n"
+        )
+
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF3 (reconciled_abundance.tsv, 7 rows)"],
+                    "latest_dataframe": "DF3",
+                },
+                "_dataframes": {
+                    "reconciled_abundance.tsv": {
+                        "columns": [
+                            "gene_ID",
+                            "transcript_ID",
+                            "transcript_novelty",
+                            "c2c12r1",
+                            "c2c12r2",
+                            "c2c12r3",
+                        ],
+                        "data": [
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000130201",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 62,
+                                "c2c12r2": 67,
+                                "c2c12r3": 76,
+                            },
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000045689",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 0,
+                                "c2c12r2": 0,
+                                "c2c12r3": 1,
+                            },
+                            {
+                                "gene_ID": "ENSMUSG00000025903",
+                                "transcript_ID": "ENSMUST00000115529",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 8,
+                                "c2c12r2": 5,
+                                "c2c12r3": 11,
+                            },
+                            {
+                                "gene_ID": "ENSMUSG00000025903",
+                                "transcript_ID": "ENSMUST00000134384",
+                                "transcript_novelty": "ISM",
+                                "c2c12r1": 0,
+                                "c2c12r2": 3,
+                                "c2c12r3": 1,
+                            },
+                        ],
+                        "row_count": 7,
+                        "metadata": {
+                            "df_id": 3,
+                            "visible": True,
+                            "label": "reconciled_abundance.tsv",
+                            "row_count": 7,
+                            "is_truncated": True,
+                        },
+                    }
+                },
+                "_provenance": [{
+                    "source": "analyzer",
+                    "tool": "parse_csv_file",
+                    "params": {
+                        "file_path": "reconciled_abundance.tsv",
+                        "work_dir": str(work_dir),
+                    },
+                    "timestamp": "2026-04-20T15:31:00Z",
+                    "success": True,
+                    "rows": 7,
+                }],
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        mock_mcp.connect = AsyncMock(side_effect=RuntimeError("analyzer offline"))
+        mock_mcp.disconnect = AsyncMock()
+        mock_mcp.call_tool = AsyncMock()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the overlap plot.\n"
+                "[[PLOT: type=upset, df=DF3, x=transcript_novelty, title=Transcript novelty overlap]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.chat_stages.response_assembly.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
+            skill="analyze_job_results",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
+        assert chart["type"] == "upset"
+        assert chart["df_id"] == 4
+        assert chart["sets"] == "c2c12r1|c2c12r2|c2c12r3"
+
+        mock_mcp.call_tool.assert_not_awaited()
+
+        agent_payload = (data.get("agent_block") or {}).get("payload") or {}
+        embedded = agent_payload.get("_dataframes") or {}
+        overlap_payload = next(iter(embedded.values()))
+        assert overlap_payload["row_count"] == 7
+
+    def test_upset_plot_drops_truncated_preview_when_full_reload_is_unavailable(self, SL, seed, tmp_path):
+        mock_mcp = AsyncMock()
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF3 (reconciled_abundance.tsv, 7 rows)"],
+                    "latest_dataframe": "DF3",
+                },
+                "_dataframes": {
+                    "reconciled_abundance.tsv": {
+                        "columns": [
+                            "gene_ID",
+                            "transcript_ID",
+                            "transcript_novelty",
+                            "c2c12r1",
+                            "c2c12r2",
+                            "c2c12r3",
+                        ],
+                        "data": [
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000130201",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 62,
+                                "c2c12r2": 67,
+                                "c2c12r3": 76,
+                            },
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000045689",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 0,
+                                "c2c12r2": 0,
+                                "c2c12r3": 1,
+                            },
+                        ],
+                        "row_count": 7,
+                        "metadata": {
+                            "df_id": 3,
+                            "visible": True,
+                            "label": "reconciled_abundance.tsv",
+                            "row_count": 7,
+                            "is_truncated": True,
+                        },
+                    }
+                },
+                "_provenance": [{
+                    "source": "analyzer",
+                    "tool": "parse_csv_file",
+                    "params": {
+                        "file_path": "reconciled_abundance.tsv",
+                        "work_dir": str(tmp_path / "missing-workdir"),
+                    },
+                    "timestamp": "2026-04-20T15:31:00Z",
+                    "success": True,
+                    "rows": 7,
+                }],
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        mock_mcp.connect = AsyncMock(side_effect=RuntimeError("analyzer offline"))
+        mock_mcp.disconnect = AsyncMock()
+        mock_mcp.call_tool = AsyncMock()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the overlap plot.\n"
+                "[[PLOT: type=upset, df=DF3, x=transcript_novelty, title=Transcript novelty overlap]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.chat_stages.response_assembly.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
+            skill="analyze_job_results",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert not data.get("plot_blocks")
+        agent_payload = (data.get("agent_block") or {}).get("payload") or {}
+        markdown = agent_payload.get("markdown") or ""
+        assert "Could not build accurate upset overlap input" in markdown
+
     def test_plot_is_saved_as_project_memory(self, SL, seed, tmp_path):
         s = SL()
         df_block = ProjectBlock(

@@ -557,7 +557,7 @@ The LLM instructs Cortex to create a chart by embedding a structured tag in its 
 [[PLOT: type=bar df=DF1 x=assay_title agg=count title=Experiment Types]]
 ```
 
-Supported chart types: `histogram`, `scatter`, `bar`, `box`, `heatmap`, `pie`
+Supported chart types: `histogram`, `scatter`, `line`, `area`, `bar`, `box`, `violin`, `strip`, `heatmap`, `pie`, `venn`, `upset`
 
 Cortex parses these tags, looks up the referenced DataFrame from the conversation history, and creates an `AGENT_PLOT` block that the UI renders via `st.plotly_chart()`.
 

@@ -1,22 +1,33 @@
 """Stage 1100 — DF/image extraction, block creation, response assembly."""
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
+from pathlib import Path
 
+import pandas as pd
+
+from common import MCPHttpClient
 from common.logging_config import get_logger
 from cortex.chat_context import ChatContext
 from cortex.chat_stages import register_stage
 from cortex.chat_dataframes import (
+    _find_plot_dataframe_payload,
+    apply_overlap_message_hints,
     assign_df_ids,
     collapse_competing_specs,
     deduplicate_plot_specs,
     extract_embedded_dataframes,
     extract_embedded_images,
+    find_dataframe_parse_source,
+    materialize_direct_set_overlap_plot_dataframes,
+    materialize_overlap_plot_dataframes,
     post_df_assignment_plot_fallback,
     rebind_plots_to_new_df,
 )
 from cortex.chat_sync_handler import _emit_progress, _extract_plot_style_params
+from cortex.config import get_service_url
 from cortex.dataframe_actions import summarize_dataframe_action
 from cortex.db import row_to_dict
 from cortex.db_helpers import _create_block_internal, save_conversation_message
@@ -27,6 +38,244 @@ import cortex.job_parameters as job_parameters
 logger = get_logger(__name__)
 
 PRIORITY = 1100
+
+
+async def _build_plot_source_dataframes(
+    plot_specs: list[dict],
+    embedded_dataframes: dict[str, dict],
+    history_blocks: list,
+) -> tuple[dict[str, dict], list[str]]:
+    overrides, errors = await _rehydrate_truncated_plot_sources(
+        plot_specs,
+        embedded_dataframes,
+        history_blocks,
+    )
+    if not overrides:
+        return embedded_dataframes, errors
+
+    merged: dict[str, dict] = {}
+    merged.update(overrides)
+    merged.update(embedded_dataframes)
+    return merged, errors
+
+
+async def _rehydrate_truncated_plot_sources(
+    plot_specs: list[dict],
+    embedded_dataframes: dict[str, dict],
+    history_blocks: list,
+) -> tuple[dict[str, dict], list[str]]:
+    relevant_df_ids = sorted({
+        spec.get("df_id")
+        for spec in plot_specs
+        if str(spec.get("type") or "").strip().lower() in {"venn", "upset"}
+        and isinstance(spec.get("df_id"), int)
+    })
+    if not relevant_df_ids:
+        return {}, []
+
+    rehydrated: dict[str, dict] = {}
+    errors: list[str] = []
+    for df_id in relevant_df_ids:
+        payload = _find_plot_dataframe_payload(
+            df_id,
+            history_blocks,
+            current_dataframes=embedded_dataframes,
+        )
+        if not _is_truncated_plot_payload(payload):
+            continue
+
+        parse_source = find_dataframe_parse_source(df_id, history_blocks)
+        full_result = await _load_full_parsed_dataframe(parse_source)
+        if not full_result:
+            errors.append(
+                f"Could not build accurate {str(next((spec.get('type') for spec in plot_specs if spec.get('df_id') == df_id), 'plot')).strip().lower() or 'plot'} overlap input: "
+                f"DF{df_id} only has truncated preview rows and the full source file could not be reloaded."
+            )
+            continue
+
+        payload_metadata = dict((payload or {}).get("metadata") or {})
+        result_metadata = dict(full_result.get("metadata") or {})
+        merged_metadata = dict(payload_metadata)
+        merged_metadata.update(result_metadata)
+        merged_metadata["df_id"] = df_id
+        if payload_metadata.get("visible") is not None:
+            merged_metadata["visible"] = payload_metadata.get("visible")
+        if payload_metadata.get("label"):
+            merged_metadata["label"] = payload_metadata.get("label")
+        if full_result.get("file_path"):
+            merged_metadata["file_path"] = full_result.get("file_path")
+        if full_result.get("work_dir"):
+            merged_metadata["work_dir"] = full_result.get("work_dir")
+
+        label = str(
+            payload_metadata.get("label")
+            or full_result.get("file_path")
+            or f"DF{df_id}"
+        ).strip()
+        label = Path(label).name if label else f"DF{df_id}"
+        rehydrated[f"{label}_full_df{df_id}"] = {
+            "columns": full_result.get("columns", []),
+            "data": full_result.get("data", []),
+            "row_count": full_result.get("row_count", len(full_result.get("data", []))),
+            "metadata": merged_metadata,
+        }
+
+    return rehydrated, errors
+
+
+def _is_truncated_plot_payload(payload: dict | None) -> bool:
+    if not payload:
+        return False
+    metadata = payload.get("metadata") or {}
+    if metadata.get("is_truncated"):
+        return True
+    stored_rows = len(payload.get("data") or [])
+    declared_rows = payload.get("row_count") or metadata.get("row_count") or metadata.get("total_rows")
+    return isinstance(declared_rows, int) and declared_rows > stored_rows
+
+
+async def _load_full_parsed_dataframe(parse_source: dict | None) -> dict | None:
+    if not parse_source:
+        return None
+    file_path = str(parse_source.get("file_path") or "").strip()
+    if not file_path:
+        return None
+
+    params: dict = {
+        "file_path": file_path,
+        "max_rows": None,
+    }
+    work_dir = str(parse_source.get("work_dir") or "").strip()
+    run_uuid = str(parse_source.get("run_uuid") or "").strip()
+    if work_dir:
+        params["work_dir"] = work_dir
+    elif run_uuid:
+        params["run_uuid"] = run_uuid
+
+    try:
+        analyzer_url = get_service_url("analyzer")
+        client = MCPHttpClient(name="analyzer", base_url=analyzer_url)
+        await client.connect()
+        try:
+            result = await client.call_tool("parse_csv_file", **params)
+        finally:
+            await client.disconnect()
+    except Exception as exc:
+        logger.warning(
+            "Failed to rehydrate truncated plot dataframe",
+            file_path=file_path,
+            work_dir=work_dir,
+            run_uuid=run_uuid,
+            error=str(exc),
+        )
+        result = _load_full_parsed_dataframe_locally(parse_source)
+        if result:
+            return result
+        return None
+
+    if not isinstance(result, dict) or not result.get("data"):
+        return _load_full_parsed_dataframe_locally(parse_source)
+    return result
+
+
+def _load_full_parsed_dataframe_locally(parse_source: dict | None) -> dict | None:
+    full_path = _resolve_local_parse_source_path(parse_source)
+    if full_path is None:
+        return None
+
+    file_path = str(parse_source.get("file_path") or "").strip()
+    work_dir = str(parse_source.get("work_dir") or "").strip()
+    sep = "\t" if file_path.endswith(".tsv") else ","
+    try:
+        df = pd.read_csv(full_path, sep=sep, low_memory=False)
+    except Exception as exc:
+        logger.warning(
+            "Local dataframe rehydration failed",
+            file_path=file_path,
+            work_dir=work_dir,
+            absolute_path=str(full_path),
+            error=str(exc),
+        )
+        return None
+
+    rows = json.loads(df.to_json(orient="records", default_handler=str))
+    return {
+        "file_path": file_path,
+        "work_dir": work_dir,
+        "columns": list(df.columns),
+        "row_count": len(df),
+        "preview_rows": len(rows),
+        "data": rows,
+        "metadata": {
+            "separator": sep,
+            "column_count": len(df.columns),
+            "total_rows": len(df),
+            "is_truncated": False,
+            "local_rehydration": True,
+        },
+    }
+
+
+def _resolve_local_parse_source_path(parse_source: dict | None) -> Path | None:
+    if not parse_source:
+        return None
+
+    file_path = str(parse_source.get("file_path") or "").strip()
+    if not file_path:
+        return None
+    work_dir = str(parse_source.get("work_dir") or "").strip()
+    if not work_dir:
+        return None
+
+    work_root = Path(work_dir).expanduser()
+    if not work_root.is_absolute():
+        return None
+
+    full_path = (work_root / file_path).resolve()
+    try:
+        full_path.relative_to(work_root.resolve())
+    except ValueError:
+        logger.warning(
+            "Rejected local dataframe rehydration path outside work dir",
+            file_path=file_path,
+            work_dir=work_dir,
+            absolute_path=str(full_path),
+        )
+        return None
+
+    if not full_path.exists() or not full_path.is_file():
+        return None
+    return full_path
+
+
+def _drop_inaccurate_truncated_overlap_specs(
+    plot_specs: list[dict],
+    plot_source_dataframes: dict[str, dict],
+    history_blocks: list,
+) -> list[str]:
+    errors: list[str] = []
+    retained_specs: list[dict] = []
+    for spec in plot_specs:
+        chart_type = str(spec.get("type") or "").strip().lower()
+        df_id = spec.get("df_id")
+        if chart_type not in {"venn", "upset"} or not isinstance(df_id, int):
+            retained_specs.append(spec)
+            continue
+
+        payload = _find_plot_dataframe_payload(
+            df_id,
+            history_blocks,
+            current_dataframes=plot_source_dataframes,
+        )
+        if not _is_truncated_plot_payload(payload):
+            retained_specs.append(spec)
+            continue
+
+        errors.append(
+            f"Could not build accurate {chart_type} overlap input: DF{df_id} only has truncated preview rows and the full source file could not be reloaded."
+        )
+    plot_specs[:] = retained_specs
+    return errors
 
 
 class ResponseAssemblyStage:
@@ -46,6 +295,43 @@ class ResponseAssemblyStage:
         # ── Assign DF IDs and rebind plots ────────────────────────────
         assign_df_ids(ctx.embedded_dataframes, ctx.history_blocks, ctx.injected_dfs)
         rebind_plots_to_new_df(ctx.plot_specs, ctx.embedded_dataframes, ctx.message)
+        plot_source_dataframes, overlap_errors = await _build_plot_source_dataframes(
+            ctx.plot_specs,
+            ctx.embedded_dataframes,
+            ctx.history_blocks,
+        )
+        overlap_errors.extend(_drop_inaccurate_truncated_overlap_specs(
+            ctx.plot_specs,
+            plot_source_dataframes,
+            ctx.history_blocks,
+        ))
+        apply_overlap_message_hints(
+            ctx.plot_specs,
+            ctx.message,
+            ctx.history_blocks,
+            current_dataframes=plot_source_dataframes,
+        )
+        overlap_errors.extend(materialize_direct_set_overlap_plot_dataframes(
+            ctx.plot_specs,
+            ctx.embedded_dataframes,
+            ctx.history_blocks,
+            current_dataframes=plot_source_dataframes,
+        ))
+        overlap_errors.extend(materialize_overlap_plot_dataframes(
+            ctx.plot_specs,
+            ctx.embedded_dataframes,
+            ctx.history_blocks,
+            current_dataframes=plot_source_dataframes,
+        ))
+        if overlap_errors:
+            overlap_error_text = "\n".join(f"- {error}" for error in overlap_errors)
+            if ctx.clean_markdown.strip():
+                ctx.clean_markdown = (
+                    f"{ctx.clean_markdown.rstrip()}\n\n"
+                    f"Plot issues:\n{overlap_error_text}"
+                )
+            else:
+                ctx.clean_markdown = f"Plot issues:\n{overlap_error_text}"
 
         # Update conv_state with newly-embedded DFs
         if ctx.embedded_dataframes:
@@ -74,6 +360,43 @@ class ResponseAssemblyStage:
             ctx.plot_specs, ctx.embedded_dataframes, ctx.message,
             _extract_plot_style_params,
         )
+        plot_source_dataframes, overlap_errors = await _build_plot_source_dataframes(
+            ctx.plot_specs,
+            ctx.embedded_dataframes,
+            ctx.history_blocks,
+        )
+        overlap_errors.extend(_drop_inaccurate_truncated_overlap_specs(
+            ctx.plot_specs,
+            plot_source_dataframes,
+            ctx.history_blocks,
+        ))
+        apply_overlap_message_hints(
+            ctx.plot_specs,
+            ctx.message,
+            ctx.history_blocks,
+            current_dataframes=plot_source_dataframes,
+        )
+        overlap_errors.extend(materialize_direct_set_overlap_plot_dataframes(
+            ctx.plot_specs,
+            ctx.embedded_dataframes,
+            ctx.history_blocks,
+            current_dataframes=plot_source_dataframes,
+        ))
+        overlap_errors.extend(materialize_overlap_plot_dataframes(
+            ctx.plot_specs,
+            ctx.embedded_dataframes,
+            ctx.history_blocks,
+            current_dataframes=plot_source_dataframes,
+        ))
+        if overlap_errors:
+            overlap_error_text = "\n".join(f"- {error}" for error in overlap_errors)
+            if ctx.clean_markdown.strip():
+                ctx.clean_markdown = (
+                    f"{ctx.clean_markdown.rstrip()}\n\n"
+                    f"Plot issues:\n{overlap_error_text}"
+                )
+            else:
+                ctx.clean_markdown = f"Plot issues:\n{overlap_error_text}"
         ctx.plot_specs = deduplicate_plot_specs(ctx.plot_specs)
         ctx.plot_specs = collapse_competing_specs(
             ctx.plot_specs, ctx.message, _extract_plot_style_params,
@@ -157,12 +480,18 @@ class ResponseAssemblyStage:
                         "df_id": _cs.get("df_id"),
                         "x": _cs.get("x"),
                         "y": _cs.get("y"),
+                        "sets": _cs.get("sets"),
                         "color": _cs.get("color"),
                         "palette": _cs.get("palette"),
                         "title": _cs.get("title"),
                         "xlabel": _cs.get("xlabel") or _cs.get("x_label"),
                         "ylabel": _cs.get("ylabel") or _cs.get("y_label"),
                         "agg": _cs.get("agg"),
+                        "max_intersections": _cs.get("max_intersections"),
+                        "source_df_ids": _cs.get("source_df_ids"),
+                        "source_labels": _cs.get("source_labels"),
+                        "source_match_cols": _cs.get("source_match_cols"),
+                        "match_key_column": _cs.get("match_key_column"),
                     }
                     _charts.append({k: v for k, v in _entry.items() if v is not None})
 

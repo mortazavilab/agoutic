@@ -91,15 +91,23 @@ need to write any code.
 ✅ ALWAYS use the [[PLOT:...]] tag below — it renders an interactive chart automatically.
 
 TAG FORMAT:
-[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>]]
+[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>, sets=<set_col1>|<set_col2>|<set_col3>, mode=<group|stack|percent>]]
+[[PLOT: type=<venn|upset>, dfs=DF1|DF2|DF3, match_cols=<col1>|<col2>|<col3>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
+[[PLOT: type=<venn|upset>, df=DF<N>, sample_col=<sample_column>, sample_values=<value1>|<value2>|<value3>, match_on=<id_column>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
 
 SUPPORTED CHART TYPES:
 - histogram  — Distribution of a single numeric column. Requires: x. Optional: color, title.
 - scatter    — Two numeric columns plotted against each other. Requires: x, y. Optional: color, title.
+- line       — Ordered trend comparison across categories or time. Requires: x, y. Optional: color, title.
+- area       — Stacked or layered trend comparison across an ordered x-axis. Requires: x, y. Optional: color, title.
 - bar        — Categorical counts or grouped aggregation. Requires: x. Optional: y, color, agg (count|sum|mean), title.
 - box        — Distribution comparison across categories. Requires: x (category), y (numeric). Optional: color, title.
+- violin     — Distribution comparison with density shape. Requires: y. Optional: x, color, title.
+- strip      — Individual-point comparison across categories. Requires: y. Optional: x, color, title.
 - heatmap    — Correlation matrix of all numeric columns. Requires: df. Optional: title.
 - pie        — Proportion of categorical values. Requires: x (category). Optional: y (values), title.
+- venn       — Two- or three-set overlap diagram. Requires: sets with 2-3 boolean/binary membership columns. Optional: y (weighted count), title.
+- upset      — Multi-set overlap plot. Requires: sets with 2-6 boolean/binary membership columns. Optional: y (weighted count), title.
 
 PARAMETER RULES:
 - df: Use a valid DF reference (e.g., DF1, DF5) ONLY when plotting an
@@ -114,6 +122,12 @@ PARAMETER RULES:
 - x / y: MUST be actual column names from that DataFrame
 - color: Optional categorical column to group/color traces by
 - agg: For bar charts — "count" (count rows per x category), "sum", or "mean"
+- sets: For venn/upset plots — pipe-separated membership columns such as `sets=treated|control|rescue`. If omitted, the renderer may infer boolean/binary set columns automatically.
+- dfs + match_cols: For cross-dataframe venn/upset plots, list source DFs and the match column for each source in the same order.
+- df + sample_col + match_on: For venn/upset plots built from one dataframe, split one dataframe into sets using `sample_col`, match rows by `match_on`, and optionally limit to `sample_values`.
+- labels: Optional set labels for venn/upset plots. Use them when sample values or dataframe labels need cleaner presentation labels.
+- max_intersections: Optional cap for upset plots.
+- mode: Optional bar mode — `group`, `stack`, or `percent`
 - title: Optional chart title (short, descriptive)
 - xlabel / ylabel: Optional axis labels when the user explicitly asks for them
 
@@ -135,6 +149,8 @@ MORE EXAMPLES:
 [[PLOT: type=bar, df=DF1, x=sample, agg=sum, title=Summary by Sample, ylabel=Reads]]
 [[PLOT: type=box, df=DF3, x=Status, y=File Size, title=File Size by Status]]
 [[PLOT: type=heatmap, df=DF2, title=Correlation Matrix]]
+[[PLOT: type=upset, dfs=DF1|DF2|DF3, match_cols=gene_symbol|gene_symbol|gene_symbol, labels=Treated|Control|Rescue, max_intersections=8, title=Shared Genes Across Conditions]]
+[[PLOT: type=venn, df=DF4, sample_col=sample, sample_values=treated|control|rescue, match_on=gene_id, labels=Treated|Control|Rescue, title=Shared Hits Across Samples]]
 [[PLOT: type=pie, df=DF1, x=Assay, title=Assay Distribution]]
 [[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=C2C12, organism=Mus musculus]]
 [[PLOT: type=bar, x=Assay, agg=count, title=C2C12 Experiments by Assay Type]]

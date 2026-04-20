@@ -178,6 +178,453 @@ def _resolve_payload_df_by_id(df_id: int, dfs: dict):
     return None, None
 
 
+def _default_plot_export_name(chart_type: str, df_label: str, fig: go.Figure) -> str:
+    title_text = str(getattr(getattr(fig.layout, "title", None), "text", "") or "").strip()
+    raw_name = re.sub(r"<[^>]+>", "", title_text) if title_text else f"{df_label}_{chart_type}"
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name).strip("._")
+    return sanitized or f"{chart_type}_plot"
+
+
+def _default_publication_settings(chart_type: str, fig: go.Figure, default_name: str) -> dict:
+    width_default = int(getattr(fig.layout, "width", None) or (1200 if chart_type in {"venn", "upset"} else 1400))
+    height_default = int(getattr(fig.layout, "height", None) or (850 if chart_type == "bar" else 780))
+    return {
+        "file_stem": default_name,
+        "figure_width": width_default,
+        "figure_height": height_default,
+        "title_size": 24,
+        "axis_title_size": 18,
+        "tick_font_size": 13,
+        "legend_font_size": 13,
+        "legend_position": "right",
+        "show_grid": True,
+        "title_bold": True,
+        "axis_title_bold": True,
+        "x_tick_angle": "auto",
+        "show_value_labels": chart_type == "bar",
+        "value_label_size": 10,
+        "value_label_angle": "auto",
+        "value_label_bold": True,
+        "export_format": "SVG",
+        "export_scale": 2,
+        "transparent_background": False,
+    }
+
+
+def _apply_publication_style(fig: go.Figure, settings: dict) -> go.Figure:
+    def _plain_text(value) -> str:
+        return re.sub(r"<[^>]+>", "", str(value or "")).strip()
+
+    def _maybe_bold(value: str, is_bold: bool) -> str:
+        clean = _plain_text(value)
+        if not clean:
+            return clean
+        return f"<b>{clean}</b>" if is_bold else clean
+
+    def _coerce_angle(raw_value, *, default_auto: int) -> int:
+        if raw_value == "auto":
+            return default_auto
+        try:
+            return int(raw_value)
+        except Exception:
+            return default_auto
+
+    def _auto_x_tick_angle(figure: go.Figure) -> int:
+        categories: list[str] = []
+        for trace in figure.data:
+            if getattr(trace, "type", None) != "bar":
+                continue
+            values = list(trace.x) if getattr(trace, "x", None) is not None else []
+            categories.extend(str(value) for value in values)
+        if not categories:
+            return 0
+        unique = list(dict.fromkeys(categories))
+        max_len = max(len(item) for item in unique)
+        if len(unique) >= 6 or max_len >= 18:
+            return -45
+        if len(unique) >= 4 or max_len >= 12:
+            return -30
+        return 0
+
+    def _format_bar_value_label(value, compact: bool = False) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        try:
+            numeric = float(value)
+        except Exception:
+            return str(value)
+        if compact:
+            sign = "-" if numeric < 0 else ""
+            abs_numeric = abs(numeric)
+            if abs_numeric >= 1_000_000:
+                scaled = f"{abs_numeric / 1_000_000:.1f}".rstrip("0").rstrip(".")
+                return f"{sign}{scaled}M"
+            if abs_numeric >= 1_000:
+                scaled = f"{abs_numeric / 1_000:.1f}".rstrip("0").rstrip(".")
+                return f"{sign}{scaled}k"
+        if numeric.is_integer():
+            return f"{int(numeric):,}"
+        return f"{numeric:,.2f}".rstrip("0").rstrip(".")
+
+    def _auto_bar_label_angle(figure: go.Figure) -> int:
+        total_bars = 0
+        max_len = 0
+        for trace in figure.data:
+            if getattr(trace, "type", None) != "bar":
+                continue
+            values = trace.x if getattr(trace, "orientation", None) == "h" else trace.y
+            value_list = list(values) if values is not None else []
+            total_bars += len(value_list)
+            for value in value_list:
+                max_len = max(max_len, len(_format_bar_value_label(value)))
+        return 45 if total_bars >= 8 or max_len >= 7 else 0
+
+    transparent = bool(settings.get("transparent_background"))
+    paper_bg = "rgba(0,0,0,0)" if transparent else "#ffffff"
+    plot_bg = "rgba(0,0,0,0)" if transparent else "#f8fafc"
+    width = int(settings.get("figure_width") or 1400)
+    height = int(settings.get("figure_height") or 850)
+    title_size = int(settings.get("title_size") or 24)
+    axis_title_size = int(settings.get("axis_title_size") or 18)
+    tick_font_size = int(settings.get("tick_font_size") or 13)
+    legend_font_size = int(settings.get("legend_font_size") or 13)
+    show_grid = bool(settings.get("show_grid", True))
+    title_bold = bool(settings.get("title_bold", True))
+    axis_title_bold = bool(settings.get("axis_title_bold", True))
+    label_font_size = int(settings.get("value_label_size") or 12)
+    label_bold = bool(settings.get("value_label_bold", True))
+    x_tick_angle = _coerce_angle(settings.get("x_tick_angle"), default_auto=_auto_x_tick_angle(fig))
+
+    title_text = _maybe_bold(getattr(getattr(fig.layout, "title", None), "text", ""), title_bold)
+    x_title_text = _maybe_bold(getattr(getattr(getattr(fig.layout, "xaxis", None), "title", None), "text", ""), axis_title_bold)
+    y_title_text = _maybe_bold(getattr(getattr(getattr(fig.layout, "yaxis", None), "title", None), "text", ""), axis_title_bold)
+
+    legend_position = str(settings.get("legend_position") or "right").lower()
+    legend_updates = {
+        "font": {"size": legend_font_size, "color": "#1f2937"},
+        "bgcolor": paper_bg,
+        "bordercolor": "#d7dee8",
+    }
+    showlegend = legend_position != "hidden"
+    extra_bottom = 72
+    extra_top = 72
+    if legend_position == "top":
+        legend_updates.update({
+            "orientation": "h",
+            "x": 0,
+            "xanchor": "left",
+            "y": 1.12,
+            "yanchor": "bottom",
+        })
+        extra_top = 120
+    elif legend_position == "bottom":
+        legend_updates.update({
+            "orientation": "h",
+            "x": 0.5,
+            "xanchor": "center",
+            "y": -0.2,
+            "yanchor": "top",
+        })
+        extra_bottom = 120
+    else:
+        legend_updates.update({
+            "orientation": "v",
+            "x": 1.02,
+            "xanchor": "left",
+            "y": 1,
+            "yanchor": "top",
+        })
+
+    fig.update_layout(
+        width=width,
+        height=height,
+        paper_bgcolor=paper_bg,
+        plot_bgcolor=plot_bg,
+        font={"size": tick_font_size, "color": "#1f2937", "family": "Arial, sans-serif"},
+        title={
+            "text": title_text,
+            "x": 0.03,
+            "xanchor": "left",
+            "font": {"size": title_size, "color": "#1f2937", "family": "Arial, sans-serif"},
+        },
+        showlegend=showlegend,
+        legend=legend_updates,
+        margin={"l": 96, "r": 36, "t": extra_top, "b": extra_bottom},
+    )
+    fig.update_xaxes(
+        title={"text": x_title_text, "font": {"size": axis_title_size, "color": "#1f2937", "family": "Arial, sans-serif"}},
+        tickfont={"size": tick_font_size, "color": "#334155", "family": "Arial, sans-serif"},
+        tickangle=x_tick_angle,
+        showgrid=show_grid,
+        gridcolor="#dbe4ee",
+        automargin=True,
+        title_standoff=16,
+    )
+    fig.update_yaxes(
+        title={"text": y_title_text, "font": {"size": axis_title_size, "color": "#1f2937", "family": "Arial, sans-serif"}},
+        tickfont={"size": tick_font_size, "color": "#334155", "family": "Arial, sans-serif"},
+        showgrid=show_grid,
+        gridcolor="#dbe4ee",
+        automargin=True,
+        title_standoff=16,
+    )
+
+    label_family = "Arial Black, Arial, sans-serif" if label_bold else "Arial, sans-serif"
+    stacked_modes = {"stack", "relative"}
+    is_stacked = str(getattr(fig.layout, "barmode", "") or "").lower() in stacked_modes or bool(getattr(fig.layout, "barnorm", None))
+    bar_traces = [trace for trace in fig.data if getattr(trace, "type", None) == "bar"]
+    if bar_traces:
+        is_pure_bar_chart = len(bar_traces) == len(fig.data)
+        if is_pure_bar_chart:
+            # Publication styling can be applied to figures that already have
+            # grouped-bar label annotations from the base render path.
+            # Reset them explicitly so the label layout is rebuilt once.
+            fig.layout.annotations = ()
+        requested_label_angle = settings.get("value_label_angle")
+        label_angle = _coerce_angle(requested_label_angle, default_auto=_auto_bar_label_angle(fig))
+        show_labels = bool(settings.get("show_value_labels", True))
+        is_grouped_vertical = (
+            show_labels
+            and not is_stacked
+            and len(bar_traces) > 1
+            and is_pure_bar_chart
+            and all(getattr(trace, "orientation", None) != "h" for trace in bar_traces)
+        )
+        compact_labels = is_grouped_vertical and requested_label_angle == "auto"
+        effective_label_angle = 0 if compact_labels else label_angle
+        annotation_specs: list[dict] = []
+        tiny_label_threshold = None
+        if is_grouped_vertical:
+            numeric_values: list[float] = []
+            for trace in bar_traces:
+                values = list(trace.y) if getattr(trace, "y", None) is not None else []
+                for value in values:
+                    try:
+                        if value is not None and not pd.isna(value):
+                            numeric_values.append(abs(float(value)))
+                    except Exception:
+                        continue
+            if numeric_values:
+                tiny_label_threshold = max(numeric_values) * 0.08
+        for trace_index, trace in enumerate(bar_traces):
+            values = trace.x if getattr(trace, "orientation", None) == "h" else trace.y
+            value_list = list(values) if values is not None else []
+            if not show_labels:
+                trace.text = None
+                trace.texttemplate = None
+                continue
+            if is_grouped_vertical:
+                x_values = list(trace.x) if getattr(trace, "x", None) is not None else []
+                text_values: list[str] = []
+                for x_value, y_value in zip(x_values, value_list):
+                    label_text = _format_bar_value_label(y_value, compact=compact_labels)
+                    is_tiny_label = False
+                    try:
+                        if tiny_label_threshold is not None and y_value is not None and not pd.isna(y_value):
+                            is_tiny_label = abs(float(y_value)) <= tiny_label_threshold
+                    except Exception:
+                        is_tiny_label = False
+                    if is_tiny_label and label_text:
+                        text_values.append("")
+                        annotation_specs.append(
+                            {
+                                "trace_index": trace_index,
+                                "x": x_value,
+                                "y": y_value,
+                                "y_numeric": float(y_value),
+                                "text": label_text,
+                            }
+                        )
+                    else:
+                        text_values.append(label_text)
+                trace.text = text_values
+            else:
+                trace.text = [_format_bar_value_label(value) for value in value_list]
+            trace.texttemplate = "%{text}"
+            trace.textposition = "auto" if is_stacked else "outside"
+            trace.textangle = effective_label_angle
+            trace.textfont = {"color": "#1f2937", "size": label_font_size, "family": label_family}
+            trace.cliponaxis = False if not is_stacked else True
+
+        margin_left = float(getattr(getattr(fig.layout, "margin", None), "l", 96) or 96)
+        margin_right = float(getattr(getattr(fig.layout, "margin", None), "r", 36) or 36)
+        margin_top = int(getattr(getattr(fig.layout, "margin", None), "t", extra_top) or extra_top)
+        margin_bottom = int(getattr(getattr(fig.layout, "margin", None), "b", extra_bottom) or extra_bottom)
+        if annotation_specs:
+            category_values: list[str] = []
+            for trace in bar_traces:
+                x_values = list(trace.x) if getattr(trace, "x", None) is not None else []
+                category_values.extend(str(value) for value in x_values)
+            category_count = len(list(dict.fromkeys(category_values))) or 1
+            usable_width = max(width - margin_left - margin_right, 320)
+            slot_width = max(min((usable_width / category_count) * 0.72 / max(len(bar_traces), 1), 40), 12)
+            center_offset = (len(bar_traces) - 1) / 2
+            label_padding = max(14, label_font_size + 4)
+            tier_step = max(12, label_font_size + 2)
+            grouped_specs: dict[tuple[str, int], list[dict]] = {}
+            for spec in annotation_specs:
+                direction = -1 if spec["y_numeric"] < 0 else 1
+                grouped_specs.setdefault((str(spec["x"]), direction), []).append({**spec, "direction": direction})
+            max_tier = 0
+            uses_angled_annotations = False
+            for specs in grouped_specs.values():
+                specs.sort(key=lambda item: abs(item["y_numeric"]))
+                max_label_len = max(len(spec["text"]) for spec in specs)
+                annotation_angle = effective_label_angle
+                if requested_label_angle == "auto":
+                    annotation_angle = -90 if len(specs) >= 3 or max_label_len >= 5 else 0
+                if annotation_angle != 0:
+                    uses_angled_annotations = True
+                for tier_rank, spec in enumerate(specs):
+                    max_tier = max(max_tier, tier_rank)
+                    fig.add_annotation(
+                        x=spec["x"],
+                        y=spec["y"],
+                        text=spec["text"],
+                        showarrow=False,
+                        xanchor="center",
+                        yanchor="top" if spec["direction"] < 0 else "bottom",
+                        xshift=int(round((spec["trace_index"] - center_offset) * slot_width)),
+                        yshift=spec["direction"] * (label_padding + (tier_rank * tier_step)),
+                        textangle=annotation_angle,
+                        font={"color": "#1f2937", "size": label_font_size, "family": label_family},
+                        align="center",
+                    )
+            margin_top += label_padding + (tier_step * max_tier) + (28 if uses_angled_annotations else 18)
+        elif compact_labels:
+            margin_top += 18
+        fig.update_layout(
+            margin={
+                "l": margin_left,
+                "r": margin_right,
+                "t": margin_top,
+                "b": margin_bottom,
+            },
+            uniformtext_minsize=label_font_size,
+            uniformtext_mode="show",
+        )
+
+    for annotation in getattr(fig.layout, "annotations", []) or []:
+        annotation_font = getattr(annotation, "font", None)
+        if hasattr(annotation_font, "to_plotly_json"):
+            current_font = dict(annotation_font.to_plotly_json() or {})
+        elif isinstance(annotation_font, dict):
+            current_font = dict(annotation_font)
+        else:
+            current_font = {}
+        current_font.setdefault("color", "#1f2937")
+        current_font["size"] = max(label_font_size, current_font.get("size", label_font_size))
+        current_font.setdefault("family", label_family)
+        annotation.font = current_font
+
+    return fig
+
+
+def _build_plot_download_payload(fig: go.Figure, settings: dict) -> tuple[bytes | None, str, str | None]:
+    export_format = str(settings.get("export_format") or "PNG").strip().upper()
+    file_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(settings.get("file_stem") or "plot")).strip("._") or "plot"
+    if export_format == "HTML":
+        return fig.to_html(include_plotlyjs="cdn").encode("utf-8"), f"{file_stem}.html", None
+
+    try:
+        import plotly.io as pio
+
+        image_bytes = pio.to_image(
+            fig,
+            format=export_format.lower(),
+            width=int(settings.get("figure_width") or 1400),
+            height=int(settings.get("figure_height") or 850),
+            scale=int(settings.get("export_scale") or 2),
+        )
+        return image_bytes, f"{file_stem}.{export_format.lower()}", None
+    except Exception as exc:
+        return None, "", str(exc)
+
+
+def _render_plot_publication_tools(fig: go.Figure, plot_key_base: str, chart_type: str, default_name: str) -> tuple[go.Figure, dict]:
+    defaults = _default_publication_settings(chart_type, fig, default_name)
+    with st.popover("Publication settings"):  # executed on every rerun; preview updates live
+        st.caption("Tune the figure for publication and download the current preview.")
+        col_left, col_right = st.columns(2)
+        with col_left:
+            file_stem = st.text_input("Filename", value=defaults["file_stem"], key=f"{plot_key_base}_file_stem")
+            figure_width = st.number_input("Width (px)", min_value=400, max_value=4000, value=defaults["figure_width"], step=50, key=f"{plot_key_base}_figure_width")
+            figure_height = st.number_input("Height (px)", min_value=300, max_value=3000, value=defaults["figure_height"], step=50, key=f"{plot_key_base}_figure_height")
+            title_size = st.number_input("Title size", min_value=10, max_value=64, value=defaults["title_size"], step=1, key=f"{plot_key_base}_title_size")
+            axis_title_size = st.number_input("Axis title size", min_value=8, max_value=48, value=defaults["axis_title_size"], step=1, key=f"{plot_key_base}_axis_title_size")
+            tick_font_size = st.number_input("Tick label size", min_value=8, max_value=32, value=defaults["tick_font_size"], step=1, key=f"{plot_key_base}_tick_font_size")
+            legend_font_size = st.number_input("Legend size", min_value=8, max_value=32, value=defaults["legend_font_size"], step=1, key=f"{plot_key_base}_legend_font_size")
+        with col_right:
+            legend_position = st.selectbox("Legend", ["right", "top", "bottom", "hidden"], index=["right", "top", "bottom", "hidden"].index(defaults["legend_position"]), key=f"{plot_key_base}_legend_position")
+            x_tick_angle = st.selectbox("X tick angle", ["auto", "0", "-30", "-45", "-60", "90"], index=0, key=f"{plot_key_base}_x_tick_angle")
+            show_grid = st.checkbox("Show grid lines", value=defaults["show_grid"], key=f"{plot_key_base}_show_grid")
+            title_bold = st.checkbox("Bold title", value=defaults["title_bold"], key=f"{plot_key_base}_title_bold")
+            axis_title_bold = st.checkbox("Bold axis titles", value=defaults["axis_title_bold"], key=f"{plot_key_base}_axis_title_bold")
+            transparent_background = st.checkbox("Transparent background", value=defaults["transparent_background"], key=f"{plot_key_base}_transparent_background")
+            export_format = st.selectbox("Download format", ["PNG", "SVG", "PDF", "HTML"], index=["PNG", "SVG", "PDF", "HTML"].index(defaults["export_format"]), key=f"{plot_key_base}_export_format")
+            export_scale = st.number_input("Export scale", min_value=1, max_value=6, value=defaults["export_scale"], step=1, key=f"{plot_key_base}_export_scale")
+
+        show_value_labels = defaults["show_value_labels"]
+        value_label_size = defaults["value_label_size"]
+        value_label_angle = defaults["value_label_angle"]
+        value_label_bold = defaults["value_label_bold"]
+        if chart_type == "bar":
+            st.divider()
+            st.caption("Bar label formatting")
+            label_col1, label_col2 = st.columns(2)
+            with label_col1:
+                show_value_labels = st.checkbox("Show value labels", value=defaults["show_value_labels"], key=f"{plot_key_base}_show_value_labels")
+                value_label_size = st.number_input("Bar label size", min_value=8, max_value=32, value=defaults["value_label_size"], step=1, key=f"{plot_key_base}_value_label_size")
+            with label_col2:
+                value_label_angle = st.selectbox("Bar label angle", ["auto", "0", "30", "45", "60", "90", "-30", "-45", "-60", "-90"], index=0, key=f"{plot_key_base}_value_label_angle")
+                value_label_bold = st.checkbox("Bold value labels", value=defaults["value_label_bold"], key=f"{plot_key_base}_value_label_bold")
+
+        settings = {
+            "file_stem": file_stem,
+            "figure_width": int(figure_width),
+            "figure_height": int(figure_height),
+            "title_size": int(title_size),
+            "axis_title_size": int(axis_title_size),
+            "tick_font_size": int(tick_font_size),
+            "legend_font_size": int(legend_font_size),
+            "legend_position": legend_position,
+            "show_grid": bool(show_grid),
+            "title_bold": bool(title_bold),
+            "axis_title_bold": bool(axis_title_bold),
+            "x_tick_angle": x_tick_angle,
+            "show_value_labels": bool(show_value_labels),
+            "value_label_size": int(value_label_size),
+            "value_label_angle": value_label_angle,
+            "value_label_bold": bool(value_label_bold),
+            "export_format": export_format,
+            "export_scale": int(export_scale),
+            "transparent_background": bool(transparent_background),
+        }
+
+        export_fig = _apply_publication_style(go.Figure(fig), settings)
+        payload_bytes, file_name, export_error = _build_plot_download_payload(export_fig, settings)
+        if export_error:
+            st.caption(f"Export unavailable: {export_error}")
+        elif payload_bytes is not None:
+            mime_map = {
+                "png": "image/png",
+                "svg": "image/svg+xml",
+                "pdf": "application/pdf",
+                "html": "text/html",
+            }
+            ext = file_name.rsplit(".", 1)[-1].lower()
+            st.download_button(
+                f"Download {settings['export_format']}",
+                data=payload_bytes,
+                file_name=file_name,
+                mime=mime_map.get(ext, "application/octet-stream"),
+                key=f"{plot_key_base}_download",
+            )
+            st.caption("SVG and PDF preserve vector text for publication. PNG uses the export scale above.")
+
+    return _apply_publication_style(go.Figure(fig), settings), settings
+
+
 def _match_column_name(columns: list[str], requested: str | None) -> str | None:
     if not requested:
         return None
@@ -277,6 +724,8 @@ def _auto_melt_for_wide_measure_axis(
 
 def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plotly_template: str):
     """Build a Plotly figure from chart spec and dataframe."""
+    from itertools import product
+
     named_colors = {
         "aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige", "bisque", "black",
         "blanchedalmond", "blue", "blueviolet", "brown", "burlywood", "cadetblue", "chartreuse",
@@ -406,6 +855,8 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
     y_axis_label = chart_spec.get("ylabel") or chart_spec.get("y_label")
     agg = chart_spec.get("agg")
     literal_color = None
+    template_layout = plotly_template.get("layout", {}) if isinstance(plotly_template, dict) else {}
+    template_colorway = list(template_layout.get("colorway") or [])
 
     def _looks_like_literal_color(value):
         if not value:
@@ -432,12 +883,302 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
             if str(item).strip().strip('"').strip("'")
         ]
 
+    def _parse_multi_value_param(value):
+        if not value:
+            return []
+        if isinstance(value, (list, tuple)):
+            candidates = value
+        else:
+            raw_value = str(value).strip()
+            if raw_value.startswith("[") and raw_value.endswith("]"):
+                raw_value = raw_value[1:-1]
+            candidates = re.split(r"[|;,]", raw_value)
+        normalized = []
+        for item in candidates:
+            cleaned = str(item).strip()
+            if cleaned.startswith("["):
+                cleaned = cleaned[1:]
+            if cleaned.endswith("]"):
+                cleaned = cleaned[:-1]
+            cleaned = cleaned.strip().strip('"').strip("'")
+            if cleaned:
+                normalized.append(cleaned)
+        return normalized
+
+    def _coerce_membership_series(
+        series: pd.Series,
+        *,
+        allow_positive_numeric: bool = False,
+    ) -> pd.Series | None:
+        if pd.api.types.is_bool_dtype(series):
+            return series.fillna(False).astype(bool)
+
+        non_null = series.dropna()
+        if non_null.empty:
+            return None
+
+        numeric = pd.to_numeric(non_null, errors="coerce")
+        if numeric.notna().all():
+            if set(numeric.unique()).issubset({0, 1}):
+                return pd.to_numeric(series, errors="coerce").fillna(0).astype(int).astype(bool)
+            if allow_positive_numeric:
+                has_positive = bool((numeric > 0).any())
+                has_negative = bool((numeric < 0).any())
+                if has_positive and not has_negative:
+                    return pd.to_numeric(series, errors="coerce").fillna(0).gt(0)
+            return None
+
+        true_tokens = {"1", "true", "t", "yes", "y", "present", "member", "in"}
+        false_tokens = {"0", "false", "f", "no", "n", "absent", "out"}
+        normalized = non_null.astype(str).str.strip().str.lower()
+        if set(normalized.unique()).issubset(true_tokens | false_tokens):
+            return series.fillna("false").astype(str).str.strip().str.lower().map(lambda value: value in true_tokens)
+
+        return None
+
+    def _infer_set_columns_local(df_plot_local: pd.DataFrame, *, max_count: int) -> list[str]:
+        inferred: list[str] = []
+        for column in df_plot_local.columns:
+            if _coerce_membership_series(df_plot_local[column]) is not None:
+                inferred.append(column)
+            if len(inferred) >= max_count:
+                break
+        return inferred
+
+    def _resolve_set_columns_local(
+        df_plot_local: pd.DataFrame,
+        requested_sets_value,
+        *,
+        min_count: int,
+        max_count: int,
+    ) -> list[str]:
+        requested = _parse_multi_value_param(requested_sets_value)
+        resolved: list[str] = []
+        if requested:
+            for item in requested:
+                matched = _match_column_name_local(list(df_plot_local.columns), item)
+                if matched and matched not in resolved:
+                    resolved.append(matched)
+            return resolved[:max_count]
+
+        inferred = _infer_set_columns_local(df_plot_local, max_count=max_count)
+        if len(inferred) >= min_count:
+            return inferred
+        return []
+
+    def _build_membership_frame_local(
+        df_plot_local: pd.DataFrame,
+        requested_sets_value,
+        *,
+        min_count: int,
+        max_count: int,
+    ):
+        requested_sets = _parse_multi_value_param(requested_sets_value)
+        set_columns = _resolve_set_columns_local(
+            df_plot_local,
+            requested_sets_value,
+            min_count=min_count,
+            max_count=max_count,
+        )
+        if len(set_columns) < min_count:
+            return None, []
+
+        membership = {}
+        for column in set_columns:
+            coerced = _coerce_membership_series(
+                df_plot_local[column],
+                allow_positive_numeric=bool(requested_sets),
+            )
+            if coerced is None:
+                return None, []
+            membership[column] = coerced
+        return pd.DataFrame(membership), set_columns
+
+    def _combination_weight_local(membership_frame: pd.DataFrame, weight_series: pd.Series | None) -> dict[tuple[bool, ...], float]:
+        counts: dict[tuple[bool, ...], float] = {}
+        for combo in product([False, True], repeat=membership_frame.shape[1]):
+            if not any(combo):
+                continue
+            mask = membership_frame.eq(combo).all(axis=1)
+            if weight_series is None:
+                count_value = float(mask.sum())
+            else:
+                count_value = float(weight_series[mask].sum())
+            counts[combo] = count_value
+        return counts
+
+    def _default_overlap_colors_local(count: int) -> list[str]:
+        base = ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2", "#B279A2"]
+        return base[:count]
+
+    def _resolve_overlap_colors_local(count: int) -> list[str]:
+        if palette_values:
+            return [palette_values[idx % len(palette_values)] for idx in range(count)]
+        if literal_color:
+            return [literal_color for _ in range(count)]
+        return _default_overlap_colors_local(count)
+
+    def _format_bar_value_label(value, compact: bool = False) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        try:
+            numeric = float(value)
+        except Exception:
+            return str(value)
+        if compact:
+            sign = "-" if numeric < 0 else ""
+            abs_numeric = abs(numeric)
+            if abs_numeric >= 1_000_000:
+                scaled = f"{abs_numeric / 1_000_000:.1f}".rstrip("0").rstrip(".")
+                return f"{sign}{scaled}M"
+            if abs_numeric >= 1_000:
+                scaled = f"{abs_numeric / 1_000:.1f}".rstrip("0").rstrip(".")
+                return f"{sign}{scaled}k"
+        if numeric.is_integer():
+            return f"{int(numeric):,}"
+        return f"{numeric:,.2f}".rstrip("0").rstrip(".")
+
+    def _auto_bar_label_angle(figure: go.Figure) -> int:
+        total_bars = 0
+        max_label_len = 0
+        for trace in figure.data:
+            if getattr(trace, "type", None) != "bar":
+                continue
+            values = trace.x if getattr(trace, "orientation", None) == "h" else trace.y
+            value_list = list(values) if values is not None else []
+            total_bars += len(value_list)
+            for value in value_list:
+                max_label_len = max(max_label_len, len(_format_bar_value_label(value)))
+        return 45 if total_bars >= 8 or max_label_len >= 7 else 0
+
+    def _apply_bar_value_labels(figure: go.Figure, *, chart_mode_value: str) -> None:
+        if not figure or not getattr(figure, "data", None):
+            return
+        label_angle = _auto_bar_label_angle(figure)
+        stacked_modes = {"stack", "stacked", "relative", "percent", "percentage", "normalize", "normalized"}
+        label_position = "auto" if chart_mode_value in stacked_modes else "outside"
+        label_color = str((template_layout.get("font") or {}).get("color") or "#1f2937")
+        bar_traces = [trace for trace in figure.data if getattr(trace, "type", None) == "bar"]
+        is_grouped_vertical = (
+            label_position == "outside"
+            and len(bar_traces) > 1
+            and all(getattr(trace, "orientation", None) != "h" for trace in bar_traces)
+        )
+        tiny_label_threshold = None
+        annotation_specs: list[dict] = []
+        label_font_size = 9 if is_grouped_vertical else 10
+        if is_grouped_vertical:
+            label_angle = 0
+            numeric_values: list[float] = []
+            for trace in bar_traces:
+                values = list(trace.y) if getattr(trace, "y", None) is not None else []
+                for value in values:
+                    try:
+                        if value is not None and not pd.isna(value):
+                            numeric_values.append(abs(float(value)))
+                    except Exception:
+                        continue
+            if numeric_values:
+                tiny_label_threshold = max(numeric_values) * 0.08
+        for trace_index, trace in enumerate(bar_traces):
+            values = trace.x if getattr(trace, "orientation", None) == "h" else trace.y
+            value_list = list(values) if values is not None else []
+            if is_grouped_vertical:
+                x_values = list(trace.x) if getattr(trace, "x", None) is not None else []
+                text_values: list[str] = []
+                for x_value, y_value in zip(x_values, value_list):
+                    label_text = _format_bar_value_label(y_value, compact=True)
+                    is_tiny_label = False
+                    try:
+                        if tiny_label_threshold is not None and y_value is not None and not pd.isna(y_value):
+                            is_tiny_label = abs(float(y_value)) <= tiny_label_threshold
+                    except Exception:
+                        is_tiny_label = False
+                    if is_tiny_label and label_text:
+                        text_values.append("")
+                        annotation_specs.append(
+                            {
+                                "trace_index": trace_index,
+                                "x": x_value,
+                                "y": y_value,
+                                "y_numeric": float(y_value),
+                                "text": label_text,
+                            }
+                        )
+                    else:
+                        text_values.append(label_text)
+                trace.text = text_values
+            else:
+                trace.text = [_format_bar_value_label(value) for value in value_list]
+            trace.texttemplate = "%{text}"
+            trace.textposition = label_position
+            trace.textangle = label_angle
+            trace.textfont = {"color": label_color, "size": label_font_size}
+            trace.cliponaxis = False if label_position == "outside" else True
+        current_margin = getattr(figure.layout, "margin", None)
+        margin_left = float(getattr(current_margin, "l", 84) or 84)
+        margin_right = float(getattr(current_margin, "r", 24) or 24)
+        margin_top = int(getattr(current_margin, "t", 72) or 72)
+        margin_bottom = int(getattr(current_margin, "b", 72) or 72)
+        if annotation_specs:
+            plot_width = float(getattr(figure.layout, "width", None) or 1100)
+            category_values: list[str] = []
+            for trace in bar_traces:
+                x_values = list(trace.x) if getattr(trace, "x", None) is not None else []
+                category_values.extend(str(value) for value in x_values)
+            category_count = len(list(dict.fromkeys(category_values))) or 1
+            usable_width = max(plot_width - margin_left - margin_right, 320)
+            slot_width = max(min((usable_width / category_count) * 0.72 / max(len(bar_traces), 1), 38), 12)
+            center_offset = (len(bar_traces) - 1) / 2
+            label_padding = max(14, label_font_size + 4)
+            tier_step = max(12, label_font_size + 2)
+            grouped_specs: dict[tuple[str, int], list[dict]] = {}
+            for spec in annotation_specs:
+                direction = -1 if spec["y_numeric"] < 0 else 1
+                grouped_specs.setdefault((str(spec["x"]), direction), []).append({**spec, "direction": direction})
+            max_tier = 0
+            uses_angled_annotations = False
+            for specs in grouped_specs.values():
+                specs.sort(key=lambda item: abs(item["y_numeric"]))
+                max_label_len = max(len(spec["text"]) for spec in specs)
+                annotation_angle = -90 if len(specs) >= 3 or max_label_len >= 5 else 0
+                if annotation_angle != 0:
+                    uses_angled_annotations = True
+                for tier_rank, spec in enumerate(specs):
+                    max_tier = max(max_tier, tier_rank)
+                    figure.add_annotation(
+                        x=spec["x"],
+                        y=spec["y"],
+                        text=spec["text"],
+                        showarrow=False,
+                        xanchor="center",
+                        yanchor="top" if spec["direction"] < 0 else "bottom",
+                        xshift=int(round((spec["trace_index"] - center_offset) * slot_width)),
+                        yshift=spec["direction"] * (label_padding + (tier_rank * tier_step)),
+                        textangle=annotation_angle,
+                        font={"color": label_color, "size": label_font_size},
+                        align="center",
+                    )
+            margin_top += label_padding + (tier_step * max_tier) + (28 if uses_angled_annotations else 18)
+        figure.update_layout(
+            margin={
+                "l": margin_left,
+                "r": margin_right,
+                "t": margin_top + (18 if is_grouped_vertical and not annotation_specs else 0),
+                "b": margin_bottom,
+            },
+            uniformtext_minsize=label_font_size,
+            uniformtext_mode="show",
+        )
+
     palette_values = _parse_palette_values(palette)
     if palette_values and len(palette_values) == 1 and _looks_like_literal_color(palette_values[0]):
         literal_color = palette_values[0]
 
     available = list(df.columns)
     requested_color_col = color_col
+    sets_value = chart_spec.get("sets")
+    chart_mode = str(chart_spec.get("mode") or chart_spec.get("barmode") or "").strip().lower()
 
     if x_col and x_col not in available:
         match = [c for c in available if c.lower() == x_col.lower()]
@@ -469,6 +1210,8 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
             px_color_kwargs["color"] = color_col
         if palette_values:
             px_color_kwargs["color_discrete_sequence"] = palette_values
+        elif template_colorway:
+            px_color_kwargs["color_discrete_sequence"] = template_colorway
         for col in [x_col, y_col]:
             if col and col in df_plot.columns:
                 try:
@@ -503,6 +1246,59 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 else:
                     return None
             fig = px.scatter(df_plot, x=x_col, y=y_col, **px_color_kwargs, title=title or f"{x_col} vs {y_col}")
+
+        elif chart_type == "line":
+            if not x_col:
+                cat_cols = df_plot.select_dtypes(exclude="number").columns.tolist()
+                x_col = cat_cols[0] if cat_cols else available[0]
+            if not y_col:
+                num_cols = [col for col in df_plot.select_dtypes(include="number").columns.tolist() if col != x_col]
+                if len(num_cols) > 1 and x_col in df_plot.columns and not color_col:
+                    df_plot = pd.melt(
+                        df_plot,
+                        id_vars=[x_col],
+                        value_vars=num_cols,
+                        var_name="measure",
+                        value_name="value",
+                    )
+                    y_col = "value"
+                    color_col = "measure"
+                    px_color_kwargs["color"] = color_col
+                elif num_cols:
+                    y_col = num_cols[0]
+                else:
+                    return None
+            fig = px.line(
+                df_plot,
+                x=x_col,
+                y=y_col,
+                **px_color_kwargs,
+                title=title or f"{y_col} by {x_col}",
+                markers=True,
+            )
+
+        elif chart_type == "area":
+            if not x_col:
+                cat_cols = df_plot.select_dtypes(exclude="number").columns.tolist()
+                x_col = cat_cols[0] if cat_cols else available[0]
+            if not y_col:
+                num_cols = [col for col in df_plot.select_dtypes(include="number").columns.tolist() if col != x_col]
+                if len(num_cols) > 1 and x_col in df_plot.columns and not color_col:
+                    df_plot = pd.melt(
+                        df_plot,
+                        id_vars=[x_col],
+                        value_vars=num_cols,
+                        var_name="measure",
+                        value_name="value",
+                    )
+                    y_col = "value"
+                    color_col = "measure"
+                    px_color_kwargs["color"] = color_col
+                elif num_cols:
+                    y_col = num_cols[0]
+                else:
+                    return None
+            fig = px.area(df_plot, x=x_col, y=y_col, **px_color_kwargs, title=title or f"{y_col} by {x_col}")
 
         elif chart_type == "bar":
             if not x_col:
@@ -566,6 +1362,42 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 title=title or f"Distribution of {y_col}" + (f" by {x_col}" if x_col else ""),
             )
 
+        elif chart_type == "violin":
+            if not y_col:
+                num_cols = df_plot.select_dtypes(include="number").columns
+                y_col = num_cols[0] if len(num_cols) > 0 else None
+            if not y_col:
+                return None
+            if not x_col:
+                cat_cols = df_plot.select_dtypes(exclude="number").columns.tolist()
+                x_col = cat_cols[0] if cat_cols else None
+            fig = px.violin(
+                df_plot,
+                x=x_col,
+                y=y_col,
+                **px_color_kwargs,
+                box=True,
+                points="all",
+                title=title or f"Distribution of {y_col}" + (f" by {x_col}" if x_col else ""),
+            )
+
+        elif chart_type == "strip":
+            if not y_col:
+                num_cols = df_plot.select_dtypes(include="number").columns
+                y_col = num_cols[0] if len(num_cols) > 0 else None
+            if not y_col:
+                return None
+            if not x_col:
+                cat_cols = df_plot.select_dtypes(exclude="number").columns.tolist()
+                x_col = cat_cols[0] if cat_cols else None
+            fig = px.strip(
+                df_plot,
+                x=x_col,
+                y=y_col,
+                **px_color_kwargs,
+                title=title or f"Individual values for {y_col}" + (f" by {x_col}" if x_col else ""),
+            )
+
         elif chart_type == "heatmap":
             num_df = df_plot.select_dtypes(include="number")
             if num_df.shape[1] < 2:
@@ -604,6 +1436,220 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                     **({"color_discrete_sequence": palette_values} if palette_values else {}),
                     title=title or f"{x_col} Distribution",
                 )
+
+        elif chart_type == "venn":
+            membership_frame, set_columns = _build_membership_frame_local(
+                df_plot,
+                sets_value,
+                min_count=2,
+                max_count=3,
+            )
+            if membership_frame is None or membership_frame.shape[1] not in {2, 3}:
+                return None
+
+            weight_series = None
+            if y_col and y_col in df_plot.columns:
+                numeric_weight = pd.to_numeric(df_plot[y_col], errors="coerce")
+                if numeric_weight.notna().any():
+                    weight_series = numeric_weight.fillna(0)
+
+            combo_counts = _combination_weight_local(membership_frame, weight_series)
+            colors = _resolve_overlap_colors_local(len(set_columns))
+            fig = go.Figure()
+
+            if len(set_columns) == 2:
+                circles = [
+                    (0.1, 0.15, 1.9, 1.95, set_columns[0], colors[0]),
+                    (1.1, 0.15, 2.9, 1.95, set_columns[1], colors[1]),
+                ]
+                count_positions = {
+                    (True, False): (0.8, 1.0),
+                    (False, True): (2.2, 1.0),
+                    (True, True): (1.5, 1.0),
+                }
+                label_positions = [(0.75, 2.12), (2.25, 2.12)]
+                x_range = [0.0, 3.0]
+                y_range = [0.0, 2.4]
+            else:
+                circles = [
+                    (0.3, 1.0, 2.1, 2.8, set_columns[0], colors[0]),
+                    (1.3, 1.0, 3.1, 2.8, set_columns[1], colors[1]),
+                    (0.8, 0.1, 2.6, 1.9, set_columns[2], colors[2]),
+                ]
+                count_positions = {
+                    (True, False, False): (0.95, 2.0),
+                    (False, True, False): (2.45, 2.0),
+                    (False, False, True): (1.7, 0.55),
+                    (True, True, False): (1.7, 2.05),
+                    (True, False, True): (1.2, 1.15),
+                    (False, True, True): (2.2, 1.15),
+                    (True, True, True): (1.7, 1.45),
+                }
+                label_positions = [(0.85, 3.0), (2.55, 3.0), (1.7, -0.02)]
+                x_range = [0.0, 3.4]
+                y_range = [-0.2, 3.2]
+
+            for idx, (x0, y0, x1, y1, label, color_value) in enumerate(circles):
+                fig.add_shape(
+                    type="circle",
+                    x0=x0,
+                    y0=y0,
+                    x1=x1,
+                    y1=y1,
+                    line={"color": color_value, "width": 3},
+                    fillcolor=color_value,
+                    opacity=0.32,
+                    layer="below",
+                )
+                fig.add_annotation(
+                    x=label_positions[idx][0],
+                    y=label_positions[idx][1],
+                    text=f"{label}<br>n={int(membership_frame[label].sum()) if weight_series is None else int(weight_series[membership_frame[label]].sum())}",
+                    showarrow=False,
+                    font={"size": 13},
+                )
+
+            for combo, (x_pos, y_pos) in count_positions.items():
+                fig.add_annotation(
+                    x=x_pos,
+                    y=y_pos,
+                    text=str(int(combo_counts.get(combo, 0))),
+                    showarrow=False,
+                    font={"size": 16},
+                )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[x_range[0], x_range[1]],
+                    y=[y_range[0], y_range[1]],
+                    mode="markers",
+                    marker={"opacity": 0},
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
+            fig.update_layout(
+                title=title or "Set overlap",
+                xaxis={"visible": False, "range": x_range},
+                yaxis={"visible": False, "range": y_range, "scaleanchor": "x", "scaleratio": 1},
+                showlegend=False,
+            )
+
+        elif chart_type == "upset":
+            from plotly.subplots import make_subplots
+
+            membership_frame, set_columns = _build_membership_frame_local(
+                df_plot,
+                sets_value,
+                min_count=2,
+                max_count=6,
+            )
+            if membership_frame is None or membership_frame.shape[1] < 2:
+                return None
+
+            weight_series = None
+            if y_col and y_col in df_plot.columns:
+                numeric_weight = pd.to_numeric(df_plot[y_col], errors="coerce")
+                if numeric_weight.notna().any():
+                    weight_series = numeric_weight.fillna(0)
+
+            combo_counts = _combination_weight_local(membership_frame, weight_series)
+            combo_items = list(combo_counts.items())
+            if not combo_items:
+                return None
+            combo_items.sort(key=lambda item: (-item[1], -sum(item[0]), item[0]))
+            max_intersections = chart_spec.get("max_intersections")
+            try:
+                max_intersections = int(max_intersections) if max_intersections is not None else 12
+            except Exception:
+                max_intersections = 12
+            combo_items = combo_items[:max(1, max_intersections)]
+
+            combo_labels = []
+            combo_values = []
+            active_points_x = []
+            active_points_y = []
+            inactive_points_x = []
+            inactive_points_y = []
+            connector_x = []
+            connector_y = []
+            for idx, (combo, count_value) in enumerate(combo_items):
+                active_sets = [set_columns[pos] for pos, flag in enumerate(combo) if flag]
+                combo_labels.append(" ∩ ".join(active_sets) if active_sets else "None")
+                combo_values.append(count_value)
+                active_indices = [pos for pos, flag in enumerate(combo) if flag]
+                for set_idx, set_name in enumerate(set_columns):
+                    if set_idx in active_indices:
+                        active_points_x.append(idx)
+                        active_points_y.append(set_name)
+                    else:
+                        inactive_points_x.append(idx)
+                        inactive_points_y.append(set_name)
+                if len(active_indices) > 1:
+                    connector_x.extend([idx] * len(active_indices) + [None])
+                    connector_y.extend([set_columns[pos] for pos in active_indices] + [None])
+
+            accent_color = _resolve_overlap_colors_local(1)[0]
+            fig = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.04,
+                row_heights=[0.62, 0.38],
+            )
+            fig.add_trace(
+                go.Bar(x=list(range(len(combo_items))), y=combo_values, marker_color=accent_color, showlegend=False),
+                row=1,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=inactive_points_x,
+                    y=inactive_points_y,
+                    mode="markers",
+                    marker={"color": "#cbd5e1", "size": 11},
+                    hoverinfo="skip",
+                    showlegend=False,
+                ),
+                row=2,
+                col=1,
+            )
+            if connector_x:
+                fig.add_trace(
+                    go.Scatter(
+                        x=connector_x,
+                        y=connector_y,
+                        mode="lines",
+                        line={"color": accent_color, "width": 2},
+                        hoverinfo="skip",
+                        showlegend=False,
+                    ),
+                    row=2,
+                    col=1,
+                )
+            fig.add_trace(
+                go.Scatter(
+                    x=active_points_x,
+                    y=active_points_y,
+                    mode="markers",
+                    marker={"color": accent_color, "size": 12},
+                    hoverinfo="skip",
+                    showlegend=False,
+                ),
+                row=2,
+                col=1,
+            )
+            fig.update_xaxes(
+                row=2,
+                col=1,
+                tickmode="array",
+                tickvals=list(range(len(combo_items))),
+                ticktext=combo_labels,
+                tickangle=-30,
+            )
+            fig.update_yaxes(row=1, col=1, title_text=y_axis_label or (y_col if y_col else "Intersection size"))
+            fig.update_yaxes(row=2, col=1, categoryorder="array", categoryarray=list(reversed(set_columns)))
+            fig.update_layout(title=title or "UpSet plot", showlegend=False)
         else:
             return None
 
@@ -612,6 +1658,8 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 for trace in fig.data:
                     labels = getattr(trace, "labels", None)
                     trace.marker.colors = [literal_color] * len(labels or [1])
+            elif chart_type in {"venn", "upset"}:
+                pass
             else:
                 fig.update_traces(marker_color=literal_color)
                 for trace in fig.data:
@@ -621,13 +1669,31 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                         trace.fillcolor = literal_color
 
         if chart_type == "bar" and color_col:
-            fig.update_layout(barmode="group")
+            if chart_mode in {"stack", "stacked", "relative"}:
+                fig.update_layout(barmode="stack")
+            elif chart_mode in {"percent", "percentage", "normalize", "normalized"}:
+                fig.update_layout(barmode="stack", barnorm="percent")
+            else:
+                fig.update_layout(barmode="group")
+        if chart_type == "bar":
+            _apply_bar_value_labels(fig, chart_mode_value=chart_mode)
         layout_updates = {"template": plotly_template}
+        if template_layout.get("paper_bgcolor"):
+            layout_updates["paper_bgcolor"] = template_layout.get("paper_bgcolor")
+        if template_layout.get("plot_bgcolor"):
+            layout_updates["plot_bgcolor"] = template_layout.get("plot_bgcolor")
+        template_title = template_layout.get("title") or {}
+        if template_title.get("x") is not None:
+            layout_updates["title_x"] = template_title.get("x")
+        if template_title.get("xanchor") is not None:
+            layout_updates["title_xanchor"] = template_title.get("xanchor")
         if x_axis_label:
             layout_updates["xaxis_title"] = x_axis_label
         if y_axis_label:
             layout_updates["yaxis_title"] = y_axis_label
         fig.update_layout(**layout_updates)
+        fig.update_xaxes(automargin=True, title_standoff=14)
+        fig.update_yaxes(automargin=True, title_standoff=14)
         return fig
     except Exception:
         return None
@@ -660,7 +1726,15 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str, plotly_te
             fig = _build_plotly_figure(chart_group[0], df, df_label, plotly_template)
             if fig:
                 _safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"plot_{block_id}_{chart_idx}")
-                st.plotly_chart(fig, width="stretch", key=_safe_key)
+                default_name = _default_plot_export_name(chart_type, df_label, fig)
+                fig, pub_settings = _render_plot_publication_tools(fig, _safe_key, chart_type, default_name)
+                st.plotly_chart(
+                    fig,
+                    width=int(pub_settings.get("figure_width") or 1400),
+                    height=int(pub_settings.get("figure_height") or 850),
+                    key=_safe_key,
+                    theme=None,
+                )
             else:
                 st.warning(
                     f"Could not render {chart_type} chart for DF{df_id}. "
@@ -678,14 +1752,27 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str, plotly_te
                         title_parts.append(spec["title"])
             if combined.data:
                 first_spec = chart_group[0] if chart_group else {}
+                template_layout = plotly_template.get("layout", {}) if isinstance(plotly_template, dict) else {}
                 combined.update_layout(
                     template=plotly_template,
                     title=" / ".join(title_parts) if title_parts else f"DF{df_id} — {chart_type}",
                     xaxis_title=first_spec.get("xlabel") or first_spec.get("x_label"),
                     yaxis_title=first_spec.get("ylabel") or first_spec.get("y_label"),
+                    paper_bgcolor=template_layout.get("paper_bgcolor"),
+                    plot_bgcolor=template_layout.get("plot_bgcolor"),
                 )
+                combined.update_xaxes(automargin=True, title_standoff=14)
+                combined.update_yaxes(automargin=True, title_standoff=14)
                 _safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"plot_{block_id}_{chart_idx}")
-                st.plotly_chart(combined, width="stretch", key=_safe_key)
+                default_name = _default_plot_export_name(chart_type, df_label, combined)
+                combined, pub_settings = _render_plot_publication_tools(combined, _safe_key, chart_type, default_name)
+                st.plotly_chart(
+                    combined,
+                    width=int(pub_settings.get("figure_width") or 1400),
+                    height=int(pub_settings.get("figure_height") or 850),
+                    key=_safe_key,
+                    theme=None,
+                )
             else:
                 st.warning(f"Could not render multi-trace {chart_type} chart for DF{df_id}.")
         chart_idx += 1
@@ -764,4 +1851,17 @@ def _render_workflow_plot_payload(payload: dict, block_id: str, step_suffix: str
             st.warning(f"Could not render workflow chart for DF{df_id}.")
             continue
         _safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"wf_plot_{block_id}_{step_suffix}_{chart_idx}")
-        st.plotly_chart(fig, width="stretch", key=_safe_key)
+        default_name = _default_plot_export_name(str(chart.get("type") or "plot"), df_label, fig)
+        fig, pub_settings = _render_plot_publication_tools(
+            fig,
+            _safe_key,
+            str(chart.get("type") or "plot"),
+            default_name,
+        )
+        st.plotly_chart(
+            fig,
+            width=int(pub_settings.get("figure_width") or 1400),
+            height=int(pub_settings.get("figure_height") or 850),
+            key=_safe_key,
+            theme=None,
+        )

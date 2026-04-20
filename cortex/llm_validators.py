@@ -11,6 +11,7 @@ Functions:
     _auto_detect_skill_switch  — pre-LLM skill rerouting by keyword signals
 """
 
+import ast
 import json
 import re
 
@@ -62,7 +63,13 @@ def _parse_tag_params(params_str: str | None) -> dict:
                 try:
                     value = json.loads(value)
                 except (json.JSONDecodeError, ValueError):
-                    value = value.strip('"\'')
+                    try:
+                        value = ast.literal_eval(value)
+                    except (ValueError, SyntaxError):
+                        value = value.strip('"\'')
+                    else:
+                        if isinstance(value, tuple):
+                            value = list(value)
             else:
                 value = value.strip('"\'')
             params[key.strip()] = value
@@ -159,6 +166,10 @@ def _validate_llm_output(
         "list_job_files", "find_file", "read_file_content",
         "parse_csv_file", "parse_bed_file", "get_analysis_summary",
         "categorize_job_files",
+        # Local Cortex dataframe tools
+        "filter_dataframe", "select_dataframe_columns", "rename_dataframe_columns",
+        "sort_dataframe", "melt_dataframe", "aggregate_dataframe",
+        "join_dataframes", "pivot_dataframe", "build_overlap_dataframe",
         # Compatibility alias corrected downstream to find_file.
         "show_bam_details",
         # edgePython (Differential Expression)

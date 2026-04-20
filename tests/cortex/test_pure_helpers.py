@@ -17,7 +17,7 @@ from cortex.path_helpers import (
     _resolve_file_path,
 )
 from cortex.chat_dataframes import _build_specialized_dataframe_plot_spec
-from cortex.tag_parser import user_wants_plot
+from cortex.tag_parser import parse_plot_tags, user_wants_plot
 
 
 # =========================================================================
@@ -94,6 +94,10 @@ class TestParseTagParams:
     def test_no_equals_sign_ignored(self):
         result = _parse_tag_params("search_term=K562, badparam")
         assert result == {"search_term": "K562"}
+
+    def test_python_style_array_is_deserialized(self):
+        result = _parse_tag_params("sets=['c2c12r1', 'c2c12r2', 'c2c12r3']")
+        assert result == {"sets": ["c2c12r1", "c2c12r2", "c2c12r3"]}
 
 
 # =========================================================================
@@ -255,6 +259,42 @@ class TestUserWantsPlot:
 
     def test_deferred_plot_request_not_detected(self):
         assert user_wants_plot("I want a DF so the data can be plotted later") is False
+
+    def test_venn_request_detected(self):
+        assert user_wants_plot("make a venn diagram of DF1") is True
+
+
+class TestParsePlotTags:
+    def test_venn_tag_keeps_set_columns(self):
+        specs = parse_plot_tags("[[PLOT: type=venn, df=DF2, sets=treated|control|rescue]]")
+
+        assert specs == [{"type": "venn", "df": "DF2", "sets": "treated|control|rescue", "df_id": 2}]
+
+    def test_upset_tag_keeps_overlap_build_params(self):
+        specs = parse_plot_tags(
+            "[[PLOT: type=upset, dfs=DF1|DF2, match_cols=gene_symbol|gene_id, labels=Treated|Control, max_intersections=5]]"
+        )
+
+        assert specs == [{
+            "type": "upset",
+            "dfs": "DF1|DF2",
+            "match_cols": "gene_symbol|gene_id",
+            "labels": "Treated|Control",
+            "max_intersections": "5",
+            "df_id": None,
+        }]
+
+    def test_upset_tag_accepts_python_list_sets(self):
+        specs = parse_plot_tags(
+            "[[PLOT: type=upset, df=DF3, sets=['c2c12r1', 'c2c12r2', 'c2c12r3']]]"
+        )
+
+        assert specs == [{
+            "type": "upset",
+            "df": "DF3",
+            "sets": ["c2c12r1", "c2c12r2", "c2c12r3"],
+            "df_id": 3,
+        }]
 
 
 class TestSpecializedDataframePlotSpec:

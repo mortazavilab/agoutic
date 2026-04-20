@@ -236,16 +236,26 @@ Renders an interactive chart from a DataFrame already in the conversation.
 [[PLOT: type=bar, df=DF1, x=assay_title, agg=count, title=Experiments by assay]]
 [[PLOT: type=pie, df=DF1, x=biosample, title=Sample distribution]]
 [[PLOT: type=scatter, df=DF2, x=read_length, y=mapped_reads, color=lab]]
+[[PLOT: type=venn, df=DF3, sets=condition_a|condition_b|condition_c, title=Shared differential expression hits]]
+[[PLOT: type=upset, dfs=DF1|DF2|DF3, match_cols=gene_symbol|gene_symbol|gene_symbol, labels=Treated|Control|Rescue, max_intersections=8, title=Shared genes across comparisons]]
+[[PLOT: type=venn, df=DF4, sample_col=sample, sample_values=treated|control|rescue, match_on=gene_id, labels=Treated|Control|Rescue, title=Shared hits across sample groups]]
 ```
 
-**Supported chart types:** `histogram`, `scatter`, `bar`, `box`, `heatmap`,
-`pie`.
+**Supported chart types:** `histogram`, `scatter`, `line`, `area`, `bar`,
+`box`, `violin`, `strip`, `heatmap`, `pie`, `venn`, `upset`.
 
 **Parameter rules:**
 - `df` — Must reference a valid DF from the conversation (e.g. `DF1`).
 - `x` / `y` — Must be actual column names from that DataFrame.
 - `color` — Optional categorical column for grouping.
 - `agg` — For bar charts: `count`, `sum`, or `mean`.
+- `sets` — For `venn` and `upset`: pipe-separated boolean/binary membership columns such as `treated|control|rescue`.
+- `dfs` + `match_cols` — For cross-dataframe overlap plots: list each source DF and its match column in order.
+- `df` + `sample_col` + `match_on` — For overlap plots from one dataframe: split by sample/condition and match rows by one identifier column.
+- `sample_values` — Optional subset/order of groups to compare when using `sample_col`.
+- `labels` — Optional presentation labels for overlap sets.
+- `max_intersections` — Optional cap for the number of intersections shown in an UpSet plot.
+- `mode` — Optional bar mode: `group`, `stack`, or `percent`.
 - `title` — Short descriptive title.
 
 ### `[[SKILL_SWITCH_TO:…]]`

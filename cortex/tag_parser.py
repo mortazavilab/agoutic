@@ -41,8 +41,8 @@ LEGACY_ANALYSIS_PATTERN = re.compile(
     r'\[\[ANALYSIS_CALL:\s*(\w+),\s*run_uuid=([a-f0-9-]+)\]\]'
 )
 
-# PLOT tags — non-greedy with DOTALL so ] inside params doesn't break
-PLOT_TAG_PATTERN = re.compile(r'\[\[PLOT:\s*(.*?)\]\]', re.DOTALL)
+# PLOT tags — when params end with a list literal, prefer the last ]] in a ]]] run
+PLOT_TAG_PATTERN = re.compile(r'\[\[PLOT:\s*(.*?)\]\](?!\])', re.DOTALL)
 
 SKILL_SWITCH_PATTERN = re.compile(r'\[\[SKILL_SWITCH_TO:\s*\w+\]\]')
 
@@ -70,6 +70,8 @@ _TOOL_CALL_PATTERN = re.compile(
 _PLOT_KEYWORDS = frozenset({
     "plot", "chart", "pie", "histogram", "scatter", "bar chart",
     "box plot", "heatmap", "visualize", "graph", "distribution",
+    "venn", "upset", "violin plot", "strip plot", "line chart",
+    "line plot", "area chart", "area plot",
 })
 
 _DEFERRED_PLOT_RE = re.compile(
@@ -80,7 +82,7 @@ _DEFERRED_PLOT_RE = re.compile(
 )
 
 _PLOT_CODE_RE = re.compile(
-    r'```python.*?(?:matplotlib|plt\.|plotly|px\.|fig\.|\.pie|\.bar|\.hist|\.scatter)',
+    r'```python.*?(?:matplotlib|plt\.|plotly|px\.|fig\.|\.pie|\.bar|\.hist|\.scatter|\.line|\.area|\.violin|\.strip|venn|upset)',
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -151,6 +153,18 @@ def _convert_mistral_inline_plot(m: re.Match) -> str:
 
 def _detect_chart_type(message: str) -> str:
     msg = message.lower()
+    if "upset" in msg:
+        return "upset"
+    if "venn" in msg:
+        return "venn"
+    if "violin" in msg:
+        return "violin"
+    if "strip" in msg:
+        return "strip"
+    if re.search(r"\bline\s+(?:chart|plot|graph)\b", msg):
+        return "line"
+    if re.search(r"\barea\s+(?:chart|plot|graph)\b", msg):
+        return "area"
     if "pie" in msg:
         return "pie"
     if "scatter" in msg:
@@ -264,21 +278,23 @@ def parse_plot_tags(response: str) -> list[dict]:
     Returns a list of plot spec dicts, each with at least ``type`` and
     ``df_id`` keys (``df_id`` may be ``None`` if unresolvable).
     """
-    matches = list(PLOT_TAG_PATTERN.finditer(response, re.DOTALL))
+    matches = list(PLOT_TAG_PATTERN.finditer(response))
     specs: list[dict] = []
     for pm in matches:
         raw_inner = pm.group(1)
         params = _parse_tag_params(raw_inner)
+        has_multi_df_refs = bool(params.get("dfs") or params.get("df_ids") or params.get("sources"))
         # Natural-language fallback inside the tag
         if not params.get("df"):
             nl = raw_inner
-            for ct in ("histogram", "scatter", "bar", "box", "heatmap", "pie"):
+            for ct in ("upset", "venn", "violin", "strip", "line", "area", "histogram", "scatter", "bar", "box", "heatmap", "pie"):
                 if ct in nl.lower():
                     params.setdefault("type", ct)
                     break
-            nl_df = re.search(r'\bDF\s*(\d+)\b', nl, re.IGNORECASE)
-            if nl_df:
-                params["df"] = f"DF{nl_df.group(1)}"
+            if not has_multi_df_refs:
+                nl_df = re.search(r'\bDF\s*(\d+)\b', nl, re.IGNORECASE)
+                if nl_df:
+                    params["df"] = f"DF{nl_df.group(1)}"
             x_m = re.search(
                 r'\b(\w+)\s+(?:on\s+the\s+)?x[- ]axis', nl, re.IGNORECASE
             ) or re.search(
