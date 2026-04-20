@@ -126,6 +126,25 @@ def _stage_upload_timeout_seconds() -> float:
     return _stage_max_total_timeout_seconds()
 
 
+def _stage_download_timeout_seconds() -> float:
+    """Default download ceiling for large result copy-backs.
+
+    Large broker-backed rsync downloads should use the same long-running
+    transfer ceiling as staging uploads rather than the generic local-auth
+    operation timeout.
+    """
+    raw_explicit = os.getenv("REMOTE_STAGE_DOWNLOAD_TIMEOUT_SECONDS", "").strip()
+    if raw_explicit:
+        try:
+            return max(1.0, float(raw_explicit))
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid REMOTE_STAGE_DOWNLOAD_TIMEOUT_SECONDS",
+                raw_value=raw_explicit,
+            )
+    return _stage_max_total_timeout_seconds()
+
+
 def _remaining_timeout_seconds(deadline: float | None) -> float | None:
     if deadline is None:
         return None
@@ -500,6 +519,7 @@ class FileTransferManager:
         local_path: str,
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
+        timeout_seconds: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
         transfer_id: str | None = None,
     ) -> dict:
@@ -530,6 +550,7 @@ class FileTransferManager:
             # storage, stalling the entire transfer.
             copy_links=False,
             copy_dirlinks=True,
+            timeout_seconds=timeout_seconds if timeout_seconds is not None else _stage_download_timeout_seconds(),
             on_progress=on_progress,
             transfer_id=transfer_id,
         )

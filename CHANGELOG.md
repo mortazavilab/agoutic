@@ -148,6 +148,14 @@
   (`launchpad/backends/file_transfer.py`,
   `launchpad/backends/local_user_broker.py`)
 
+- **Large broker-backed output downloads no longer time out after 3600 seconds
+  by default** — Launchpad now gives brokered result copy-backs the same
+  long-running transfer budget as large staging uploads instead of letting
+  them fall back to the generic 1-hour local-auth operation timeout, so
+  healthy multi-hour rsync downloads are no longer interrupted around the
+  30 GB mark simply because the broker deadline expires first.
+  (`launchpad/backends/file_transfer.py`)
+
 ### Tests
 
 - **Custom `dogme.profile` runtime override regression coverage** — added
@@ -197,6 +205,12 @@
   progress output counts as activity and does not trigger a false stall.
   (`tests/launchpad/test_file_transfer.py`,
   `tests/launchpad/test_local_auth_sessions.py`)
+
+- **Brokered output-download timeout regression coverage** — added focused
+  file-transfer coverage to ensure broker-backed `download_outputs()` calls
+  forward the long-running transfer timeout instead of regressing to the
+  generic 3600 s broker default.
+  (`tests/launchpad/test_file_transfer.py`)
 
 ## [3.6.3] - 2026-04-13
 

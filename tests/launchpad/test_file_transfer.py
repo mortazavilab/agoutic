@@ -210,6 +210,8 @@ async def test_download_passes_include_patterns_to_broker_session(monkeypatch, t
     assert payload["copy_links"] is False
     assert payload["copy_dirlinks"] is True
     assert payload["use_skip_compress"] is True
+    assert payload["timeout_seconds"] == pytest.approx(28800.0, rel=0.01)
+    assert payload["timeout_seconds"] > LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio

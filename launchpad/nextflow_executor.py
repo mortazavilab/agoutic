@@ -415,6 +415,8 @@ class NextflowConfig:
         gpu_account = (slurm_gpu_account or cpu_account).strip() or cpu_account
         cpu_cpus = int(slurm_cpus) if slurm_cpus is not None else 12
         cpu_memory_gb = int(slurm_memory_gb) if slurm_memory_gb is not None else 64
+        minimap_cpus = max(cpu_cpus, 16)
+        minimap_memory_gb = max(cpu_memory_gb, 96)
         cpu_walltime = str(slurm_walltime or "8:00:00").strip() or "8:00:00"
         normalized_bind_paths: list[str] = []
         for bind_path in slurm_bind_paths or []:
@@ -615,7 +617,8 @@ class NextflowConfig:
         config_lines.append("    }")
         config_lines.append("")
         config_lines.append("    withName: 'minimapTask' {")
-        config_lines.append("        memory = '64 GB'  // Increase memory for minimap2")
+        config_lines.append(f"        cpus = {minimap_cpus}")
+        config_lines.append(f"        memory = '{minimap_memory_gb} GB'  // Increase memory for minimap2 remap/sort")
         config_lines.append("    }")
         config_lines.append("}")
         config_lines.append("")

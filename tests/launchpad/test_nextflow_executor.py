@@ -228,6 +228,24 @@ class TestGenerateConfig:
         assert "    cpus = 12" in config
         assert "    memory = '64 GB'" in config
         assert "    time = '8:00:00'" in config
+        assert "withName: 'minimapTask' {\n        cpus = 16\n        memory = '96 GB'" in config
+
+    def test_slurm_execution_preserves_higher_explicit_minimap_resources(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-slurm-minimap-high",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_cpu_partition="standard",
+            slurm_gpu_partition="gpu",
+            slurm_cpu_account="SEYEDAM_LAB",
+            slurm_gpu_account="BIOD132_CLASS_GPU",
+            slurm_cpus=64,
+            slurm_memory_gb=192,
+        )
+
+        assert "withName: 'minimapTask' {\n        cpus = 64\n        memory = '192 GB'" in config
 
     def test_slurm_dna_defaults_scope_container_gpu_modkit_to_openchromatin_tasks(self):
         config = NextflowConfig.generate_config(
