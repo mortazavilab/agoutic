@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from common.logging_config import get_logger
+from cortex.dataframe_sources import hydrate_dataframe_payload_locally
 from cortex.dataframe_transforms import (
     aggregate_dataframe,
     dataframe_to_payload,
@@ -225,6 +226,7 @@ def execute_local_dataframe_call(
     *,
     history_blocks: list,
     current_dataframes: dict[str, dict] | None = None,
+    project_dir_path=None,
 ) -> dict[str, Any]:
     normalized = _normalize_action_params(tool_name, params)
     if tool_name == "build_overlap_dataframe":
@@ -239,11 +241,13 @@ def execute_local_dataframe_call(
             normalized["left_df_id"],
             history_blocks,
             current_dataframes=current_dataframes,
+            project_dir_path=project_dir_path,
         )
         right_payload = _find_dataframe_payload(
             normalized["right_df_id"],
             history_blocks,
             current_dataframes=current_dataframes,
+            project_dir_path=project_dir_path,
         )
         left = payload_to_dataframe(left_payload)
         right = payload_to_dataframe(right_payload)
@@ -274,6 +278,7 @@ def execute_local_dataframe_call(
         normalized["df_id"],
         history_blocks,
         current_dataframes=current_dataframes,
+        project_dir_path=project_dir_path,
     )
     frame = payload_to_dataframe(source_payload)
 
@@ -658,19 +663,16 @@ def _find_dataframe_payload(
     df_id: int,
     history_blocks: list,
     current_dataframes: dict[str, dict] | None = None,
+    project_dir_path=None,
 ) -> dict[str, Any]:
-    for payload in (current_dataframes or {}).values():
-        metadata = payload.get("metadata") or {}
-        if metadata.get("df_id") == df_id:
-            return payload
-    for block in reversed(history_blocks or []):
-        if getattr(block, "type", None) != "AGENT_PLAN":
-            continue
-        dataframes = get_block_payload(block).get("_dataframes", {})
-        for payload in dataframes.values():
-            metadata = payload.get("metadata") or {}
-            if metadata.get("df_id") == df_id:
-                return payload
+    payload = hydrate_dataframe_payload_locally(
+        df_id,
+        history_blocks,
+        current_dataframes=current_dataframes,
+        project_dir_path=project_dir_path,
+    )
+    if payload is not None:
+        return payload
     raise ValueError(f"DF{df_id} was not found in the conversation history")
 
 

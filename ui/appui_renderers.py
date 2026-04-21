@@ -152,16 +152,60 @@ def _render_embedded_dataframes(dfs: dict, block_id: str, *, only_visible: bool 
 
 
 def _resolve_df_by_id(df_id: int, all_blocks: list):
-    """Resolve DF by ID across AGENT_PLAN blocks."""
+    """Resolve DF by ID across blocks that carry payload _dataframes."""
     for blk in reversed(all_blocks):
-        if blk.get("type") != "AGENT_PLAN":
-            continue
-        dfs = blk.get("payload", {}).get("_dataframes", {})
+        payload = blk.get("payload", {})
+        dfs = payload.get("_dataframes", {})
         for fname, fdata in dfs.items():
             meta = fdata.get("metadata", {})
             if meta.get("df_id") == df_id:
                 rows = fdata.get("data", [])
                 cols = fdata.get("columns") or None
+                declared_rows = meta.get("row_count") or fdata.get("row_count") or meta.get("total_rows")
+                if meta.get("is_truncated") or (
+                    isinstance(declared_rows, int) and declared_rows > len(rows)
+                ):
+                    candidates = {Path(str(fname)).name}
+                    label = str(meta.get("label") or "").strip()
+                    if label:
+                        candidates.add(Path(label).name)
+                    parse_entries = [
+                        entry for entry in (payload.get("_provenance") or [])
+                        if entry.get("success")
+                        and entry.get("source") == "analyzer"
+                        and entry.get("tool") == "parse_csv_file"
+                    ]
+                    parse_source = None
+                    for entry in parse_entries:
+                        params = dict(entry.get("params") or {})
+                        file_path = str(params.get("file_path") or "").strip()
+                        if file_path and Path(file_path).name in candidates:
+                            parse_source = params
+                            break
+                    if parse_source is None and len(parse_entries) == 1:
+                        parse_source = dict(parse_entries[0].get("params") or {})
+                    if parse_source:
+                        raw_file_path = str(parse_source.get("file_path") or label or fname).strip()
+                        raw_work_dir = str(parse_source.get("work_dir") or "").strip()
+                        candidate_path = Path(raw_file_path).expanduser()
+                        full_path = None
+                        if candidate_path.is_absolute():
+                            if candidate_path.exists() and candidate_path.is_file():
+                                full_path = candidate_path
+                        elif raw_work_dir:
+                            work_dir = Path(raw_work_dir).expanduser()
+                            for path_try in ((work_dir / candidate_path), (work_dir / candidate_path.name)):
+                                if path_try.exists() and path_try.is_file():
+                                    full_path = path_try
+                                    break
+                        if full_path is not None:
+                            sep = "\t" if full_path.suffix.lower() == ".tsv" else ","
+                            try:
+                                rehydrated = pd.read_csv(full_path, sep=sep, low_memory=False)
+                            except Exception:
+                                rehydrated = None
+                            if rehydrated is not None and not rehydrated.empty:
+                                return rehydrated, fname
                 df = pd.DataFrame(rows, columns=cols)
                 return df, fname
     return None, None
@@ -1567,6 +1611,7 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
 
             combo_labels = []
             combo_values = []
+            combo_text = []
             active_points_x = []
             active_points_y = []
             inactive_points_x = []
@@ -1577,6 +1622,7 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 active_sets = [set_columns[pos] for pos, flag in enumerate(combo) if flag]
                 combo_labels.append(" ∩ ".join(active_sets) if active_sets else "None")
                 combo_values.append(count_value)
+                combo_text.append(str(int(count_value)) if float(count_value).is_integer() else f"{count_value:g}")
                 active_indices = [pos for pos, flag in enumerate(combo) if flag]
                 for set_idx, set_name in enumerate(set_columns):
                     if set_idx in active_indices:
@@ -1598,7 +1644,15 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 row_heights=[0.62, 0.38],
             )
             fig.add_trace(
-                go.Bar(x=list(range(len(combo_items))), y=combo_values, marker_color=accent_color, showlegend=False),
+                go.Bar(
+                    x=list(range(len(combo_items))),
+                    y=combo_values,
+                    marker_color=accent_color,
+                    text=combo_text,
+                    textposition="outside",
+                    cliponaxis=False,
+                    showlegend=False,
+                ),
                 row=1,
                 col=1,
             )

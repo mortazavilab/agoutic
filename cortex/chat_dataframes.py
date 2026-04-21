@@ -24,6 +24,8 @@ from atlas.config import CONSORTIUM_REGISTRY
 from common.logging_config import get_logger
 from cortex.config import SERVICE_REGISTRY
 from cortex.dataframe_actions import build_overlap_dataframe_payload
+from cortex.dataframe_sources import find_dataframe_parse_source as _find_dataframe_parse_source_impl
+from cortex.dataframe_sources import find_dataframe_payload as _find_dataframe_payload_impl
 from cortex.llm_validators import get_block_payload
 from cortex.tag_parser import user_wants_plot
 
@@ -853,57 +855,16 @@ def _find_plot_dataframe_payload(
     *,
     current_dataframes: dict[str, dict] | None = None,
 ) -> dict | None:
-    if current_dataframes:
-        for payload in current_dataframes.values():
-            metadata = payload.get("metadata") or {}
-            if metadata.get("df_id") == df_id:
-                return payload
-
-    for block in reversed(history_blocks or []):
-        payload = get_block_payload(block)
-        for df_payload in (payload.get("_dataframes") or {}).values():
-            metadata = df_payload.get("metadata") or {}
-            if metadata.get("df_id") == df_id:
-                return df_payload
-    return None
+    return _find_dataframe_payload_impl(
+        df_id,
+        history_blocks,
+        current_dataframes=current_dataframes,
+    )
 
 
 def find_dataframe_parse_source(df_id: int, history_blocks: list) -> dict | None:
     """Return parse_csv provenance params for an existing dataframe when available."""
-    for block in reversed(history_blocks or []):
-        payload = get_block_payload(block)
-        dataframes = payload.get("_dataframes") or {}
-        matched_key = None
-        matched_label = None
-        for key, df_payload in dataframes.items():
-            metadata = df_payload.get("metadata") or {}
-            if metadata.get("df_id") != df_id:
-                continue
-            matched_key = key
-            matched_label = str(metadata.get("label") or key or "").strip()
-            break
-        if matched_key is None:
-            continue
-
-        candidates = {Path(str(matched_key)).name}
-        if matched_label:
-            candidates.add(Path(matched_label).name)
-
-        parse_entries = [
-            entry for entry in (payload.get("_provenance") or [])
-            if entry.get("success")
-            and entry.get("source") == "analyzer"
-            and entry.get("tool") == "parse_csv_file"
-        ]
-        for entry in parse_entries:
-            params = dict(entry.get("params") or {})
-            file_path = str(params.get("file_path") or "").strip()
-            if file_path and Path(file_path).name in candidates:
-                return params
-        if len(parse_entries) == 1:
-            return dict(parse_entries[0].get("params") or {})
-
-    return None
+    return _find_dataframe_parse_source_impl(df_id, history_blocks)
 
 
 def _extract_explicit_overlap_set_columns(

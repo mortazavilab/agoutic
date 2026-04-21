@@ -333,7 +333,7 @@ async def parse_csv_file_tool(
         file_path: Relative path to CSV/TSV file
         work_dir: Absolute path to the workflow directory (preferred)
         run_uuid: Job UUID (legacy fallback)
-        max_rows: Maximum rows to return (default: 100)
+        max_rows: Maximum rows to return (default: 100). Use null to load the full file.
 
     Returns:
         Dict with parsed table data including columns and rows
@@ -747,7 +747,7 @@ TOOL_SCHEMAS = {
                 },
                 "max_rows": {
                     "type": "integer",
-                    "description": "Maximum rows to return (default: 100)"
+                    "description": "Maximum rows to return (default: 100). Use null to load the full file."
                 }
             },
             "required": ["file_path"]

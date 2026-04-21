@@ -42,7 +42,11 @@ def execute_pending_dataframe_action(session, pending_block: ProjectBlock) -> di
     session.refresh(pending_block)
 
     try:
-        result_payload = execute_local_dataframe_call(tool_name, params, history_blocks=history_blocks)
+        result_payload = execute_local_dataframe_call(
+            tool_name,
+            params,
+            history_blocks=history_blocks,
+        )
         result_record = {"tool": tool_name, "params": params, "data": result_payload}
         embedded_dataframes = extract_embedded_dataframes({"cortex": [result_record]}, summary)
         assign_df_ids(embedded_dataframes, history_blocks, {})

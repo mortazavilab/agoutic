@@ -2,8 +2,11 @@
 
 ### Bug Fixes
 
-- **Truncated venn/upset plots now recover when older dataframe history is missing provenance** — when an overlap plot targets a saved dataframe that only has preview rows in chat history, AGOUTIC now reloads the full source table from analyzer provenance when available and otherwise searches matching project files by path, basename, or dataframe label before rebuilding the overlap-membership dataframe. If the full source still cannot be recovered, the chart is dropped instead of rendering incorrect overlap counts from truncated previews.
-  (`cortex/chat_stages/response_assembly.py`, `tests/cortex/test_chat_data_calls.py`)
+- **Parsed dataframe previews stay lightweight while full-data consumers now rehydrate the real table on demand** — CSV/TSV parsing keeps the default 100-row preview behavior, but `head DFn <rows>` can now expand past the stored preview, local dataframe actions rehydrate the full source before filtering or transforming, and plot assembly rebuilds charts from the full parsed table instead of silently using truncated previews. The shared dataframe-source resolver also now prefers visible dataframe history over hidden helper payloads and falls back to local file reload when analyzer reparse responses are still truncated.
+  (`analyzer/app.py`, `analyzer/mcp_tools.py`, `cortex/dataframe_sources.py`, `cortex/chat_stages/quick_exits.py`, `cortex/chat_stages/response_assembly.py`, `cortex/dataframe_actions.py`, `cortex/tool_dispatch.py`, `tests/analyzer/test_app.py`, `tests/cortex/test_analyzer_proxy.py`, `tests/cortex/test_chat_data_calls.py`, `tests/cortex/test_dataframe_actions.py`, `tests/cortex/test_dataframe_sources.py`)
+
+- **UpSet plots now show intersection counts above each bar and the UI rehydrates truncated plot dataframes without a backend import dependency** — the Streamlit renderer now reloads truncated parsed dataframes locally from block provenance when needed for chart rendering, keeps the UI thin by avoiding direct `cortex.*` imports, and displays the numeric intersection size above every UpSet column for easier reading.
+  (`ui/appui_renderers.py`, `tests/ui/test_app_source_helpers.py`)
 
 ## [3.6.4] - 2026-04-18
 

@@ -721,7 +721,7 @@ class TestHelpIntent:
 
 class TestResolveDfById:
     def test_returns_latest_matching_dataframe(self):
-        fn = _load_function("_resolve_df_by_id")
+        fn = _load_function("_resolve_df_by_id", {"Path": Path})
         blocks = [
             {
                 "type": "AGENT_PLAN",
@@ -754,14 +754,92 @@ class TestResolveDfById:
         assert label == "new.csv"
         assert list(df["gene"]) == ["NEW"]
 
-    def test_ignores_non_agent_plan_blocks_and_missing_ids(self):
-        fn = _load_function("_resolve_df_by_id")
+    def test_ignores_blocks_without_dataframes_and_missing_ids(self):
+        fn = _load_function("_resolve_df_by_id", {"Path": Path})
         blocks = [
             {"type": "USER_MESSAGE", "payload": {}},
             {"type": "AGENT_PLAN", "payload": {"_dataframes": {}}},
         ]
 
         assert fn(99, blocks) == (None, None)
+
+    def test_prefers_latest_block_with_matching_dataframe(self):
+        fn = _load_function("_resolve_df_by_id", {"Path": Path})
+        blocks = [
+            {
+                "type": "AGENT_PLAN",
+                "payload": {
+                    "_dataframes": {
+                        "preview.csv": {
+                            "metadata": {"df_id": 3},
+                            "data": [{"gene": "OLD"}],
+                            "columns": ["gene"],
+                        }
+                    }
+                },
+            },
+            {
+                "type": "AGENT_PLOT",
+                "payload": {
+                    "_dataframes": {
+                        "full.csv": {
+                            "metadata": {"df_id": 3},
+                            "data": [{"gene": "NEW"}],
+                            "columns": ["gene"],
+                        }
+                    }
+                },
+            },
+        ]
+
+        df, label = fn(3, blocks)
+
+        assert label == "full.csv"
+        assert list(df["gene"]) == ["NEW"]
+
+    def test_rehydrates_truncated_dataframe_from_local_parse_source(self, tmp_path):
+        fn = _load_function("_resolve_df_by_id", {"Path": Path})
+        work_dir = tmp_path / "workflow"
+        work_dir.mkdir()
+        source_path = work_dir / "big.csv"
+        source_path.write_text("idx,value\n" + "\n".join(f"{idx},{idx * 2}" for idx in range(150)))
+        blocks = [
+            {
+                "type": "AGENT_PLAN",
+                "payload": {
+                    "_dataframes": {
+                        "big.csv": {
+                            "metadata": {
+                                "df_id": 5,
+                                "label": "big.csv",
+                                "row_count": 150,
+                                "is_truncated": True,
+                            },
+                            "data": [{"idx": idx, "value": idx * 2} for idx in range(100)],
+                            "columns": ["idx", "value"],
+                            "row_count": 150,
+                        }
+                    },
+                    "_provenance": [{
+                        "source": "analyzer",
+                        "tool": "parse_csv_file",
+                        "success": True,
+                        "params": {
+                            "file_path": "big.csv",
+                            "work_dir": str(work_dir),
+                            "max_rows": 100,
+                        },
+                    }],
+                },
+            }
+        ]
+
+        df, label = fn(5, blocks)
+
+        assert label == "big.csv"
+        assert df is not None
+        assert len(df) == 150
+        assert df.iloc[-1]["idx"] == 149
 
 
 class TestResolvePayloadDfById:
@@ -1504,6 +1582,7 @@ class TestBuildPlotlyFigure:
         assert fig is not None
         assert fig.data[0].type == "bar"
         assert list(fig.data[0].y[:3]) == [2.0, 1.0, 1.0]
+        assert list(fig.data[0].text[:3]) == ["2", "1", "1"]
         assert len(fig.data[0].y) == 7
         assert list(fig.data[0].y).count(0.0) == 4
         assert fig.layout.title.text == "UpSet plot"

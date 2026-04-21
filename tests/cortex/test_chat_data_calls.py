@@ -667,6 +667,296 @@ class TestPlotTagParsing:
         overlap_payload = next(iter(embedded.values()))
         assert overlap_payload["row_count"] == 7
 
+    def test_upset_plot_falls_back_to_local_when_analyzer_returns_truncated_preview(self, SL, seed, tmp_path):
+        mock_mcp = AsyncMock()
+        work_dir = tmp_path / "workflow-reconcile"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "reconciled_abundance.tsv").write_text(
+            "gene_ID\ttranscript_ID\ttranscript_novelty\tc2c12r1\tc2c12r2\tc2c12r3\n"
+            "ENSMUSG00000033845\tENSMUST00000130201\tKNOWN\t62\t67\t76\n"
+            "ENSMUSG00000033845\tENSMUST00000045689\tKNOWN\t0\t0\t1\n"
+            "ENSMUSG00000025903\tENSMUST00000115529\tKNOWN\t8\t5\t11\n"
+            "ENSMUSG00000025903\tENSMUST00000134384\tISM\t0\t3\t1\n"
+            "ENSMUSG00000025903\tENSMUST00000150971\tKNOWN\t4\t4\t5\n"
+            "ENSMUSG00000033845\tENSMUST00000156816\tKNOWN\t214\t167\t170\n"
+            "ENSMUSG00000033845\tENSMUST00000132625\tKNOWN\t2\t0\t2\n"
+        )
+
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF3 (reconciled_abundance.tsv, 7 rows)"],
+                    "latest_dataframe": "DF3",
+                },
+                "_dataframes": {
+                    "reconciled_abundance.tsv": {
+                        "columns": [
+                            "gene_ID",
+                            "transcript_ID",
+                            "transcript_novelty",
+                            "c2c12r1",
+                            "c2c12r2",
+                            "c2c12r3",
+                        ],
+                        "data": [
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000130201",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 62,
+                                "c2c12r2": 67,
+                                "c2c12r3": 76,
+                            },
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000045689",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 0,
+                                "c2c12r2": 0,
+                                "c2c12r3": 1,
+                            },
+                        ],
+                        "row_count": 7,
+                        "metadata": {
+                            "df_id": 3,
+                            "visible": True,
+                            "label": "reconciled_abundance.tsv",
+                            "row_count": 7,
+                            "is_truncated": True,
+                        },
+                    }
+                },
+                "_provenance": [{
+                    "source": "analyzer",
+                    "tool": "parse_csv_file",
+                    "params": {
+                        "file_path": "reconciled_abundance.tsv",
+                        "work_dir": str(work_dir),
+                    },
+                    "timestamp": "2026-04-20T15:31:00Z",
+                    "success": True,
+                    "rows": 7,
+                }],
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        mock_mcp.connect = AsyncMock()
+        mock_mcp.disconnect = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "file_path": "reconciled_abundance.tsv",
+            "work_dir": str(work_dir),
+            "columns": [
+                "gene_ID",
+                "transcript_ID",
+                "transcript_novelty",
+                "c2c12r1",
+                "c2c12r2",
+                "c2c12r3",
+            ],
+            "data": [
+                {
+                    "gene_ID": "ENSMUSG00000033845",
+                    "transcript_ID": "ENSMUST00000130201",
+                    "transcript_novelty": "KNOWN",
+                    "c2c12r1": 62,
+                    "c2c12r2": 67,
+                    "c2c12r3": 76,
+                },
+                {
+                    "gene_ID": "ENSMUSG00000033845",
+                    "transcript_ID": "ENSMUST00000045689",
+                    "transcript_novelty": "KNOWN",
+                    "c2c12r1": 0,
+                    "c2c12r2": 0,
+                    "c2c12r3": 1,
+                },
+            ],
+            "row_count": 7,
+            "metadata": {
+                "separator": "\t",
+                "column_count": 6,
+                "total_rows": 7,
+                "is_truncated": True,
+            },
+        })
+
+        def think(msg, skill, history):
+            return (
+                "Here is the overlap plot.\n"
+                "[[PLOT: type=upset, df=DF3, x=transcript_novelty, title=Transcript novelty overlap]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.chat_stages.response_assembly.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
+            skill="analyze_job_results",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
+        assert chart["type"] == "upset"
+        assert chart["df_id"] == 4
+        assert chart["sets"] == "c2c12r1|c2c12r2|c2c12r3"
+
+        mock_mcp.call_tool.assert_awaited_once_with(
+            "parse_csv_file",
+            file_path="reconciled_abundance.tsv",
+            work_dir=str(work_dir),
+            max_rows=None,
+        )
+
+        agent_payload = (data.get("agent_block") or {}).get("payload") or {}
+        embedded = agent_payload.get("_dataframes") or {}
+        overlap_payload = next(iter(embedded.values()))
+        assert overlap_payload["row_count"] == 7
+
+    def test_upset_plot_rehydrates_from_relative_work_dir_like_head(self, SL, seed, tmp_path, monkeypatch):
+        mock_mcp = AsyncMock()
+        workflow_dir = tmp_path / "relative-workflow"
+        workflow_dir.mkdir(parents=True, exist_ok=True)
+        (workflow_dir / "reconciled_abundance.tsv").write_text(
+            "gene_ID\ttranscript_ID\ttranscript_novelty\tc2c12r1\tc2c12r2\tc2c12r3\n"
+            "ENSMUSG00000033845\tENSMUST00000130201\tKNOWN\t62\t67\t76\n"
+            "ENSMUSG00000033845\tENSMUST00000045689\tKNOWN\t0\t0\t1\n"
+            "ENSMUSG00000025903\tENSMUST00000115529\tKNOWN\t8\t5\t11\n"
+            "ENSMUSG00000025903\tENSMUST00000134384\tISM\t0\t3\t1\n"
+            "ENSMUSG00000025903\tENSMUST00000150971\tKNOWN\t4\t4\t5\n"
+            "ENSMUSG00000033845\tENSMUST00000156816\tKNOWN\t214\t167\t170\n"
+            "ENSMUSG00000033845\tENSMUST00000132625\tKNOWN\t2\t0\t2\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF3 (reconciled_abundance.tsv, 7 rows)"],
+                    "latest_dataframe": "DF3",
+                },
+                "_dataframes": {
+                    "reconciled_abundance.tsv": {
+                        "columns": [
+                            "gene_ID",
+                            "transcript_ID",
+                            "transcript_novelty",
+                            "c2c12r1",
+                            "c2c12r2",
+                            "c2c12r3",
+                        ],
+                        "data": [
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000130201",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 62,
+                                "c2c12r2": 67,
+                                "c2c12r3": 76,
+                            },
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000045689",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 0,
+                                "c2c12r2": 0,
+                                "c2c12r3": 1,
+                            },
+                        ],
+                        "row_count": 7,
+                        "metadata": {
+                            "df_id": 3,
+                            "visible": True,
+                            "label": "reconciled_abundance.tsv",
+                            "row_count": 7,
+                            "is_truncated": True,
+                        },
+                    }
+                },
+                "_provenance": [{
+                    "source": "analyzer",
+                    "tool": "parse_csv_file",
+                    "params": {
+                        "file_path": "reconciled_abundance.tsv",
+                        "work_dir": "relative-workflow",
+                    },
+                    "timestamp": "2026-04-20T15:31:00Z",
+                    "success": True,
+                    "rows": 7,
+                }],
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        mock_mcp.connect = AsyncMock(side_effect=RuntimeError("analyzer offline"))
+        mock_mcp.disconnect = AsyncMock()
+        mock_mcp.call_tool = AsyncMock()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the overlap plot.\n"
+                "[[PLOT: type=upset, df=DF3, x=transcript_novelty, title=Transcript novelty overlap]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.chat_stages.response_assembly.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(
+            client,
+            "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
+            skill="analyze_job_results",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
+        assert chart["type"] == "upset"
+        assert chart["df_id"] == 4
+        assert chart["sets"] == "c2c12r1|c2c12r2|c2c12r3"
+
+        agent_payload = (data.get("agent_block") or {}).get("payload") or {}
+        embedded = agent_payload.get("_dataframes") or {}
+        overlap_payload = next(iter(embedded.values()))
+        assert overlap_payload["row_count"] == 7
+
     def test_upset_plot_rehydrates_from_project_files_without_provenance(self, SL, seed, tmp_path):
         project_dir = tmp_path / "proj"
         workflow_dir = project_dir / "workflow2"
@@ -2810,6 +3100,7 @@ class TestFileToolChaining:
         """find_file result should chain to parse_csv_file for .csv files."""
         mock_mcp = AsyncMock()
         call_count = [0]
+        parse_calls = []
         async def mock_call_tool(tool_name, **kwargs):
             nonlocal call_count
             call_count[0] += 1
@@ -2820,6 +3111,7 @@ class TestFileToolChaining:
                     "work_dir": "/tmp/job1",
                 }
             elif tool_name == "parse_csv_file":
+                parse_calls.append(kwargs)
                 return {
                     "file_path": "results/data.csv",
                     "columns": ["A", "B"],
@@ -2853,6 +3145,7 @@ class TestFileToolChaining:
         assert resp.status_code == 200
         data = resp.json()
         payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        assert parse_calls == [{"file_path": "results/data.csv", "work_dir": "/tmp/job1", "max_rows": 100}]
         md = payload.get("markdown", "")
         assert "SKILL_SWITCH" not in md
 
@@ -3217,6 +3510,143 @@ class TestDFInspectionIntegration:
         assert "RNA-seq" in md
         assert "ENCSR001" in md
         assert "| Assay | Accession | Status |" in md
+
+    def test_head_df1_can_expand_beyond_preview_rows(self, SL, seed, tmp_path):
+        rows = [{"idx": i, "value": i * 2} for i in range(150)]
+        work_dir = tmp_path / "workflow"
+        work_dir.mkdir()
+        source_path = work_dir / "big.csv"
+        source_path.write_text("idx,value\n" + "\n".join(f"{row['idx']},{row['value']}" for row in rows))
+
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Here is DF1.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF1 (big.csv, 150 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "big.csv": {
+                        "columns": ["idx", "value"],
+                        "data": rows[:100],
+                        "row_count": 150,
+                        "metadata": {
+                            "df_id": 1,
+                            "visible": True,
+                            "label": "big.csv",
+                            "row_count": 150,
+                            "is_truncated": True,
+                        },
+                    }
+                },
+                "_provenance": [{
+                    "source": "analyzer",
+                    "tool": "parse_csv_file",
+                    "params": {
+                        "file_path": "big.csv",
+                        "work_dir": str(work_dir),
+                        "max_rows": 100,
+                    },
+                    "timestamp": "2026-04-20T15:31:00Z",
+                    "success": True,
+                    "rows": 150,
+                }],
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            raise AssertionError("LLM should NOT be called for head df")
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "head df1 120")
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        assert "showing first 120" in md
+        assert "| 119 | 238 |" in md
+
+    def test_plot_block_references_dataframe_for_truncated_source(self, SL, seed, tmp_path):
+        rows = [{"group": "A" if i < 120 else "B", "value": i} for i in range(150)]
+        work_dir = tmp_path / "plot-workflow"
+        work_dir.mkdir()
+        source_path = work_dir / "big.csv"
+        source_path.write_text("group,value\n" + "\n".join(f"{row['group']},{row['value']}" for row in rows))
+
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF1 (big.csv, 150 rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    "big.csv": {
+                        "columns": ["group", "value"],
+                        "data": rows[:100],
+                        "row_count": 150,
+                        "metadata": {
+                            "df_id": 1,
+                            "visible": True,
+                            "label": "big.csv",
+                            "row_count": 150,
+                            "is_truncated": True,
+                        },
+                    }
+                },
+                "_provenance": [{
+                    "source": "analyzer",
+                    "tool": "parse_csv_file",
+                    "params": {
+                        "file_path": "big.csv",
+                        "work_dir": str(work_dir),
+                        "max_rows": 100,
+                    },
+                    "timestamp": "2026-04-20T15:31:00Z",
+                    "success": True,
+                    "rows": 150,
+                }],
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the chart.\n[[PLOT: type=bar, df=DF1, x=group, agg=count, title=Counts by Group]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "plot DF1 by group", skill="analyze_job_results")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_payload = (data.get("plot_blocks") or [])[0].get("payload") or {}
+        charts = plot_payload.get("charts") or []
+        assert charts
+        assert charts[0].get("df_id") == 1
 
     def test_head_df_defaults_to_latest(self, SL, seed, tmp_path):
         self._seed_df_block(SL)

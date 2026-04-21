@@ -216,7 +216,7 @@ async def download_file(
 async def parse_csv_endpoint(
     run_uuid: str = Query(..., description="Job UUID"),
     file_path: str = Query(..., description="Relative file path to CSV/TSV"),
-    max_rows: Optional[int] = Query(100, description="Maximum rows to return")
+    max_rows: Optional[int] = Query(100, description="Maximum rows to return (default: 100). Use null to load the full file.")
 ):
     """
     Parse a CSV/TSV file.
@@ -224,7 +224,7 @@ async def parse_csv_endpoint(
     Args:
         run_uuid: Job UUID
         file_path: Relative path to CSV/TSV file
-        max_rows: Maximum rows to return
+        max_rows: Maximum rows to return (default: 100). Use null to load the full file.
     
     Returns:
         ParsedTableData with structured data

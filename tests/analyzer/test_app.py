@@ -208,13 +208,19 @@ class TestAnalyzerApp:
         with patch("analyzer.app.parse_csv_file", side_effect=ValueError("bad csv")):
             invalid = client.get("/analysis/files/parse/csv?run_uuid=run-1&file_path=bad.csv")
 
-        with patch("analyzer.app.parse_csv_file", return_value=_csv_payload()):
+        with patch("analyzer.app.parse_csv_file", return_value=_csv_payload()) as parse_csv_file:
             ok = client.get("/analysis/files/parse/csv?run_uuid=run-1&file_path=results.csv&max_rows=2")
+
+        with patch("analyzer.app.parse_csv_file", return_value=_csv_payload()) as parse_csv_file_default:
+            default_ok = client.get("/analysis/files/parse/csv?run_uuid=run-1&file_path=results.csv")
 
         assert missing.status_code == 404
         assert invalid.status_code == 400
         assert ok.status_code == 200
+        assert default_ok.status_code == 200
         assert ok.json()["columns"] == ["gene", "score"]
+        parse_csv_file.assert_called_once_with("run-1", "results.csv", 2)
+        parse_csv_file_default.assert_called_once_with("run-1", "results.csv", 100)
 
     def test_parse_bed_endpoint_maps_errors_and_success(self):
         client = TestClient(app, raise_server_exceptions=False)

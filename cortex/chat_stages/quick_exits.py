@@ -5,6 +5,7 @@ import re
 
 from common.logging_config import get_logger
 from cortex.chat_context import ChatContext
+from cortex.dataframe_sources import hydrate_dataframe_payload_locally
 from cortex.chat_stages import register_stage
 from cortex.chat_sync_handler import (
     _create_prompt_response,
@@ -179,6 +180,24 @@ class DfCommandStage:
                 _int_keys = [k for k in _df_map if isinstance(k, int)]
                 _target_id = max(_int_keys) if _int_keys else None
             _n_rows = _df_cmd.get("n", 10)
+            if isinstance(_target_id, int) and _target_id in _df_map:
+                _stored = _df_map[_target_id]
+                _stored_rows = len(_stored.get("data", []))
+                _declared_rows = int(_stored.get("row_count") or _stored_rows)
+                if _n_rows > _stored_rows and _declared_rows > _stored_rows:
+                    _full_payload = hydrate_dataframe_payload_locally(
+                        _target_id,
+                        ctx.history_blocks,
+                        project_dir_path=ctx.project_dir_path,
+                    )
+                    if _full_payload:
+                        _meta = _full_payload.get("metadata") or {}
+                        _df_map[_target_id] = {
+                            "columns": _full_payload.get("columns", []),
+                            "data": _full_payload.get("data", []),
+                            "row_count": _full_payload.get("row_count", len(_full_payload.get("data", []))),
+                            "label": _meta.get("label", _stored.get("label", f"DF{_target_id}")),
+                        }
             _md = _render_head_df(_df_map, _target_id, _n_rows)
 
         resp = await _create_prompt_response(

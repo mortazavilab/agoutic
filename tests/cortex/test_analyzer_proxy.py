@@ -224,6 +224,12 @@ class TestParseCsv:
                          params={"run_uuid": "abc-123", "file_path": "data.csv"})
         assert resp.status_code == 200
         assert resp.json()["columns"] == ["score", "name"]
+        mock_mcp.call_tool.assert_awaited_once_with(
+            "parse_csv_file",
+            run_uuid="abc-123",
+            file_path="data.csv",
+            max_rows=100,
+        )
 
     def test_parse_csv_max_rows(self, client, mock_mcp):
         mock_mcp.call_tool.return_value = {"success": True, "rows": []}
@@ -231,6 +237,12 @@ class TestParseCsv:
                     params={"run_uuid": "abc-123", "file_path": "d.csv",
                                 "max_rows": 5})
         assert resp.status_code == 200
+        mock_mcp.call_tool.assert_awaited_once_with(
+            "parse_csv_file",
+            run_uuid="abc-123",
+            file_path="d.csv",
+            max_rows=5,
+        )
 
 
 # ---------------------------------------------------------------------------

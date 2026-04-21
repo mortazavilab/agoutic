@@ -140,6 +140,55 @@ class TestExecuteLocalDataframeCall:
         assert rows["EGFR"] == {"match_key": "EGFR", "Tumor": True, "Normal": True}
         assert rows["STAT1"] == {"match_key": "STAT1", "Tumor": False, "Normal": True}
 
+    def test_filter_dataframe_rehydrates_full_preview_source(self, tmp_path):
+        work_dir = tmp_path / "workflow"
+        work_dir.mkdir()
+        source_path = work_dir / "big.csv"
+        source_rows = [{"idx": idx, "value": idx} for idx in range(150)]
+        source_path.write_text("idx,value\n" + "\n".join(f"{row['idx']},{row['value']}" for row in source_rows))
+
+        preview_rows = source_rows[:100]
+        history_blocks = [
+            SimpleNamespace(
+                type="AGENT_PLAN",
+                payload_json=json.dumps({
+                    "_dataframes": {
+                        "big.csv": {
+                            "columns": ["idx", "value"],
+                            "data": preview_rows,
+                            "row_count": 150,
+                            "metadata": {
+                                "df_id": 1,
+                                "label": "big.csv",
+                                "row_count": 150,
+                                "visible": True,
+                                "is_truncated": True,
+                            },
+                        },
+                    },
+                    "_provenance": [{
+                        "source": "analyzer",
+                        "tool": "parse_csv_file",
+                        "success": True,
+                        "params": {
+                            "file_path": "big.csv",
+                            "work_dir": str(work_dir),
+                            "max_rows": 100,
+                        },
+                    }],
+                }),
+            )
+        ]
+
+        result = execute_local_dataframe_call(
+            "filter_dataframe",
+            {"df_id": 1, "column": "idx", "operator": ">=", "value": 145},
+            history_blocks=history_blocks,
+        )
+
+        assert result["row_count"] == 5
+        assert [row["idx"] for row in result["data"]] == [145, 146, 147, 148, 149]
+
 
 class TestBuildAutoDataframeCall:
     def test_builds_melt_call_from_reshape_request(self):

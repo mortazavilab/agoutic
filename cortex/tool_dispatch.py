@@ -688,6 +688,7 @@ async def execute_tool_calls(
                         tool_name,
                         params,
                         history_blocks=history_blocks,
+                        project_dir_path=project_dir_path,
                     )
                     source_results.append({
                         "tool": tool_name,
