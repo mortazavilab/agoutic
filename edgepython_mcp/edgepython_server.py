@@ -133,16 +133,93 @@ def _require(key: str, label: str):
         )
 
 
+_TRANSCRIPT_ID_PATTERNS = (
+    r"(^|[|_.-])ENST\d+",
+    r"(^|[|_.-])NM_\d+",
+    r"(^|[|_.-])NR_\d+",
+    r"(^|[|_.-])XM_\d+",
+    r"(^|[|_.-])XR_\d+",
+    r"\btx\d+\b",
+    r"\btranscript\b",
+    r"\bisoform\b",
+)
+
+
+def _first_present_string(row, columns: tuple[str, ...]) -> Optional[str]:
+    for col in columns:
+        if col not in row.index:
+            continue
+        val = row[col]
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text and text != "nan":
+            return text
+    return None
+
+
 def _gene_name(row):
     """Extract gene name from a top_tags result row."""
     # Prefer symbol (from annotation) over raw gene ID
-    for col in ("Symbol", "gene_name", "gene_id", "GeneID"):
-        if col in row.index:
-            val = row[col]
-            if val is not None and str(val).strip() and str(val) != "nan":
-                return str(val)
+    gene_name = _first_present_string(row, ("Symbol", "gene_name", "gene_id", "GeneID"))
+    if gene_name:
+        return gene_name
     # Fall back to row index
     return str(row.name)
+
+
+def _transcript_name(row) -> Optional[str]:
+    transcript_name = _first_present_string(
+        row,
+        ("TranscriptID", "transcript_id", "transcript", "ExonID", "exon_id", "exonid"),
+    )
+    if transcript_name:
+        return transcript_name
+
+    row_name = str(row.name).strip()
+    if not row_name or row_name == "nan":
+        return None
+    if row_name == _gene_name(row):
+        return None
+    if _state.get("feature_level") == "transcript":
+        return row_name
+    if any(re.search(pattern, row_name, flags=re.IGNORECASE) for pattern in _TRANSCRIPT_ID_PATTERNS):
+        return row_name
+    return None
+
+
+def _format_feature_label(
+    row,
+    *,
+    include_transcript: bool = False,
+    separator: str = "\n",
+) -> str:
+    gene_label = _gene_name(row)
+    if not include_transcript:
+        return gene_label
+
+    transcript_label = _transcript_name(row)
+    if not transcript_label or transcript_label == gene_label:
+        return gene_label
+    return f"{gene_label}{separator}{transcript_label}"
+
+
+def _feature_label_candidates(row) -> set[str]:
+    candidates = {str(_gene_name(row)).strip().lower()}
+    transcript_label = _transcript_name(row)
+    if transcript_label:
+        candidates.add(transcript_label.strip().lower())
+    return {candidate for candidate in candidates if candidate}
+
+
+def _feature_lookup_key(row) -> str:
+    row_name = str(row.name).strip()
+    if row_name and row_name != "nan":
+        return row_name
+    transcript_label = _transcript_name(row)
+    if transcript_label:
+        return transcript_label
+    return _gene_name(row)
 
 
 def _infer_feature_level(feature_ids: Optional[list]) -> tuple[str, str]:
@@ -158,16 +235,6 @@ def _infer_feature_level(feature_ids: Optional[list]) -> tuple[str, str]:
     ids = ids[:500]
     n = len(ids)
 
-    tx_patterns = (
-        r"(^|[|_.-])ENST\d+",
-        r"(^|[|_.-])NM_\d+",
-        r"(^|[|_.-])NR_\d+",
-        r"(^|[|_.-])XM_\d+",
-        r"(^|[|_.-])XR_\d+",
-        r"\btx\d+\b",
-        r"\btranscript\b",
-        r"\bisoform\b",
-    )
     gene_patterns = (
         r"(^|[|_.-])ENSG\d+",
         r"(^|[|_.-])FBgn\d+",
@@ -177,7 +244,7 @@ def _infer_feature_level(feature_ids: Optional[list]) -> tuple[str, str]:
     tx_hits = 0
     gene_hits = 0
     for s in ids:
-        if any(re.search(p, s, flags=re.IGNORECASE) for p in tx_patterns):
+        if any(re.search(p, s, flags=re.IGNORECASE) for p in _TRANSCRIPT_ID_PATTERNS):
             tx_hits += 1
         if any(re.search(p, s, flags=re.IGNORECASE) for p in gene_patterns):
             gene_hits += 1
@@ -1867,6 +1934,31 @@ def _apply_plot_frame(ax) -> None:
     ax.set_axisbelow(True)
 
 
+def _place_legend_outside(
+    ax,
+    *,
+    loc: str = "upper left",
+    anchor: tuple[float, float] = (1.02, 1.0),
+    fontsize: int = 8,
+    ncol: int = 1,
+):
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return None
+    ax.figure.subplots_adjust(right=min(ax.figure.subplotpars.right, 0.78))
+    legend = ax.legend(
+        handles,
+        labels,
+        frameon=False,
+        loc=loc,
+        bbox_to_anchor=anchor,
+        borderaxespad=0.0,
+        fontsize=fontsize,
+        ncol=ncol,
+    )
+    return legend
+
+
 def _benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
     pvals = np.asarray(p_values, dtype=float)
     adjusted = np.full_like(pvals, np.nan, dtype=float)
@@ -1907,6 +1999,7 @@ def generate_plot(
     logfc_cutoff: object = 1.0,
     top_n_labels: object = 12,
     label_genes: Optional[object] = None,
+    label_transcripts: object = False,
     title: Optional[str] = None,
     subtitle: Optional[str] = None,
 ) -> str:
@@ -1929,6 +2022,7 @@ def generate_plot(
             in the current working directory.
         svg_output_path: Optional path to save the SVG companion.
         dpi: Raster DPI value or preset phrase.
+        label_transcripts: Include transcript/isoform IDs in labels when available.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -1952,6 +2046,7 @@ def generate_plot(
     logfc_cutoff = abs(_coerce_float(logfc_cutoff, 1.0))
     top_n_labels = max(0, _coerce_int(top_n_labels, 12))
     label_genes = _normalize_label_genes(label_genes)
+    label_transcripts = _coerce_bool(label_transcripts, default=False)
 
     d = _state["dgelist"]
 
@@ -2043,7 +2138,11 @@ def generate_plot(
             fdr = pd.to_numeric(table["FDR"], errors="coerce").to_numpy(dtype=float)
         else:
             fdr = _benjamini_hochberg(pval)
-        gene_names = [_gene_name(row) for _, row in table.iterrows()]
+        plot_labels = [
+            _format_feature_label(row, include_transcript=label_transcripts, separator="\n")
+            for _, row in table.iterrows()
+        ]
+        label_candidates = [_feature_label_candidates(row) for _, row in table.iterrows()]
 
         metric_source = fdr if use_fdr_y else pval
         metric_label = "FDR" if use_fdr_y else "p-value"
@@ -2113,7 +2212,10 @@ def generate_plot(
         )
 
         forced_labels = {label.lower() for label in label_genes}
-        forced_indices = [idx for idx, gene in enumerate(gene_names) if gene.lower() in forced_labels]
+        forced_indices = [
+            idx for idx, candidates in enumerate(label_candidates)
+            if forced_labels.intersection(candidates)
+        ]
         sig_candidates = np.where(sig_mask)[0]
         ranked_candidates = sorted(
             sig_candidates.tolist(),
@@ -2127,6 +2229,7 @@ def generate_plot(
             if len(label_indices) >= len(forced_indices) + top_n_labels:
                 break
 
+        label_fontstyle = "normal" if label_transcripts else "italic"
         if label_indices:
             try:
                 from adjustText import adjust_text
@@ -2138,9 +2241,9 @@ def generate_plot(
                     ax.text(
                         logfc[idx],
                         neg_log_metric[idx],
-                        gene_names[idx],
+                        plot_labels[idx],
                         fontsize=8,
-                        fontstyle="italic",
+                        fontstyle=label_fontstyle,
                         color="#111827",
                         zorder=5,
                     )
@@ -2163,14 +2266,14 @@ def generate_plot(
                     x_offset = (0.03 * x_span) * (1 if logfc[idx] >= 0 else -1)
                     y_offset = 0.03 * y_span * (1 + (offset % 4) * 0.35)
                     ax.annotate(
-                        gene_names[idx],
+                        plot_labels[idx],
                         xy=(logfc[idx], neg_log_metric[idx]),
                         xytext=(logfc[idx] + x_offset, neg_log_metric[idx] + y_offset),
                         textcoords="data",
                         ha="left" if logfc[idx] >= 0 else "right",
                         va="bottom",
                         fontsize=8,
-                        fontstyle="italic",
+                        fontstyle=label_fontstyle,
                         color="#111827",
                         arrowprops={"arrowstyle": "-", "color": "#6b7280", "lw": 0.6, "alpha": 0.9},
                     )
@@ -2180,7 +2283,7 @@ def generate_plot(
             f"colors use a colorblind-safe palette"
         )
         _apply_plot_header(fig, ax, title=title or f"Volcano plot: {result_name}", subtitle=volcano_subtitle)
-        ax.legend(frameon=False, loc="upper right")
+        _place_legend_outside(ax, loc="upper left", anchor=(1.02, 1.0), fontsize=8)
         saved_text = _save_plot_outputs(
             fig,
             label="Volcano plot",
@@ -2201,15 +2304,21 @@ def generate_plot(
         table = tt["table"]
 
         logcpm = ep.cpm(d, log=True)
-        top_genes = [_gene_name(row) for _, row in table.iterrows()]
+        heatmap_rows = list(table.iterrows())
+        top_feature_keys = [_feature_lookup_key(row) for _, row in heatmap_rows]
+        top_feature_labels = [
+            _format_feature_label(row, include_transcript=label_transcripts, separator=" | ")
+            for _, row in heatmap_rows
+        ]
 
-        gene_ids = d.get("_gene_ids", [])
+        gene_ids = [str(gene_id) for gene_id in d.get("_gene_ids", [])]
         idx = []
         gene_labels = []
-        for gn in top_genes:
-            if gn in gene_ids:
-                idx.append(gene_ids.index(gn))
-                gene_labels.append(gn)
+        for feature_key, feature_label in zip(top_feature_keys, top_feature_labels):
+            feature_key = str(feature_key).strip()
+            if feature_key in gene_ids:
+                idx.append(gene_ids.index(feature_key))
+                gene_labels.append(feature_label)
         if not idx:
             idx = list(range(min(30, logcpm.shape[0])))
             gene_labels = [str(i) for i in idx]
@@ -2260,7 +2369,16 @@ def generate_plot(
         from matplotlib.patches import Patch
         present = plot_df["source"].unique()
         legend_handles = [Patch(color=source_colors.get(s, "#999"), label=s) for s in present]
-        ax.legend(handles=legend_handles, loc="lower right", fontsize=8)
+        if legend_handles:
+            ax.figure.subplots_adjust(right=min(ax.figure.subplotpars.right, 0.78))
+            ax.legend(
+                handles=legend_handles,
+                frameon=False,
+                loc="upper left",
+                bbox_to_anchor=(1.02, 1.0),
+                borderaxespad=0.0,
+                fontsize=8,
+            )
         saved_text = _save_plot_outputs(
             fig,
             label="Enrichment bar plot",

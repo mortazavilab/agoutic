@@ -134,6 +134,14 @@ class TestEdgepythonParamExtraction(unittest.TestCase):
         self.assertEqual(result["dpi"], 1200)
         self.assertEqual(result["svg_output_path"], "/tmp/volcano.svg")
 
+    def test_generate_plot_extracts_transcript_label_request(self):
+        result = _validate_edgepython_params(
+            "generate_plot",
+            {"plot_type": "volcano"},
+            "make a volcano plot with transcript labels on the plot",
+        )
+        self.assertTrue(result["label_transcripts"])
+
 
 class TestEdgepythonToolSchemas(unittest.TestCase):
     """Verify tool_schemas.py uses JSON Schema format compatible with validate_against_schema."""

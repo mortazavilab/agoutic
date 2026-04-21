@@ -96,6 +96,7 @@ EXAMPLES:
 [[PLOT: type=venn, df=DF3, sample_col=sample, sample_values=treated|control|rescue, match_on=gene_id, labels=Treated|Control|Rescue, title=Shared Hits Across Samples]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, dpi=publication]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=md, dpi=600]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, dpi=publication, label_transcripts=true, label_genes=["TP53", "ENST00000269305"]]]
 
 WHEN TO PLOT:
 - The user explicitly said "plot", "chart", "visualize", "graph", "histogram",

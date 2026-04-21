@@ -146,6 +146,9 @@ Supported publication-quality volcano controls in this slice include:
 - `use_fdr_y=true` to switch the y-axis from `-log10(p-value)` to `-log10(FDR)`
 - `pvalue_cutoff`, `fdr_cutoff`, and `logfc_cutoff`
 - `top_n_labels` and `label_genes=[...]` for on-image gene labels
+- `label_transcripts=true` to add transcript or isoform IDs to volcano and heatmap labels when those IDs are available
+
+Publication legends for the edgePython image plots render outside the plotting area by default so they do not cover the data points.
 
 #### Step 10: Save Results
 

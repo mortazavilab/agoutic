@@ -4,6 +4,7 @@
 
 - **DE plot artifacts now default to publication-quality raster output and ship an SVG companion** — edgePython-backed `generate_plot` calls now normalize publication DPI presets before execution, write 600 dpi raster output by default, generate an SVG companion artifact, and upgrade volcano plots with threshold annotations, counts boxes, and collision-aware gene labeling while keeping Cortex and workflow summaries on the existing PNG-first path.
   (`cortex/edgepython_plot_params.py`, `cortex/data_call_generator.py`, `cortex/tool_dispatch.py`, `edgepython_mcp/edgepython_server.py`, `edgepython_mcp/tool_schemas.py`, `analyzer/edgepython_adapter.py`, `analyzer/mcp_tools.py`, `cortex/plan_executor.py`, `tests/cortex/test_de_routing.py`, `tests/analyzer/test_edgepython_adapter.py`, `tests/cortex/test_plan_executor_run_script.py`, `environment.yml`)
+- **DE publication plots can now include transcript labels on request and keep legends off the data region** — edgePython `generate_plot` accepts transcript-aware label requests for volcano and heatmap views when transcript IDs are available, and the publication legends now render outside the plotting area instead of covering the data.
 
 ### Bug Fixes
 

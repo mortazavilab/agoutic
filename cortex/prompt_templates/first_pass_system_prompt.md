@@ -170,6 +170,7 @@ MORE EXAMPLES:
 [[PLOT: type=bar, x=Assay, agg=count, title=C2C12 Experiments by Assay Type]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, dpi=publication]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, use_fdr_y=true, dpi=1200, label_genes=["TP53", "MYC"]]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, dpi=publication, label_transcripts=true, label_genes=["TP53", "ENST00000269305"]]]
 
 WHEN TO SUGGEST PLOTS:
 - User explicitly asks: "plot", "chart", "visualize", "graph", "histogram", "scatter", "pie"
