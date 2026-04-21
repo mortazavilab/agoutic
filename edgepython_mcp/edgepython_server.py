@@ -1990,6 +1990,8 @@ def _normalize_label_genes(value: object) -> list[str]:
 def generate_plot(
     plot_type: str,
     result_name: Optional[str] = None,
+    input_path: Optional[str] = None,
+    df_label: Optional[str] = None,
     output_path: Optional[str] = None,
     svg_output_path: Optional[str] = None,
     dpi: Optional[object] = None,
@@ -2018,6 +2020,8 @@ def generate_plot(
         result_name: Which test result to plot (for md/volcano/heatmap).
             For enrichment plots, the name of the enrichment result.
             Default: most recent result.
+        input_path: Optional generic table input path resolved by Cortex.
+        df_label: Optional display label for the resolved dataframe source.
         output_path: Path to save the raster output. Default: auto-generated
             in the current working directory.
         svg_output_path: Optional path to save the SVG companion.

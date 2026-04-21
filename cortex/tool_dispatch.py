@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import pandas as pd
+
 from atlas.config import (
     CONSORTIUM_REGISTRY,
     get_all_tool_aliases,
@@ -25,6 +27,12 @@ from common import MCPHttpClient
 from common.logging_config import get_logger
 from cortex.config import SERVICE_REGISTRY, get_service_url
 from cortex.dataframe_actions import execute_local_dataframe_call, is_local_dataframe_tool
+from cortex.dataframe_sources import (
+    find_dataframe_parse_source,
+    hydrate_dataframe_payload_locally,
+    is_truncated_dataframe_payload,
+    resolve_dataframe_source_path_locally,
+)
 from cortex.edgepython_plot_params import build_svg_companion_path, normalize_generate_plot_params
 from cortex.encode_helpers import (
     _looks_like_assay,
@@ -43,6 +51,7 @@ from cortex.remote_orchestration import (
     _inject_launchpad_context_params,
 )
 from cortex.tool_contracts import validate_against_schema
+from cortex.plot_routing import normalize_plot_type
 
 logger = get_logger(__name__)
 
@@ -761,6 +770,19 @@ async def execute_tool_calls(
                     })
                     continue
 
+                # --- edgepython output path + plot input resolution ---
+                if source_key == "edgepython":
+                    if project_dir_path:
+                        _inject_edgepython_output_path(
+                            tool_name, params, project_dir_path,
+                        )
+                    _resolve_edgepython_plot_source_params(
+                        tool_name,
+                        params,
+                        history_blocks=history_blocks,
+                        project_dir_path=project_dir_path,
+                    )
+
                 # Routing errors
                 if "__routing_error__" in params:
                     error_msg = params.pop("__routing_error__")
@@ -773,12 +795,6 @@ async def execute_tool_calls(
 
                 logger.info("Calling tool", source=source_key,
                             tool=tool_name, params=params)
-
-                # --- edgepython output path injection ---
-                if source_key == "edgepython" and project_dir_path:
-                    _inject_edgepython_output_path(
-                        tool_name, params, project_dir_path,
-                    )
 
                 # Call the tool (with single retry for transient errors)
                 result_data = await _call_with_retry(
@@ -920,6 +936,118 @@ def _inject_edgepython_output_path(
         orig = params.get("output_path", "")
         fname = Path(orig).name if orig else f"de_results.{fmt}"
         params["output_path"] = str(ep_output_dir / fname)
+
+
+def _coerce_plot_df_id(value: object) -> int | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        if value.is_integer() and value > 0:
+            return int(value)
+        return None
+    match = re.match(r'(?:DF)?\s*(\d+)', str(value).strip(), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _materialize_dataframe_payload_for_plot(
+    payload: dict,
+    *,
+    df_id: int,
+    plot_type: str,
+    project_dir_path: Path | None,
+    preferred_output_path: str | None,
+) -> str:
+    if project_dir_path is not None:
+        output_dir = project_dir_path / "de_results" / "plot_inputs"
+    elif preferred_output_path:
+        output_dir = Path(str(preferred_output_path)).expanduser().resolve().parent / "plot_inputs"
+    else:
+        output_dir = Path.cwd() / "plot_inputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata = payload.get("metadata") or {}
+    label = str(metadata.get("label") or f"DF{df_id}").strip()
+    safe_label = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(label).stem or label).strip("._") or f"df{df_id}"
+    safe_plot_type = re.sub(r"[^A-Za-z0-9._-]+", "_", normalize_plot_type(plot_type) or "plot").strip("._") or "plot"
+    output_path = output_dir / f"{safe_plot_type}_{safe_label}_df{df_id}.tsv"
+
+    rows = payload.get("data") or []
+    df = pd.DataFrame(rows)
+    if df.empty and payload.get("columns"):
+        df = pd.DataFrame(columns=payload.get("columns") or [])
+    df.to_csv(output_path, sep="\t", index=False)
+    return str(output_path)
+
+
+def _resolve_edgepython_plot_source_params(
+    tool_name: str,
+    params: dict,
+    *,
+    history_blocks: list,
+    project_dir_path: Path | None,
+) -> None:
+    if tool_name != "generate_plot":
+        return
+    if params.get("input_path"):
+        params.pop("df", None)
+        params.pop("df_id", None)
+        return
+
+    df_id = _coerce_plot_df_id(params.get("df_id"))
+    if df_id is None:
+        df_id = _coerce_plot_df_id(params.get("df"))
+    if df_id is None:
+        return
+
+    payload = hydrate_dataframe_payload_locally(
+        df_id,
+        history_blocks,
+        project_dir_path=project_dir_path,
+    )
+    if payload is None:
+        params["__routing_error__"] = f"Plot source DF{df_id} was not found in conversation history."
+        params.pop("df", None)
+        params.pop("df_id", None)
+        return
+    if is_truncated_dataframe_payload(payload):
+        params["__routing_error__"] = (
+            f"Plot source DF{df_id} only has truncated preview rows and the full source file could not be reloaded."
+        )
+        params.pop("df", None)
+        params.pop("df_id", None)
+        return
+
+    parse_source = find_dataframe_parse_source(df_id, history_blocks)
+    resolved_source_path = resolve_dataframe_source_path_locally(
+        parse_source,
+        payload=payload,
+        project_dir_path=project_dir_path,
+    )
+
+    try:
+        input_path = (
+            str(resolved_source_path)
+            if resolved_source_path is not None
+            else _materialize_dataframe_payload_for_plot(
+                payload,
+                df_id=df_id,
+                plot_type=str(params.get("plot_type") or "plot"),
+                project_dir_path=project_dir_path,
+                preferred_output_path=str(params.get("output_path") or ""),
+            )
+        )
+    except Exception as exc:
+        params["__routing_error__"] = f"Could not prepare plot input for DF{df_id}: {exc}"
+        params.pop("df", None)
+        params.pop("df_id", None)
+        return
+
+    params["input_path"] = input_path
+    params.setdefault("df_label", str((payload.get("metadata") or {}).get("label") or f"DF{df_id}"))
+    params.pop("df", None)
+    params.pop("df_id", None)
 
 
 async def _encode_retry_if_needed(

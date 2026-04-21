@@ -1,9 +1,18 @@
 """Tests for DE skill routing and parameter extraction."""
+import json
 import tempfile
 import unittest
+from pathlib import Path
+
 from cortex.llm_validators import _auto_detect_skill_switch
 from cortex.data_call_generator import _validate_edgepython_params
-from cortex.tool_dispatch import _inject_edgepython_output_path
+from cortex.plot_routing import infer_plot_route
+from cortex.tool_dispatch import _inject_edgepython_output_path, _resolve_edgepython_plot_source_params
+
+
+class _DummyBlock:
+    def __init__(self, payload):
+        self.payload_json = json.dumps(payload)
 
 
 class TestDERouting(unittest.TestCase):
@@ -125,6 +134,14 @@ class TestEdgepythonParamExtraction(unittest.TestCase):
         )
         self.assertEqual(result["dpi"], 600)
 
+    def test_generate_plot_extracts_high_res_dpi(self):
+        result = _validate_edgepython_params(
+            "generate_plot",
+            {"plot_type": "volcano"},
+            "make a high res volcano plot",
+        )
+        self.assertEqual(result["dpi"], 900)
+
     def test_generate_plot_builds_svg_companion_for_explicit_output(self):
         result = _validate_edgepython_params(
             "generate_plot",
@@ -141,6 +158,32 @@ class TestEdgepythonParamExtraction(unittest.TestCase):
             "make a volcano plot with transcript labels on the plot",
         )
         self.assertTrue(result["label_transcripts"])
+
+    def test_generate_plot_normalizes_plot_type_and_df_ref(self):
+        result = _validate_edgepython_params(
+            "generate_plot",
+            {"plot_type": "stacked bar", "df": "DF2"},
+            "make a stacked bar chart",
+        )
+        self.assertEqual(result["plot_type"], "stacked_bar")
+        self.assertEqual(result["df_id"], 2)
+
+
+class TestPlotRouting(unittest.TestCase):
+    def test_simple_bar_stays_declarative(self):
+        route = infer_plot_route("bar", user_message="bar chart of read counts per sample")
+        self.assertEqual(route, "declarative")
+
+    def test_publication_deg_bar_uses_edgepython(self):
+        route = infer_plot_route(
+            "bar",
+            user_message="bar chart of DEG counts per contrast for the dissertation",
+        )
+        self.assertEqual(route, "edgepython")
+
+    def test_heatmap_uses_edgepython(self):
+        route = infer_plot_route("heatmap", user_message="heatmap of the top genes")
+        self.assertEqual(route, "edgepython")
 
 
 class TestEdgepythonToolSchemas(unittest.TestCase):
@@ -268,6 +311,79 @@ class TestEdgepythonOutputPathInjection(unittest.TestCase):
         result = self._inject("generate_plot", params, self.project_dir)
         self.assertEqual(result["output_path"], "/custom/path/volcano.png")
         self.assertEqual(result["svg_output_path"], "/custom/path/volcano.svg")
+
+
+class TestEdgepythonPlotSourceResolution(unittest.TestCase):
+    def test_resolve_edgepython_plot_source_rehydrates_truncated_dataframe(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "counts.csv"
+            csv_path.write_text("sample\tcount\nA\t1\nB\t2\n", encoding="utf-8")
+
+            block = _DummyBlock({
+                "_dataframes": {
+                    "counts.csv": {
+                        "columns": ["sample", "count"],
+                        "data": [{"sample": "A", "count": 1}],
+                        "row_count": 2,
+                        "metadata": {
+                            "df_id": 1,
+                            "visible": True,
+                            "label": "counts.csv",
+                            "row_count": 2,
+                            "is_truncated": True,
+                        },
+                    }
+                },
+                "_provenance": [
+                    {
+                        "success": True,
+                        "source": "analyzer",
+                        "tool": "parse_csv_file",
+                        "params": {"file_path": "counts.csv", "work_dir": tmpdir},
+                    }
+                ],
+            })
+            params = {"plot_type": "bar", "df": "DF1"}
+
+            _resolve_edgepython_plot_source_params(
+                "generate_plot",
+                params,
+                history_blocks=[block],
+                project_dir_path=Path(tmpdir),
+            )
+
+            self.assertEqual(Path(params["input_path"]).resolve(), csv_path.resolve())
+            self.assertEqual(params["df_label"], "counts.csv")
+            self.assertNotIn("df", params)
+            self.assertNotIn("df_id", params)
+
+    def test_resolve_edgepython_plot_source_errors_when_full_data_unavailable(self):
+        block = _DummyBlock({
+            "_dataframes": {
+                "preview_only.csv": {
+                    "columns": ["sample", "count"],
+                    "data": [{"sample": "A", "count": 1}],
+                    "row_count": 2,
+                    "metadata": {
+                        "df_id": 1,
+                        "visible": True,
+                        "label": "preview_only.csv",
+                        "row_count": 2,
+                        "is_truncated": True,
+                    },
+                }
+            }
+        })
+        params = {"plot_type": "bar", "df": "DF1"}
+
+        _resolve_edgepython_plot_source_params(
+            "generate_plot",
+            params,
+            history_blocks=[block],
+            project_dir_path=None,
+        )
+
+        self.assertIn("__routing_error__", params)
 
 
 if __name__ == "__main__":

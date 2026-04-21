@@ -311,6 +311,10 @@ TOOL_SCHEMAS = {
             "properties": {
                 "plot_type": {"type": "string", "description": "Type of plot: mds, bcv, ql_dispersion, md, volcano, heatmap, enrichment_bar, enrichment_dot."},
                 "result_name": {"type": "string", "description": "Which result to plot (for md/volcano/heatmap) or enrichment result name."},
+                "df": {"type": "string", "description": "Optional chat dataframe reference like DF1. Cortex resolves this to an input_path before calling edgePython."},
+                "df_id": {"type": "integer", "description": "Optional numeric chat dataframe reference. Cortex resolves this to an input_path before calling edgePython."},
+                "input_path": {"type": "string", "description": "Optional resolved input table path for generic server-side plots."},
+                "df_label": {"type": "string", "description": "Optional label for the resolved dataframe source."},
                 "output_path": {"type": "string", "description": "Path to save the raster output (PNG)."},
                 "svg_output_path": {"type": "string", "description": "Optional path to save the SVG companion."},
                 "dpi": {"type": "string", "description": "Raster DPI as a number or preset phrase (300, 600, 900, 1200; web, draft, publication, print, high res, poster, journal max)."},

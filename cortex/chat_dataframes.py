@@ -27,6 +27,7 @@ from cortex.dataframe_actions import build_overlap_dataframe_payload
 from cortex.dataframe_sources import find_dataframe_parse_source as _find_dataframe_parse_source_impl
 from cortex.dataframe_sources import find_dataframe_payload as _find_dataframe_payload_impl
 from cortex.llm_validators import get_block_payload
+from cortex.plot_routing import detect_chart_type, infer_plot_route
 from cortex.tag_parser import user_wants_plot
 
 logger = get_logger(__name__)
@@ -581,10 +582,16 @@ def post_df_assignment_plot_fallback(
                 newest_df_data or {},
                 user_message,
             )
-            auto_post_spec.update(extract_plot_style_params(user_message))
-            plot_specs.append(auto_post_spec)
-            logger.info("Post-DF-assignment plot fallback generated",
-                        spec=auto_post_spec)
+            if auto_post_spec is not None:
+                auto_post_spec.update(extract_plot_style_params(user_message))
+                plot_specs.append(auto_post_spec)
+                logger.info("Post-DF-assignment plot fallback generated",
+                            spec=auto_post_spec)
+            else:
+                logger.info(
+                    "Skipped declarative plot fallback for edgepython-routed request",
+                    newest_df_id=newest_df_id,
+                )
 
     # Fix specs with None df_id
     if plot_specs and embedded_dataframes:
@@ -720,40 +727,11 @@ def collapse_competing_specs(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _detect_chart_type(message: str) -> str:
-    msg = message.lower()
-    if "upset" in msg:
-        return "upset"
-    if "venn" in msg:
-        return "venn"
-    if "violin" in msg:
-        return "violin"
-    if "strip" in msg:
-        return "strip"
-    if re.search(r"\bline\s+(?:chart|plot|graph)\b", msg):
-        return "line"
-    if re.search(r"\barea\s+(?:chart|plot|graph)\b", msg):
-        return "area"
-    if "pie" in msg:
-        return "pie"
-    if "scatter" in msg:
-        return "scatter"
-    if "bar" in msg:
-        return "bar"
-    if "box" in msg:
-        return "box"
-    if "heatmap" in msg or "correlation" in msg:
-        return "heatmap"
-    if "histogram" in msg or "distribution" in msg:
-        return "histogram"
-    return "bar"
-
-
 def _build_fallback_plot_spec(
     df_id: int,
     df_data: dict,
     user_message: str,
-) -> dict:
+) -> dict | None:
     """Choose a sensible fallback plot spec for the newest dataframe."""
     specialized = _build_specialized_dataframe_plot_spec(df_data)
     if specialized is not None:
@@ -761,7 +739,9 @@ def _build_fallback_plot_spec(
         specialized["df"] = f"DF{df_id}"
         return specialized
 
-    auto_type = _detect_chart_type(user_message)
+    auto_type = detect_chart_type(user_message)
+    if infer_plot_route(auto_type, user_message=user_message) != "declarative":
+        return None
     auto_x = _detect_x_column(user_message)
     auto_post_spec: dict = {
         "type": auto_type,

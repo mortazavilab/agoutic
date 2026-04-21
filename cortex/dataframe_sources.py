@@ -207,6 +207,19 @@ def load_full_parsed_dataframe_locally(
     }
 
 
+def resolve_dataframe_source_path_locally(
+    parse_source: dict | None,
+    *,
+    payload: dict | None = None,
+    project_dir_path: Path | None = None,
+) -> Path | None:
+    return _resolve_local_parse_source_path(
+        parse_source,
+        payload=payload,
+        project_dir_path=project_dir_path,
+    )
+
+
 def _resolve_local_parse_source_path(
     parse_source: dict | None,
     *,

@@ -6,13 +6,15 @@ import re
 from pathlib import Path
 from typing import Any
 
+from cortex.plot_routing import normalize_plot_type
+
 _DPI_PRESETS = {
     "web": 300,
     "draft": 300,
     "publication": 600,
     "print": 600,
-    "high res": 600,
-    "high resolution": 600,
+    "high res": 900,
+    "high resolution": 900,
     "poster": 900,
     "journal max": 1200,
 }
@@ -102,6 +104,15 @@ def build_svg_companion_path(output_path: str) -> str:
 def normalize_generate_plot_params(params: dict[str, Any], *, text_pool: str = "") -> dict[str, Any]:
     """Normalize `generate_plot` params without widening the public contract."""
     normalized = dict(params)
+
+    if normalized.get("plot_type"):
+        normalized["plot_type"] = normalize_plot_type(str(normalized.get("plot_type") or ""))
+
+    df_ref = normalized.get("df")
+    if df_ref and not normalized.get("df_id"):
+        match = re.match(r'(?:DF)?\s*(\d+)', str(df_ref), re.IGNORECASE)
+        if match:
+            normalized["df_id"] = int(match.group(1))
 
     if "resolution" in normalized and not normalized.get("dpi"):
         normalized["dpi"] = normalized.pop("resolution")

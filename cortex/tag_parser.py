@@ -16,6 +16,12 @@ from atlas.config import get_all_fallback_patterns
 from common.logging_config import get_logger
 from cortex.dataframe_actions import parse_pending_action_tag, strip_pending_action_tags
 from cortex.llm_validators import _parse_tag_params
+from cortex.plot_routing import (
+    detect_chart_type,
+    infer_plot_route,
+    legacy_declarative_plot_warning,
+    normalize_plot_type,
+)
 
 logger = get_logger(__name__)
 
@@ -151,35 +157,6 @@ def _convert_mistral_inline_plot(m: re.Match) -> str:
     return f"[[PLOT: {m.group(1).rstrip()}]]"
 
 
-def _detect_chart_type(message: str) -> str:
-    msg = message.lower()
-    if "upset" in msg:
-        return "upset"
-    if "venn" in msg:
-        return "venn"
-    if "violin" in msg:
-        return "violin"
-    if "strip" in msg:
-        return "strip"
-    if re.search(r"\bline\s+(?:chart|plot|graph)\b", msg):
-        return "line"
-    if re.search(r"\barea\s+(?:chart|plot|graph)\b", msg):
-        return "area"
-    if "pie" in msg:
-        return "pie"
-    if "scatter" in msg:
-        return "scatter"
-    if "bar" in msg:
-        return "bar"
-    if "box" in msg:
-        return "box"
-    if "heatmap" in msg or "correlation" in msg:
-        return "heatmap"
-    if "histogram" in msg or "distribution" in msg:
-        return "histogram"
-    return "bar"
-
-
 def _detect_x_column(message: str) -> str | None:
     by_match = re.search(r'\bby\s+(\w+)', message, re.IGNORECASE)
     if by_match and not re.match(r'DF\d+', by_match.group(1), re.IGNORECASE):
@@ -287,10 +264,7 @@ def parse_plot_tags(response: str) -> list[dict]:
         # Natural-language fallback inside the tag
         if not params.get("df"):
             nl = raw_inner
-            for ct in ("upset", "venn", "violin", "strip", "line", "area", "histogram", "scatter", "bar", "box", "heatmap", "pie"):
-                if ct in nl.lower():
-                    params.setdefault("type", ct)
-                    break
+            params.setdefault("type", detect_chart_type(nl))
             if not has_multi_df_refs:
                 nl_df = re.search(r'\bDF\s*(\d+)\b', nl, re.IGNORECASE)
                 if nl_df:
@@ -313,7 +287,20 @@ def parse_plot_tags(response: str) -> list[dict]:
         df_ref = params.get("df", "")
         df_id_m = re.match(r'(?:DF)?\s*(\d+)', df_ref, re.IGNORECASE)
         params["df_id"] = int(df_id_m.group(1)) if df_id_m else None
-        params.setdefault("type", "histogram")
+        params["type"] = normalize_plot_type(str(params.get("type") or "histogram")) or "histogram"
+        migration_warning = legacy_declarative_plot_warning(
+            params.get("type"),
+            user_message=raw_inner,
+            params=params,
+        )
+        if migration_warning:
+            params["legacy_declarative_compat"] = True
+            params["migration_warning"] = migration_warning
+            logger.warning(
+                "Preserving legacy declarative plot tag for compatibility",
+                plot_type=params.get("type"),
+                warning=migration_warning,
+            )
         specs.append(params)
     if specs:
         logger.info(
@@ -402,16 +389,23 @@ def apply_plot_code_fallback(
     auto_x = _detect_x_column(user_message)
 
     if auto_df_id is not None:
-        auto_spec: dict = {
-            "type": auto_type,
-            "df_id": auto_df_id,
-            "df": f"DF{auto_df_id}",
-        }
-        if auto_x:
-            auto_spec["x"] = auto_x
-        auto_spec.update(extract_plot_style_params(user_message))
-        plot_specs.append(auto_spec)
-        logger.info("Auto-generated PLOT spec from code fallback", spec=auto_spec)
+        route = infer_plot_route(auto_type, user_message=user_message)
+        if route == "declarative":
+            auto_spec: dict = {
+                "type": auto_type,
+                "df_id": auto_df_id,
+                "df": f"DF{auto_df_id}",
+            }
+            if auto_x:
+                auto_spec["x"] = auto_x
+            auto_spec.update(extract_plot_style_params(user_message))
+            plot_specs.append(auto_spec)
+            logger.info("Auto-generated PLOT spec from code fallback", spec=auto_spec)
+        else:
+            logger.warning(
+                "Skipping declarative plot fallback for edgepython-routed request",
+                plot_type=auto_type,
+            )
 
     # Strip the code block and boilerplate from the markdown
     corrected_response = re.sub(
