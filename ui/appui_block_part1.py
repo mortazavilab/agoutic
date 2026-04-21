@@ -352,6 +352,15 @@ def render_block_part1(
                     if _v not in (None, "", [], {}):
                         _summary[_k.replace("_", " ").title()] = _v
                 _summary["Gate Action"] = extracted_params.get("gate_action") or content.get("gate_action", "job")
+                if (extracted_params.get("gate_action") or content.get("gate_action")) == "compare_region_overlaps":
+                    if _src_params.get("sample_a_label"):
+                        _summary["Sample A"] = _src_params.get("sample_a_label")
+                    if _src_params.get("sample_b_label"):
+                        _summary["Sample B"] = _src_params.get("sample_b_label")
+                    if _src_params.get("selected_file_a"):
+                        _summary["Resolved BED A"] = _src_params.get("selected_file_a")
+                    if _src_params.get("selected_file_b"):
+                        _summary["Resolved BED B"] = _src_params.get("selected_file_b")
             if _summary:
                 with st.expander("Plan Summary", expanded=True):
                     review_panel(_summary, title="Ready-to-Run Parameters")
@@ -740,6 +749,123 @@ def render_block_part1(
                                     "min_samples": int(min_samples),
                                     "filter_known": bool(filter_known),
                                     "script_id": "reconcile_bams/reconcile_bams",
+                                }
+                            )
+                            payload_update = dict(content)
+                            payload_update["edited_params"] = edited_params
+                            resp = make_authenticated_request(
+                                "PATCH",
+                                f"{API_URL}/block/{block_id}",
+                                json={"status": "APPROVED", "payload": payload_update}
+                            )
+                            if resp.status_code == 200:
+                                st.rerun()
+                            else:
+                                try:
+                                    error_detail = resp.json().get("detail") or resp.text
+                                except Exception:
+                                    error_detail = resp.text
+                                st.error(f"Approval failed: {error_detail}")
+
+                        if submit_reject:
+                            st.session_state[f"rejecting_{block_id}"] = True
+                            st.rerun()
+
+                elif _gate_action == "compare_region_overlaps" and extracted_params:
+                    sample_a_label_default = extracted_params.get("sample_a_label") or "Sample A"
+                    sample_b_label_default = extracted_params.get("sample_b_label") or "Sample B"
+                    selected_file_a = extracted_params.get("selected_file_a") or ""
+                    selected_file_b = extracted_params.get("selected_file_b") or ""
+                    selected_file_a_candidates = int(extracted_params.get("selected_file_a_candidates") or 0)
+                    selected_file_b_candidates = int(extracted_params.get("selected_file_b_candidates") or 0)
+                    output_directory_default = extracted_params.get("output_directory") or extracted_params.get("input_directory") or ""
+                    script_args_default = extracted_params.get("script_args") or []
+                    min_overlap_default = 1
+                    plot_type_default = "venn"
+                    if isinstance(script_args_default, list):
+                        try:
+                            if "--min-overlap-bp" in script_args_default:
+                                _idx = script_args_default.index("--min-overlap-bp")
+                                min_overlap_default = int(script_args_default[_idx + 1])
+                        except Exception:
+                            min_overlap_default = 1
+                    plot_type_default = str(extracted_params.get("plot_type") or "venn").strip().lower() or "venn"
+
+                    with st.form(key=f"overlap_form_{block_id}"):
+                        grouped_section("Overlap Summary")
+                        st.write(f"**Plot Type**: `{plot_type_default}`")
+                        st.write("**Input Mode**: `BED overlap script`")
+                        _script_id = extracted_params.get("script_id") or "analyze_job_results/compare_bed_region_overlaps"
+                        st.write(f"**Execution Script**: `{_script_id}`")
+
+                        grouped_section("Resolved BED Inputs")
+                        st.write(f"**{sample_a_label_default}**")
+                        st.code(selected_file_a or "No BED file resolved", language="text")
+                        if selected_file_a_candidates:
+                            st.caption(f"Candidate BED files found: {selected_file_a_candidates}")
+
+                        st.write(f"**{sample_b_label_default}**")
+                        st.code(selected_file_b or "No BED file resolved", language="text")
+                        if selected_file_b_candidates:
+                            st.caption(f"Candidate BED files found: {selected_file_b_candidates}")
+
+                        grouped_section("Script Settings")
+                        sample_a_label = st.text_input("Sample A Label", value=sample_a_label_default)
+                        sample_b_label = st.text_input("Sample B Label", value=sample_b_label_default)
+                        output_directory = st.text_input(
+                            "Output Directory",
+                            value=output_directory_default,
+                            help="Workflow folder where the overlap CSV outputs will be written.",
+                        )
+                        min_overlap_bp = st.number_input(
+                            "Minimum Overlap (bp)",
+                            min_value=1,
+                            value=max(int(min_overlap_default), 1),
+                            step=1,
+                        )
+
+                        st.divider()
+                        col1, col2 = st.columns(2)
+                        submit_approve = col1.form_submit_button("✅ Approve Overlap Script", width="stretch")
+                        submit_reject = col2.form_submit_button("❌ Reject", width="stretch")
+
+                        if submit_approve:
+                            updated_script_args = []
+                            if isinstance(script_args_default, list):
+                                updated_script_args = list(script_args_default)
+
+                            def _replace_flag(args: list[str], flag: str, value: str) -> list[str]:
+                                result = []
+                                skip_next = False
+                                replaced = False
+                                for idx, item in enumerate(args):
+                                    if skip_next:
+                                        skip_next = False
+                                        continue
+                                    if item == flag:
+                                        result.extend([flag, value])
+                                        skip_next = True
+                                        replaced = True
+                                        continue
+                                    result.append(item)
+                                if not replaced:
+                                    result.extend([flag, value])
+                                return result
+
+                            updated_script_args = _replace_flag(updated_script_args, "--sample-a-label", sample_a_label)
+                            updated_script_args = _replace_flag(updated_script_args, "--sample-b-label", sample_b_label)
+                            updated_script_args = _replace_flag(updated_script_args, "--output-dir", output_directory)
+                            updated_script_args = _replace_flag(updated_script_args, "--min-overlap-bp", str(int(min_overlap_bp)))
+
+                            edited_params = dict(extracted_params)
+                            edited_params.update(
+                                {
+                                    "sample_a_label": sample_a_label,
+                                    "sample_b_label": sample_b_label,
+                                    "output_directory": output_directory,
+                                    "input_directory": extracted_params.get("input_directory") or ".",
+                                    "script_args": updated_script_args,
+                                    "gate_action": "compare_region_overlaps",
                                 }
                             )
                             payload_update = dict(content)

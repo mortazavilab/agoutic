@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from common.logging_config import get_logger
@@ -17,6 +18,72 @@ if TYPE_CHECKING:
     from cortex.schemas import ConversationState
 
 logger = get_logger(__name__)
+
+_PROJECT_WORKFLOW_REF_RE = re.compile(
+    r"\b(?P<project>[a-z0-9][a-z0-9_-]*)\s*:\s*(?P<workflow>workflow\d+)\b",
+    re.IGNORECASE,
+)
+_BED_PATH_RE = re.compile(r"(?P<path>(?:/|~|\.)[^\s,;]+\.bed)\b", re.IGNORECASE)
+
+
+def _project_owner_root(project_dir: str, default_work_dir: str = "") -> str:
+    candidate = (project_dir or "").strip() or (default_work_dir or "").strip()
+    if not candidate:
+        return ""
+    candidate = candidate.rstrip("/")
+    if re.search(r"/workflow\d+$", candidate, re.IGNORECASE):
+        candidate = candidate.rsplit("/", 1)[0]
+    parent = Path(candidate).parent
+    if not str(parent) or str(parent) == ".":
+        return ""
+    return str(parent)
+
+
+def _resolve_project_workflow_ref(ref: str, project_dir: str, default_work_dir: str = "") -> str:
+    match = _PROJECT_WORKFLOW_REF_RE.fullmatch((ref or "").strip())
+    if not match:
+        return ref
+    owner_root = _project_owner_root(project_dir, default_work_dir)
+    if not owner_root:
+        return ref
+    return f"{owner_root.rstrip('/')}/{match.group('project')}/{match.group('workflow')}/openChromatin"
+
+
+def _resolve_existing_path(path_value: str, conv_state: "ConversationState", project_dir: str) -> str:
+    path_text = str(path_value or "").strip().rstrip(".,;:!?")
+    if not path_text:
+        return path_text
+    expanded = os.path.expanduser(path_text)
+    if os.path.isabs(expanded):
+        return expanded
+    work_dir = getattr(conv_state, "work_dir", "") or project_dir
+    if work_dir:
+        return str((Path(work_dir) / expanded).resolve())
+    return expanded
+
+
+def _project_output_root(project_dir: str, conv_state: "ConversationState") -> str:
+    if project_dir:
+        return project_dir
+    work_dir = str(getattr(conv_state, "work_dir", "") or "").strip().rstrip("/")
+    if re.search(r"/workflow\d+$", work_dir, re.IGNORECASE):
+        return work_dir.rsplit("/", 1)[0]
+    return work_dir
+
+
+def _next_project_workflow_dir(project_dir: str) -> str:
+    root = Path(project_dir).expanduser()
+    if not root.exists() or not root.is_dir():
+        return str(root / "workflow1")
+    highest = 0
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        match = re.fullmatch(r"workflow(\d+)", child.name, re.IGNORECASE)
+        if not match:
+            continue
+        highest = max(highest, int(match.group(1)))
+    return str(root / f"workflow{highest + 1}")
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +404,38 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             params["database"] = "KEGG"
         elif "reactome" in msg:
             params["database"] = "REAC"
+        return params
+
+    if plan_type == "compare_region_overlaps":
+        project_refs = [match.group(0) for match in _PROJECT_WORKFLOW_REF_RE.finditer(message or "")]
+        bed_paths = [match.group("path") for match in _BED_PATH_RE.finditer(message or "")]
+        plot_type = _select_plot_type(message)
+        default_work_dir = str(getattr(conv_state, "work_dir", "") or "")
+
+        if len(project_refs) >= 2:
+            params["folder_a"] = _resolve_project_workflow_ref(project_refs[0], project_dir, default_work_dir)
+            params["folder_b"] = _resolve_project_workflow_ref(project_refs[1], project_dir, default_work_dir)
+            params["sample_a_label"] = project_refs[0].strip()
+            params["sample_b_label"] = project_refs[1].strip()
+            params["pattern_a"] = "*.m6Aopen.bed"
+            params["pattern_b"] = "*.m6Aopen.bed"
+            params["input_directory"] = project_dir or params["folder_a"]
+        elif len(bed_paths) >= 2:
+            params["bed_a_path"] = _resolve_existing_path(bed_paths[0], conv_state, project_dir)
+            params["bed_b_path"] = _resolve_existing_path(bed_paths[1], conv_state, project_dir)
+            params["sample_a_label"] = Path(params["bed_a_path"]).stem
+            params["sample_b_label"] = Path(params["bed_b_path"]).stem
+            params["input_directory"] = str(Path(params["bed_a_path"]).parent)
+
+        output_root = _project_output_root(project_dir, conv_state)
+        if output_root:
+            params["output_directory"] = _next_project_workflow_dir(output_root)
+            params["script_working_directory"] = output_root
+
+        params["sample_name"] = "open_chromatin_overlap"
+        params["mode"] = "DNA"
+        params["plot_type"] = plot_type if plot_type in {"venn", "upset"} else "venn"
+        params["min_overlap_bp"] = 1
         return params
 
     if plan_type == "run_xgenepy_analysis":

@@ -20,6 +20,11 @@ from common.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+_PROJECT_WORKFLOW_REF_RE = re.compile(
+    r'\b[a-z0-9][a-z0-9_-]*\s*:\s*workflow\d+\b',
+    re.IGNORECASE,
+)
+
 
 # ── Utility ────────────────────────────────────────────────────────────────
 
@@ -164,7 +169,7 @@ def _validate_llm_output(
         "scaffold_dogme_dir", "get_job_logs", "get_job_debug",
         # Analyzer (Analysis)
         "list_job_files", "find_file", "read_file_content",
-        "parse_csv_file", "parse_bed_file", "get_analysis_summary",
+        "parse_csv_file", "parse_bed_file", "compare_bed_region_overlaps", "get_analysis_summary",
         "categorize_job_files",
         # Local Cortex dataframe tools
         "filter_dataframe", "select_dataframe_columns", "rename_dataframe_columns",
@@ -332,6 +337,15 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
             return "IGVF_Search"
 
     # --- Signals for analyze_job_results ---
+    _has_project_workflow_ref = bool(_PROJECT_WORKFLOW_REF_RE.search(user_message))
+    _has_overlap_region_intent = bool(re.search(
+        r'\b(?:venn|upset|diagram)\b.*\b(?:regions?|open\s+chromatin|chromatin)\b'
+        r'|\b(?:regions?|open\s+chromatin|chromatin)\b.*\b(?:venn|upset|diagram)\b',
+        msg_lower,
+    ))
+    if current_skill != "analyze_job_results" and _has_project_workflow_ref and _has_overlap_region_intent:
+        return "analyze_job_results"
+
     _results_words = [
         "qc report", "quality control", "parse the",
         "read the output", "show me the results", "show the results",

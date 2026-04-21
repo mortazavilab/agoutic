@@ -157,6 +157,20 @@ def _reconcile_parse_candidate_priority(file_info: dict) -> tuple[int, str]:
     return (20, path)
 
 
+def _overlap_parse_candidate_priority(file_info: dict) -> tuple[int, str]:
+    name = str(file_info.get("name") or file_info.get("path") or "").lower()
+    path = str(file_info.get("path") or file_info.get("name") or "")
+    if "membership" in name:
+        return (0, path)
+    if "shared" in name:
+        return (1, path)
+    if "sample_a_only" in name or "sample_b_only" in name or "only" in name:
+        return (2, path)
+    if "count" in name or "summary" in name:
+        return (3, path)
+    return (20, path)
+
+
 def _extract_located_files(step_result: Any) -> tuple[str | None, list[dict[str, Any]]]:
     work_dir: str | None = None
     file_entries: list[dict[str, Any]] = []
@@ -209,6 +223,8 @@ def _derive_parse_tool_calls(plan_payload: dict, step: dict) -> list[dict]:
     priority_fn = (
         _reconcile_parse_candidate_priority
         if plan_payload.get("plan_type") == "reconcile_bams"
+        else _overlap_parse_candidate_priority
+        if plan_payload.get("plan_type") == "compare_region_overlaps"
         else _parse_candidate_priority
     )
 
@@ -275,6 +291,8 @@ async def _derive_runtime_parse_tool_calls(plan_payload: dict, step: dict) -> li
     priority_fn = (
         _reconcile_parse_candidate_priority
         if plan_payload.get("plan_type") == "reconcile_bams"
+        else _overlap_parse_candidate_priority
+        if plan_payload.get("plan_type") == "compare_region_overlaps"
         else _parse_candidate_priority
     )
     runtime_work_dir = (
@@ -782,6 +800,63 @@ def _build_workflow_plot_payload(plan_payload: dict, step: dict) -> dict[str, An
     tables = _extract_all_dependency_tables(plan_payload, step)
     if not tables:
         return None
+
+    if plan_payload.get("plan_type") == "compare_region_overlaps":
+        requested_type = str(
+            step.get("plot_type")
+            or plan_payload.get("plot_type")
+            or "venn"
+        ).strip().lower() or "venn"
+        sample_labels = [
+            str(plan_payload.get("sample_a_label") or "").strip(),
+            str(plan_payload.get("sample_b_label") or "").strip(),
+        ]
+        overlap_table = next(
+            (
+                table for table in tables
+                if "membership" in str(table.get("file_path") or "").lower()
+            ),
+            None,
+        ) or next(
+            (
+                table for table in tables
+                if all(label in {str(col) for col in table.get("columns", [])} for label in sample_labels if label)
+            ),
+            None,
+        )
+        if overlap_table is None:
+            return None
+
+        overlap_columns = {str(col) for col in overlap_table.get("columns", [])}
+        resolved_set_columns = [label for label in sample_labels if label and label in overlap_columns]
+        dataframe_payload = {
+            overlap_table.get("label") or "overlap_membership_components.csv": {
+                "columns": overlap_table.get("columns", []),
+                "data": overlap_table.get("data", []),
+                "row_count": overlap_table.get("row_count", 0),
+                "metadata": {
+                    **(overlap_table.get("metadata") or {}),
+                    "df_id": 1,
+                    "visible": True,
+                    "label": overlap_table.get("label") or "overlap_membership_components.csv",
+                    "row_count": overlap_table.get("row_count", 0),
+                    "kind": "overlap_membership",
+                    **({"set_columns": resolved_set_columns} if resolved_set_columns else {}),
+                },
+            }
+        }
+        chart_spec: dict[str, Any] = {
+            "type": requested_type,
+            "df_id": 1,
+            "title": step.get("title") or f"{requested_type.title()} diagram",
+        }
+        if resolved_set_columns:
+            chart_spec["sets"] = resolved_set_columns
+        return {
+            "selected_file": overlap_table.get("file_path"),
+            "charts": [chart_spec],
+            "_dataframes": dataframe_payload,
+        }
 
     selected = min(tables, key=_table_plot_priority)
     requested_type = str(

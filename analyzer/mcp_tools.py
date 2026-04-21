@@ -15,6 +15,7 @@ from analyzer.analysis_engine import (
     read_file_content,
     parse_csv_file,
     parse_bed_file,
+    compare_bed_region_overlaps,
     parse_xgenepy_outputs,
     generate_analysis_summary,
     get_job_work_dir,
@@ -434,6 +435,62 @@ async def parse_bed_file_tool(
         }
 
 
+async def compare_bed_region_overlaps_tool(
+    bed_a_path: Optional[str] = None,
+    bed_b_path: Optional[str] = None,
+    folder_a: Optional[str] = None,
+    folder_b: Optional[str] = None,
+    pattern_a: Optional[str] = None,
+    pattern_b: Optional[str] = None,
+    sample_a_label: Optional[str] = None,
+    sample_b_label: Optional[str] = None,
+    min_overlap_bp: int = 1,
+    export_dir: Optional[str] = None,
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compare two BED sources and build overlap/dataframe outputs."""
+    try:
+        min_overlap_bp = int(min_overlap_bp)
+        resolved_work_dir = resolve_work_dir(work_dir=work_dir, run_uuid=run_uuid)
+        result = compare_bed_region_overlaps(
+            bed_a_path=bed_a_path,
+            bed_b_path=bed_b_path,
+            folder_a=folder_a,
+            folder_b=folder_b,
+            pattern_a=pattern_a,
+            pattern_b=pattern_b,
+            sample_a_label=sample_a_label,
+            sample_b_label=sample_b_label,
+            min_overlap_bp=min_overlap_bp,
+            export_dir=export_dir,
+            work_dir_path=str(resolved_work_dir) if resolved_work_dir else work_dir,
+        )
+        return {
+            "success": True,
+            "work_dir": str(resolved_work_dir) if resolved_work_dir else (work_dir or ""),
+            **result,
+        }
+    except (FileNotFoundError, NotADirectoryError) as e:
+        return {
+            "success": False,
+            "error": "BED source not found",
+            "detail": str(e),
+        }
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Invalid BED overlap request",
+            "detail": str(e),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "Failed to compare BED overlaps",
+            "detail": str(e),
+        }
+
+
 async def parse_xgenepy_outputs_tool(
     output_dir: str,
     work_dir: Optional[str] = None,
@@ -641,6 +698,7 @@ TOOL_REGISTRY = {
     "read_file_content": read_file_content_tool,
     "parse_csv_file": parse_csv_file_tool,
     "parse_bed_file": parse_bed_file_tool,
+    "compare_bed_region_overlaps": compare_bed_region_overlaps_tool,
     "parse_xgenepy_outputs": parse_xgenepy_outputs_tool,
     "get_analysis_summary": get_analysis_summary_tool,
     "categorize_job_files": categorize_job_files_tool,
@@ -783,6 +841,63 @@ TOOL_SCHEMAS = {
                 }
             },
             "required": ["file_path"]
+        }
+    },
+    "compare_bed_region_overlaps": {
+        "description": "Compare two BED files or folder-discovered BED files, treating even 1 bp overlaps as shared connected components. Returns overlap dataframes plus BED exports for shared and sample-specific regions.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "bed_a_path": {
+                    "type": "string",
+                    "description": "Explicit path to sample A BED file. Use this or folder_a."
+                },
+                "bed_b_path": {
+                    "type": "string",
+                    "description": "Explicit path to sample B BED file. Use this or folder_b."
+                },
+                "folder_a": {
+                    "type": "string",
+                    "description": "Folder to search recursively for sample A BED file when bed_a_path is not provided."
+                },
+                "folder_b": {
+                    "type": "string",
+                    "description": "Folder to search recursively for sample B BED file when bed_b_path is not provided."
+                },
+                "pattern_a": {
+                    "type": "string",
+                    "description": "Optional filename glob or substring for resolving sample A BED file. Newest match is selected."
+                },
+                "pattern_b": {
+                    "type": "string",
+                    "description": "Optional filename glob or substring for resolving sample B BED file. Newest match is selected."
+                },
+                "sample_a_label": {
+                    "type": "string",
+                    "description": "Optional display label for sample A. Defaults to the BED filename stem."
+                },
+                "sample_b_label": {
+                    "type": "string",
+                    "description": "Optional display label for sample B. Defaults to the BED filename stem."
+                },
+                "min_overlap_bp": {
+                    "type": "integer",
+                    "description": "Minimum overlap in base pairs for two regions to connect. Default: 1."
+                },
+                "export_dir": {
+                    "type": "string",
+                    "description": "Optional directory where shared/sample-specific BED exports should be written."
+                },
+                "work_dir": {
+                    "type": "string",
+                    "description": "Optional base directory for resolving relative paths."
+                },
+                "run_uuid": {
+                    "type": "string",
+                    "description": "Legacy analyzer run UUID. Only used to resolve work_dir when needed."
+                }
+            },
+            "required": []
         }
     },
     "parse_xgenepy_outputs": {

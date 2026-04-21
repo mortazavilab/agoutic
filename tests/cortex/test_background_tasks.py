@@ -927,6 +927,7 @@ class TestSubmitJobAfterApproval:
         run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_reconcile")
         assert run_step["status"] == "RUNNING"
         assert run_step["run_uuid"] == "script-run-1"
+        assert mock_client.call_tool.call_args.args[0] == "run_allowlisted_script"
         submitted = mock_client.call_tool.call_args.kwargs
         assert submitted["script_id"] == "reconcile_bams/reconcile_bams"
         assert submitted["script_args"][:7] == [
@@ -942,6 +943,89 @@ class TestSubmitJobAfterApproval:
         assert "--filter_known" in submitted["script_args"]
         job_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
         assert any(get_block_payload(block).get("run_type") == "script" for block in job_blocks)
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_script_submission_marks_generic_overlap_run_step_running(self, session_factory, seed_data):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "plan_type": "compare_region_overlaps",
+                "status": "RUNNING",
+                "current_step_id": "run_overlap",
+                "steps": [
+                    {
+                        "id": "approve_overlap",
+                        "kind": "REQUEST_APPROVAL",
+                        "status": "COMPLETED",
+                    },
+                    {
+                        "id": "run_overlap",
+                        "kind": "RUN_SCRIPT",
+                        "status": "PENDING",
+                    },
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        gate = _create_block_internal(
+            sess,
+            "proj-bg",
+            "APPROVAL_GATE",
+            {
+                "gate_action": "compare_region_overlaps",
+                "extracted_params": {
+                    "sample_name": "open_chromatin_overlap",
+                    "mode": "DNA",
+                    "input_directory": "/proj/current",
+                    "output_directory": "/proj/current/workflow7",
+                    "run_type": "script",
+                    "script_id": "analyze_job_results/compare_bed_region_overlaps",
+                    "script_args": [
+                        "--folder-a", "/data/projectA/workflow2/openChromatin",
+                        "--folder-b", "/data/projectB/workflow4/openChromatin",
+                        "--output-dir", "/proj/current/workflow7",
+                    ],
+                    "script_working_directory": "/proj/current",
+                    "workflow_block_id": workflow_block.id,
+                    "gate_action": "compare_region_overlaps",
+                },
+                "model": "default",
+            },
+            status="APPROVED",
+            owner_id="u-bg",
+        )
+        sess.commit()
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "script-run-overlap-1",
+            "work_directory": "/Users/alim/vscode/agoutic/skills/analyze_job_results/scripts",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        sess = session_factory()
+        workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        workflow_payload = get_block_payload(workflow)
+        run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_overlap")
+        assert run_step["status"] == "RUNNING"
+        assert run_step["run_uuid"] == "script-run-overlap-1"
+        assert mock_client.call_tool.call_args.args[0] == "run_allowlisted_script"
+        job_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").order_by(ProjectBlock.seq.desc()).first()
+        job_payload = get_block_payload(job_block)
+        assert job_payload["work_directory"] == "/proj/current/workflow7"
+        assert job_payload["run_type"] == "script"
         sess.close()
 
     @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from cortex.plan_params import build_de_group_clarification
 from cortex.planner import (
     _detect_plan_type,
     _extract_plan_params,
+    _template_compare_region_overlaps,
     _template_run_de_pipeline,
     _template_reconcile_bams,
     _template_remote_stage_workflow,
@@ -64,6 +65,45 @@ def test_detect_plan_type_matches_reconcile_bams_request():
 
 def test_detect_plan_type_matches_reconcile_the_bams_request():
     assert _detect_plan_type("I want to reconcile the bams of C2C12r1 and C2C12r3") == "reconcile_bams"
+
+
+def test_detect_plan_type_matches_region_overlap_request():
+    assert (
+        _detect_plan_type(
+            "make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4"
+        )
+        == "compare_region_overlaps"
+    )
+
+
+def test_generate_plan_uses_deterministic_region_overlap_template():
+    class _Engine:
+        def plan(self, *_args, **_kwargs):
+            raise AssertionError("deterministic overlap plans should not fall through to engine.plan")
+
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/users/ali-mortazavi/testvenn2/workflow1",
+    )
+
+    plan = generate_plan(
+        "make a venn diagram of the regions in testslopenchrom:workflow2 and testslopenchrom2:workflow3",
+        "analyze_job_results",
+        state,
+        _Engine(),
+        project_dir="/tmp/users/ali-mortazavi/testvenn2",
+    )
+
+    assert plan is not None
+    assert plan["plan_type"] == "compare_region_overlaps"
+    assert [step["kind"] for step in plan["steps"]] == [
+        "LOCATE_DATA",
+        "REQUEST_APPROVAL",
+        "RUN_SCRIPT",
+        "PARSE_OUTPUT_FILE",
+        "GENERATE_PLOT",
+    ]
 
 
 def test_detect_plan_type_matches_grouped_de_compare_request():
@@ -138,6 +178,50 @@ def test_reconcile_bams_template_locate_step_uses_workflow_annot_dirs():
             },
         },
     ]
+
+
+def test_extract_plan_params_region_overlap_uses_project_workflow_refs_and_new_workflow_dir(tmp_path):
+    project_dir = tmp_path / "active-project"
+    (project_dir / "workflow1").mkdir(parents=True)
+    (project_dir / "workflow3").mkdir()
+
+    params = _extract_plan_params(
+        "make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4",
+        ConversationState(active_skill="analyze_job_results", active_project="proj-1", work_dir=str(project_dir / "workflow3")),
+        "compare_region_overlaps",
+        str(project_dir),
+    )
+
+    assert params["folder_a"].endswith("/testslopenchrom/workflow2/openChromatin")
+    assert params["folder_b"].endswith("/testopenchrom2/workflow4/openChromatin")
+    assert params["pattern_a"] == "*.m6Aopen.bed"
+    assert params["pattern_b"] == "*.m6Aopen.bed"
+    assert params["output_directory"] == str(project_dir / "workflow4")
+    assert params["script_working_directory"] == str(project_dir)
+
+
+def test_compare_region_overlaps_template_uses_four_steps_plus_approval():
+    plan = _template_compare_region_overlaps(
+        {
+            "folder_a": "/data/user/testslopenchrom/workflow2/openChromatin",
+            "folder_b": "/data/user/testopenchrom2/workflow4/openChromatin",
+            "pattern_a": "*.m6Aopen.bed",
+            "pattern_b": "*.m6Aopen.bed",
+            "sample_a_label": "testslopenchrom:workflow2",
+            "sample_b_label": "testopenchrom2:workflow4",
+            "output_directory": "/projects/current/workflow7",
+            "script_working_directory": "/projects/current",
+            "input_directory": "/projects/current",
+            "plot_type": "venn",
+        }
+    )
+
+    kinds = [step["kind"] for step in plan["steps"]]
+    assert kinds == ["LOCATE_DATA", "REQUEST_APPROVAL", "RUN_SCRIPT", "PARSE_OUTPUT_FILE", "GENERATE_PLOT"]
+    assert plan["output_directory"] == "/projects/current/workflow7"
+    run_step = next(step for step in plan["steps"] if step["kind"] == "RUN_SCRIPT")
+    assert run_step["tool_calls"][0]["params"]["script_id"] == "analyze_job_results/compare_bed_region_overlaps"
+    assert "--output-dir" in run_step["tool_calls"][0]["params"]["script_args"]
 
 
 def test_reconcile_bams_template_defaults_output_directory_to_common_workflow_parent():

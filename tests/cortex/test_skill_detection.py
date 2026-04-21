@@ -205,6 +205,13 @@ class TestAnalyzeJobResults:
         result = _auto_detect_skill_switch("what files do I have?", "welcome")
         assert result is None
 
+    def test_project_workflow_region_venn_routes_to_analyze_job_results(self):
+        result = _auto_detect_skill_switch(
+            "make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4",
+            "welcome",
+        )
+        assert result == "analyze_job_results"
+
 
 class TestDownloadFiles:
     """Tests for routing to download_files skill."""

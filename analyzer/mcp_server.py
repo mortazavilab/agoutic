@@ -59,6 +59,37 @@ async def parse_bed_file(file_path: str, work_dir: str | None = None, run_uuid: 
     return await TOOL_REGISTRY["parse_bed_file"](file_path=file_path, work_dir=work_dir, run_uuid=run_uuid, max_records=max_records)
 
 @mcp.tool()
+async def compare_bed_region_overlaps(
+    bed_a_path: str | None = None,
+    bed_b_path: str | None = None,
+    folder_a: str | None = None,
+    folder_b: str | None = None,
+    pattern_a: str | None = None,
+    pattern_b: str | None = None,
+    sample_a_label: str | None = None,
+    sample_b_label: str | None = None,
+    min_overlap_bp: int = 1,
+    export_dir: str | None = None,
+    work_dir: str | None = None,
+    run_uuid: str | None = None,
+) -> Dict[str, Any]:
+    """Compare two BED sources and build overlap dataframes plus BED exports."""
+    return await TOOL_REGISTRY["compare_bed_region_overlaps"](
+        bed_a_path=bed_a_path,
+        bed_b_path=bed_b_path,
+        folder_a=folder_a,
+        folder_b=folder_b,
+        pattern_a=pattern_a,
+        pattern_b=pattern_b,
+        sample_a_label=sample_a_label,
+        sample_b_label=sample_b_label,
+        min_overlap_bp=min_overlap_bp,
+        export_dir=export_dir,
+        work_dir=work_dir,
+        run_uuid=run_uuid,
+    )
+
+@mcp.tool()
 async def parse_xgenepy_outputs(output_dir: str, work_dir: str | None = None, run_uuid: str | None = None, max_rows: int | None = 200) -> Dict[str, Any]:
     """Parse canonical XgenePy output artifacts and return structured result payloads."""
     return await TOOL_REGISTRY["parse_xgenepy_outputs"](output_dir=output_dir, work_dir=work_dir, run_uuid=run_uuid, max_rows=max_rows)

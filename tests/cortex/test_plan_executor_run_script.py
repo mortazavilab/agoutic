@@ -132,6 +132,69 @@ def test_run_script_is_not_auto_executed_by_default():
 
 
 @pytest.mark.asyncio
+async def test_generate_plot_builds_workflow_venn_from_overlap_membership_csv(monkeypatch):
+    payload = {
+        "plan_type": "compare_region_overlaps",
+        "sample_a_label": "Alpha",
+        "sample_b_label": "Beta",
+        "steps": [
+            {
+                "id": "parse1",
+                "kind": "PARSE_OUTPUT_FILE",
+                "title": "Parse overlap CSVs",
+                "status": "COMPLETED",
+                "depends_on": [],
+                "result": [
+                    {
+                        "tool": "parse_csv_file",
+                        "source_key": "analyzer",
+                        "result": {
+                            "file_path": "overlap_membership_components.csv",
+                            "columns": ["component_id", "Alpha", "Beta", "overlap_class"],
+                            "row_count": 3,
+                            "data": [
+                                {"component_id": "C1", "Alpha": True, "Beta": False, "overlap_class": "Alpha only"},
+                                {"component_id": "C2", "Alpha": True, "Beta": True, "overlap_class": "shared"},
+                                {"component_id": "C3", "Alpha": False, "Beta": True, "overlap_class": "Beta only"},
+                            ],
+                            "preview_rows": 3,
+                            "metadata": {},
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "plot1",
+                "kind": "GENERATE_PLOT",
+                "title": "Render venn",
+                "status": "PENDING",
+                "depends_on": ["parse1"],
+                "plot_type": "venn",
+            },
+        ],
+    }
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "plot1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    chart = result.data["charts"][0]
+    assert chart["type"] == "venn"
+    assert chart["sets"] == ["Alpha", "Beta"]
+    embedded = result.data["_dataframes"]
+    payload_frame = next(iter(embedded.values()))
+    assert payload_frame["metadata"]["kind"] == "overlap_membership"
+    assert payload_frame["metadata"]["set_columns"] == ["Alpha", "Beta"]
+
+
+@pytest.mark.asyncio
 async def test_execute_step_prepare_de_input_updates_follow_up_de_steps(monkeypatch, tmp_path):
     abundance_path = tmp_path / "reconciled_abundance.tsv"
     abundance_path.write_text(

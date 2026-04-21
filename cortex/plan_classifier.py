@@ -17,6 +17,22 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_PROJECT_WORKFLOW_REF_RE = re.compile(
+    r"\b[a-z0-9][a-z0-9_-]*\s*:\s*workflow\d+\b",
+    re.IGNORECASE,
+)
+_BED_PATH_RE = re.compile(r"(?:/|~|\.)[^\s,;]+\.bed\b", re.IGNORECASE)
+
+
+def _is_region_overlap_request(message: str) -> bool:
+    msg = (message or "").lower()
+    has_plot = any(token in msg for token in ("venn", "upset", "diagram"))
+    has_region_term = any(token in msg for token in ("region", "regions", "open chromatin", "chromatin"))
+    ref_count = len(_PROJECT_WORKFLOW_REF_RE.findall(message or ""))
+    if ref_count < 2:
+        ref_count = len(_BED_PATH_RE.findall(message or ""))
+    return has_plot and has_region_term and ref_count >= 2
+
 # ---------------------------------------------------------------------------
 # Multi-step / informational pattern lists
 # ---------------------------------------------------------------------------
@@ -223,6 +239,9 @@ def _detect_plan_type(message: str) -> str | None:
     for pat in _RECONCILE_BAMS_PATTERNS:
         if pat.search(message):
             return "reconcile_bams"
+
+    if _is_region_overlap_request(message):
+        return "compare_region_overlaps"
 
     # 2. Enrichment analysis
     for pat in _ENRICHMENT_PATTERNS:

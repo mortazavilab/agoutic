@@ -8,6 +8,7 @@ appropriate tool calls for ENCODE, Dogme, and browsing commands.
 
 import os
 import re
+from pathlib import Path
 
 from cortex.conversation_state import _extract_job_context_from_history
 from cortex.dataframe_actions import build_auto_dataframe_call
@@ -26,6 +27,48 @@ from cortex.path_helpers import (
 from common.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+_PROJECT_WORKFLOW_REF_RE = re.compile(
+    r'\b(?P<project>[a-z0-9][a-z0-9_-]*)\s*:\s*(?P<workflow>workflow\d+)\b',
+    re.IGNORECASE,
+)
+
+
+def _project_owner_root(project_dir: str, default_work_dir: str = "") -> str:
+    candidate = (project_dir or "").strip() or (default_work_dir or "").strip()
+    if not candidate:
+        return ""
+    candidate = candidate.rstrip("/")
+    if re.search(r'/workflow\d+$', candidate, re.IGNORECASE):
+        candidate = candidate.rsplit("/", 1)[0]
+    path = Path(candidate)
+    parent = path.parent
+    if not str(parent) or str(parent) == ".":
+        return ""
+    return str(parent)
+
+
+def _resolve_project_workflow_ref(ref: str, project_dir: str, default_work_dir: str = "") -> str:
+    match = _PROJECT_WORKFLOW_REF_RE.fullmatch((ref or "").strip())
+    if not match:
+        return ref
+    owner_root = _project_owner_root(project_dir, default_work_dir)
+    if not owner_root:
+        return ref
+    project_slug = match.group("project")
+    workflow_name = match.group("workflow")
+    return f"{owner_root.rstrip('/')}/{project_slug}/{workflow_name}/openChromatin"
+
+
+def _extract_region_overlap_refs(user_message: str) -> list[str]:
+    return [match.group(0) for match in _PROJECT_WORKFLOW_REF_RE.finditer(user_message or "")]
+
+
+def _wants_region_overlap_plot(user_message: str) -> bool:
+    msg = (user_message or "").lower()
+    has_plot = any(token in msg for token in ("venn", "upset", "diagram"))
+    has_region_term = any(token in msg for token in ("region", "regions", "open chromatin", "chromatin"))
+    return has_plot and has_region_term
 
 
 def _is_script_source_dir(path_value: str) -> bool:
@@ -146,6 +189,11 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     _df_action_call = build_auto_dataframe_call(user_message)
     if _df_action_call is not None:
         return [_df_action_call]
+
+    # --- Cross-project BED overlap requests must use the workflow planner ---
+    _region_overlap_refs = _extract_region_overlap_refs(user_message)
+    if len(_region_overlap_refs) >= 2 and _wants_region_overlap_plot(user_message):
+        return calls
 
     # --- DF reference / visualization follow-up: never auto-call ---
     # If the user references an existing DataFrame (DF1, DF2, ...) this is
@@ -902,6 +950,14 @@ def _validate_analyzer_params(
     """
     params = dict(params)  # shallow copy
 
+    def _normalize_overlap_folder_ref(value: str, *, current_project_dir: str, current_default_wd: str) -> str:
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return stripped
+        return _resolve_project_workflow_ref(stripped, current_project_dir, current_default_wd)
+
     # --- Strip unknown params for each tool ---
     _KNOWN_PARAMS: dict[str, set[str]] = {
         "list_job_files": {"work_dir", "run_uuid", "extensions", "compact", "max_depth"},
@@ -909,6 +965,11 @@ def _validate_analyzer_params(
         "read_file_content": {"file_path", "work_dir", "run_uuid", "preview_lines"},
         "parse_csv_file": {"file_path", "work_dir", "run_uuid", "max_rows"},
         "parse_bed_file": {"file_path", "work_dir", "run_uuid", "max_records"},
+        "compare_bed_region_overlaps": {
+            "bed_a_path", "bed_b_path", "folder_a", "folder_b",
+            "pattern_a", "pattern_b", "sample_a_label", "sample_b_label",
+            "min_overlap_bp", "export_dir", "work_dir", "run_uuid",
+        },
         "get_analysis_summary": {"run_uuid", "work_dir"},
         "categorize_job_files": {"work_dir", "run_uuid"},
     }
@@ -1017,6 +1078,18 @@ def _validate_analyzer_params(
     # Fallback: use the project directory if no workflow-level work_dir
     if not real_wd and project_dir:
         real_wd = project_dir
+
+    if tool == "compare_bed_region_overlaps":
+        for overlap_key in ("folder_a", "folder_b", "bed_a_path", "bed_b_path"):
+            if overlap_key in params:
+                params[overlap_key] = _normalize_overlap_folder_ref(
+                    params.get(overlap_key),
+                    current_project_dir=project_dir,
+                    current_default_wd=real_wd,
+                )
+        params.setdefault("pattern_a", "*.m6Aopen.bed")
+        params.setdefault("pattern_b", "*.m6Aopen.bed")
+        params.setdefault("min_overlap_bp", 1)
     if real_wd and project_dir and _is_script_source_dir(real_wd):
         real_wd = _latest_workflow_dir(project_dir) or project_dir
     workflows = ctx.get("workflows", [])

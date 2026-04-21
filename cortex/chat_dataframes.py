@@ -80,6 +80,9 @@ def extract_embedded_dataframes(
         for r in src_results:
             tool = r.get("tool", "")
 
+            if "data" in r:
+                _extract_dataframe_bundle(r, embedded)
+
             if tool in ("parse_csv_file", "parse_bed_file") and "data" in r:
                 _extract_file_parse(r, embedded)
 
@@ -106,6 +109,31 @@ def extract_embedded_dataframes(
                 _extract_search_results(r, table_cols, embedded)
 
     return embedded
+
+
+def _extract_dataframe_bundle(r: dict, embedded: dict) -> None:
+    rd = r.get("data")
+    if not isinstance(rd, dict):
+        return
+    bundle = rd.get("_dataframes")
+    if not isinstance(bundle, dict):
+        return
+
+    for label, payload in bundle.items():
+        if not isinstance(payload, dict):
+            continue
+        rows = payload.get("data")
+        columns = payload.get("columns")
+        if not isinstance(rows, list) or not isinstance(columns, list):
+            continue
+        metadata = dict(payload.get("metadata") or {})
+        metadata.setdefault("label", label)
+        embedded[label] = {
+            "columns": columns,
+            "data": rows,
+            "row_count": payload.get("row_count", len(rows)),
+            "metadata": metadata,
+        }
 
 
 def _extract_file_parse(r: dict, embedded: dict) -> None:
@@ -540,7 +568,15 @@ def apply_overlap_message_hints(
             max_count=set_limit,
         )
         if len(explicit_sets) < 2:
-            continue
+            metadata = payload.get("metadata") or {}
+            metadata_sets = [
+                str(value) for value in (metadata.get("set_columns") or [])
+                if isinstance(value, str) and value.strip()
+            ]
+            if 2 <= len(metadata_sets) <= set_limit:
+                explicit_sets = metadata_sets
+            else:
+                continue
         spec["sets"] = "|".join(explicit_sets)
         logger.info(
             "Applied overlap plot message hints",

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from pathlib import Path
 from typing import Any
 
 from common.logging_config import get_logger
@@ -1126,6 +1127,167 @@ def _template_compare_workflows(params: dict) -> dict:
         "auto_execute_safe_steps": True,
         "status": "PENDING",
         "current_step_id": steps[0]["id"],
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
+def _template_compare_region_overlaps(params: dict) -> dict:
+    output_directory = str(params.get("output_directory") or "").strip()
+    script_working_directory = str(params.get("script_working_directory") or params.get("input_directory") or ".").strip()
+    sample_a_label = str(params.get("sample_a_label") or "Sample A").strip() or "Sample A"
+    sample_b_label = str(params.get("sample_b_label") or "Sample B").strip() or "Sample B"
+    plot_type = str(params.get("plot_type") or "venn").strip().lower() or "venn"
+
+    locate_calls: list[dict[str, Any]] = []
+    folder_a = str(params.get("folder_a") or "").strip()
+    folder_b = str(params.get("folder_b") or "").strip()
+    bed_a_path = str(params.get("bed_a_path") or "").strip()
+    bed_b_path = str(params.get("bed_b_path") or "").strip()
+    pattern_a = str(params.get("pattern_a") or "*.bed").strip() or "*.bed"
+    pattern_b = str(params.get("pattern_b") or "*.bed").strip() or "*.bed"
+
+    if folder_a:
+        locate_calls.append({
+            "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": {
+                "work_dir": folder_a,
+                "extensions": ".bed",
+                "max_depth": 3,
+                "name_pattern": pattern_a,
+            },
+        })
+    elif bed_a_path:
+        locate_calls.append({
+            "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": {
+                "work_dir": str(Path(bed_a_path).parent),
+                "extensions": ".bed",
+                "max_depth": 1,
+                "name_pattern": Path(bed_a_path).name,
+            },
+        })
+
+    if folder_b:
+        locate_calls.append({
+            "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": {
+                "work_dir": folder_b,
+                "extensions": ".bed",
+                "max_depth": 3,
+                "name_pattern": pattern_b,
+            },
+        })
+    elif bed_b_path:
+        locate_calls.append({
+            "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": {
+                "work_dir": str(Path(bed_b_path).parent),
+                "extensions": ".bed",
+                "max_depth": 1,
+                "name_pattern": Path(bed_b_path).name,
+            },
+        })
+
+    script_args = ["--output-dir", output_directory, "--min-overlap-bp", str(int(params.get("min_overlap_bp", 1) or 1))]
+    if folder_a:
+        script_args.extend(["--folder-a", folder_a, "--pattern-a", pattern_a])
+    elif bed_a_path:
+        script_args.extend(["--bed-a-path", bed_a_path])
+    if folder_b:
+        script_args.extend(["--folder-b", folder_b, "--pattern-b", pattern_b])
+    elif bed_b_path:
+        script_args.extend(["--bed-b-path", bed_b_path])
+    script_args.extend(["--sample-a-label", sample_a_label, "--sample-b-label", sample_b_label])
+
+    steps = []
+    idx = 0
+
+    s_locate = _make_step(
+        "LOCATE_DATA",
+        f"Identify region files for {sample_a_label} and {sample_b_label}",
+        idx,
+        tool_calls=locate_calls,
+    )
+    steps.append(s_locate)
+    idx += 1
+
+    s_approve = _make_step(
+        "REQUEST_APPROVAL",
+        "Approve overlap CSV generation",
+        idx,
+        requires_approval=True,
+        depends_on=[s_locate["id"]],
+    )
+    steps.append(s_approve)
+    idx += 1
+
+    s_run = _make_step(
+        "RUN_SCRIPT",
+        "Run BED overlap script and write overlap CSV outputs",
+        idx,
+        requires_approval=True,
+        depends_on=[s_approve["id"]],
+        tool_calls=[
+            {
+                "source_key": "launchpad",
+                "tool": "run_allowlisted_script",
+                "params": {
+                    "script_id": "analyze_job_results/compare_bed_region_overlaps",
+                    "script_args": script_args,
+                    "script_working_directory": script_working_directory,
+                },
+            }
+        ],
+    )
+    steps.append(s_run)
+    idx += 1
+
+    s_parse = _make_step(
+        "PARSE_OUTPUT_FILE",
+        "Read overlap CSV outputs into dataframes",
+        idx,
+        depends_on=[s_run["id"]],
+    )
+    steps.append(s_parse)
+    idx += 1
+
+    s_plot = _make_step(
+        "GENERATE_PLOT",
+        f"Render {plot_type} diagram from overlap membership dataframe",
+        idx,
+        depends_on=[s_parse["id"]],
+    )
+    s_plot["plot_type"] = plot_type
+    steps.append(s_plot)
+
+    return {
+        "plan_type": "compare_region_overlaps",
+        "title": f"Compare open chromatin regions: {sample_a_label} vs {sample_b_label}",
+        "goal": params.get("goal", f"Compare BED region overlaps for {sample_a_label} and {sample_b_label}"),
+        "workflow_type": "compare_region_overlaps",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "sample_name": params.get("sample_name", "open_chromatin_overlap"),
+        "mode": params.get("mode", "DNA"),
+        "input_directory": params.get("input_directory") or script_working_directory,
+        "output_directory": output_directory,
+        "script_working_directory": script_working_directory,
+        "folder_a": folder_a,
+        "folder_b": folder_b,
+        "bed_a_path": bed_a_path,
+        "bed_b_path": bed_b_path,
+        "pattern_a": pattern_a,
+        "pattern_b": pattern_b,
+        "sample_a_label": sample_a_label,
+        "sample_b_label": sample_b_label,
+        "plot_type": plot_type,
+        "min_overlap_bp": int(params.get("min_overlap_bp", 1) or 1),
         "steps": steps,
         "artifacts": [],
     }

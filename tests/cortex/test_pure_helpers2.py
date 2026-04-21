@@ -423,6 +423,22 @@ class TestValidateAnalyzerParams:
         assert result["max_depth"] == 1
         assert "__routing_error__" not in result
 
+    def test_compare_bed_overlap_resolves_project_workflow_shorthand(self):
+        result = _validate_analyzer_params(
+            tool="compare_bed_region_overlaps",
+            params={
+                "folder_a": "testslopenchrom:workflow2",
+                "folder_b": "testopenchrom2:workflow4",
+            },
+            user_message="make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4",
+            project_dir="/media/backup_disk/agoutic_root/users/ali-mortazavi/current-project",
+        )
+        assert result["folder_a"] == "/media/backup_disk/agoutic_root/users/ali-mortazavi/testslopenchrom/workflow2/openChromatin"
+        assert result["folder_b"] == "/media/backup_disk/agoutic_root/users/ali-mortazavi/testopenchrom2/workflow4/openChromatin"
+        assert result["pattern_a"] == "*.m6Aopen.bed"
+        assert result["pattern_b"] == "*.m6Aopen.bed"
+        assert result["min_overlap_bp"] == 1
+
 
 # ======================================================================
 # _build_auto_analysis_context

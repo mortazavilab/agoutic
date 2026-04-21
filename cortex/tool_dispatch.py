@@ -197,6 +197,9 @@ _BASE_TOOL_ALIASES: dict[str, str] = {
     "get_file": "read_file_content",
     "parse_csv": "parse_csv_file",
     "parse_bed": "parse_bed_file",
+    "compare_bed_files": "compare_bed_region_overlaps",
+    "compare_bed_overlaps": "compare_bed_region_overlaps",
+    "overlap_bed_files": "compare_bed_region_overlaps",
     "analysis_summary": "get_analysis_summary",
     "job_summary": "get_analysis_summary",
     # Compatibility fallback for hallucinated BAM-detail request tool.

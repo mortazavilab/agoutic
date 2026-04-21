@@ -94,6 +94,29 @@ def _build_reconcile_script_args(job_params: dict) -> list[str]:
     return script_args
 
 
+def _build_script_submission_payload(job_data: dict) -> dict:
+    script_id = str(job_data.get("script_id") or "").strip()
+    script_path = str(job_data.get("script_path") or "").strip()
+    if not script_id and not script_path:
+        raise ValueError("Script approval is missing both script_id and script_path.")
+
+    submission_payload: dict = {}
+    if script_id:
+        submission_payload["script_id"] = script_id
+    if script_path:
+        submission_payload["script_path"] = script_path
+
+    script_args = job_data.get("script_args")
+    if isinstance(script_args, list):
+        submission_payload["script_args"] = list(script_args)
+
+    script_working_directory = str(job_data.get("script_working_directory") or "").strip()
+    if script_working_directory:
+        submission_payload["script_working_directory"] = script_working_directory
+
+    return submission_payload
+
+
 def _remote_stage_data_action(job_data: dict) -> tuple[dict, str]:
     cache_preflight = job_data.get("cache_preflight")
     if not isinstance(cache_preflight, dict):
@@ -455,8 +478,13 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         logger.info("Job parameters prepared", source="edited" if gate_payload.get('edited_params') else "extracted",
                     job_data=job_data)
 
-        submission_payload = dict(job_data)
-        submission_payload.pop("staged_input_directory", None)
+        if run_type == "script":
+            submission_tool = "run_allowlisted_script"
+            submission_payload = _build_script_submission_payload(job_data)
+        else:
+            submission_tool = "submit_dogme_job"
+            submission_payload = dict(job_data)
+            submission_payload.pop("staged_input_directory", None)
 
         workflow_payload = get_block_payload(workflow_block) if workflow_block is not None else None
         check_remote_stage_step_id = None
@@ -668,7 +696,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=900.0)
             await client.connect()
             try:
-                result = await client.call_tool("submit_dogme_job", **submission_payload)
+                result = await client.call_tool(submission_tool, **submission_payload)
             finally:
                 await client.disconnect()
         except Exception as e:

@@ -10,6 +10,7 @@ Ten plan templates:
   - run_workflow: Analyze a local sample (stage → run → analyze)
     - remote_stage_workflow: Stage a sample on a remote SLURM target for later reuse
   - compare_samples: Compare two or more samples
+    - compare_region_overlaps: Identify BEDs, run overlap script, parse CSVs, render venn/upset
   - download_analyze: Download from ENCODE/URL, then analyze
   - summarize_results: Summarize existing completed job results
   - run_de_pipeline: Full differential expression analysis
@@ -51,6 +52,7 @@ from cortex.plan_templates import (  # noqa: F401 — re-exported
     _plan_instance_id,
     _step_id,
     _template_compare_samples,
+    _template_compare_region_overlaps,
     _template_compare_workflows,
     _template_download_analyze,
     _template_parse_plot_interpret,
@@ -170,6 +172,8 @@ def _apply_manifest_planning_metadata(
 def _deterministic_template_for_plan_type(plan_type: str, params: dict) -> dict | None:
     if plan_type == "compare_samples":
         return _template_compare_samples(params)
+    if plan_type == "compare_region_overlaps":
+        return _template_compare_region_overlaps(params)
     if plan_type == "download_analyze":
         return _template_download_analyze(params)
     if plan_type == "summarize_results":
@@ -698,6 +702,14 @@ def generate_plan(
     if plan_type == "run_workflow":
         plan = _apply_manifest_planning_metadata(
             _template_run_workflow(params),
+            plan_type=plan_type,
+            params=params,
+        )
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return _finalize_plan(plan, conv_state)
+    if plan_type == "compare_region_overlaps":
+        plan = _apply_manifest_planning_metadata(
+            _template_compare_region_overlaps(params),
             plan_type=plan_type,
             params=params,
         )

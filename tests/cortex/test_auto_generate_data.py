@@ -586,6 +586,15 @@ class TestDogmeFileParsing:
 # ---------------------------------------------------------------------------
 
 class TestAnalyzeJobResultsCatchAll:
+    def test_region_overlap_prompt_does_not_auto_generate_local_analyzer_call(self):
+        calls = _auto_generate_data_calls(
+            "make a venn diagram of the regions in testslopenchrom:workflow2 and testslopenchrom2:workflow3",
+            "analyze_job_results",
+            project_dir="/tmp/users/ali-mortazavi/current-project",
+        )
+
+        assert calls == []
+
     def test_auto_generates_summary(self):
         blocks = _make_blocks([
             {"type": "EXECUTION_JOB", "payload": {

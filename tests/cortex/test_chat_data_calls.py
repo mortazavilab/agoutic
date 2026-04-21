@@ -184,6 +184,143 @@ class TestPlotTagParsing:
         assert "[TOOL_CALLS]PLOT:" not in agent_markdown
         assert "Let me create a visualization" in agent_markdown
 
+    def test_bed_overlap_tool_bundle_drives_venn_fallback(self, SL, seed, tmp_path):
+        analyzer_mcp = AsyncMock()
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            assert tool_name == "compare_bed_region_overlaps"
+            return {
+                "success": True,
+                "comparison_label": "Alpha vs Beta",
+                "_dataframes": {
+                    "Shared open chromatin overlaps (Alpha vs Beta)": {
+                        "columns": ["component_id", "chrom", "component_start", "component_end"],
+                        "data": [
+                            {"component_id": "C1", "chrom": "chr1", "component_start": 10, "component_end": 40},
+                        ],
+                        "row_count": 1,
+                        "metadata": {"visible": True, "label": "Shared open chromatin overlaps (Alpha vs Beta)"},
+                    },
+                    "Overlap membership components (Alpha vs Beta)": {
+                        "columns": ["component_id", "Alpha", "Beta"],
+                        "data": [
+                            {"component_id": "C1", "Alpha": True, "Beta": True},
+                            {"component_id": "C2", "Alpha": True, "Beta": False},
+                            {"component_id": "C3", "Alpha": False, "Beta": True},
+                        ],
+                        "row_count": 3,
+                        "metadata": {
+                            "visible": True,
+                            "label": "Overlap membership components (Alpha vs Beta)",
+                            "kind": "overlap_membership",
+                            "set_columns": ["Alpha", "Beta"],
+                        },
+                    },
+                },
+            }
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+
+        def think(msg, skill, history):
+            return (
+                "[[DATA_CALL: service=analyzer, tool=compare_bed_region_overlaps, bed_a_path=/tmp/alpha.bed, bed_b_path=/tmp/beta.bed, sample_a_label=Alpha, sample_b_label=Beta, min_overlap_bp=1]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=analyzer_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+
+        resp = _chat(
+            client,
+            "make a venn diagram of the shared open chromatin regions between alpha and beta",
+            skill="run_dogme_dna",
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
+        assert chart["type"] == "venn"
+        assert chart["df_id"] == 2
+        assert chart["sets"] == "Alpha|Beta"
+
+        payload = (data.get("agent_block") or {}).get("payload") or {}
+        embedded = payload.get("_dataframes") or {}
+        assert "Shared open chromatin overlaps (Alpha vs Beta)" in embedded
+        membership_payloads = [
+            value for value in embedded.values()
+            if (value.get("metadata") or {}).get("kind") == "overlap_membership"
+        ]
+        assert membership_payloads
+        assert any((value.get("metadata") or {}).get("df_id") == 2 for value in membership_payloads)
+
+    def test_project_workflow_shorthand_auto_generates_bed_overlap_call(self, SL, seed, tmp_path):
+        analyzer_mcp = AsyncMock()
+        observed: dict[str, dict] = {}
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            observed["tool"] = tool_name
+            observed["params"] = dict(kwargs)
+            return {
+                "success": True,
+                "comparison_label": "Auto overlap",
+                "_dataframes": {
+                    "Overlap membership components (Auto overlap)": {
+                        "columns": ["component_id", "A", "B"],
+                        "data": [
+                            {"component_id": "C1", "A": True, "B": True},
+                            {"component_id": "C2", "A": True, "B": False},
+                            {"component_id": "C3", "A": False, "B": True},
+                        ],
+                        "row_count": 3,
+                        "metadata": {
+                            "visible": True,
+                            "label": "Overlap membership components (Auto overlap)",
+                            "kind": "overlap_membership",
+                            "set_columns": ["A", "B"],
+                        },
+                    },
+                },
+            }
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+
+        def think(msg, skill, history):
+            return (
+                "I will compare those workflow regions.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=analyzer_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+
+        resp = _chat(
+            client,
+            "make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4",
+            skill="welcome",
+        )
+
+        assert resp.status_code == 200
+        assert observed["tool"] == "compare_bed_region_overlaps"
+        assert observed["params"]["folder_a"] == str((tmp_path / "testslopenchrom" / "workflow2" / "openChromatin").resolve())
+        assert observed["params"]["folder_b"] == str((tmp_path / "testopenchrom2" / "workflow4" / "openChromatin").resolve())
+        assert observed["params"]["pattern_a"] == "*.m6Aopen.bed"
+        assert observed["params"]["pattern_b"] == "*.m6Aopen.bed"
+        assert observed["params"]["min_overlap_bp"] == 1
+
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
+        assert chart["type"] == "venn"
+
     def test_plot_payload_preserves_ylabel(self, SL, seed, tmp_path):
         s = SL()
         df_block = ProjectBlock(

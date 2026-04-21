@@ -18,12 +18,14 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 - BAM-adjacent result triage using supported Analyzer tools only (`list_job_files`,
   `find_file`, `read_file_content`, `parse_csv_file`, `parse_bed_file`) when
   direct BAM inspection tools are unavailable
+- Cross-workflow region comparisons that reference results as `project_slug:workflowN`, especially Venn/UpSet requests over Fiber-seq open-chromatin BED outputs
 
 **Example questions:**
 - "Analyze job results for UUID xyz"
 - "Show me what files are available for this job"
 - "Give me a QC report"
 - "What's the status of recently completed jobs?"
+- "Make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4"
 
 ### ❌ This Skill Does NOT Handle:
 
@@ -83,6 +85,29 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 * `analysis_type`: (String, Optional) Type of analysis: "qc_report", "summary", "detailed", "files_only"
 * `bed_file_path`: (String, Optional) Absolute or workflow-relative BED file path when the user asks for chromosome-region counts
 * `modification_name`: (String, Optional) Modification token such as `inosine` or `m6A` when the user asks for modification counts by chromosome
+* `project_slug:workflowN`: (String, Optional) Cross-project shorthand for server-hosted completed workflows. For region-overlap requests, resolve this to the workflow's `openChromatin/` folder.
+
+## Cross-Workflow Region Overlap Shorthand
+
+When the user asks to compare completed workflow regions using a shorthand like:
+
+`testslopenchrom:workflow2`
+
+interpret that as the server-hosted workflow folder for that project slug and workflow number. For Fiber-seq open-chromatin overlap/Venn requests:
+
+1. Resolve each `project_slug:workflowN` reference to that workflow's `openChromatin/` folder.
+2. Use Analyzer tool `compare_bed_region_overlaps`.
+3. Default both folder patterns to `*.m6Aopen.bed`.
+4. Default `min_overlap_bp=1` so even a 1 bp interval overlap counts as shared.
+5. Let Cortex render the Venn from the returned overlap-membership dataframe.
+
+Canonical example:
+
+```text
+[[DATA_CALL: service=analyzer, tool=compare_bed_region_overlaps, folder_a=testslopenchrom:workflow2, folder_b=testopenchrom2:workflow4, pattern_a=*.m6Aopen.bed, pattern_b=*.m6Aopen.bed, min_overlap_bp=1]]
+```
+
+Do not ask the user for explicit BED paths when the `project_slug:workflowN` references are already present.
 
 ## Bundled Script: Count BED Regions per Chromosome
 

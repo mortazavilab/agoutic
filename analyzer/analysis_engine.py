@@ -6,6 +6,8 @@ Handles file discovery, parsing, and analysis of Dogme job results.
 import csv
 import fnmatch
 import json
+import re
+from collections import OrderedDict
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -434,6 +436,454 @@ def _safe_scalar(val) -> Any:
     return val
 
 
+def _parse_bed_records_from_path(
+    full_path: Path,
+    max_records: Optional[int] = None,
+) -> Tuple[List[BedRecord], int]:
+    """Parse BED records from an absolute file path."""
+    records: list[BedRecord] = []
+    total_records = 0
+
+    try:
+        with open(full_path, 'r', encoding='utf-8') as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith('#') or line.startswith('track') or line.startswith('browser'):
+                    continue
+
+                fields = line.split('\t')
+                if len(fields) < 3:
+                    raise ValueError(f"BED line has fewer than 3 columns: {line}")
+
+                chrom_start = int(fields[1])
+                chrom_end = int(fields[2])
+                if chrom_end <= chrom_start:
+                    continue
+
+                total_records += 1
+                if max_records is not None and len(records) >= max_records:
+                    continue
+
+                record = BedRecord(
+                    chrom=fields[0],
+                    chromStart=chrom_start,
+                    chromEnd=chrom_end,
+                    name=fields[3] if len(fields) > 3 else None,
+                    score=float(fields[4]) if len(fields) > 4 and fields[4] != '.' else None,
+                    strand=fields[5] if len(fields) > 5 else None,
+                    extra_fields={},
+                )
+                if len(fields) > 6:
+                    for index, field in enumerate(fields[6:], start=6):
+                        if index < len(BED_COLUMNS):
+                            record.extra_fields[BED_COLUMNS[index]] = field
+                        else:
+                            record.extra_fields[f"field_{index}"] = field
+                records.append(record)
+    except Exception as exc:
+        raise ValueError(f"Error parsing BED file: {exc}") from exc
+
+    return records, total_records
+
+
+def _resolve_input_path(
+    path_value: str,
+    *,
+    work_dir_path: Optional[str] = None,
+    expect_dir: bool = False,
+) -> Path:
+    """Resolve an input path that may be absolute or relative to work_dir."""
+    candidate = Path(path_value).expanduser()
+    if not candidate.is_absolute():
+        if not work_dir_path:
+            raise ValueError(f"Relative path requires work_dir: {path_value}")
+        candidate = Path(work_dir_path).expanduser() / candidate
+    resolved = candidate.resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"Path not found: {resolved}")
+    if expect_dir and not resolved.is_dir():
+        raise NotADirectoryError(f"Expected a directory: {resolved}")
+    if not expect_dir and not resolved.is_file():
+        raise FileNotFoundError(f"Expected a file: {resolved}")
+    return resolved
+
+
+def _matches_bed_pattern(file_path: Path, pattern: str) -> bool:
+    if file_path.suffix.lower() != '.bed':
+        return False
+    normalized = (pattern or "*.bed").strip()
+    if not normalized:
+        return True
+    if any(token in normalized for token in "*?["):
+        return fnmatch.fnmatch(file_path.name, normalized) or fnmatch.fnmatch(str(file_path), normalized)
+    return normalized.lower() in file_path.name.lower()
+
+
+def _resolve_bed_source(
+    *,
+    bed_path: Optional[str],
+    folder_path: Optional[str],
+    pattern: Optional[str],
+    sample_label: Optional[str],
+    work_dir_path: Optional[str],
+) -> Dict[str, Any]:
+    if bed_path:
+        resolved_path = _resolve_input_path(bed_path, work_dir_path=work_dir_path, expect_dir=False)
+        return {
+            "path": resolved_path,
+            "label": sample_label or resolved_path.stem,
+            "source_mode": "explicit_path",
+            "search_pattern": None,
+        }
+
+    if not folder_path:
+        raise ValueError("Each BED source needs either an explicit bed_path or a folder_path.")
+
+    resolved_folder = _resolve_input_path(folder_path, work_dir_path=work_dir_path, expect_dir=True)
+    search_pattern = pattern or "*.bed"
+    matches = [
+        candidate for candidate in resolved_folder.rglob("*")
+        if candidate.is_file() and _matches_bed_pattern(candidate, search_pattern)
+    ]
+    if not matches:
+        raise FileNotFoundError(
+            f"No BED files matched pattern '{search_pattern}' under {resolved_folder}"
+        )
+
+    selected = sorted(matches, key=lambda candidate: (candidate.stat().st_mtime, str(candidate)))[-1]
+    return {
+        "path": selected,
+        "label": sample_label or selected.stem,
+        "source_mode": "folder_search",
+        "search_pattern": search_pattern,
+        "search_root": str(resolved_folder),
+        "matched_count": len(matches),
+    }
+
+
+def _deduplicate_sample_labels(label_a: str, label_b: str) -> Tuple[str, str]:
+    if label_a.strip().lower() != label_b.strip().lower():
+        return label_a, label_b
+    return f"{label_a} (A)", f"{label_b} (B)"
+
+
+def _slugify_label(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", (value or "sample").strip()).strip("_")
+    return cleaned or "sample"
+
+
+def _format_interval_strings(intervals: List[Dict[str, Any]]) -> str:
+    return "; ".join(
+        f"{interval['chrom']}:{interval['start']}-{interval['end']}"
+        for interval in intervals
+    )
+
+
+def _serialize_component_rows(rows: List[Dict[str, Any]], columns: List[str]) -> List[Dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for row in rows:
+        serialized.append({column: row.get(column) for column in columns})
+    return serialized
+
+
+def _write_bed_rows(path: Path, rows: List[Dict[str, Any]], name_key: str) -> None:
+    with open(path, 'w', encoding='utf-8', newline='') as handle:
+        writer = csv.writer(handle, delimiter='\t')
+        for row in rows:
+            chrom = row.get('chrom')
+            start = row.get('bed_start')
+            end = row.get('bed_end')
+            if chrom is None or start is None or end is None:
+                continue
+            writer.writerow([chrom, int(start), int(end), row.get(name_key) or row.get('component_id') or 'component'])
+
+
+def compare_bed_region_overlaps(
+    *,
+    bed_a_path: Optional[str] = None,
+    bed_b_path: Optional[str] = None,
+    folder_a: Optional[str] = None,
+    folder_b: Optional[str] = None,
+    pattern_a: Optional[str] = None,
+    pattern_b: Optional[str] = None,
+    sample_a_label: Optional[str] = None,
+    sample_b_label: Optional[str] = None,
+    min_overlap_bp: int = 1,
+    export_dir: Optional[str] = None,
+    work_dir_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compare two BED files and build connected overlap-component tables."""
+    if min_overlap_bp < 1:
+        raise ValueError("min_overlap_bp must be at least 1")
+
+    resolved_a = _resolve_bed_source(
+        bed_path=bed_a_path,
+        folder_path=folder_a,
+        pattern=pattern_a,
+        sample_label=sample_a_label,
+        work_dir_path=work_dir_path,
+    )
+    resolved_b = _resolve_bed_source(
+        bed_path=bed_b_path,
+        folder_path=folder_b,
+        pattern=pattern_b,
+        sample_label=sample_b_label,
+        work_dir_path=work_dir_path,
+    )
+
+    label_a, label_b = _deduplicate_sample_labels(
+        str(resolved_a["label"]),
+        str(resolved_b["label"]),
+    )
+    resolved_a["label"] = label_a
+    resolved_b["label"] = label_b
+
+    chrom_groups: dict[str, list[dict[str, Any]]] = {}
+    for sample_key, source in (("a", resolved_a), ("b", resolved_b)):
+        records, total_records = _parse_bed_records_from_path(source["path"])
+        source["record_count"] = total_records
+        intervals = chrom_groups
+        for record in records:
+            interval = {
+                "sample_key": sample_key,
+                "sample_label": source["label"],
+                "chrom": record.chrom,
+                "start": int(record.chromStart),
+                "end": int(record.chromEnd),
+                "name": record.name,
+            }
+            intervals.setdefault(record.chrom, []).append(interval)
+
+    all_components: list[dict[str, Any]] = []
+    component_index = 1
+    overlap_threshold = min_overlap_bp
+    for chrom in sorted(chrom_groups):
+        chrom_intervals = sorted(chrom_groups[chrom], key=lambda item: (item["start"], item["end"], item["sample_key"]))
+        current: Optional[dict[str, Any]] = None
+        for interval in chrom_intervals:
+            if current is None:
+                current = {
+                    "chrom": chrom,
+                    "component_start": interval["start"],
+                    "component_end": interval["end"],
+                    "intervals": [interval],
+                }
+                continue
+
+            if interval["start"] <= current["component_end"] - overlap_threshold:
+                current["intervals"].append(interval)
+                current["component_end"] = max(current["component_end"], interval["end"])
+                continue
+
+            all_components.append(current)
+            current = {
+                "chrom": chrom,
+                "component_start": interval["start"],
+                "component_end": interval["end"],
+                "intervals": [interval],
+            }
+
+        if current is not None:
+            all_components.append(current)
+
+    component_rows: list[dict[str, Any]] = []
+    shared_rows: list[dict[str, Any]] = []
+    sample_a_only_rows: list[dict[str, Any]] = []
+    sample_b_only_rows: list[dict[str, Any]] = []
+
+    for component in all_components:
+        sample_a_intervals = [item for item in component["intervals"] if item["sample_key"] == "a"]
+        sample_b_intervals = [item for item in component["intervals"] if item["sample_key"] == "b"]
+        has_a = bool(sample_a_intervals)
+        has_b = bool(sample_b_intervals)
+        component_id = f"C{component_index}"
+        component_index += 1
+
+        row = {
+            "component_id": component_id,
+            "chrom": component["chrom"],
+            "component_start": component["component_start"],
+            "component_end": component["component_end"],
+            label_a: has_a,
+            label_b: has_b,
+            "overlap_class": "shared" if has_a and has_b else (f"{label_a} only" if has_a else f"{label_b} only"),
+            "sample_a_start": min((item["start"] for item in sample_a_intervals), default=None),
+            "sample_a_end": max((item["end"] for item in sample_a_intervals), default=None),
+            "sample_b_start": min((item["start"] for item in sample_b_intervals), default=None),
+            "sample_b_end": max((item["end"] for item in sample_b_intervals), default=None),
+            "sample_a_interval_count": len(sample_a_intervals),
+            "sample_b_interval_count": len(sample_b_intervals),
+            "sample_a_regions": _format_interval_strings(sample_a_intervals) if has_a else "",
+            "sample_b_regions": _format_interval_strings(sample_b_intervals) if has_b else "",
+        }
+        component_rows.append(row)
+
+        if has_a and has_b:
+            shared_rows.append({
+                **row,
+                "bed_start": row["component_start"],
+                "bed_end": row["component_end"],
+            })
+        elif has_a:
+            sample_a_only_rows.append({
+                **row,
+                "bed_start": row["sample_a_start"],
+                "bed_end": row["sample_a_end"],
+            })
+        else:
+            sample_b_only_rows.append({
+                **row,
+                "bed_start": row["sample_b_start"],
+                "bed_end": row["sample_b_end"],
+            })
+
+    component_columns = [
+        "component_id", "chrom", "component_start", "component_end",
+        label_a, label_b, "overlap_class",
+        "sample_a_start", "sample_a_end", "sample_b_start", "sample_b_end",
+        "sample_a_interval_count", "sample_b_interval_count",
+        "sample_a_regions", "sample_b_regions",
+    ]
+    summary_rows = [
+        {"combination": f"{label_a} only", label_a: True, label_b: False, "count": len(sample_a_only_rows)},
+        {"combination": "shared", label_a: True, label_b: True, "count": len(shared_rows)},
+        {"combination": f"{label_b} only", label_a: False, label_b: True, "count": len(sample_b_only_rows)},
+    ]
+
+    shared_columns = component_columns
+    summary_columns = ["combination", label_a, label_b, "count"]
+
+    slug_a = _slugify_label(label_a)
+    slug_b = _slugify_label(label_b)
+    comparison_slug = f"{slug_a}__vs__{slug_b}"
+    if export_dir:
+        export_root = Path(export_dir).expanduser()
+        if not export_root.is_absolute():
+            if not work_dir_path:
+                raise ValueError(f"Relative export_dir requires work_dir: {export_dir}")
+            export_root = Path(work_dir_path).expanduser() / export_root
+        comparison_dir = export_root.resolve() / comparison_slug
+    else:
+        comparison_dir = resolved_a["path"].parent / "agoutic_bed_overlaps" / comparison_slug
+    comparison_dir.mkdir(parents=True, exist_ok=True)
+
+    shared_a_bed = comparison_dir / f"shared_{slug_a}.bed"
+    shared_b_bed = comparison_dir / f"shared_{slug_b}.bed"
+    sample_a_only_bed = comparison_dir / f"{slug_a}_only.bed"
+    sample_b_only_bed = comparison_dir / f"{slug_b}_only.bed"
+
+    shared_a_rows = [{**row, "bed_start": row["sample_a_start"], "bed_end": row["sample_a_end"]} for row in shared_rows]
+    shared_b_rows = [{**row, "bed_start": row["sample_b_start"], "bed_end": row["sample_b_end"]} for row in shared_rows]
+    _write_bed_rows(shared_a_bed, shared_a_rows, "component_id")
+    _write_bed_rows(shared_b_bed, shared_b_rows, "component_id")
+    _write_bed_rows(sample_a_only_bed, sample_a_only_rows, "component_id")
+    _write_bed_rows(sample_b_only_bed, sample_b_only_rows, "component_id")
+
+    dataframe_bundle: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+    comparison_label = f"{label_a} vs {label_b}"
+    dataframe_bundle[f"Shared open chromatin overlaps ({comparison_label})"] = {
+        "columns": shared_columns,
+        "data": _serialize_component_rows(shared_rows, shared_columns),
+        "row_count": len(shared_rows),
+        "metadata": {
+            "label": f"Shared open chromatin overlaps ({comparison_label})",
+            "visible": True,
+            "kind": "shared_bed_overlap_components",
+            "sample_labels": [label_a, label_b],
+        },
+    }
+    dataframe_bundle[f"{label_a} only open chromatin ({comparison_label})"] = {
+        "columns": shared_columns,
+        "data": _serialize_component_rows(sample_a_only_rows, shared_columns),
+        "row_count": len(sample_a_only_rows),
+        "metadata": {
+            "label": f"{label_a} only open chromatin ({comparison_label})",
+            "visible": True,
+            "kind": "bed_only_components",
+            "sample_label": label_a,
+        },
+    }
+    dataframe_bundle[f"{label_b} only open chromatin ({comparison_label})"] = {
+        "columns": shared_columns,
+        "data": _serialize_component_rows(sample_b_only_rows, shared_columns),
+        "row_count": len(sample_b_only_rows),
+        "metadata": {
+            "label": f"{label_b} only open chromatin ({comparison_label})",
+            "visible": True,
+            "kind": "bed_only_components",
+            "sample_label": label_b,
+        },
+    }
+    dataframe_bundle[f"Overlap combination counts ({comparison_label})"] = {
+        "columns": summary_columns,
+        "data": summary_rows,
+        "row_count": len(summary_rows),
+        "metadata": {
+            "label": f"Overlap combination counts ({comparison_label})",
+            "visible": True,
+            "kind": "bed_overlap_summary",
+            "set_columns": [label_a, label_b],
+        },
+    }
+    dataframe_bundle[f"Overlap membership components ({comparison_label})"] = {
+        "columns": component_columns,
+        "data": _serialize_component_rows(component_rows, component_columns),
+        "row_count": len(component_rows),
+        "metadata": {
+            "label": f"Overlap membership components ({comparison_label})",
+            "visible": True,
+            "kind": "overlap_membership",
+            "set_columns": [label_a, label_b],
+            "source_labels": [label_a, label_b],
+            "match_key_column": "component_id",
+        },
+    }
+
+    return {
+        "comparison_label": comparison_label,
+        "sample_a": {
+            "label": label_a,
+            "bed_path": str(resolved_a["path"]),
+            "source_mode": resolved_a["source_mode"],
+            "search_pattern": resolved_a.get("search_pattern"),
+            "search_root": resolved_a.get("search_root"),
+            "matched_count": resolved_a.get("matched_count"),
+            "record_count": resolved_a.get("record_count", 0),
+        },
+        "sample_b": {
+            "label": label_b,
+            "bed_path": str(resolved_b["path"]),
+            "source_mode": resolved_b["source_mode"],
+            "search_pattern": resolved_b.get("search_pattern"),
+            "search_root": resolved_b.get("search_root"),
+            "matched_count": resolved_b.get("matched_count"),
+            "record_count": resolved_b.get("record_count", 0),
+        },
+        "counts": {
+            "shared_components": len(shared_rows),
+            "sample_a_only_components": len(sample_a_only_rows),
+            "sample_b_only_components": len(sample_b_only_rows),
+            "total_components": len(component_rows),
+        },
+        "export_dir": str(comparison_dir),
+        "exported_files": {
+            "shared_sample_a_bed": str(shared_a_bed),
+            "shared_sample_b_bed": str(shared_b_bed),
+            "sample_a_only_bed": str(sample_a_only_bed),
+            "sample_b_only_bed": str(sample_b_only_bed),
+        },
+        "columns": shared_columns,
+        "data": _serialize_component_rows(shared_rows, shared_columns),
+        "row_count": len(shared_rows),
+        "metadata": {
+            "label": f"Shared open chromatin overlaps ({comparison_label})",
+            "sample_labels": [label_a, label_b],
+            "min_overlap_bp": min_overlap_bp,
+        },
+        "_dataframes": dataframe_bundle,
+    }
+
+
 # ==================== BED File Parsing ====================
 
 def parse_bed_file(
@@ -469,45 +919,7 @@ def parse_bed_file(
     if not full_path.exists():
         raise FileNotFoundError(f"File not found: {file_path} (absolute path: {full_path})")
     
-    records = []
-    total_records = 0
-    
-    try:
-        with open(full_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                # Skip comments and empty lines
-                line = line.strip()
-                if not line or line.startswith('#') or line.startswith('track') or line.startswith('browser'):
-                    continue
-                
-                total_records += 1
-                
-                # Only parse if within max_records
-                if max_records is None or len(records) < max_records:
-                    fields = line.split('\t')
-                    
-                    # Parse standard BED fields
-                    record = BedRecord(
-                        chrom=fields[0],
-                        chromStart=int(fields[1]),
-                        chromEnd=int(fields[2]),
-                        name=fields[3] if len(fields) > 3 else None,
-                        score=float(fields[4]) if len(fields) > 4 and fields[4] != '.' else None,
-                        strand=fields[5] if len(fields) > 5 else None,
-                        extra_fields={}
-                    )
-                    
-                    # Parse additional fields (BED6+)
-                    if len(fields) > 6:
-                        for i, field in enumerate(fields[6:], start=6):
-                            if i < len(BED_COLUMNS):
-                                record.extra_fields[BED_COLUMNS[i]] = field
-                            else:
-                                record.extra_fields[f"field_{i}"] = field
-                    
-                    records.append(record)
-    except Exception as e:
-        raise ValueError(f"Error parsing BED file: {str(e)}")
+    records, total_records = _parse_bed_records_from_path(full_path, max_records=max_records)
     
     # Generate metadata
     metadata = {

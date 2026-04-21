@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
+from pathlib import Path
 
 from sqlalchemy import select
 from fastapi.concurrency import run_in_threadpool
@@ -262,13 +264,16 @@ async def _ensure_workflow_plan_approval_gate(
     if existing_gate is not None:
         return existing_gate
 
-    reconcile_context = _build_reconcile_plan_approval_context(workflow_block)
-    if reconcile_context is not None:
-        extracted_params = reconcile_context["extracted_params"]
-        gate_action = reconcile_context["gate_action"]
-        gate_skill = reconcile_context["skill"]
-        gate_label = reconcile_context["label"]
-        cache_preflight = reconcile_context.get("cache_preflight")
+    plan_specific_context = (
+        _build_reconcile_plan_approval_context(workflow_block)
+        or _build_compare_region_overlap_approval_context(workflow_block)
+    )
+    if plan_specific_context is not None:
+        extracted_params = plan_specific_context["extracted_params"]
+        gate_action = plan_specific_context["gate_action"]
+        gate_skill = plan_specific_context["skill"]
+        gate_label = plan_specific_context["label"]
+        cache_preflight = plan_specific_context.get("cache_preflight")
     else:
         extracted_params = await job_parameters.extract_job_parameters_from_conversation(session, workflow_block.project_id)
         gate_action = "job"
@@ -550,4 +555,97 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
         "cache_preflight": None,
         "gate_action": "reconcile_bams",
         "skill": "reconcile_bams",
+    }
+
+
+def _select_latest_located_file(result_payload: object) -> tuple[str | None, str | None, int] | None:
+    items = result_payload if isinstance(result_payload, list) else [result_payload]
+    selected: tuple[str | None, str | None, int] | None = None
+    for item in items:
+        payload = item.get("result") if isinstance(item, dict) and "result" in item else item
+        if not isinstance(payload, dict):
+            continue
+        work_dir = str(payload.get("work_dir") or "").strip()
+        files = payload.get("files") if isinstance(payload.get("files"), list) else []
+        file_entries = [entry for entry in files if isinstance(entry, dict) and not str(entry.get("name") or "").endswith("/")]
+        if not file_entries:
+            continue
+        newest = sorted(
+            file_entries,
+            key=lambda entry: (str(entry.get("modified_time") or ""), str(entry.get("path") or entry.get("name") or "")),
+        )[-1]
+        rel_path = str(newest.get("path") or newest.get("name") or "").strip()
+        absolute_path = rel_path
+        if work_dir and rel_path and not os.path.isabs(rel_path):
+            absolute_path = str((Path(work_dir) / rel_path).resolve())
+        candidate = (absolute_path or None, rel_path or None, len(file_entries))
+        if selected is None or candidate > selected:
+            selected = candidate
+    return selected
+
+
+def _build_compare_region_overlap_approval_context(workflow_block: ProjectBlock) -> dict | None:
+    payload = get_block_payload(workflow_block)
+    if payload.get("plan_type") != "compare_region_overlaps":
+        return None
+
+    locate_step = next(
+        (step for step in payload.get("steps", []) if step.get("kind") == "LOCATE_DATA" and step.get("status") == "COMPLETED"),
+        None,
+    )
+    run_step = next(
+        (step for step in payload.get("steps", []) if step.get("kind") == "RUN_SCRIPT"),
+        None,
+    )
+    if not isinstance(run_step, dict):
+        return None
+
+    tool_call = next(
+        (
+            call for call in (run_step.get("tool_calls") or [])
+            if call.get("tool") == "run_allowlisted_script"
+        ),
+        None,
+    )
+    params = dict((tool_call or {}).get("params") or {})
+    script_args = params.get("script_args") if isinstance(params.get("script_args"), list) else []
+    locate_results = locate_step.get("result") if isinstance(locate_step, dict) else None
+    selected_files = []
+    if isinstance(locate_results, list):
+        for result_item in locate_results:
+            selected = _select_latest_located_file(result_item)
+            if selected is not None:
+                selected_files.append(selected)
+
+    extracted_params = {
+        "plan_type": "compare_region_overlaps",
+        "workflow_block_id": workflow_block.id,
+        "run_type": "script",
+        "script_id": params.get("script_id"),
+        "script_path": params.get("script_path"),
+        "script_args": script_args,
+        "script_working_directory": params.get("script_working_directory"),
+        "sample_name": payload.get("sample_name") or "open_chromatin_overlap",
+        "mode": payload.get("mode") or "DNA",
+        "input_type": "bed",
+        "input_directory": payload.get("input_directory") or params.get("script_working_directory") or ".",
+        "output_directory": payload.get("output_directory"),
+        "sample_a_label": payload.get("sample_a_label"),
+        "sample_b_label": payload.get("sample_b_label"),
+        "folder_a": payload.get("folder_a"),
+        "folder_b": payload.get("folder_b"),
+        "bed_a_path": payload.get("bed_a_path"),
+        "bed_b_path": payload.get("bed_b_path"),
+        "selected_file_a": selected_files[0][0] if len(selected_files) >= 1 else None,
+        "selected_file_b": selected_files[1][0] if len(selected_files) >= 2 else None,
+        "selected_file_a_candidates": selected_files[0][2] if len(selected_files) >= 1 else 0,
+        "selected_file_b_candidates": selected_files[1][2] if len(selected_files) >= 2 else 0,
+        "gate_action": "compare_region_overlaps",
+    }
+    return {
+        "label": "Do you authorize the Agent to compute the overlap CSVs and venn inputs for these open-chromatin regions?",
+        "extracted_params": extracted_params,
+        "cache_preflight": None,
+        "gate_action": "compare_region_overlaps",
+        "skill": payload.get("skill") or "analyze_job_results",
     }

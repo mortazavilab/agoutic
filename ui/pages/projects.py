@@ -27,6 +27,30 @@ user = require_auth(API_URL)
 section_header("Projects Dashboard", "Project state, activity, jobs, and storage at a glance", icon="📁")
 
 
+def _set_active_project(project_id: str, project_name: str, *, open_chat: bool = False) -> None:
+    """Persist the selected project as the active chat context."""
+    st.session_state["active_project_id"] = project_id
+    st.session_state["_project_id_input"] = project_id
+    st.session_state["blocks"] = []
+    st.session_state["_last_rendered_project"] = project_id
+    st.session_state.pop("_welcome_sent_for", None)
+
+    try:
+        make_authenticated_request(
+            "PUT",
+            f"{API_URL}/user/last-project",
+            json={"project_id": project_id},
+            timeout=3,
+        )
+    except Exception:
+        pass
+
+    st.toast(f"Active project set: {project_name}")
+    if open_chat:
+        st.switch_page("appUI.py")
+    st.rerun()
+
+
 def _format_timestamp(raw_value: str | None) -> str:
     if not raw_value:
         return "—"
@@ -293,6 +317,23 @@ if not proj_options:
 
 selected_name = st.selectbox("Select project", list(proj_options.keys()))
 selected_id = proj_options[selected_name]
+_current_active_project = st.session_state.get("active_project_id")
+
+if _current_active_project == selected_id:
+    st.info(f"Active chat project: {selected_name}")
+else:
+    st.caption(
+        "Selected project is not the current chat project. "
+        "Use the actions below to switch safely without opening appUI first."
+    )
+
+switch_col, chat_col = st.columns(2)
+with switch_col:
+    if st.button("📌 Set Active Project", width="stretch"):
+        _set_active_project(selected_id, selected_name)
+with chat_col:
+    if st.button("💬 Open This Project In Chat", width="stretch"):
+        _set_active_project(selected_id, selected_name, open_chat=True)
 
 # Quick actions row
 act1, act2 = st.columns(2)

@@ -19,6 +19,7 @@ This skill provides **downstream analysis interpretation** for completed Dogme D
 - "What's the CpG methylation frequency?"
 - "Parse the modification BED file"
 - "Analyze the Fiber-seq accessibility data"
+- "Make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4"
 
 ### ❌ This Skill Does NOT Handle:
 
@@ -72,8 +73,8 @@ The Dogme DNA pipeline performs:
 - `*.mod_freq.csv` — modification frequency statistics
 
 ### Fiber-Seq Specific (if mode includes fiber-seq)
-- `*.fiberseq.bed` — fiber-seq accessibility regions
-- `*.m6A.bed` — m6A modification calls for chromatin state
+- `openChromatin/*.m6Aopen.bed` — fiber-seq accessibility regions
+- `bedMethyl/*.6mA.bed` — m6A modification calls for chromatin state
 
 ### QC Reports
 - `*qc_summary*` — comprehensive QC metrics
@@ -111,14 +112,20 @@ That guide includes:
 
 **DNA-specific tools:**
 - Methylation data: `parse_bed_file` for `*.5mCG.filtered.bed` or `*.5hmCG.filtered.bed`
-- Fiber-seq data: `parse_bed_file` for `*.m6Aopen.bed` or `*.m6A.filtered.bed`  
+- Fiber-seq data: `parse_bed_file` for `*.m6Aopen.bed` or `*.6mA.filtered.bed`  
+- Cross-sample Fiber-seq overlap: `compare_bed_region_overlaps` for two BED files or two project folders; supports 1 bp overlap matching, returns overlap dataframes, and emits BED exports for shared/sample-specific loci
 - Alignment stats: `parse_csv_file` for `*.stats.csv` or `read_file_content` for `*.flagstat.txt`
+
+**Cross-workflow shorthand:**
+- If the user references completed jobs as `project_slug:workflowN`, treat each one as that workflow's `openChromatin/` folder for Fiber-seq overlap requests.
+- For prompts like "make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4", use `compare_bed_region_overlaps` with `pattern_a=*.m6Aopen.bed`, `pattern_b=*.m6Aopen.bed`, and `min_overlap_bp=1`.
+- The system may normalize those shorthand refs before tool dispatch, but you should still reason about them as completed workflow result references, not as local file uploads.
 
 ### DNA-Specific Notes
 
 **Files to search for:**
 - Methylation data: `find_file(work_dir=..., file_name=5mC)` or `CpG`
-- Fiber-seq data: `find_file(work_dir=..., file_name=fiberseq)` or `m6A`
+- Fiber-seq data: `find_file(work_dir=..., file_name=fiberseq)` or `6mA`
 - Alignment stats: `find_file(work_dir=..., file_name=stats)` or `flagstat`
 
 **Typical directories:**

@@ -1626,35 +1626,36 @@ async def update_block(
         # If an APPROVAL_GATE was just approved, trigger job submission or download
         if block.type == "APPROVAL_GATE" and old_status == "PENDING" and block.status == "APPROVED":
             gate_payload = get_block_payload(block)
+            extracted_params = gate_payload.get("edited_params") or gate_payload.get("extracted_params") or {}
+            is_script_plan_gate = bool(
+                block.parent_id
+                and isinstance(extracted_params, dict)
+                and str(extracted_params.get("run_type") or "").strip().lower() == "script"
+            )
             if gate_payload.get("gate_action") == "download":
                 asyncio.create_task(download_after_approval(block.project_id, block_id))
-            elif gate_payload.get("gate_action") == "reconcile_bams":
+            else:
                 asyncio.create_task(workflow_submission.submit_job_after_approval(block.project_id, block_id))
-                if block.parent_id:
-                    _plan_block = _find_workflow_plan(session, block.project_id,
-                                                      workflow_block_id=block.parent_id)
-                    if _plan_block:
-                        _mark_workflow_plan_approval_complete(session, _plan_block, block.id)
+            # If this gate belongs to a plan, resume plan execution after the job
+            if block.parent_id:
+                _plan_block = _find_workflow_plan(session, block.project_id,
+                                                  workflow_block_id=block.parent_id)
+                if _plan_block:
+                    _mark_workflow_plan_approval_complete(session, _plan_block, block.id)
+                    if is_script_plan_gate:
                         _advance_workflow_plan_to_step_kind(
                             session,
                             _plan_block,
                             kind="RUN_SCRIPT",
                             approval_gate_id=block.id,
                         )
-            else:
-                asyncio.create_task(workflow_submission.submit_job_after_approval(block.project_id, block_id))
-            # If this gate belongs to a plan, resume plan execution after the job
-            if block.parent_id and gate_payload.get("gate_action") != "reconcile_bams":
-                _plan_block = _find_workflow_plan(session, block.project_id,
-                                                  workflow_block_id=block.parent_id)
-                if _plan_block:
-                    _mark_workflow_plan_approval_complete(session, _plan_block, block.id)
-                    asyncio.create_task(
-                        _auto_execute_plan_steps(
-                            block.project_id, _plan_block.id,
-                            user, gate_payload.get("model", "default"),
+                    else:
+                        asyncio.create_task(
+                            _auto_execute_plan_steps(
+                                block.project_id, _plan_block.id,
+                                user, gate_payload.get("model", "default"),
+                            )
                         )
-                    )
         
         # If an APPROVAL_GATE was rejected, trigger rejection handling
         if block.type == "APPROVAL_GATE" and old_status == "PENDING" and block.status == "REJECTED":
