@@ -1134,10 +1134,11 @@ def _template_compare_workflows(params: dict) -> dict:
 
 def _template_compare_region_overlaps(params: dict) -> dict:
     output_directory = str(params.get("output_directory") or "").strip()
-    script_working_directory = str(params.get("script_working_directory") or params.get("input_directory") or ".").strip()
+    input_directory = str(params.get("input_directory") or ".").strip() or "."
     sample_a_label = str(params.get("sample_a_label") or "Sample A").strip() or "Sample A"
     sample_b_label = str(params.get("sample_b_label") or "Sample B").strip() or "Sample B"
     plot_type = str(params.get("plot_type") or "venn").strip().lower() or "venn"
+    plot_title = str(params.get("plot_title") or "").strip()
 
     locate_calls: list[dict[str, Any]] = []
     folder_a = str(params.get("folder_a") or "").strip()
@@ -1239,7 +1240,6 @@ def _template_compare_region_overlaps(params: dict) -> dict:
                 "params": {
                     "script_id": "analyze_job_results/compare_bed_region_overlaps",
                     "script_args": script_args,
-                    "script_working_directory": script_working_directory,
                 },
             }
         ],
@@ -1263,6 +1263,8 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         depends_on=[s_parse["id"]],
     )
     s_plot["plot_type"] = plot_type
+    if plot_title:
+        s_plot["plot_title"] = plot_title
     steps.append(s_plot)
 
     return {
@@ -1275,9 +1277,8 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         "current_step_id": steps[0]["id"],
         "sample_name": params.get("sample_name", "open_chromatin_overlap"),
         "mode": params.get("mode", "DNA"),
-        "input_directory": params.get("input_directory") or script_working_directory,
+        "input_directory": input_directory,
         "output_directory": output_directory,
-        "script_working_directory": script_working_directory,
         "folder_a": folder_a,
         "folder_b": folder_b,
         "bed_a_path": bed_a_path,
@@ -1287,6 +1288,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         "sample_a_label": sample_a_label,
         "sample_b_label": sample_b_label,
         "plot_type": plot_type,
+        "plot_title": plot_title,
         "min_overlap_bp": int(params.get("min_overlap_bp", 1) or 1),
         "steps": steps,
         "artifacts": [],

@@ -1150,6 +1150,15 @@ def _rewrite_overlap_plot_spec(original_spec: dict, payload: dict) -> dict:
         "source_match_cols": metadata.get("source_match_cols"),
         "match_key_column": metadata.get("match_key_column"),
     }
+    label_override = original_spec.get("labels")
+    if label_override is None and metadata.get("source_labels"):
+        source_labels = metadata.get("source_labels")
+        if isinstance(source_labels, (list, tuple)):
+            label_override = "|".join(str(value) for value in source_labels)
+        else:
+            label_override = source_labels
+    if label_override is not None:
+        rewritten["labels"] = label_override
     if original_spec.get("title") is not None:
         rewritten["title"] = original_spec.get("title")
     if original_spec.get("palette") is not None:

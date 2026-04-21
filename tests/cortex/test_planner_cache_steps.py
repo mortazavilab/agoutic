@@ -197,7 +197,38 @@ def test_extract_plan_params_region_overlap_uses_project_workflow_refs_and_new_w
     assert params["pattern_a"] == "*.m6Aopen.bed"
     assert params["pattern_b"] == "*.m6Aopen.bed"
     assert params["output_directory"] == str(project_dir / "workflow4")
-    assert params["script_working_directory"] == str(project_dir)
+    assert "script_working_directory" not in params
+
+
+def test_extract_plan_params_region_overlap_accepts_explicit_sample_labels(tmp_path):
+    project_dir = tmp_path / "active-project"
+    (project_dir / "workflow2").mkdir(parents=True)
+
+    params = _extract_plan_params(
+        "make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4 with sample A named Control peaks and sample B named Treatment peaks",
+        ConversationState(active_skill="analyze_job_results", active_project="proj-1", work_dir=str(project_dir / "workflow2")),
+        "compare_region_overlaps",
+        str(project_dir),
+    )
+
+    assert params["sample_a_label"] == "Control peaks"
+    assert params["sample_b_label"] == "Treatment peaks"
+
+
+def test_extract_plan_params_region_overlap_stops_sample_b_before_title_clause(tmp_path):
+    project_dir = tmp_path / "active-project"
+    (project_dir / "workflow2").mkdir(parents=True)
+
+    params = _extract_plan_params(
+        "make a venn diagram of the regions in testslopenchrom:workflow2 and testslopenchrom2:workflow3 with sample A named IGVFFI6571ANCX and sample B named IGVFFI1476XCPC and title it IGVF open chromatin overlap.",
+        ConversationState(active_skill="analyze_job_results", active_project="proj-1", work_dir=str(project_dir / "workflow2")),
+        "compare_region_overlaps",
+        str(project_dir),
+    )
+
+    assert params["sample_a_label"] == "IGVFFI6571ANCX"
+    assert params["sample_b_label"] == "IGVFFI1476XCPC"
+    assert params["plot_title"] == "IGVF open chromatin overlap"
 
 
 def test_compare_region_overlaps_template_uses_four_steps_plus_approval():
@@ -210,7 +241,6 @@ def test_compare_region_overlaps_template_uses_four_steps_plus_approval():
             "sample_a_label": "testslopenchrom:workflow2",
             "sample_b_label": "testopenchrom2:workflow4",
             "output_directory": "/projects/current/workflow7",
-            "script_working_directory": "/projects/current",
             "input_directory": "/projects/current",
             "plot_type": "venn",
         }
@@ -222,6 +252,26 @@ def test_compare_region_overlaps_template_uses_four_steps_plus_approval():
     run_step = next(step for step in plan["steps"] if step["kind"] == "RUN_SCRIPT")
     assert run_step["tool_calls"][0]["params"]["script_id"] == "analyze_job_results/compare_bed_region_overlaps"
     assert "--output-dir" in run_step["tool_calls"][0]["params"]["script_args"]
+    assert "script_working_directory" not in run_step["tool_calls"][0]["params"]
+
+
+def test_compare_region_overlaps_template_carries_plot_title_to_generate_step():
+    plan = _template_compare_region_overlaps(
+        {
+            "folder_a": "/data/user/testslopenchrom/workflow2/openChromatin",
+            "folder_b": "/data/user/testopenchrom2/workflow4/openChromatin",
+            "sample_a_label": "IGVFFI6571ANCX",
+            "sample_b_label": "IGVFFI1476XCPC",
+            "output_directory": "/projects/current/workflow7",
+            "input_directory": "/projects/current",
+            "plot_type": "venn",
+            "plot_title": "IGVF open chromatin overlap",
+        }
+    )
+
+    plot_step = next(step for step in plan["steps"] if step["kind"] == "GENERATE_PLOT")
+    assert plot_step["plot_title"] == "IGVF open chromatin overlap"
+    assert plan["plot_title"] == "IGVF open chromatin overlap"
 
 
 def test_reconcile_bams_template_defaults_output_directory_to_common_workflow_parent():

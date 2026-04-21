@@ -16,7 +16,11 @@ from cortex.path_helpers import (
     _resolve_workflow_path,
     _resolve_file_path,
 )
-from cortex.chat_dataframes import _build_specialized_dataframe_plot_spec
+from cortex.chat_dataframes import (
+    _build_specialized_dataframe_plot_spec,
+    apply_overlap_message_hints,
+    materialize_direct_set_overlap_plot_dataframes,
+)
 from cortex.tag_parser import parse_plot_tags, user_wants_plot
 
 
@@ -295,6 +299,38 @@ class TestParsePlotTags:
             "sets": ["c2c12r1", "c2c12r2", "c2c12r3"],
             "df_id": 3,
         }]
+
+
+def test_direct_overlap_rewrite_preserves_label_override_for_existing_membership_df():
+    plot_specs = [{"type": "venn", "df": "DF1", "df_id": 1, "labels": "Control|Treatment"}]
+    current_dataframes = {
+        "overlap_membership_components.csv": {
+            "columns": ["match_key", "Alpha", "Beta"],
+            "data": [
+                {"match_key": "C1", "Alpha": True, "Beta": False},
+                {"match_key": "C2", "Alpha": True, "Beta": True},
+                {"match_key": "C3", "Alpha": False, "Beta": True},
+            ],
+            "row_count": 3,
+            "metadata": {
+                "df_id": 1,
+                "kind": "overlap_membership",
+                "set_columns": ["Alpha", "Beta"],
+                "visible": True,
+            },
+        }
+    }
+
+    apply_overlap_message_hints(plot_specs, "rename the venn labels", [], current_dataframes=current_dataframes)
+    materialize_direct_set_overlap_plot_dataframes(
+        plot_specs,
+        current_dataframes,
+        [],
+        current_dataframes=current_dataframes,
+    )
+
+    assert plot_specs[0]["sets"] == "Alpha|Beta"
+    assert plot_specs[0]["labels"] == "Control|Treatment"
 
 
 class TestSpecializedDataframePlotSpec:

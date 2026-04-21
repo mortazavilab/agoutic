@@ -259,7 +259,6 @@ class TestPauseAutoRefresh:
 
         assert fake_st.session_state["_suppress_auto_refresh_until"] == 110.0
 
-
 class TestProjectSwitchHelpers:
     def test_project_scope_mount_key_changes_with_project_id(self):
         fn = _load_function("_project_scope_mount_key")

@@ -573,6 +573,7 @@ def _extract_parsed_tables(step_result: Any) -> list[dict[str, Any]]:
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         tables.append({
             "file_path": file_path,
+            "work_dir": str(payload.get("work_dir") or "").strip(),
             "label": Path(file_path).name or file_path,
             "columns": columns,
             "data": rows,
@@ -841,6 +842,12 @@ def _build_workflow_plot_payload(plan_payload: dict, step: dict) -> dict[str, An
                     "label": overlap_table.get("label") or "overlap_membership_components.csv",
                     "row_count": overlap_table.get("row_count", 0),
                     "kind": "overlap_membership",
+                    "source_file_path": overlap_table.get("file_path"),
+                    "source_work_dir": overlap_table.get("work_dir"),
+                    "is_truncated": bool(
+                        (overlap_table.get("metadata") or {}).get("is_truncated")
+                        or int(overlap_table.get("row_count") or 0) > len(overlap_table.get("data", []))
+                    ),
                     **({"set_columns": resolved_set_columns} if resolved_set_columns else {}),
                 },
             }
@@ -848,10 +855,12 @@ def _build_workflow_plot_payload(plan_payload: dict, step: dict) -> dict[str, An
         chart_spec: dict[str, Any] = {
             "type": requested_type,
             "df_id": 1,
-            "title": step.get("title") or f"{requested_type.title()} diagram",
+            "title": step.get("plot_title") or plan_payload.get("plot_title") or step.get("title") or f"{requested_type.title()} diagram",
         }
         if resolved_set_columns:
             chart_spec["sets"] = resolved_set_columns
+        if resolved_set_columns and len([label for label in sample_labels if label]) == len(resolved_set_columns):
+            chart_spec["labels"] = sample_labels
         return {
             "selected_file": overlap_table.get("file_path"),
             "charts": [chart_spec],

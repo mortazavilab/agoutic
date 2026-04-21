@@ -357,6 +357,8 @@ def render_block_part1(
                         _summary["Sample A"] = _src_params.get("sample_a_label")
                     if _src_params.get("sample_b_label"):
                         _summary["Sample B"] = _src_params.get("sample_b_label")
+                    if _src_params.get("plot_title"):
+                        _summary["Plot Title"] = _src_params.get("plot_title")
                     if _src_params.get("selected_file_a"):
                         _summary["Resolved BED A"] = _src_params.get("selected_file_a")
                     if _src_params.get("selected_file_b"):
@@ -780,6 +782,7 @@ def render_block_part1(
                     selected_file_b_candidates = int(extracted_params.get("selected_file_b_candidates") or 0)
                     output_directory_default = extracted_params.get("output_directory") or extracted_params.get("input_directory") or ""
                     script_args_default = extracted_params.get("script_args") or []
+                    plot_title_default = extracted_params.get("plot_title") or ""
                     min_overlap_default = 1
                     plot_type_default = "venn"
                     if isinstance(script_args_default, list):
@@ -812,6 +815,11 @@ def render_block_part1(
                         grouped_section("Script Settings")
                         sample_a_label = st.text_input("Sample A Label", value=sample_a_label_default)
                         sample_b_label = st.text_input("Sample B Label", value=sample_b_label_default)
+                        plot_title = st.text_input(
+                            "Plot Title",
+                            value=plot_title_default,
+                            help="Optional title shown at the top of the venn/upset plot.",
+                        )
                         output_directory = st.text_input(
                             "Output Directory",
                             value=output_directory_default,
@@ -862,6 +870,7 @@ def render_block_part1(
                                 {
                                     "sample_a_label": sample_a_label,
                                     "sample_b_label": sample_b_label,
+                                    "plot_title": plot_title,
                                     "output_directory": output_directory,
                                     "input_directory": extracted_params.get("input_directory") or ".",
                                     "script_args": updated_script_args,

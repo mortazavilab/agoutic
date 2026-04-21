@@ -133,7 +133,7 @@ VISUAL DEFAULTS:
   edgePython `generate_plot` for server-side saved-image plots.
 
 TAG FORMAT:
-[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>, sets=<set_col1>|<set_col2>|<set_col3>, mode=<group|stack|percent>]]
+[[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>, sets=<set_col1>|<set_col2>|<set_col3>, labels=<label1>|<label2>|<label3>, mode=<group|stack|percent>]]
 [[PLOT: type=<venn|upset>, dfs=DF1|DF2|DF3, match_cols=<col1>|<col2>|<col3>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
 [[PLOT: type=<venn|upset>, df=DF<N>, sample_col=<sample_column>, sample_values=<value1>|<value2>|<value3>, match_on=<id_column>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
 

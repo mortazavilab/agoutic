@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [3.6.5] - 2026-04-21
+
 ### Features
 
 - **Fiber-seq open-chromatin comparisons can now build overlap dataframes and auto-render 2-set Venn diagrams across project folders** — Analyzer now exposes a `compare_bed_region_overlaps` tool that accepts either explicit BED paths or folder-plus-pattern resolution, treats even 1 bp interval overlap as shared membership, groups connected overlaps into component-level rows, returns shared and sample-specific open-chromatin tables plus an overlap-membership dataframe for Venn plotting, and writes shared/sample-specific BED exports for downstream use. Cortex now extracts bundled analyzer dataframes from tool results and uses overlap metadata to hydrate Venn set columns automatically when analyzer responses already include the needed membership tables, including prompts that refer to workflow folders like `testslopenchrom:workflow2` and `testopenchrom2:workflow4`.
@@ -20,6 +22,9 @@
 
 ### Bug Fixes
 
+- **Two-set overlap venn diagrams now render full-count regions with readable geometry and labels** — the workflow overlap chart path now preserves full-data membership counts for venn rendering, reloads the source overlap membership CSV when only a preview payload is present, and renders the two-set venn with larger circles, separated annotations, and comma-formatted counts so large overlaps remain legible when reopening an existing project.
+  (`cortex/plan_executor.py`, `ui/appui_renderers.py`, `tests/cortex/test_plan_executor_run_script.py`, `tests/ui/test_app_source_helpers.py`)
+
 - **Full DE compare requests now default to `p-value < 0.05` consistently across summaries, top-gene extraction, and the default volcano plot** — Cortex now treats an unspecified DE significance cutoff as raw `p-value < 0.05` instead of mixing a p-value volcano with FDR-based downstream summaries, while still honoring explicit `p-value` or `FDR` thresholds when the user asks for them.
   (`cortex/plan_params.py`, `cortex/plan_templates.py`, `cortex/plan_composer.py`, `cortex/plan_executor.py`, `cortex/memory_service.py`, `edgepython_mcp/edgepython_server.py`, `edgepython_mcp/tool_schemas.py`, `skills/differential_expression/SKILL.md`, `tests/cortex/test_planner_cache_steps.py`, `tests/cortex/test_plan_composer.py`, `tests/cortex/test_plan_executor_run_script.py`, `tests/cortex/test_memory_service.py`, `tests/test_edgepython_de_thresholds.py`)
 
@@ -32,8 +37,11 @@
 - **UpSet plots now show intersection counts above each bar and the UI rehydrates truncated plot dataframes without a backend import dependency** — the Streamlit renderer now reloads truncated parsed dataframes locally from block provenance when needed for chart rendering, keeps the UI thin by avoiding direct `cortex.*` imports, and displays the numeric intersection size above every UpSet column for easier reading.
   (`ui/appui_renderers.py`, `tests/ui/test_app_source_helpers.py`)
 
-- **Cross-project overlap venn requests now stay on the script-backed workflow path end-to-end** — overlap prompts that reference workflow folders no longer fall back to the synchronous local analyzer shortcut, deterministic planning now returns the dedicated `compare_region_overlaps` template instead of falling through to freeform LLM planning, the approval gate shows overlap-specific script inputs rather than the generic Dogme form, and approved overlap runs now submit through Launchpad `run_allowlisted_script` instead of leaking into `submit_dogme_job` with invalid BED job parameters.
+- **Cross-project overlap venn requests now stay on the script-backed workflow path end-to-end** — overlap prompts that reference workflow folders no longer fall back to the synchronous local analyzer shortcut, deterministic planning now returns the dedicated `compare_region_overlaps` template instead of falling through to freeform LLM planning, the approval gate shows overlap-specific script inputs rather than the generic Dogme form, and approved overlap runs now submit through Launchpad `run_allowlisted_script` without forwarding the project root as `script_working_directory`, avoiding both the old invalid Dogme BED payload and the allowlisted-root rejection from Launchpad script execution. Successful allowlisted overlap scripts are now treated as completed workflow runs even when Launchpad returns a synchronous script result with `exit_code=0` but no Nextflow `run_uuid`, so the workflow can continue into CSV parsing and venn rendering.
   (`cortex/data_call_generator.py`, `cortex/planner.py`, `cortex/chat_approval.py`, `cortex/workflow_submission.py`, `ui/appui_block_part1.py`, `tests/cortex/test_auto_generate_data.py`, `tests/cortex/test_planner_cache_steps.py`, `tests/cortex/test_background_tasks.py`)
+
+- **Overlap venn/upset approvals now expose an explicit plot title and parse title phrases separately from sample labels** — prompts like `sample B named ... and title it ...` now stop the label parser before the title clause, store the requested overlap chart title as a dedicated workflow parameter, expose that title in the overlap approval gate for manual edits, and propagate approved label/title changes onto the workflow plot payload so the first rendered venn or upset uses the intended sample names and title.
+  (`cortex/plan_params.py`, `cortex/plan_templates.py`, `cortex/chat_approval.py`, `cortex/plan_executor.py`, `cortex/workflow_submission.py`, `ui/appui_block_part1.py`, `tests/cortex/test_planner_cache_steps.py`, `tests/cortex/test_plan_executor_run_script.py`, `tests/cortex/test_background_tasks.py`)
 
 ## [3.6.4] - 2026-04-18
 

@@ -632,6 +632,7 @@ def _build_compare_region_overlap_approval_context(workflow_block: ProjectBlock)
         "output_directory": payload.get("output_directory"),
         "sample_a_label": payload.get("sample_a_label"),
         "sample_b_label": payload.get("sample_b_label"),
+        "plot_title": payload.get("plot_title"),
         "folder_a": payload.get("folder_a"),
         "folder_b": payload.get("folder_b"),
         "bed_a_path": payload.get("bed_a_path"),

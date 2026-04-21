@@ -192,6 +192,123 @@ async def test_generate_plot_builds_workflow_venn_from_overlap_membership_csv(mo
     payload_frame = next(iter(embedded.values()))
     assert payload_frame["metadata"]["kind"] == "overlap_membership"
     assert payload_frame["metadata"]["set_columns"] == ["Alpha", "Beta"]
+    assert payload_frame["metadata"]["source_file_path"] == "overlap_membership_components.csv"
+
+
+@pytest.mark.asyncio
+async def test_generate_plot_prefers_explicit_overlap_plot_title(monkeypatch):
+    payload = {
+        "plan_type": "compare_region_overlaps",
+        "sample_a_label": "Alpha",
+        "sample_b_label": "Beta",
+        "plot_title": "IGVF open chromatin overlap",
+        "steps": [
+            {
+                "id": "parse1",
+                "kind": "PARSE_OUTPUT_FILE",
+                "title": "Parse overlap CSVs",
+                "status": "COMPLETED",
+                "depends_on": [],
+                "result": [
+                    {
+                        "tool": "parse_csv_file",
+                        "source_key": "analyzer",
+                        "result": {
+                            "file_path": "overlap_membership_components.csv",
+                            "columns": ["component_id", "Alpha", "Beta", "overlap_class"],
+                            "row_count": 3,
+                            "data": [
+                                {"component_id": "C1", "Alpha": True, "Beta": False, "overlap_class": "Alpha only"},
+                                {"component_id": "C2", "Alpha": True, "Beta": True, "overlap_class": "shared"},
+                                {"component_id": "C3", "Alpha": False, "Beta": True, "overlap_class": "Beta only"},
+                            ],
+                            "preview_rows": 3,
+                            "metadata": {},
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "plot1",
+                "kind": "GENERATE_PLOT",
+                "title": "Render venn",
+                "status": "PENDING",
+                "depends_on": ["parse1"],
+                "plot_type": "venn",
+            },
+        ],
+    }
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "plot1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    assert result.data["charts"][0]["title"] == "IGVF open chromatin overlap"
+
+
+@pytest.mark.asyncio
+async def test_generate_plot_marks_truncated_overlap_payload_for_rehydration(monkeypatch):
+    payload = {
+        "plan_type": "compare_region_overlaps",
+        "sample_a_label": "Alpha",
+        "sample_b_label": "Beta",
+        "steps": [
+            {
+                "id": "parse1",
+                "kind": "PARSE_OUTPUT_FILE",
+                "title": "Parse overlap CSVs",
+                "status": "COMPLETED",
+                "depends_on": [],
+                "result": [
+                    {
+                        "tool": "parse_csv_file",
+                        "source_key": "analyzer",
+                        "result": {
+                            "work_dir": "/tmp/overlap",
+                            "file_path": "overlap_membership_components.csv",
+                            "columns": ["component_id", "Alpha", "Beta", "overlap_class"],
+                            "row_count": 646081,
+                            "data": [
+                                {"component_id": "C1", "Alpha": True, "Beta": False, "overlap_class": "Alpha only"},
+                            ],
+                            "preview_rows": 1,
+                            "metadata": {"is_truncated": True, "total_rows": 646081},
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "plot1",
+                "kind": "GENERATE_PLOT",
+                "title": "Render venn",
+                "status": "PENDING",
+                "depends_on": ["parse1"],
+                "plot_type": "venn",
+            },
+        ],
+    }
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "plot1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    payload_frame = next(iter(result.data["_dataframes"].values()))
+    assert payload_frame["metadata"]["is_truncated"] is True
+    assert payload_frame["metadata"]["source_work_dir"] == "/tmp/overlap"
 
 
 @pytest.mark.asyncio

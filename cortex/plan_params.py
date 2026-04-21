@@ -26,6 +26,61 @@ _PROJECT_WORKFLOW_REF_RE = re.compile(
 _BED_PATH_RE = re.compile(r"(?P<path>(?:/|~|\.)[^\s,;]+\.bed)\b", re.IGNORECASE)
 
 
+def _clean_overlap_display_label(label_text: str) -> str:
+    cleaned = str(label_text or "").strip().strip('"').strip("'")
+    return cleaned.strip(" ,;:.!?")
+
+
+def _extract_overlap_label_override(message: str, sample_key: str) -> str | None:
+    if not message:
+        return None
+
+    other_key = "b" if sample_key == "a" else "a"
+    stop_pattern = rf"(?=\s*(?:,|;|\.)\s*|\s+and\s+sample\s*{other_key}\b|\s+and\s+title\b|\s+title\b|$)"
+    patterns = (
+        rf"\bsample\s*{sample_key}(?:\s+(?:label|name))?\s*(?:=|:|as|is|called|named)\s*(.+?){stop_pattern}",
+        rf"\brename\s+sample\s*{sample_key}\s+to\s*(.+?){stop_pattern}",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if not match:
+            continue
+        cleaned = _clean_overlap_display_label(match.group(1))
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _extract_overlap_label_overrides(message: str) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    sample_a_label = _extract_overlap_label_override(message, "a")
+    sample_b_label = _extract_overlap_label_override(message, "b")
+    if sample_a_label:
+        overrides["sample_a_label"] = sample_a_label
+    if sample_b_label:
+        overrides["sample_b_label"] = sample_b_label
+    return overrides
+
+
+def _extract_overlap_plot_title(message: str) -> str | None:
+    if not message:
+        return None
+
+    patterns = (
+        r"\btitle\s+it\s+(?:as\s+)?(.+?)(?:[.;]|$)",
+        r"\bwith\s+title\s*(?:=|:)?\s*(.+?)(?:[.;]|$)",
+        r"\bplot\s+title\s*(?:=|:|is|as)?\s*(.+?)(?:[.;]|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if not match:
+            continue
+        cleaned = _clean_overlap_display_label(match.group(1))
+        if cleaned:
+            return cleaned
+    return None
+
+
 def _project_owner_root(project_dir: str, default_work_dir: str = "") -> str:
     candidate = (project_dir or "").strip() or (default_work_dir or "").strip()
     if not candidate:
@@ -411,30 +466,33 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         bed_paths = [match.group("path") for match in _BED_PATH_RE.finditer(message or "")]
         plot_type = _select_plot_type(message)
         default_work_dir = str(getattr(conv_state, "work_dir", "") or "")
+        label_overrides = _extract_overlap_label_overrides(message or "")
+        plot_title = _extract_overlap_plot_title(message or "")
 
         if len(project_refs) >= 2:
             params["folder_a"] = _resolve_project_workflow_ref(project_refs[0], project_dir, default_work_dir)
             params["folder_b"] = _resolve_project_workflow_ref(project_refs[1], project_dir, default_work_dir)
-            params["sample_a_label"] = project_refs[0].strip()
-            params["sample_b_label"] = project_refs[1].strip()
+            params["sample_a_label"] = label_overrides.get("sample_a_label") or project_refs[0].strip()
+            params["sample_b_label"] = label_overrides.get("sample_b_label") or project_refs[1].strip()
             params["pattern_a"] = "*.m6Aopen.bed"
             params["pattern_b"] = "*.m6Aopen.bed"
             params["input_directory"] = project_dir or params["folder_a"]
         elif len(bed_paths) >= 2:
             params["bed_a_path"] = _resolve_existing_path(bed_paths[0], conv_state, project_dir)
             params["bed_b_path"] = _resolve_existing_path(bed_paths[1], conv_state, project_dir)
-            params["sample_a_label"] = Path(params["bed_a_path"]).stem
-            params["sample_b_label"] = Path(params["bed_b_path"]).stem
+            params["sample_a_label"] = label_overrides.get("sample_a_label") or Path(params["bed_a_path"]).stem
+            params["sample_b_label"] = label_overrides.get("sample_b_label") or Path(params["bed_b_path"]).stem
             params["input_directory"] = str(Path(params["bed_a_path"]).parent)
 
         output_root = _project_output_root(project_dir, conv_state)
         if output_root:
             params["output_directory"] = _next_project_workflow_dir(output_root)
-            params["script_working_directory"] = output_root
 
         params["sample_name"] = "open_chromatin_overlap"
         params["mode"] = "DNA"
         params["plot_type"] = plot_type if plot_type in {"venn", "upset"} else "venn"
+        if plot_title:
+            params["plot_title"] = plot_title
         params["min_overlap_bp"] = 1
         return params
 

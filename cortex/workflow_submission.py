@@ -111,6 +111,10 @@ def _build_script_submission_payload(job_data: dict) -> dict:
         submission_payload["script_args"] = list(script_args)
 
     script_working_directory = str(job_data.get("script_working_directory") or "").strip()
+    # The BED overlap script already receives absolute input/output paths and
+    # Launchpad only accepts allowlisted roots for custom working directories.
+    if script_id == "analyze_job_results/compare_bed_region_overlaps":
+        script_working_directory = ""
     if script_working_directory:
         submission_payload["script_working_directory"] = script_working_directory
 
@@ -347,6 +351,25 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             else:
                 gate_payload["extracted_params"] = job_params
             gate_block.payload_json = json.dumps(gate_payload)
+            session.commit()
+
+            workflow_payload = get_block_payload(workflow_block)
+            workflow_payload["sample_a_label"] = job_params.get("sample_a_label") or workflow_payload.get("sample_a_label")
+            workflow_payload["sample_b_label"] = job_params.get("sample_b_label") or workflow_payload.get("sample_b_label")
+            workflow_payload["plot_title"] = job_params.get("plot_title") or workflow_payload.get("plot_title")
+            steps = workflow_payload.get("steps") or []
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                if step.get("kind") == "GENERATE_PLOT":
+                    if job_params.get("plot_title"):
+                        step["plot_title"] = job_params.get("plot_title")
+                elif step.get("kind") == "LOCATE_DATA":
+                    step["title"] = (
+                        f"Identify region files for {workflow_payload.get('sample_a_label') or 'Sample A'} "
+                        f"and {workflow_payload.get('sample_b_label') or 'Sample B'}"
+                    )
+            workflow_block.payload_json = json.dumps(workflow_payload)
             session.commit()
 
         _apply_slurm_cache_preflight_to_workflow(session, workflow_block, job_data.get("cache_preflight"))
@@ -718,6 +741,14 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             if _script_output_dir and os.path.isabs(_script_output_dir):
                 _work_directory = _script_output_dir
 
+        script_completed_without_run_uuid = (
+            run_type == "script"
+            and not run_uuid
+            and isinstance(result, dict)
+            and bool(result.get("success"))
+            and int(result.get("exit_code") or 0) == 0
+        )
+
         if run_uuid:
             if workflow_block is not None:
                 payload = get_block_payload(workflow_block)
@@ -790,6 +821,86 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
 
             # Start polling job status in background
             asyncio.create_task(job_polling.poll_job_status(project_id, job_block.id, run_uuid))
+        elif script_completed_without_run_uuid:
+            _gate_model = gate_payload.get("model", "default")
+            job_block = _create_block_internal(
+                session,
+                project_id,
+                "EXECUTION_JOB",
+                {
+                    "run_uuid": None,
+                    "work_directory": _work_directory,
+                    "sample_name": job_data["sample_name"],
+                    "mode": job_data["mode"],
+                    "run_type": run_type,
+                    "workflow_plan_block_id": workflow_block.id if workflow_block is not None else None,
+                    "model": _gate_model,
+                    "status": "COMPLETED",
+                    "message": "Script completed successfully",
+                    "script_id": job_data.get("script_id"),
+                    "script_path": job_data.get("script_path"),
+                    "script_args": job_data.get("script_args") if isinstance(job_data.get("script_args"), list) else None,
+                    "stdout": result.get("stdout") if isinstance(result, dict) else None,
+                    "stderr": result.get("stderr") if isinstance(result, dict) else None,
+                    "exit_code": result.get("exit_code") if isinstance(result, dict) else None,
+                    "job_status": {
+                        "status": "COMPLETED",
+                        "progress_percent": 100,
+                        "message": "Script completed successfully",
+                        "tasks": {},
+                    },
+                    "logs": [],
+                },
+                status="DONE",
+                owner_id=owner_id,
+            )
+
+            if workflow_block is not None:
+                run_step_id = _resolve_workflow_step_id(
+                    get_block_payload(workflow_block),
+                    "run_dogme",
+                    kinds=("RUN_SCRIPT",),
+                )
+                if run_step_id:
+                    step_result_payload = dict(result)
+                    if _work_directory:
+                        step_result_payload["work_directory"] = _work_directory
+                        step_result_payload["output_directory"] = _work_directory
+                    _set_workflow_step_status(
+                        session,
+                        workflow_block,
+                        run_step_id,
+                        "COMPLETED",
+                        extra={
+                            "block_id": job_block.id,
+                            **({"work_directory": _work_directory, "output_directory": _work_directory} if _work_directory else {}),
+                            "result": [
+                                {
+                                    "tool": submission_tool,
+                                    "result": step_result_payload,
+                                }
+                            ],
+                        },
+                    )
+
+                from cortex.app import _auto_execute_plan_steps
+
+                user_stub = type("UserStub", (), {"id": owner_id})()
+                asyncio.create_task(
+                    _auto_execute_plan_steps(
+                        project_id,
+                        workflow_block.id,
+                        user_stub,
+                        gate_payload.get("model", "default"),
+                    )
+                )
+
+            logger.info(
+                "Script completed without run_uuid",
+                project_id=project_id,
+                script_id=job_data.get("script_id"),
+                work_directory=_work_directory,
+            )
         else:
             # MCP call succeeded but no run_uuid in response
             # Show the actual result for debugging

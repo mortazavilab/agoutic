@@ -218,6 +218,31 @@ def _resolve_payload_df_by_id(df_id: int, dfs: dict):
         if meta.get("df_id") == df_id:
             rows = fdata.get("data", []) if isinstance(fdata, dict) else []
             cols = fdata.get("columns") if isinstance(fdata, dict) else None
+            declared_rows = meta.get("row_count") or fdata.get("row_count") or meta.get("total_rows")
+            if meta.get("is_truncated") or (
+                isinstance(declared_rows, int) and declared_rows > len(rows)
+            ):
+                raw_file_path = str(meta.get("source_file_path") or meta.get("label") or fname).strip()
+                raw_work_dir = str(meta.get("source_work_dir") or "").strip()
+                candidate_path = Path(raw_file_path).expanduser()
+                full_path = None
+                if candidate_path.is_absolute():
+                    if candidate_path.exists() and candidate_path.is_file():
+                        full_path = candidate_path
+                elif raw_work_dir:
+                    work_dir = Path(raw_work_dir).expanduser()
+                    for path_try in ((work_dir / candidate_path), (work_dir / candidate_path.name)):
+                        if path_try.exists() and path_try.is_file():
+                            full_path = path_try
+                            break
+                if full_path is not None:
+                    sep = "\t" if full_path.suffix.lower() == ".tsv" else ","
+                    try:
+                        rehydrated = pd.read_csv(full_path, sep=sep, low_memory=False)
+                    except Exception:
+                        rehydrated = None
+                    if rehydrated is not None and not rehydrated.empty:
+                        return rehydrated, fname
             return pd.DataFrame(rows, columns=cols or None), fname
     return None, None
 
@@ -1528,6 +1553,8 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
             )
             if membership_frame is None or membership_frame.shape[1] not in {2, 3}:
                 return None
+            requested_labels = _parse_multi_value_param(chart_spec.get("labels"))
+            display_labels = requested_labels if len(requested_labels) == len(set_columns) else set_columns
 
             weight_series = None
             if y_col and y_col in df_plot.columns:
@@ -1541,22 +1568,22 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
 
             if len(set_columns) == 2:
                 circles = [
-                    (0.1, 0.15, 1.9, 1.95, set_columns[0], colors[0]),
-                    (1.1, 0.15, 2.9, 1.95, set_columns[1], colors[1]),
+                    (0.0, 0.2, 2.8, 3.0, set_columns[0], display_labels[0], colors[0]),
+                    (1.8, 0.2, 4.6, 3.0, set_columns[1], display_labels[1], colors[1]),
                 ]
                 count_positions = {
-                    (True, False): (0.8, 1.0),
-                    (False, True): (2.2, 1.0),
-                    (True, True): (1.5, 1.0),
+                    (True, False): (0.95, 1.6),
+                    (False, True): (3.65, 1.6),
+                    (True, True): (2.3, 1.6),
                 }
-                label_positions = [(0.75, 2.12), (2.25, 2.12)]
-                x_range = [0.0, 3.0]
-                y_range = [0.0, 2.4]
+                label_positions = [(1.0, 3.28), (3.6, 3.28)]
+                x_range = [-0.35, 4.95]
+                y_range = [0.0, 3.65]
             else:
                 circles = [
-                    (0.3, 1.0, 2.1, 2.8, set_columns[0], colors[0]),
-                    (1.3, 1.0, 3.1, 2.8, set_columns[1], colors[1]),
-                    (0.8, 0.1, 2.6, 1.9, set_columns[2], colors[2]),
+                    (0.3, 1.0, 2.1, 2.8, set_columns[0], display_labels[0], colors[0]),
+                    (1.3, 1.0, 3.1, 2.8, set_columns[1], display_labels[1], colors[1]),
+                    (0.8, 0.1, 2.6, 1.9, set_columns[2], display_labels[2], colors[2]),
                 ]
                 count_positions = {
                     (True, False, False): (0.95, 2.0),
@@ -1571,7 +1598,7 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 x_range = [0.0, 3.4]
                 y_range = [-0.2, 3.2]
 
-            for idx, (x0, y0, x1, y1, label, color_value) in enumerate(circles):
+            for idx, (x0, y0, x1, y1, column_name, display_label, color_value) in enumerate(circles):
                 fig.add_shape(
                     type="circle",
                     x0=x0,
@@ -1586,18 +1613,20 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 fig.add_annotation(
                     x=label_positions[idx][0],
                     y=label_positions[idx][1],
-                    text=f"{label}<br>n={int(membership_frame[label].sum()) if weight_series is None else int(weight_series[membership_frame[label]].sum())}",
+                    text=(
+                        f"{display_label}<br>n={int(membership_frame[column_name].sum()) if weight_series is None else int(weight_series[membership_frame[column_name]].sum()):,}"
+                    ),
                     showarrow=False,
-                    font={"size": 13},
+                    font={"size": 18},
                 )
 
             for combo, (x_pos, y_pos) in count_positions.items():
                 fig.add_annotation(
                     x=x_pos,
                     y=y_pos,
-                    text=str(int(combo_counts.get(combo, 0))),
+                    text=f"{int(combo_counts.get(combo, 0)):,}",
                     showarrow=False,
-                    font={"size": 16},
+                    font={"size": 28},
                 )
 
             fig.add_trace(

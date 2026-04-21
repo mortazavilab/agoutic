@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.6.1
+**Version:** 3.6.5
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -33,11 +33,13 @@ AGOUTIC supports **dual execution modes**:
 Remote execution features:
 - **Saved SSH profiles** — per-user connection profiles with secure key references (no raw secrets stored). Supports local OS user key access through a per-session broker launched under that Unix account with `su` (password used transiently, never stored)
 - **SLURM resource management** — configurable account, partition, CPUs, memory, walltime, GPUs with validation
+- **Shared OpenChromatin GPU runtime defaults** — DNA SLURM runs now default to the shared Dogme OpenChromatin GPU container and task-scoped runtime wiring instead of the older custom host-mounted modkit path
 - **Remote base path model** — a single `remote_base_path` anchors `ref/`, `data/`, and per-workflow remote directories
 - **Remote browsing and stage-only intake** — browse saved-cluster paths and stage references/input data without submitting a job
+- **Stage transfer controls** — running stage-only transfers can be refreshed, cancelled, resumed, and failed staging cards can delete their reserved local workflow folders directly from the UI
 - **Result destination policy** — keep results remote-only, copy back locally, or both
 - **Staged approval prompts** — Cortex collects details progressively, presents summary before submission
-- **Run and staging status tracking** — dedicated staging tasks plus remote execution stage labels through `completed`
+- **Run and staging status tracking** — dedicated staging tasks plus remote execution stage labels through `completed`, including byte-level transfer progress, current-file details, and faster live refresh while transfers are active
 - **Scheduler integration** — SLURM job ID tracking, state polling via sacct/squeue, cancellation via scancel
 
 Phase 1 limitation: Analyzer operates on local-accessible files only. Remote results must be copied back before downstream analysis.
@@ -83,12 +85,14 @@ AGOUTIC is designed to help users:
   - Compare grouped samples directly from reconciled workflow abundance tables
     or saved dataframes
   - Use the stateful DE flow: load → filter → normalize → design → fit → test → results
+  - Prefer workflow-local `reconciled.gtf` annotation when present so transcript-aware plots and summaries stay aligned with the active workflow output
   - Filter by FDR/logFC and report annotated top genes for interpretation
 
 - **Functional interpretation**
   - Run GO enrichment (BP, MF, CC)
   - Run Reactome and KEGG pathway enrichment
   - Translate Ensembl IDs and normalize symbols for human and mouse datasets
+  - Build and reuse colocated GTF-backed gene/transcript caches for workflow-local or custom annotations
 
 For deeper tool-level details, see [`analyzer/README.md`](analyzer/README.md),
 [`skills/differential_expression/SKILL.md`](skills/differential_expression/SKILL.md),
@@ -157,7 +161,8 @@ The analysis layer returns:
 - Inline Plotly visualizations directly in chat
 - Interactive bar, scatter, heatmap, box, histogram, pie, venn, and upset plots from conversation dataframes
 - Automatic plotting from parsed tables when chartable data are detected
-- Saved venn/upset overlap plots over earlier chat dataframes reload the full source table from analyzer provenance or matching project files when only preview rows are available, so overlap counts stay accurate
+- Cross-workflow open-chromatin overlap requests can run as approval-gated background workflows that write workflow-scoped overlap CSVs and manifests for downstream plotting
+- Saved venn/upset overlap plots over earlier chat dataframes reload the full source table from analyzer provenance or matching project files when only preview rows are available, so overlap counts stay accurate and two-set venn diagrams remain readable for large overlaps
 - edgePython-backed DE and enrichment plots now default to 600 dpi raster export with an SVG companion for project-scoped artifact output
 - Publication-style volcano and MD plots route through edgePython, while generic dataframe charts remain an interactive Plotly path rather than a server-side publication export path
 
@@ -319,6 +324,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
   - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
   - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that now runs through manifest-first classification and composition for core deterministic flows. `SkillManifest` metadata supplies planner triggers, expected inputs, required services, runtime hints, and MCP tool chains; `plan_composer.py` builds DE, enrichment, and XgenePy plans from that metadata; legacy templates remain as deterministic fallback for unmigrated flows; and CHECK_EXISTING guards still skip expensive operations when results already exist.
+  - **Deterministic skill-management commands** — `/skills`, `/skill <skill_key>`, and `/use-skill <skill_key>` expose the live skill catalog, describe individual skills, and persist manual skill switching across turns without relying on a freeform model response.
   - **Gene Annotation & ID Translation** — offline Ensembl gene ID ↔ symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. Bidirectional `lookup_gene` tool answers "what is the Ensembl ID for TP53?" style queries. Pre-LLM auto-skill detection routes gene questions to the correct skill from any context (including Welcome). MCP tools: `annotate_genes` (edgePython, DE-stateful), `translate_gene_ids` and `lookup_gene` (Analyzer).
   - **Robust DATA_CALL tag parsing** — bracket-aware parameter parser handles JSON arrays inside DATA_CALL tags (e.g. `gene_symbols=["TP53", "BRCA1"]`). Mistral-native `[TOOL_CALLS]DATA_CALL:` format is auto-normalized to standard `[[DATA_CALL:...]]` tags.
   - **Skill-defined plan chains** — skill authors can declare multi-step workflows in skill Markdown files under a `## Plan Chains` section. A single message like "get K562 experiments and make a plot by assay type" is detected at classify-time and produces both a data search and a visualization. Trigger phrases support multi-phrasing (AND/OR keyword groups) for flexible matching. See `SKILLS.md` for the full authoring guide.
@@ -347,12 +353,15 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 - **Tech:** FastAPI + Nextflow + Dogme
 - **Features:**
   - Submit Dogme DNA/RNA/cDNA pipelines
+  - Shared OpenChromatin GPU container defaults for SLURM DNA runs with task-scoped runtime injection for OpenChromatin work
   - Real-time job monitoring
   - Log streaming
   - User-jailed working directories
   - **Job cancellation** — SIGTERM-based cancel with cooperative `.nextflow_cancelled` marker; properly displays CANCELLED (not FAILED) in UI
   - **Workflow folder deletion** — DELETE endpoint removes work directory and sets status to DELETED; block status updated immediately so UI reflects deletion
   - **Job resume** — resubmit cancelled/failed jobs with Nextflow `-resume` flag to reuse cached task results in the same workflow directory instead of starting fresh
+  - **Stage-only transfer lifecycle controls** — refresh, cancel, resume, and failed-stage cleanup actions are available in both the workflow UI and Task Center
+  - **Live staging telemetry** — running transfers surface current file, transferred bytes, total size, and faster refresh cadence during brokered or direct rsync activity
   - **`delete_job_data` MCP tool** — enables chat-based deletion ("delete workflow1")
 - **Docs:** [launchpad/README.md](launchpad/README.md)
 
@@ -363,6 +372,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - Full DE pipeline: load → filter → normalize → design → dispersion → fit → test → results → plots
   - Gene list filtering from DE results by FDR, logFC, and direction (up/down/all)
   - Gene annotation (annotate_genes) on DE results in-place
+  - Workflow-local `reconciled.gtf` preference for annotation when available, with shared reference caches as fallback
   - Stateful pipeline — each step builds on previous results within a session
   - Volcano, MDS, MA, BCV, heatmap plot generation
   - TSV/CSV/JSON result export
@@ -378,6 +388,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
   - File discovery and content reading
   - Workflow folder browsing via `list_job_files`
   - Gene ID translation (`translate_gene_ids`) and bidirectional lookup (`lookup_gene`) via Ensembl reference tables
+  - GTF-backed gene and transcript annotation with colocated caches for shared references, workflow-local outputs, or custom user-provided GTFs
   - GO enrichment (BP/MF/CC) and pathway enrichment (KEGG/Reactome) via g:Profiler
   - Per-conversation enrichment state management
   - Species auto-detection from gene ID prefixes (ENSG → human, ENSMUSG → mouse)
@@ -906,7 +917,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.4.17 — Dual-scope memory system, chat-line memory CRUD, sample annotation, auto-capture, memory-aware LLM context
+- **Release**: 3.6.5 — manifest-first planning now ships with deterministic skill commands, GTF-backed annotation prefers workflow-local `reconciled.gtf` outputs, remote staging supports refresh/cancel/resume/delete plus live byte-progress telemetry, SLURM DNA runs default to the shared OpenChromatin GPU runtime, and cross-workflow overlap workflows reopen accurately with readable large-count venn diagrams and publication-style DE plot exports
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
@@ -920,5 +931,5 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 - complete: Plan-execute-observe-replan, gene annotation, expanded templates
 - complete: Centralized DB, Alembic migrations, enrichment tools in Analyzer
 - complete: Cortex modularisation and DE adapter integration
-- current: Dual-scope memory system, sample annotation, auto-capture
+- current: Manifest-driven planning, workflow-local annotation, overlap workflows, and remote execution hardening
 - next: Production deployment preparation
