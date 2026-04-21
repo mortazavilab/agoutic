@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Bug Fixes
+
+- **Truncated venn/upset plots now recover when older dataframe history is missing provenance** — when an overlap plot targets a saved dataframe that only has preview rows in chat history, AGOUTIC now reloads the full source table from analyzer provenance when available and otherwise searches matching project files by path, basename, or dataframe label before rebuilding the overlap-membership dataframe. If the full source still cannot be recovered, the chart is dropped instead of rendering incorrect overlap counts from truncated previews.
+  (`cortex/chat_stages/response_assembly.py`, `tests/cortex/test_chat_data_calls.py`)
+
 ## [3.6.4] - 2026-04-18
 
 ### Features

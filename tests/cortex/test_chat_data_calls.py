@@ -667,6 +667,110 @@ class TestPlotTagParsing:
         overlap_payload = next(iter(embedded.values()))
         assert overlap_payload["row_count"] == 7
 
+    def test_upset_plot_rehydrates_from_project_files_without_provenance(self, SL, seed, tmp_path):
+        project_dir = tmp_path / "proj"
+        workflow_dir = project_dir / "workflow2"
+        workflow_dir.mkdir(parents=True, exist_ok=True)
+        (workflow_dir / "reconciled_abundance.tsv").write_text(
+            "gene_ID\ttranscript_ID\ttranscript_novelty\tc2c12r1\tc2c12r2\tc2c12r3\n"
+            "ENSMUSG00000033845\tENSMUST00000130201\tKNOWN\t62\t67\t76\n"
+            "ENSMUSG00000033845\tENSMUST00000045689\tKNOWN\t0\t0\t1\n"
+            "ENSMUSG00000025903\tENSMUST00000115529\tKNOWN\t8\t5\t11\n"
+            "ENSMUSG00000025903\tENSMUST00000134384\tISM\t0\t3\t1\n"
+            "ENSMUSG00000025903\tENSMUST00000150971\tKNOWN\t4\t4\t5\n"
+            "ENSMUSG00000033845\tENSMUST00000156816\tKNOWN\t214\t167\t170\n"
+            "ENSMUSG00000033845\tENSMUST00000132625\tKNOWN\t2\t0\t2\n"
+        )
+
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": "analyze_job_results",
+                    "known_dataframes": ["DF3 (reconciled_abundance.tsv, 7 rows)"],
+                    "latest_dataframe": "DF3",
+                },
+                "_dataframes": {
+                    "reconciled_abundance.tsv": {
+                        "columns": [
+                            "gene_ID",
+                            "transcript_ID",
+                            "transcript_novelty",
+                            "c2c12r1",
+                            "c2c12r2",
+                            "c2c12r3",
+                        ],
+                        "data": [
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000130201",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 62,
+                                "c2c12r2": 67,
+                                "c2c12r3": 76,
+                            },
+                            {
+                                "gene_ID": "ENSMUSG00000033845",
+                                "transcript_ID": "ENSMUST00000045689",
+                                "transcript_novelty": "KNOWN",
+                                "c2c12r1": 0,
+                                "c2c12r2": 0,
+                                "c2c12r3": 1,
+                            },
+                        ],
+                        "row_count": 7,
+                        "metadata": {
+                            "df_id": 3,
+                            "visible": True,
+                            "label": "reconciled_abundance.tsv",
+                            "row_count": 7,
+                            "is_truncated": True,
+                        },
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+        def think(msg, skill, history):
+            return (
+                "Here is the overlap plot.\n"
+                "[[PLOT: type=upset, df=DF3, x=transcript_novelty, title=Transcript novelty overlap]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(
+            client,
+            "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
+            skill="analyze_job_results",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
+        assert chart["type"] == "upset"
+        assert chart["df_id"] == 4
+        assert chart["sets"] == "c2c12r1|c2c12r2|c2c12r3"
+
+        agent_payload = (data.get("agent_block") or {}).get("payload") or {}
+        embedded = agent_payload.get("_dataframes") or {}
+        overlap_payload = next(iter(embedded.values()))
+        assert overlap_payload["row_count"] == 7
+        assert overlap_payload["metadata"]["kind"] == "overlap_membership"
+
     def test_upset_plot_drops_truncated_preview_when_full_reload_is_unavailable(self, SL, seed, tmp_path):
         mock_mcp = AsyncMock()
         s = SL()

@@ -155,8 +155,9 @@ The analysis layer returns:
 ### Visualization Support
 
 - Inline Plotly visualizations directly in chat
-- Interactive bar, scatter, heatmap, box, histogram, and pie plots
+- Interactive bar, scatter, heatmap, box, histogram, pie, venn, and upset plots
 - Automatic plotting from parsed tables when chartable data are detected
+- Saved venn/upset overlap plots over earlier chat dataframes reload the full source table from analyzer provenance or matching project files when only preview rows are available, so overlap counts stay accurate
 - Plot generation from DE and enrichment outputs for rapid interpretation
 
 ### Current Analysis Limitations

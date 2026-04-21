@@ -44,11 +44,13 @@ async def _build_plot_source_dataframes(
     plot_specs: list[dict],
     embedded_dataframes: dict[str, dict],
     history_blocks: list,
+    project_dir_path: Path | None = None,
 ) -> tuple[dict[str, dict], list[str]]:
     overrides, errors = await _rehydrate_truncated_plot_sources(
         plot_specs,
         embedded_dataframes,
         history_blocks,
+        project_dir_path=project_dir_path,
     )
     if not overrides:
         return embedded_dataframes, errors
@@ -63,6 +65,7 @@ async def _rehydrate_truncated_plot_sources(
     plot_specs: list[dict],
     embedded_dataframes: dict[str, dict],
     history_blocks: list,
+    project_dir_path: Path | None = None,
 ) -> tuple[dict[str, dict], list[str]]:
     relevant_df_ids = sorted({
         spec.get("df_id")
@@ -85,7 +88,11 @@ async def _rehydrate_truncated_plot_sources(
             continue
 
         parse_source = find_dataframe_parse_source(df_id, history_blocks)
-        full_result = await _load_full_parsed_dataframe(parse_source)
+        full_result = await _load_full_parsed_dataframe(
+            parse_source,
+            payload=payload,
+            project_dir_path=project_dir_path,
+        )
         if not full_result:
             errors.append(
                 f"Could not build accurate {str(next((spec.get('type') for spec in plot_specs if spec.get('df_id') == df_id), 'plot')).strip().lower() or 'plot'} overlap input: "
@@ -134,58 +141,80 @@ def _is_truncated_plot_payload(payload: dict | None) -> bool:
     return isinstance(declared_rows, int) and declared_rows > stored_rows
 
 
-async def _load_full_parsed_dataframe(parse_source: dict | None) -> dict | None:
-    if not parse_source:
-        return None
-    file_path = str(parse_source.get("file_path") or "").strip()
-    if not file_path:
-        return None
+async def _load_full_parsed_dataframe(
+    parse_source: dict | None,
+    *,
+    payload: dict | None = None,
+    project_dir_path: Path | None = None,
+) -> dict | None:
+    file_path = str((parse_source or {}).get("file_path") or "").strip()
 
-    params: dict = {
-        "file_path": file_path,
-        "max_rows": None,
-    }
-    work_dir = str(parse_source.get("work_dir") or "").strip()
-    run_uuid = str(parse_source.get("run_uuid") or "").strip()
-    if work_dir:
-        params["work_dir"] = work_dir
-    elif run_uuid:
-        params["run_uuid"] = run_uuid
+    params: dict = {}
+    work_dir = str((parse_source or {}).get("work_dir") or "").strip()
+    run_uuid = str((parse_source or {}).get("run_uuid") or "").strip()
+    if file_path:
+        params = {
+            "file_path": file_path,
+            "max_rows": None,
+        }
+        if work_dir:
+            params["work_dir"] = work_dir
+        elif run_uuid:
+            params["run_uuid"] = run_uuid
 
-    try:
-        analyzer_url = get_service_url("analyzer")
-        client = MCPHttpClient(name="analyzer", base_url=analyzer_url)
-        await client.connect()
+    if params:
         try:
-            result = await client.call_tool("parse_csv_file", **params)
-        finally:
-            await client.disconnect()
-    except Exception as exc:
-        logger.warning(
-            "Failed to rehydrate truncated plot dataframe",
-            file_path=file_path,
-            work_dir=work_dir,
-            run_uuid=run_uuid,
-            error=str(exc),
-        )
-        result = _load_full_parsed_dataframe_locally(parse_source)
-        if result:
+            analyzer_url = get_service_url("analyzer")
+            client = MCPHttpClient(name="analyzer", base_url=analyzer_url)
+            await client.connect()
+            try:
+                result = await client.call_tool("parse_csv_file", **params)
+            finally:
+                await client.disconnect()
+        except Exception as exc:
+            logger.warning(
+                "Failed to rehydrate truncated plot dataframe",
+                file_path=file_path,
+                work_dir=work_dir,
+                run_uuid=run_uuid,
+                error=str(exc),
+            )
+            result = _load_full_parsed_dataframe_locally(
+                parse_source,
+                payload=payload,
+                project_dir_path=project_dir_path,
+            )
+            if result:
+                return result
+            return None
+
+        if isinstance(result, dict) and result.get("data"):
             return result
-        return None
 
-    if not isinstance(result, dict) or not result.get("data"):
-        return _load_full_parsed_dataframe_locally(parse_source)
-    return result
+    return _load_full_parsed_dataframe_locally(
+        parse_source,
+        payload=payload,
+        project_dir_path=project_dir_path,
+    )
 
 
-def _load_full_parsed_dataframe_locally(parse_source: dict | None) -> dict | None:
-    full_path = _resolve_local_parse_source_path(parse_source)
+def _load_full_parsed_dataframe_locally(
+    parse_source: dict | None,
+    *,
+    payload: dict | None = None,
+    project_dir_path: Path | None = None,
+) -> dict | None:
+    full_path = _resolve_local_parse_source_path(
+        parse_source,
+        payload=payload,
+        project_dir_path=project_dir_path,
+    )
     if full_path is None:
         return None
 
-    file_path = str(parse_source.get("file_path") or "").strip()
-    work_dir = str(parse_source.get("work_dir") or "").strip()
-    sep = "\t" if file_path.endswith(".tsv") else ","
+    file_path = _select_local_source_label(parse_source, payload, full_path)
+    work_dir = str(full_path.parent)
+    sep = "\t" if full_path.suffix.lower() == ".tsv" else ","
     try:
         df = pd.read_csv(full_path, sep=sep, low_memory=False)
     except Exception as exc:
@@ -212,40 +241,180 @@ def _load_full_parsed_dataframe_locally(parse_source: dict | None) -> dict | Non
             "total_rows": len(df),
             "is_truncated": False,
             "local_rehydration": True,
+            "resolved_path": str(full_path),
         },
     }
 
 
-def _resolve_local_parse_source_path(parse_source: dict | None) -> Path | None:
-    if not parse_source:
+def _resolve_local_parse_source_path(
+    parse_source: dict | None,
+    *,
+    payload: dict | None = None,
+    project_dir_path: Path | None = None,
+) -> Path | None:
+    candidate_files = _candidate_local_source_files(parse_source, payload)
+    if not candidate_files:
         return None
 
-    file_path = str(parse_source.get("file_path") or "").strip()
-    if not file_path:
-        return None
-    work_dir = str(parse_source.get("work_dir") or "").strip()
-    if not work_dir:
+    work_dir = str((parse_source or {}).get("work_dir") or "").strip()
+    work_root = Path(work_dir).expanduser() if work_dir else None
+    project_root = project_dir_path.resolve() if isinstance(project_dir_path, Path) else None
+    search_roots = _candidate_local_search_roots(project_root, work_root)
+
+    for candidate in candidate_files:
+        resolved = _resolve_candidate_source_path(candidate, search_roots)
+        if resolved is not None:
+            return resolved
+
+    preferred_parent_name = work_root.name if work_root is not None and work_root.name else ""
+    return _search_local_source_by_name(
+        candidate_files,
+        search_roots,
+        preferred_parent_name=preferred_parent_name,
+    )
+
+
+def _candidate_local_source_files(parse_source: dict | None, payload: dict | None) -> list[Path]:
+    seen: set[str] = set()
+    candidates: list[Path] = []
+
+    def _add(raw_value) -> None:
+        for candidate in _extract_file_like_candidates(raw_value):
+            key = str(candidate)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            candidates.append(candidate)
+
+    if parse_source:
+        _add(parse_source.get("file_path"))
+
+    metadata = dict((payload or {}).get("metadata") or {})
+    _add(metadata.get("file_path"))
+    _add(metadata.get("label"))
+    return candidates
+
+
+def _extract_file_like_candidates(raw_value) -> list[Path]:
+    value = str(raw_value or "").strip()
+    if not value:
+        return []
+
+    matches: list[str] = []
+    suffixes = {".csv", ".tsv", ".txt"}
+    direct_path = Path(value)
+    if direct_path.suffix.lower() in suffixes:
+        matches.append(value)
+
+    for match in re.findall(r"[A-Za-z0-9_./\\ -]+\.(?:csv|tsv|txt)", value, re.IGNORECASE):
+        cleaned = match.strip().strip('"\'')
+        if cleaned:
+            matches.append(cleaned)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for match in matches:
+        key = match.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(Path(key))
+    return deduped
+
+
+def _candidate_local_search_roots(
+    project_root: Path | None,
+    work_root: Path | None,
+) -> list[Path]:
+    roots: list[Path] = []
+
+    def _add(path: Path | None) -> None:
+        if not isinstance(path, Path):
+            return
+        try:
+            resolved = path.resolve()
+        except Exception:
+            return
+        if resolved in roots:
+            return
+        roots.append(resolved)
+
+    if work_root and work_root.is_absolute():
+        _add(work_root)
+    if project_root:
+        _add(project_root)
+        _add(project_root / "data")
+        _add(project_root.parent / "data")
+        if work_root and work_root.name:
+            _add(project_root / work_root.name)
+    return roots
+
+
+def _resolve_candidate_source_path(candidate: Path, search_roots: list[Path]) -> Path | None:
+    if candidate.is_absolute():
+        return candidate.resolve() if candidate.exists() and candidate.is_file() else None
+
+    for root in search_roots:
+        try:
+            full_path = (root / candidate).resolve()
+        except Exception:
+            continue
+        if full_path.exists() and full_path.is_file():
+            return full_path
+    return None
+
+
+def _search_local_source_by_name(
+    candidate_files: list[Path],
+    search_roots: list[Path],
+    *,
+    preferred_parent_name: str = "",
+) -> Path | None:
+    candidate_names = [candidate.name for candidate in candidate_files if candidate.name]
+    if not candidate_names:
         return None
 
-    work_root = Path(work_dir).expanduser()
-    if not work_root.is_absolute():
+    matches: list[Path] = []
+    for root in search_roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        for name in candidate_names:
+            try:
+                for match in root.rglob(name):
+                    if match.is_file():
+                        resolved = match.resolve()
+                        if resolved not in matches:
+                            matches.append(resolved)
+            except Exception:
+                continue
+
+    if not matches:
         return None
 
-    full_path = (work_root / file_path).resolve()
-    try:
-        full_path.relative_to(work_root.resolve())
-    except ValueError:
-        logger.warning(
-            "Rejected local dataframe rehydration path outside work dir",
-            file_path=file_path,
-            work_dir=work_dir,
-            absolute_path=str(full_path),
-        )
-        return None
+    preferred_parent_name = preferred_parent_name.strip()
+    if preferred_parent_name:
+        preferred = [path for path in matches if preferred_parent_name in path.parts]
+        if preferred:
+            matches = preferred
 
-    if not full_path.exists() or not full_path.is_file():
-        return None
-    return full_path
+    matches.sort(key=lambda path: (len(path.parts), str(path)))
+    return matches[0]
+
+
+def _select_local_source_label(
+    parse_source: dict | None,
+    payload: dict | None,
+    full_path: Path,
+) -> str:
+    for raw_value in (
+        (parse_source or {}).get("file_path"),
+        ((payload or {}).get("metadata") or {}).get("file_path"),
+        ((payload or {}).get("metadata") or {}).get("label"),
+    ):
+        candidates = _extract_file_like_candidates(raw_value)
+        if candidates:
+            return str(candidates[0])
+    return full_path.name
 
 
 def _drop_inaccurate_truncated_overlap_specs(
@@ -299,6 +468,7 @@ class ResponseAssemblyStage:
             ctx.plot_specs,
             ctx.embedded_dataframes,
             ctx.history_blocks,
+            project_dir_path=ctx.project_dir_path,
         )
         overlap_errors.extend(_drop_inaccurate_truncated_overlap_specs(
             ctx.plot_specs,
@@ -364,6 +534,7 @@ class ResponseAssemblyStage:
             ctx.plot_specs,
             ctx.embedded_dataframes,
             ctx.history_blocks,
+            project_dir_path=ctx.project_dir_path,
         )
         overlap_errors.extend(_drop_inaccurate_truncated_overlap_specs(
             ctx.plot_specs,
