@@ -215,6 +215,12 @@ def prepare_project_task_sections_for_dock(
         stale_hide_hours=stale_hide_hours,
     )
 
+
+def _project_scope_mount_key(scope_name: str, project_id: str) -> str:
+    scope_token = (scope_name or "scope").strip() or "scope"
+    project_token = (project_id or "none").strip() or "none"
+    return f"{scope_token}_project_scope_{project_token}"
+
 # Check if we're creating a new project (flag set by New Project button)
 if st.session_state.get("_create_new_project", False):
     # Create project via server-side endpoint (server generates UUID)
@@ -542,15 +548,19 @@ for _p in st.session_state.get("_cached_projects", []):
     if _p.get("id") == active_id:
         _active_project_name = _p.get("name", _active_project_name)
         break
-st.title(f"🧬 {_active_project_name}")
 
 # Determine if the chat area needs periodic auto-refresh.
 # This is evaluated ONCE per full script run; the fragment uses it.
 _auto_refresh_suppressed = _auto_refresh_is_suppressed()
+_project_switch_loading = st.session_state.get("_project_switch_loading_for") == active_id
 _needs_auto_refresh = bool((auto_refresh or st.session_state.get("_has_running_job", False)) and not _auto_refresh_suppressed)
 _needs_full_page_auto_refresh = bool(auto_refresh and st.session_state.get("_has_full_refresh_job", False) and not _auto_refresh_suppressed)
 _refresh_seconds = min(poll_seconds, 2) if st.session_state.get("_has_running_job", False) else poll_seconds
-_refresh_interval = timedelta(seconds=_refresh_seconds) if _needs_auto_refresh else None
+if _project_switch_loading:
+    _refresh_interval = timedelta(milliseconds=100)
+else:
+    _refresh_interval = timedelta(seconds=_refresh_seconds) if _needs_auto_refresh else None
+project_loading_slot = None
 
 
 @st.fragment(run_every=_refresh_interval)
@@ -562,158 +572,177 @@ def _render_chat():
     all stay stable so there is no visible page flash.
     """
     _active_id = st.session_state.active_project_id
+    with st.container(key=_project_scope_mount_key("chat", _active_id)):
+        if st.session_state.get("_project_switch_loading_for") == _active_id:
+            st.session_state["_has_running_job"] = False
+            st.session_state["_has_full_refresh_job"] = False
+            st.session_state.pop("_hidden_block_count", None)
+            return
 
-    # 1. Fetch & Sanitize
-    fetched_blocks, _fetch_ok = get_sanitized_blocks(_active_id)
-    fetched_blocks = [b for b in fetched_blocks if b.get("project_id") == _active_id]
+        if project_loading_slot is not None:
+            project_loading_slot.empty()
 
-    # Only update session-state blocks when the fetch actually succeeded.
-    # A transient server error / timeout should NOT wipe the displayed chat.
-    if _fetch_ok:
-        blocks = fetched_blocks
-        st.session_state.blocks = blocks
-    else:
-        # Keep whatever was previously in session state so the chat stays visible.
-        blocks = st.session_state.get("blocks", [])
-        if blocks:
-            st.caption("⚠️ Could not refresh — showing cached messages")
+        # 1. Fetch & Sanitize
+        fetched_blocks, _fetch_ok = get_sanitized_blocks(_active_id)
+        fetched_blocks = [b for b in fetched_blocks if b.get("project_id") == _active_id]
 
-    if not blocks:
-        st.session_state["_has_running_job"] = False
-        # Auto-send welcome prompt for empty projects
-        if not st.session_state.get("_welcome_sent_for") or st.session_state["_welcome_sent_for"] != _active_id:
-            st.session_state["_welcome_sent_for"] = _active_id
-            try:
-                resp = make_authenticated_request(
-                    "POST",
-                    f"{API_URL}/chat",
-                    json={
-                        "project_id": _active_id,
-                        "message": "Hello, what can you help me with?",
-                        "skill": "welcome",
-                        "model": model_choice
-                    }
-                )
-                if resp.status_code == 200:
-                    time.sleep(0.5)
-                    st.rerun()
-            except Exception:
-                pass
-        st.info(f"👋 **Project `{_active_id}` is empty.**\n\nAsk Agoutic to start a task!")
-        return
+        # Only update session-state blocks when the fetch actually succeeded.
+        # A transient server error / timeout should NOT wipe the displayed chat.
+        if _fetch_ok:
+            blocks = fetched_blocks
+            st.session_state.blocks = blocks
+        else:
+            # Keep whatever was previously in session state so the chat stays visible.
+            blocks = st.session_state.get("blocks", [])
+            if blocks:
+                st.caption("⚠️ Could not refresh — showing cached messages")
 
-    # 2. Pagination
-    max_visible = st.session_state.get("_max_visible_blocks", 30)
-    if len(blocks) > max_visible:
-        hidden_count = len(blocks) - max_visible
-        st.session_state["_hidden_block_count"] = hidden_count
-        visible_blocks = blocks[-max_visible:]
-    else:
-        st.session_state.pop("_hidden_block_count", None)
-        visible_blocks = blocks
+        if not blocks:
+            st.session_state["_has_running_job"] = False
+            # Auto-send welcome prompt for empty projects
+            if not st.session_state.get("_welcome_sent_for") or st.session_state["_welcome_sent_for"] != _active_id:
+                st.session_state["_welcome_sent_for"] = _active_id
+                try:
+                    resp = make_authenticated_request(
+                        "POST",
+                        f"{API_URL}/chat",
+                        json={
+                            "project_id": _active_id,
+                            "message": "Hello, what can you help me with?",
+                            "skill": "welcome",
+                            "model": model_choice
+                        }
+                    )
+                    if resp.status_code == 200:
+                        time.sleep(0.5)
+                        st.rerun()
+                except Exception:
+                    pass
+            st.info(f"👋 **Project `{_active_id}` is empty.**\n\nAsk Agoutic to start a task!")
+            return
 
-    # 3. Scan ALL blocks for running jobs
-    _has_running_job = False
-    _has_full_refresh_job = False
-    _has_pending_submission = False
-    _has_finished_job = False
-    for blk in blocks:
-        btype = blk.get("type")
-        bstatus = blk.get("status")
-        if _block_requires_full_refresh(blk):
-            _has_full_refresh_job = True
-        if btype == "EXECUTION_JOB" and bstatus == "RUNNING":
-            _has_running_job = True
-        if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
-            _has_finished_job = True
-        # Keep auto-refresh alive while a result transfer is in progress
-        # (manual sync on an already-completed job).
-        if btype == "EXECUTION_JOB" and bstatus == "DONE":
-            _blk_payload = blk.get("payload", {}) if isinstance(blk.get("payload"), dict) else {}
-            _blk_js = _blk_payload.get("job_status", {}) if isinstance(_blk_payload.get("job_status"), dict) else {}
-            _blk_run_uuid = _blk_payload.get("run_uuid", "")
-            _blk_ts = (_blk_js.get("transfer_state") or "").strip().lower()
-            _cached_ts = (st.session_state.get(f"_transfer_state_{_blk_run_uuid}") or "").strip().lower() if _blk_run_uuid else ""
-            if _blk_ts in {"downloading_outputs"} or _cached_ts in {"downloading_outputs"}:
+        # 2. Pagination
+        max_visible = st.session_state.get("_max_visible_blocks", 30)
+        if len(blocks) > max_visible:
+            hidden_count = len(blocks) - max_visible
+            st.session_state["_hidden_block_count"] = hidden_count
+            visible_blocks = blocks[-max_visible:]
+        else:
+            st.session_state.pop("_hidden_block_count", None)
+            visible_blocks = blocks
+
+        # 3. Scan ALL blocks for running jobs
+        _has_running_job = False
+        _has_full_refresh_job = False
+        _has_pending_submission = False
+        _has_finished_job = False
+        for blk in blocks:
+            btype = blk.get("type")
+            bstatus = blk.get("status")
+            if _block_requires_full_refresh(blk):
+                _has_full_refresh_job = True
+            if btype == "EXECUTION_JOB" and bstatus == "RUNNING":
                 _has_running_job = True
-        if btype == "STAGING_TASK" and bstatus == "RUNNING":
+            if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
+                _has_finished_job = True
+            # Keep auto-refresh alive while a result transfer is in progress
+            # (manual sync on an already-completed job).
+            if btype == "EXECUTION_JOB" and bstatus == "DONE":
+                _blk_payload = blk.get("payload", {}) if isinstance(blk.get("payload"), dict) else {}
+                _blk_js = _blk_payload.get("job_status", {}) if isinstance(_blk_payload.get("job_status"), dict) else {}
+                _blk_run_uuid = _blk_payload.get("run_uuid", "")
+                _blk_ts = (_blk_js.get("transfer_state") or "").strip().lower()
+                _cached_ts = (st.session_state.get(f"_transfer_state_{_blk_run_uuid}") or "").strip().lower() if _blk_run_uuid else ""
+                if _blk_ts in {"downloading_outputs"} or _cached_ts in {"downloading_outputs"}:
+                    _has_running_job = True
+            if btype == "STAGING_TASK" and bstatus == "RUNNING":
+                _has_running_job = True
+            if btype == "STAGING_TASK" and bstatus in ("DONE", "FAILED"):
+                _has_finished_job = True
+            if btype == "APPROVAL_GATE" and bstatus == "APPROVED":
+                _has_pending_submission = True
+            if btype == "DOWNLOAD_TASK" and bstatus == "RUNNING":
+                _has_running_job = True
+
+        # 4. Render visible blocks
+        for blk in visible_blocks:
+            render_block(blk, expected_project_id=_active_id)
+
+        # 5. Determine if auto-refresh should stay active
+        if _has_pending_submission and not _has_running_job and not _has_finished_job:
             _has_running_job = True
-        if btype == "STAGING_TASK" and bstatus in ("DONE", "FAILED"):
-            _has_finished_job = True
-        if btype == "APPROVAL_GATE" and bstatus == "APPROVED":
-            _has_pending_submission = True
-        if btype == "DOWNLOAD_TASK" and bstatus == "RUNNING":
-            _has_running_job = True
 
-    # 4. Render visible blocks
-    for blk in visible_blocks:
-        render_block(blk, expected_project_id=_active_id)
+        # Grace window: keep refreshing 30s after completion to catch auto-analysis
+        if _has_finished_job and not _has_running_job:
+            last_finish = st.session_state.get("_job_finished_at")
+            if last_finish is None:
+                st.session_state["_job_finished_at"] = time.time()
+                _has_running_job = True
+            elif time.time() - last_finish < 30:
+                _has_running_job = True
+        elif _has_running_job:
+            st.session_state.pop("_job_finished_at", None)
 
-    # 5. Determine if auto-refresh should stay active
-    if _has_pending_submission and not _has_running_job and not _has_finished_job:
-        _has_running_job = True
+        st.session_state["_has_running_job"] = _has_running_job
+        st.session_state["_has_full_refresh_job"] = _has_full_refresh_job
 
-    # Grace window: keep refreshing 30s after completion to catch auto-analysis
-    if _has_finished_job and not _has_running_job:
-        last_finish = st.session_state.get("_job_finished_at")
-        if last_finish is None:
-            st.session_state["_job_finished_at"] = time.time()
-            _has_running_job = True
-        elif time.time() - last_finish < 30:
-            _has_running_job = True
-    elif _has_running_job:
-        st.session_state.pop("_job_finished_at", None)
+        # Keep session alive while jobs are running (heartbeat every 5 min)
+        if _has_running_job:
+            _last_hb = st.session_state.get("_last_heartbeat", 0)
+            if time.time() - _last_hb > 300:
+                try:
+                    make_authenticated_request("POST", f"{API_URL}/auth/heartbeat", timeout=5)
+                    st.session_state["_last_heartbeat"] = time.time()
+                except Exception:
+                    pass
 
-    st.session_state["_has_running_job"] = _has_running_job
-    st.session_state["_has_full_refresh_job"] = _has_full_refresh_job
+        # Show refresh indicator inside the fragment
+        if _needs_auto_refresh:
+            st.caption(
+                f"🔄 Live updating "
+                f"(last: {datetime.datetime.now().strftime('%H:%M:%S')})"
+            )
 
-    # Keep session alive while jobs are running (heartbeat every 5 min)
-    if _has_running_job:
-        _last_hb = st.session_state.get("_last_heartbeat", 0)
-        if time.time() - _last_hb > 300:
-            try:
-                make_authenticated_request("POST", f"{API_URL}/auth/heartbeat", timeout=5)
-                st.session_state["_last_heartbeat"] = time.time()
-            except Exception:
-                pass
-
-    # Show refresh indicator inside the fragment
-    if _needs_auto_refresh:
-        st.caption(
-            f"🔄 Live updating "
-            f"(last: {datetime.datetime.now().strftime('%H:%M:%S')})"
-        )
-
-
-_render_chat()
+with st.container(key=_project_scope_mount_key("project_panel", active_id)):
+    st.title(f"🧬 {_active_project_name}")
+    project_loading_slot = st.empty()
+    if _project_switch_loading:
+        with project_loading_slot.container():
+            st.info(f"Loading project `{active_id}`...")
+    _render_chat()
 
 
 @st.fragment(run_every=_refresh_interval)
 def _render_task_dock():
     """Render an inline task pane only when the project has tasks."""
     _active_id = st.session_state.active_project_id
-    sections = get_project_tasks(_active_id)
-    sections, hidden_stale = prepare_project_task_sections_for_dock(sections)
-    total_tasks = _count_project_tasks(sections)
-    st.session_state["_show_task_dock"] = total_tasks > 0
-    if total_tasks == 0:
-        return
+    with st.container(key=_project_scope_mount_key("task_dock_scope", _active_id)):
+        if st.session_state.get("_project_switch_loading_for") == _active_id:
+            st.session_state["_show_task_dock"] = False
+            return
 
-    with st.container(border=True, height=TASK_DOCK_HEIGHT_PX, key="task_dock"):
-        if hidden_stale:
-            st.caption(
-                f"Hidden {hidden_stale} stale task(s) older than 48h from this project view."
-            )
-        render_project_tasks(_active_id, sections=sections, docked=True)
+        sections = get_project_tasks(_active_id)
+        sections, hidden_stale = prepare_project_task_sections_for_dock(sections)
+        total_tasks = _count_project_tasks(sections)
+        st.session_state["_show_task_dock"] = total_tasks > 0
+        if total_tasks == 0:
+            return
+
+        with st.container(border=True, height=TASK_DOCK_HEIGHT_PX, key="task_dock"):
+            if hidden_stale:
+                st.caption(
+                    f"Hidden {hidden_stale} stale task(s) older than 48h from this project view."
+                )
+            render_project_tasks(_active_id, sections=sections, docked=True)
 
 
-# Pagination button — rendered outside the fragment to avoid duplicate-key
-# errors when the fragment's run_every timer overlaps with a full page rerun.
-_hbc = st.session_state.get("_hidden_block_count", 0)
-if _hbc > 0:
-    if st.button(f"⬆️ Load {min(_hbc, 30)} older messages ({_hbc} hidden)"):
-        st.session_state["_max_visible_blocks"] = st.session_state.get("_max_visible_blocks", 30) + 30
-        st.rerun()
+    # Pagination button — rendered outside the fragment to avoid duplicate-key
+    # errors when the fragment's run_every timer overlaps with a full page rerun.
+    _hbc = st.session_state.get("_hidden_block_count", 0)
+    if _hbc > 0:
+        if st.button(f"⬆️ Load {min(_hbc, 30)} older messages ({_hbc} hidden)"):
+            st.session_state["_max_visible_blocks"] = st.session_state.get("_max_visible_blocks", 30) + 30
+            st.rerun()
 
 # --- Capture chat input EARLY ---
 # st.chat_input is one-shot: its value is only available during the single
@@ -728,6 +757,9 @@ if _captured_prompt and not st.session_state.get("_pending_prompt"):
     st.session_state["_pending_prompt"] = _captured_prompt
 
 _render_task_dock()
+
+if st.session_state.get("_project_switch_loading_for") == active_id:
+    st.session_state.pop("_project_switch_loading_for", None)
 
 # Bootstrap: if the desired fragment auto-refresh state changed during the
 # fragment run, trigger one full rerun so Streamlit re-registers the fragment
@@ -744,7 +776,7 @@ st.write("---")
 render_file_upload(api_url=API_URL, active_id=active_id, get_session_cookie_fn=get_session_cookie)
 
 # --- Handle in-flight chat request (non-blocking polling with stop support) ---
-handle_active_chat(api_url=API_URL)
+handle_active_chat(api_url=API_URL, active_project_id=active_id)
 
 # 3. Chat Input
 # The prompt was captured earlier (before bootstrap/active-chat reruns).

@@ -29,6 +29,7 @@ section_header("Projects Dashboard", "Project state, activity, jobs, and storage
 
 def _set_active_project(project_id: str, project_name: str, *, open_chat: bool = False) -> None:
     """Persist the selected project as the active chat context."""
+    st.session_state["_project_switch_loading_for"] = project_id
     st.session_state["active_project_id"] = project_id
     st.session_state["_project_id_input"] = project_id
     st.session_state["blocks"] = []

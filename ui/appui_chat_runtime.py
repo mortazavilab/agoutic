@@ -38,10 +38,12 @@ def render_file_upload(*, api_url: str, active_id: str, get_session_cookie_fn):
                 st.error(f"Upload error: {e}")
 
 
-def handle_active_chat(*, api_url: str):
+def handle_active_chat(*, api_url: str, active_project_id: str | None = None):
     """Render and drive in-flight chat status until completion/cancel."""
     active_chat = st.session_state.get("_active_chat")
     if active_chat is None:
+        return
+    if active_project_id and active_chat.get("project_id") not in {None, "", active_project_id}:
         return
 
     ac_thread = active_chat["thread"]
@@ -178,6 +180,7 @@ def launch_chat_request(*, api_url: str, active_id: str, prompt: str, model_choi
         "result_holder": result_holder,
         "start_time": time.time(),
         "session_token": session_token,
+        "project_id": active_id,
     }
     time.sleep(0.5)
     st.rerun()

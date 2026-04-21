@@ -25,8 +25,10 @@ _EXTRACTED_MODULES = {
     "appui_services": _UI_DIR / "appui_services.py",
     "appui_renderers": _UI_DIR / "appui_renderers.py",
     "appui_tasks": _UI_DIR / "appui_tasks.py",
+    "appui_chat_runtime": _UI_DIR / "appui_chat_runtime.py",
 }
 _BLOCK_PART2_PATH = _UI_DIR / "appui_block_part2.py"
+_PROJECTS_PAGE_PATH = _UI_DIR / "pages" / "projects.py"
 
 
 def _parse_appui_imports():
@@ -162,6 +164,13 @@ def _load_block_part2_function(name: str, extra_globals: dict | None = None):
     return _ast_load_fn_from_file(name, _BLOCK_PART2_PATH, namespace)
 
 
+def _load_projects_page_function(name: str, extra_globals: dict | None = None):
+    namespace: dict = {}
+    if extra_globals:
+        namespace.update(extra_globals)
+    return _ast_load_fn_from_file(name, _PROJECTS_PAGE_PATH, namespace)
+
+
 class TestCreateProjectServerSide:
     def test_returns_server_project_id_on_success(self):
         response = SimpleNamespace(
@@ -249,6 +258,67 @@ class TestPauseAutoRefresh:
         fn(2)
 
         assert fake_st.session_state["_suppress_auto_refresh_until"] == 110.0
+
+
+class TestProjectSwitchHelpers:
+    def test_project_scope_mount_key_changes_with_project_id(self):
+        fn = _load_function("_project_scope_mount_key")
+
+        assert fn("project_panel", "project-a") != fn("project_panel", "project-b")
+        assert fn("project_panel", "project-a") == "project_panel_project_scope_project-a"
+
+    def test_set_active_project_resets_project_view_state(self):
+        fake_st = SimpleNamespace(
+            session_state={
+                "active_project_id": "project-a",
+                "_project_id_input": "project-a",
+                "blocks": [{"id": "old-block"}],
+                "_welcome_sent_for": "project-a",
+            },
+            toast=MagicMock(),
+            switch_page=MagicMock(),
+            rerun=MagicMock(),
+        )
+        request = MagicMock()
+        fn = _load_projects_page_function(
+            "_set_active_project",
+            {
+                "st": fake_st,
+                "make_authenticated_request": request,
+                "API_URL": "http://api.test",
+            },
+        )
+
+        fn("project-b", "Project B")
+
+        assert fake_st.session_state["_project_switch_loading_for"] == "project-b"
+        assert fake_st.session_state["active_project_id"] == "project-b"
+        assert fake_st.session_state["_project_id_input"] == "project-b"
+        assert fake_st.session_state["blocks"] == []
+        assert fake_st.session_state["_last_rendered_project"] == "project-b"
+        assert "_welcome_sent_for" not in fake_st.session_state
+        fake_st.rerun.assert_called_once()
+
+
+class TestActiveChatIsolation:
+    def test_handle_active_chat_ignores_other_project_request(self):
+        fake_st = SimpleNamespace(
+            session_state={
+                "_active_chat": {
+                    "project_id": "project-a",
+                    "request_id": "req-1",
+                }
+            },
+            chat_message=MagicMock(),
+            rerun=MagicMock(),
+        )
+        fn = _load_function("handle_active_chat", {"st": fake_st})
+
+        fn(api_url="http://api.test", active_project_id="project-b")
+
+        assert fake_st.session_state["_active_chat"]["project_id"] == "project-a"
+        fake_st.chat_message.assert_not_called()
+        fake_st.rerun.assert_not_called()
 
 
 class TestStagingBlockNeedsRefresh:

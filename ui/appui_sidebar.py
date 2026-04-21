@@ -101,6 +101,7 @@ def render_sidebar(
         def _on_project_id_change():
             new_val = st.session_state.get("_project_id_input", "")
             if new_val and new_val != st.session_state.get("active_project_id"):
+                st.session_state["_project_switch_loading_for"] = new_val
                 st.session_state.active_project_id = new_val
                 st.session_state.blocks = []
                 st.session_state._last_rendered_project = new_val
@@ -134,144 +135,146 @@ def render_sidebar(
 
         st.divider()
 
-        st.subheader("📁 Projects")
-        try:
-            proj_resp = request_fn("GET", f"{api_url}/projects", timeout=3)
-            if proj_resp.status_code == 200:
-                user_projects = proj_resp.json().get("projects", [])
-                st.session_state["_cached_projects"] = user_projects
-                if user_projects:
-                    st.caption(f"{len(user_projects)} project(s)")
+        with st.container(key=f"sidebar_project_scope_{st.session_state.active_project_id}"):
+            st.subheader("📁 Projects")
+            try:
+                proj_resp = request_fn("GET", f"{api_url}/projects", timeout=3)
+                if proj_resp.status_code == 200:
+                    user_projects = proj_resp.json().get("projects", [])
+                    st.session_state["_cached_projects"] = user_projects
+                    if user_projects:
+                        st.caption(f"{len(user_projects)} project(s)")
 
-                    if len(user_projects) > 4:
-                        _proj_filter = st.text_input(
-                            "🔍 Filter",
-                            key="_proj_filter",
-                            placeholder="Search projects…",
-                            label_visibility="collapsed",
-                        )
-                    else:
-                        _proj_filter = ""
-
-                    filtered = user_projects
-                    if _proj_filter:
-                        _pf = _proj_filter.lower()
-                        filtered = [p for p in user_projects if _pf in p.get("name", "").lower()]
-
-                    for proj in filtered:
-                        proj_id = proj.get("id", "")
-                        proj_name = proj.get("name", proj_id)[:30]
-                        proj_slug = proj.get("slug", "")
-                        is_current = proj_id == st.session_state.active_project_id
-                        archive_confirm_id = st.session_state.get("_confirm_archive_project_id")
-
-                        job_count = proj.get("job_count")
-                        label_extra = f" · {job_count} job{'s' if job_count != 1 else ''}" if job_count else ""
-
-                        # Show slug suffix when disk folder differs from display name
-                        slug_hint = ""
-                        if proj_slug and proj_slug != slugify_project_name(proj_name):
-                            slug_hint = f" `({proj_slug})`"
-
-                        if is_current:
-                            st.info(f"📌 **{proj_name}**{slug_hint}{label_extra}")
-                        else:
-                            col_name, col_archive = st.columns([5, 1])
-                            with col_name:
-                                if archive_confirm_id == proj_id:
-                                    st.warning(f"Archive {proj_name}?")
-                                elif st.button(f"📂 {proj_name}{slug_hint}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
-                                    st.session_state.active_project_id = proj_id
-                                    st.session_state.blocks = []
-                                    st.session_state._last_rendered_project = proj_id
-                                    st.session_state["_project_id_input"] = proj_id
-                                    st.session_state.pop("_welcome_sent_for", None)
-                                    try:
-                                        request_fn(
-                                            "PUT",
-                                            f"{api_url}/user/last-project",
-                                            json={"project_id": proj_id},
-                                            timeout=3,
-                                        )
-                                    except Exception:
-                                        pass
-                                    st.rerun()
-                            with col_archive:
-                                if archive_confirm_id == proj_id:
-                                    if st.button("✅", key=f"arch_yes_{proj_id}", help=f"Confirm archive '{proj_name}'"):
-                                        pause_auto_refresh(4)
-                                        try:
-                                            del_resp = request_fn("DELETE", f"{api_url}/projects/{proj_id}", timeout=5)
-                                            if del_resp.status_code == 200:
-                                                st.session_state.pop("_confirm_archive_project_id", None)
-                                                st.toast(f"Archived: {proj_name}")
-                                                st.rerun()
-                                            else:
-                                                st.error(f"Archive failed: {del_resp.status_code}")
-                                        except Exception as e:
-                                            st.error(f"Error: {e}")
-                                    if st.button("✖", key=f"arch_no_{proj_id}", help="Cancel archive"):
-                                        st.session_state.pop("_confirm_archive_project_id", None)
-                                        st.rerun()
-                                elif st.button("🗑", key=f"arch_{proj_id}", help=f"Archive '{proj_name}'"):
-                                    st.session_state["_confirm_archive_project_id"] = proj_id
-                                    pause_auto_refresh(4)
-                                    st.rerun()
-        except Exception:
-            pass
-
-        st.divider()
-        st.page_link("pages/tasks.py", label="🗂️ Task Center")
-        st.caption("Running, recovered, and follow-up work across projects")
-
-        st.divider()
-
-        st.subheader("💬 History")
-        try:
-            conv_resp = request_fn(
-                "GET",
-                f"{api_url}/projects/{st.session_state.active_project_id}/conversations",
-                timeout=3,
-            )
-            if conv_resp.status_code == 200:
-                conversations = conv_resp.json().get("conversations", [])
-                if conversations:
-                    st.caption(f"{len(conversations)} conversation(s)")
-                    for conv in conversations[:5]:
-                        conv_title = conv.get("title", "Untitled")[:30]
-                        if st.button(f"📝 {conv_title}...", key=f"conv_{conv['id']}", width="stretch"):
-                            msg_resp = request_fn(
-                                "GET",
-                                f"{api_url}/conversations/{conv['id']}/messages",
-                                timeout=3,
+                        if len(user_projects) > 4:
+                            _proj_filter = st.text_input(
+                                "🔍 Filter",
+                                key="_proj_filter",
+                                placeholder="Search projects…",
+                                label_visibility="collapsed",
                             )
-                            if msg_resp.status_code == 200:
-                                st.session_state.loaded_conversation = msg_resp.json()
+                        else:
+                            _proj_filter = ""
+
+                        filtered = user_projects
+                        if _proj_filter:
+                            _pf = _proj_filter.lower()
+                            filtered = [p for p in user_projects if _pf in p.get("name", "").lower()]
+
+                        for proj in filtered:
+                            proj_id = proj.get("id", "")
+                            proj_name = proj.get("name", proj_id)[:30]
+                            proj_slug = proj.get("slug", "")
+                            is_current = proj_id == st.session_state.active_project_id
+                            archive_confirm_id = st.session_state.get("_confirm_archive_project_id")
+
+                            job_count = proj.get("job_count")
+                            label_extra = f" · {job_count} job{'s' if job_count != 1 else ''}" if job_count else ""
+
+                            # Show slug suffix when disk folder differs from display name
+                            slug_hint = ""
+                            if proj_slug and proj_slug != slugify_project_name(proj_name):
+                                slug_hint = f" `({proj_slug})`"
+
+                            if is_current:
+                                st.info(f"📌 **{proj_name}**{slug_hint}{label_extra}")
+                            else:
+                                col_name, col_archive = st.columns([5, 1])
+                                with col_name:
+                                    if archive_confirm_id == proj_id:
+                                        st.warning(f"Archive {proj_name}?")
+                                    elif st.button(f"📂 {proj_name}{slug_hint}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
+                                        st.session_state["_project_switch_loading_for"] = proj_id
+                                        st.session_state.active_project_id = proj_id
+                                        st.session_state.blocks = []
+                                        st.session_state._last_rendered_project = proj_id
+                                        st.session_state["_project_id_input"] = proj_id
+                                        st.session_state.pop("_welcome_sent_for", None)
+                                        try:
+                                            request_fn(
+                                                "PUT",
+                                                f"{api_url}/user/last-project",
+                                                json={"project_id": proj_id},
+                                                timeout=3,
+                                            )
+                                        except Exception:
+                                            pass
+                                        st.rerun()
+                                with col_archive:
+                                    if archive_confirm_id == proj_id:
+                                        if st.button("✅", key=f"arch_yes_{proj_id}", help=f"Confirm archive '{proj_name}'"):
+                                            pause_auto_refresh(4)
+                                            try:
+                                                del_resp = request_fn("DELETE", f"{api_url}/projects/{proj_id}", timeout=5)
+                                                if del_resp.status_code == 200:
+                                                    st.session_state.pop("_confirm_archive_project_id", None)
+                                                    st.toast(f"Archived: {proj_name}")
+                                                    st.rerun()
+                                                else:
+                                                    st.error(f"Archive failed: {del_resp.status_code}")
+                                            except Exception as e:
+                                                st.error(f"Error: {e}")
+                                        if st.button("✖", key=f"arch_no_{proj_id}", help="Cancel archive"):
+                                            st.session_state.pop("_confirm_archive_project_id", None)
+                                            st.rerun()
+                                    elif st.button("🗑", key=f"arch_{proj_id}", help=f"Archive '{proj_name}'"):
+                                        st.session_state["_confirm_archive_project_id"] = proj_id
+                                        pause_auto_refresh(4)
+                                        st.rerun()
+            except Exception:
+                pass
+
+            st.divider()
+            st.page_link("pages/tasks.py", label="🗂️ Task Center")
+            st.caption("Running, recovered, and follow-up work across projects")
+
+            st.divider()
+
+            st.subheader("💬 History")
+            try:
+                conv_resp = request_fn(
+                    "GET",
+                    f"{api_url}/projects/{st.session_state.active_project_id}/conversations",
+                    timeout=3,
+                )
+                if conv_resp.status_code == 200:
+                    conversations = conv_resp.json().get("conversations", [])
+                    if conversations:
+                        st.caption(f"{len(conversations)} conversation(s)")
+                        for conv in conversations[:5]:
+                            conv_title = conv.get("title", "Untitled")[:30]
+                            if st.button(f"📝 {conv_title}...", key=f"conv_{conv['id']}", width="stretch"):
+                                msg_resp = request_fn(
+                                    "GET",
+                                    f"{api_url}/conversations/{conv['id']}/messages",
+                                    timeout=3,
+                                )
+                                if msg_resp.status_code == 200:
+                                    st.session_state.loaded_conversation = msg_resp.json()
+                                    st.rerun()
+                    else:
+                        st.caption("No history yet")
+
+                job_resp = request_fn(
+                    "GET",
+                    f"{api_url}/projects/{st.session_state.active_project_id}/jobs",
+                    timeout=3,
+                )
+                if job_resp.status_code == 200:
+                    jobs = job_resp.json().get("jobs", [])
+                    if jobs:
+                        st.caption(f"📊 {len(jobs)} job(s)")
+                        for job in jobs[:3]:
+                            status_emoji = "✅" if job.get("status") == "COMPLETED" else "⏳"
+                            job_name = job.get("sample_name", "Unknown")[:20]
+                            if st.button(f"{status_emoji} {job_name}", key=f"job_{job['id']}", width="stretch"):
+                                st.session_state.selected_job = job
                                 st.rerun()
-                else:
-                    st.caption("No history yet")
+                    else:
+                        st.caption("No jobs yet")
+            except Exception:
+                pass
 
-            job_resp = request_fn(
-                "GET",
-                f"{api_url}/projects/{st.session_state.active_project_id}/jobs",
-                timeout=3,
-            )
-            if job_resp.status_code == 200:
-                jobs = job_resp.json().get("jobs", [])
-                if jobs:
-                    st.caption(f"📊 {len(jobs)} job(s)")
-                    for job in jobs[:3]:
-                        status_emoji = "✅" if job.get("status") == "COMPLETED" else "⏳"
-                        job_name = job.get("sample_name", "Unknown")[:20]
-                        if st.button(f"{status_emoji} {job_name}", key=f"job_{job['id']}", width="stretch"):
-                            st.session_state.selected_job = job
-                            st.rerun()
-                else:
-                    st.caption("No jobs yet")
-        except Exception:
-            pass
-
-        st.divider()
+            st.divider()
 
         _tok_data = None
         try:
@@ -299,22 +302,22 @@ def render_sidebar(
         except Exception:
             pass
 
-        _mem_list = (_mem_data or {}).get("memories", [])
-        _mem_count = (_mem_data or {}).get("total", 0)
-        _mem_label = f"🧠 Memories ({_mem_count})" if _mem_count else "🧠 Memories"
+            _mem_list = (_mem_data or {}).get("memories", [])
+            _mem_count = (_mem_data or {}).get("total", 0)
+            _mem_label = f"🧠 Memories ({_mem_count})" if _mem_count else "🧠 Memories"
 
-        with st.expander(_mem_label, expanded=False):
-            if _mem_list:
-                for _m in _mem_list[:5]:
-                    _pin = "⭐ " if _m.get("is_pinned") else ""
-                    _scope = "🌐" if _m.get("project_id") is None else ""
-                    st.caption(f"{_pin}{_scope}{_m.get('content', '')[:60]}")
-                if _mem_count > 5:
-                    st.caption(f"*... and {_mem_count - 5} more*")
-                st.page_link("pages/memories.py", label="View all memories →")
-            else:
-                st.caption("No memories yet.")
-                st.caption("Use `/remember <text>` in chat.")
+            with st.expander(_mem_label, expanded=False):
+                if _mem_list:
+                    for _m in _mem_list[:5]:
+                        _pin = "⭐ " if _m.get("is_pinned") else ""
+                        _scope = "🌐" if _m.get("project_id") is None else ""
+                        st.caption(f"{_pin}{_scope}{_m.get('content', '')[:60]}")
+                    if _mem_count > 5:
+                        st.caption(f"*... and {_mem_count - 5} more*")
+                    st.page_link("pages/memories.py", label="View all memories →")
+                else:
+                    st.caption("No memories yet.")
+                    st.caption("Use `/remember <text>` in chat.")
 
         _lt = (_tok_data or {}).get("lifetime", {})
         _tok_total = _lt.get("total_tokens", 0)
