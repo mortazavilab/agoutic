@@ -433,6 +433,9 @@ def _template_run_de_pipeline(params: dict) -> dict:
     use_prep = bool(group_a_samples and group_b_samples)
     method = params.get("method") or ("exact_test" if use_prep else "glm")
     work_dir = str(params.get("work_dir") or "").strip()
+    significance_metric = str(params.get("significance_metric") or "pvalue").strip().lower() or "pvalue"
+    significance_threshold = float(params.get("significance_threshold", 0.05))
+    significance_explicit = bool(params.get("significance_explicit"))
     result_name = params.get("result_name") or f"{re.sub(r'[^a-zA-Z0-9]+', '_', str(group_a_label)).strip('_').lower() or 'group1'}_vs_{re.sub(r'[^a-zA-Z0-9]+', '_', str(group_b_label)).strip('_').lower() or 'group2'}_{params.get('level', 'gene')}"
 
     steps = []
@@ -502,7 +505,12 @@ def _template_run_de_pipeline(params: dict) -> dict:
             _manifest_tool_call(
                 "differential_expression",
                 "exact_test",
-                {"pair": [group_a_label, group_b_label], "name": result_name},
+                {
+                    "pair": [group_a_label, group_b_label],
+                    "name": result_name,
+                    "significance_metric": significance_metric,
+                    "significance_threshold": significance_threshold,
+                },
                 default_source_key="edgepython",
             ),
         ])
@@ -529,7 +537,12 @@ def _template_run_de_pipeline(params: dict) -> dict:
             _manifest_tool_call(
                 "differential_expression",
                 "test_contrast",
-                {"contrast": contrast, "name": result_name},
+                {
+                    "contrast": contrast,
+                    "name": result_name,
+                    "significance_metric": significance_metric,
+                    "significance_threshold": significance_threshold,
+                },
                 default_source_key="edgepython",
             ),
         ])
@@ -537,10 +550,22 @@ def _template_run_de_pipeline(params: dict) -> dict:
         _manifest_tool_call(
             "differential_expression",
             "get_top_genes",
-            {"name": result_name, "n": 20, "fdr_threshold": 0.05},
+            {
+                "name": result_name,
+                "n": 20,
+                "significance_metric": significance_metric,
+                "significance_threshold": significance_threshold,
+            },
             default_source_key="edgepython",
         )
     )
+
+    plot_params = {"plot_type": "volcano", "result_name": result_name}
+    if significance_explicit:
+        if significance_metric == "pvalue":
+            plot_params.update({"use_fdr_y": False, "pvalue_cutoff": significance_threshold})
+        else:
+            plot_params.update({"use_fdr_y": True, "fdr_cutoff": significance_threshold})
 
     s_de = _make_step("RUN_DE_PIPELINE", f"Run DE analysis ({contrast})", idx,
                       requires_approval=False, depends_on=de_depends,
@@ -580,7 +605,7 @@ def _template_run_de_pipeline(params: dict) -> dict:
                             _manifest_tool_call(
                                 "differential_expression",
                                 "generate_plot",
-                                {"plot_type": "volcano", "result_name": result_name},
+                                plot_params,
                                 default_source_key="edgepython",
                             )
                         ])
@@ -605,6 +630,9 @@ def _template_run_de_pipeline(params: dict) -> dict:
         "status": "PENDING",
         "current_step_id": steps[0]["id"],
         "work_dir": work_dir,
+        "significance_metric": significance_metric,
+        "significance_threshold": significance_threshold,
+        "significance_explicit": significance_explicit,
         "steps": steps,
         "artifacts": [],
     }

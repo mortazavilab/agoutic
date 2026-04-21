@@ -1360,6 +1360,8 @@ def test_contrast(
     name: Optional[str] = None,
     method: str = "qlf",
     lfc: float = 0.585,
+    significance_metric: str = "fdr",
+    significance_threshold: float = 0.05,
 ) -> str:
     """Test a contrast for differential expression.
 
@@ -1370,6 +1372,8 @@ def test_contrast(
         method: Test method — 'qlf' (quasi-likelihood F-test, default)
             or 'treat' (TREAT with log-FC threshold).
         lfc: Log2-fold-change threshold for TREAT method. Default: log2(1.5) ≈ 0.585.
+        significance_metric: Significance metric for summary counts: 'fdr' or 'pvalue'.
+        significance_threshold: Cutoff for the selected significance metric.
     """
     _require("fit", "fitted model")
     fit = _state["fit"]
@@ -1391,16 +1395,19 @@ def test_contrast(
     # Summary
     tt = ep.top_tags(res, n=res["table"].shape[0])
     table = tt["table"]
-    fdr = table["FDR"].values
-    logfc = table["logFC"].values
-
-    n_up = int(((fdr < 0.05) & (logfc > 0)).sum())
-    n_down = int(((fdr < 0.05) & (logfc < 0)).sum())
-    n_ns = int((fdr >= 0.05).sum())
+    significance_metric, significance_threshold = _resolve_significance_params(
+        significance_metric,
+        significance_threshold,
+    )
+    n_up, n_down, n_ns, metric_label = _count_de_by_significance(
+        table,
+        significance_metric=significance_metric,
+        significance_threshold=significance_threshold,
+    )
 
     lines = [
         f"Test: {method.upper()} — {contrast}",
-        f"DE genes (FDR < 0.05): {n_up} up, {n_down} down, {n_ns} NS",
+        f"DE genes ({metric_label} < {_format_significance_threshold(significance_threshold)}): {n_up} up, {n_down} down, {n_ns} NS",
         "",
         "Top 5 genes:",
     ]
@@ -1432,6 +1439,8 @@ def test_coef(
     name: Optional[str] = None,
     method: str = "qlf",
     lfc: float = 0.585,
+    significance_metric: str = "fdr",
+    significance_threshold: float = 0.05,
 ) -> str:
     """Test a single coefficient by index.
 
@@ -1440,6 +1449,8 @@ def test_coef(
         name: Label for this result set. Default: auto-generated.
         method: 'qlf' (default) or 'treat'.
         lfc: Log2-fold-change threshold for TREAT method.
+        significance_metric: Significance metric for summary counts: 'fdr' or 'pvalue'.
+        significance_threshold: Cutoff for the selected significance metric.
     """
     _require("fit", "fitted model")
     fit = _state["fit"]
@@ -1457,16 +1468,19 @@ def test_coef(
 
     tt = ep.top_tags(res, n=res["table"].shape[0])
     table = tt["table"]
-    fdr = table["FDR"].values
-    logfc = table["logFC"].values
-
-    n_up = int(((fdr < 0.05) & (logfc > 0)).sum())
-    n_down = int(((fdr < 0.05) & (logfc < 0)).sum())
-    n_ns = int((fdr >= 0.05).sum())
+    significance_metric, significance_threshold = _resolve_significance_params(
+        significance_metric,
+        significance_threshold,
+    )
+    n_up, n_down, n_ns, metric_label = _count_de_by_significance(
+        table,
+        significance_metric=significance_metric,
+        significance_threshold=significance_threshold,
+    )
 
     lines = [
         f"Test: {method.upper()} — coef {coef}",
-        f"DE genes (FDR < 0.05): {n_up} up, {n_down} down, {n_ns} NS",
+        f"DE genes ({metric_label} < {_format_significance_threshold(significance_threshold)}): {n_up} up, {n_down} down, {n_ns} NS",
     ]
     _append_gene_level_warning(lines)
     return "\n".join(lines)
@@ -1482,6 +1496,8 @@ def glm_lrt_test(
     contrast: Optional[list] = None,
     name: Optional[str] = None,
     use_ql_fit: bool = False,
+    significance_metric: str = "fdr",
+    significance_threshold: float = 0.05,
 ) -> str:
     """Run a likelihood-ratio test (LRT) from a GLM fit.
 
@@ -1490,6 +1506,8 @@ def glm_lrt_test(
         contrast: Optional contrast vector (same length as coefficients).
         name: Label for this result set. Default: auto-generated.
         use_ql_fit: If True, uses the QL fit from fit_model().
+        significance_metric: Significance metric for summary counts: 'fdr' or 'pvalue'.
+        significance_threshold: Cutoff for the selected significance metric.
     """
     fit = _state["fit"] if use_ql_fit else _state["glm_fit"]
     if fit is None:
@@ -1510,16 +1528,19 @@ def glm_lrt_test(
 
     tt = ep.top_tags(res, n=res["table"].shape[0])
     table = tt["table"]
-    fdr = table["FDR"].values
-    logfc = table["logFC"].values if "logFC" in table.columns else np.zeros(len(table))
-
-    n_up = int(((fdr < 0.05) & (logfc > 0)).sum())
-    n_down = int(((fdr < 0.05) & (logfc < 0)).sum())
-    n_ns = int((fdr >= 0.05).sum())
+    significance_metric, significance_threshold = _resolve_significance_params(
+        significance_metric,
+        significance_threshold,
+    )
+    n_up, n_down, n_ns, metric_label = _count_de_by_significance(
+        table,
+        significance_metric=significance_metric,
+        significance_threshold=significance_threshold,
+    )
 
     lines = [
         "Test: LRT",
-        f"DE genes (FDR < 0.05): {n_up} up, {n_down} down, {n_ns} NS",
+        f"DE genes ({metric_label} < {_format_significance_threshold(significance_threshold)}): {n_up} up, {n_down} down, {n_ns} NS",
     ]
     _append_gene_level_warning(lines)
     return "\n".join(lines)
@@ -1537,6 +1558,8 @@ def exact_test(
     big_count: int = 900,
     prior_count: float = 0.125,
     name: Optional[str] = None,
+    significance_metric: str = "fdr",
+    significance_threshold: float = 0.05,
 ) -> str:
     """Run edgePython exact test for two-group DE.
 
@@ -1547,6 +1570,8 @@ def exact_test(
         big_count: Threshold for beta approximation.
         prior_count: Prior count for logFC calculation.
         name: Label for this result set. Default: auto-generated.
+        significance_metric: Significance metric for summary counts: 'fdr' or 'pvalue'.
+        significance_threshold: Cutoff for the selected significance metric.
     """
     _require("dgelist", "DGEList")
     d = _state["dgelist"]
@@ -1571,16 +1596,19 @@ def exact_test(
 
     tt = ep.top_tags(res, n=res["table"].shape[0])
     table = tt["table"]
-    fdr = table["FDR"].values
-    logfc = table["logFC"].values
-
-    n_up = int(((fdr < 0.05) & (logfc > 0)).sum())
-    n_down = int(((fdr < 0.05) & (logfc < 0)).sum())
-    n_ns = int((fdr >= 0.05).sum())
+    significance_metric, significance_threshold = _resolve_significance_params(
+        significance_metric,
+        significance_threshold,
+    )
+    n_up, n_down, n_ns, metric_label = _count_de_by_significance(
+        table,
+        significance_metric=significance_metric,
+        significance_threshold=significance_threshold,
+    )
 
     lines = [
         "Test: Exact",
-        f"DE genes (FDR < 0.05): {n_up} up, {n_down} down, {n_ns} NS",
+        f"DE genes ({metric_label} < {_format_significance_threshold(significance_threshold)}): {n_up} up, {n_down} down, {n_ns} NS",
     ]
     _append_gene_level_warning(lines)
     return "\n".join(lines)
@@ -1697,13 +1725,17 @@ def get_top_genes(
     name: Optional[str] = None,
     n: int = 20,
     fdr_threshold: float = 0.05,
+    significance_metric: str = "fdr",
+    significance_threshold: Optional[float] = None,
 ) -> str:
     """Get the top differentially expressed genes from a test result.
 
     Args:
         name: Which result set to query. Default: most recent.
         n: Number of top genes to return. Default: 20.
-        fdr_threshold: FDR cutoff for significance. Default: 0.05.
+        fdr_threshold: Legacy FDR cutoff for significance. Default: 0.05.
+        significance_metric: Significance metric to use: 'fdr' or 'pvalue'.
+        significance_threshold: Cutoff for the selected significance metric.
     """
     if name is None:
         name = _state["last_result"]
@@ -1717,12 +1749,18 @@ def get_top_genes(
     tt = ep.top_tags(res, n=n)
     table = tt["table"]
 
-    # Filter by FDR
-    sig = table[table["FDR"] < fdr_threshold]
+    significance_metric, significance_threshold = _resolve_significance_params(
+        significance_metric,
+        significance_threshold,
+        fdr_threshold=fdr_threshold,
+    )
+    metric_series = _get_significance_series(table, significance_metric)
+    sig = table[metric_series < significance_threshold]
+    metric_label = _significance_label(significance_metric)
 
     lines = [
         f"Result: {name} (showing top {min(n, len(table))} genes, "
-        f"{len(sig)} with FDR < {fdr_threshold})",
+        f"{len(sig)} with {metric_label} < {_format_significance_threshold(significance_threshold)})",
         "",
     ]
 
@@ -1735,11 +1773,12 @@ def get_top_genes(
     lines.append(header)
     lines.append("-" * len(header))
 
-    for _, row in table.iterrows():
+    metric_values = metric_series.to_numpy(dtype=float)
+    for (_, row), metric_value in zip(table.iterrows(), metric_values):
         gene = _gene_name(row)
         if len(gene) > 19:
             gene = gene[:17] + ".."
-        sig_mark = "***" if row["FDR"] < 0.001 else "**" if row["FDR"] < 0.01 else "*" if row["FDR"] < fdr_threshold else ""
+        sig_mark = "***" if metric_value < 0.001 else "**" if metric_value < 0.01 else "*" if metric_value < significance_threshold else ""
         line = f"{gene:<20} {row['logFC']:>8.3f} {row['logCPM']:>8.2f}"
         if stat_col:
             line += f" {row[stat_col]:>8.2f}"
@@ -1869,6 +1908,70 @@ def _coerce_float(value: object, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_significance_metric(value: object, default: str = "fdr") -> str:
+    text = str(value or "").strip().lower()
+    if text in {"fdr", "qvalue", "q-value", "q value", "adjp", "adj_p", "adjusted p", "adjusted-p", "padj"}:
+        return "fdr"
+    if text in {"p", "pvalue", "p-value", "p value", "pval", "raw p", "raw-p", "raw_p", "raw p-value"}:
+        return "pvalue"
+    return default
+
+
+def _resolve_significance_params(
+    significance_metric: object = None,
+    significance_threshold: object = None,
+    *,
+    fdr_threshold: object = None,
+    default_metric: str = "fdr",
+    default_threshold: float = 0.05,
+) -> tuple[str, float]:
+    metric = _normalize_significance_metric(significance_metric, default=default_metric)
+    raw_threshold = significance_threshold
+    if raw_threshold in (None, "") and metric == "fdr" and fdr_threshold not in (None, ""):
+        raw_threshold = fdr_threshold
+    threshold = _coerce_float(raw_threshold, default_threshold)
+    if threshold <= 0:
+        threshold = default_threshold
+    return metric, threshold
+
+
+def _significance_label(metric: str) -> str:
+    return "FDR" if metric == "fdr" else "p-value"
+
+
+def _get_significance_series(table: pd.DataFrame, metric: str) -> pd.Series:
+    if metric == "pvalue":
+        if "PValue" not in table.columns:
+            raise ValueError("Result table does not include a PValue column.")
+        return pd.to_numeric(table["PValue"], errors="coerce")
+
+    if "FDR" in table.columns:
+        return pd.to_numeric(table["FDR"], errors="coerce")
+    if "PValue" in table.columns:
+        return pd.to_numeric(table["PValue"], errors="coerce")
+    raise ValueError("Result table does not include an FDR or PValue column.")
+
+
+def _format_significance_threshold(threshold: float) -> str:
+    return f"{threshold:g}"
+
+
+def _count_de_by_significance(
+    table: pd.DataFrame,
+    *,
+    significance_metric: str,
+    significance_threshold: float,
+) -> tuple[int, int, int, str]:
+    metric_series = _get_significance_series(table, significance_metric).to_numpy(dtype=float)
+    logfc = pd.to_numeric(table["logFC"], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(metric_series) & np.isfinite(logfc)
+    sig = valid & (metric_series < significance_threshold)
+    n_up = int((sig & (logfc > 0)).sum())
+    n_down = int((sig & (logfc < 0)).sum())
+    n_ns = int((valid & ~sig).sum())
+    return n_up, n_down, n_ns, _significance_label(significance_metric)
 
 
 def _coerce_plot_dpi(value: object, default: int = 600) -> int:
@@ -3583,8 +3686,14 @@ def reset_sc_state() -> str:
 # ===========================================================================
 
 
-def _extract_gene_list_from_de(result_name=None, fdr_threshold=0.05,
-                                logfc_threshold=0.0, direction="all"):
+def _extract_gene_list_from_de(
+    result_name=None,
+    fdr_threshold=0.05,
+    logfc_threshold=0.0,
+    direction="all",
+    significance_metric: str = "fdr",
+    significance_threshold: Optional[float] = None,
+):
     """Extract filtered gene list from DE results.
 
     Returns dict with keys: 'all', 'up', 'down' (each a list of gene IDs).
@@ -3598,13 +3707,18 @@ def _extract_gene_list_from_de(result_name=None, fdr_threshold=0.05,
     tt = ep.top_tags(res, n=res["table"].shape[0])
     table = tt["table"]
 
-    # Filter by FDR
-    if "FDR" in table.columns:
-        mask = table["FDR"] < fdr_threshold
-    elif "PValue" in table.columns:
-        mask = table["PValue"] < fdr_threshold
-    else:
+    significance_metric, significance_threshold = _resolve_significance_params(
+        significance_metric,
+        significance_threshold,
+        fdr_threshold=fdr_threshold,
+    )
+    try:
+        metric_series = _get_significance_series(table, significance_metric)
+        mask = metric_series < significance_threshold
+        metric_label = _significance_label(significance_metric)
+    except ValueError:
         mask = pd.Series(True, index=table.index)
+        metric_label = "all genes"
 
     # Filter by |logFC|
     if logfc_threshold > 0 and "logFC" in table.columns:
@@ -3622,7 +3736,14 @@ def _extract_gene_list_from_de(result_name=None, fdr_threshold=0.05,
 
     all_genes = list(sig.index)
 
-    result = {"all": all_genes, "up": up, "down": down}
+    result = {
+        "all": all_genes,
+        "up": up,
+        "down": down,
+        "significance_metric": significance_metric,
+        "significance_label": metric_label,
+        "significance_threshold": significance_threshold,
+    }
 
     if direction == "up":
         genes = up
@@ -3640,20 +3761,29 @@ def filter_de_genes(
     fdr_threshold: float = 0.05,
     logfc_threshold: float = 0.0,
     direction: str = "all",
+    significance_metric: str = "fdr",
+    significance_threshold: Optional[float] = None,
 ) -> str:
     """Filter DE results to extract gene lists for enrichment analysis.
 
     Args:
         result_name: Name of the DE result to filter. Default: most recent.
-        fdr_threshold: FDR cutoff for significance. Default: 0.05.
+        fdr_threshold: Legacy FDR cutoff for significance. Default: 0.05.
         logfc_threshold: Minimum absolute log2 fold-change. Default: 0 (no filter).
         direction: 'all', 'up', or 'down'. Default: 'all'.
+        significance_metric: Significance metric to use: 'fdr' or 'pvalue'.
+        significance_threshold: Cutoff for the selected significance metric.
 
     Returns:
         Summary of filtered gene counts and first 20 gene names.
     """
     genes, result = _extract_gene_list_from_de(
-        result_name, fdr_threshold, logfc_threshold, direction
+        result_name,
+        fdr_threshold,
+        logfc_threshold,
+        direction,
+        significance_metric=significance_metric,
+        significance_threshold=significance_threshold,
     )
     if genes is None:
         return result  # Error message
@@ -3661,7 +3791,16 @@ def filter_de_genes(
     _state["_filtered_genes"] = result
 
     rname = result_name or _state.get("last_result", "?")
-    lines = [f"Filtered DE genes from '{rname}' (FDR < {fdr_threshold}"
+    metric_label = result.get("significance_label") or _significance_label(
+        _normalize_significance_metric(significance_metric)
+    )
+    metric_threshold = result.get("significance_threshold")
+    metric_phrase = (
+        f"{metric_label} < {_format_significance_threshold(metric_threshold)}"
+        if metric_label != "all genes" and metric_threshold is not None
+        else metric_label
+    )
+    lines = [f"Filtered DE genes from '{rname}' ({metric_phrase}"
              f"{f', |logFC| >= {logfc_threshold}' if logfc_threshold > 0 else ''}):",
              f"  Up-regulated: {len(result['up'])} genes",
              f"  Down-regulated: {len(result['down'])} genes",

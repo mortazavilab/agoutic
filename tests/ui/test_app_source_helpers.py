@@ -989,6 +989,103 @@ class TestWorkflowHighlightSteps:
         assert [step["kind"] for step in highlights] == ["GENERATE_PLOT", "INTERPRET_RESULTS"]
 
 
+class _ContextManagerStub:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class TestRenderWorkflowStepDataframes:
+    def test_workflow_step_renders_embedded_dataframes_and_post_markdown(self):
+        fake_st = SimpleNamespace(
+            chat_message=MagicMock(return_value=_ContextManagerStub()),
+            markdown=MagicMock(),
+            caption=MagicMock(),
+            divider=MagicMock(),
+            expander=MagicMock(return_value=_ContextManagerStub()),
+            session_state={},
+            json=MagicMock(),
+        )
+        render_dfs = MagicMock()
+        render_step_payload = MagicMock()
+        fn = _load_block_part2_function(
+            "render_block_part2",
+            {
+                "st": fake_st,
+                "section_header": lambda *args, **kwargs: None,
+                "metadata_row": lambda *args, **kwargs: None,
+                "status_chip": lambda *args, **kwargs: None,
+                "info_callout": lambda *args, **kwargs: None,
+            },
+        )
+
+        fn(
+            btype="WORKFLOW_PLAN",
+            block={"payload": {}},
+            content={
+                "title": "Workflow",
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "kind": "INTERPRET_RESULTS",
+                        "title": "Interpret DE results",
+                        "status": "COMPLETED",
+                        "result": {
+                            "markdown": "Lead interpretation.",
+                            "_dataframes": {
+                                "up.csv": {
+                                    "columns": ["term_name"],
+                                    "data": [{"term_name": "axon development"}],
+                                    "row_count": 1,
+                                    "metadata": {"df_id": 1, "visible": True, "label": "GO enrichment (upregulated)"},
+                                }
+                            },
+                            "post_dataframe_markdown": "Up table summary.",
+                            "comparison": {"group_a_label": "AD"},
+                        },
+                    }
+                ],
+            },
+            block_id="block-1",
+            status="COMPLETED",
+            API_URL="http://api.test",
+            active_id="proj-1",
+            LIVE_JOB_STATUS_TIMEOUT_SECONDS=30,
+            make_authenticated_request=lambda *args, **kwargs: None,
+            show_metadata=lambda: None,
+            _workflow_status_presentation=lambda status: ("ok", status, "ok"),
+            _format_plan_timestamp=lambda value: value,
+            _format_duration=lambda *_args, **_kwargs: "",
+            _block_timestamp=lambda: "",
+            _render_workflow_plot_payload=lambda *_args, **_kwargs: None,
+            _render_embedded_dataframes=render_dfs,
+            _render_step_payload=render_step_payload,
+            _job_status_updated_at=lambda *_args, **_kwargs: None,
+            _run_status_label=lambda *_args, **_kwargs: "",
+            _format_timestamp=lambda *_args, **_kwargs: "",
+            _workflow_label_from_path=lambda path: path,
+            _pause_auto_refresh=lambda *_args, **_kwargs: None,
+            get_job_debug_info=lambda *_args, **_kwargs: None,
+            _render_plot_block=lambda *_args, **_kwargs: None,
+        )
+
+        render_dfs.assert_called_once()
+        assert render_dfs.call_args.args[0] == {
+            "up.csv": {
+                "columns": ["term_name"],
+                "data": [{"term_name": "axon development"}],
+                "row_count": 1,
+                "metadata": {"df_id": 1, "visible": True, "label": "GO enrichment (upregulated)"},
+            }
+        }
+        markdown_values = [call.args[0] for call in fake_st.markdown.call_args_list]
+        assert "Lead interpretation." in markdown_values
+        assert "Up table summary." in markdown_values
+        render_step_payload.assert_called_once_with({"comparison": {"group_a_label": "AD"}})
+
+
 class TestRenderWorkflowPlotPayload:
     def test_renders_saved_image_artifacts(self, tmp_path):
         image_path = tmp_path / "volcano.png"

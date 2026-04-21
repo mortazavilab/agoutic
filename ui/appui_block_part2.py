@@ -169,6 +169,7 @@ def render_block_part2(
     _format_duration,
     _block_timestamp,
     _render_workflow_plot_payload,
+    _render_embedded_dataframes,
     _render_step_payload,
     _job_status_updated_at,
     _run_status_label,
@@ -286,12 +287,24 @@ def render_block_part2(
                             result = step.get("result")
                             if result not in (None, "", [], {}):
                                 st.markdown("**Result**")
+                                rendered_result = result
                                 if isinstance(result, dict):
                                     _render_workflow_plot_payload(result, block_id, f"step_{idx}")
                                     result_markdown = result.get("markdown")
                                     if isinstance(result_markdown, str) and result_markdown.strip():
                                         st.markdown(result_markdown)
-                                _render_step_payload(result)
+                                    result_dfs = result.get("_dataframes")
+                                    if isinstance(result_dfs, dict) and result_dfs:
+                                        _render_embedded_dataframes(result_dfs, f"{block_id}_step_{idx}")
+                                    post_dataframe_markdown = result.get("post_dataframe_markdown")
+                                    if isinstance(post_dataframe_markdown, str) and post_dataframe_markdown.strip():
+                                        st.markdown(post_dataframe_markdown)
+                                    rendered_result = {
+                                        key: value for key, value in result.items()
+                                        if key not in {"markdown", "_dataframes", "post_dataframe_markdown"}
+                                    }
+                                if rendered_result not in (None, "", [], {}):
+                                    _render_step_payload(rendered_result)
                     else:
                         st.markdown(f"{idx}. {step}")
 

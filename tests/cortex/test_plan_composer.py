@@ -39,6 +39,39 @@ def test_compose_plan_from_manifest_matches_de_template_structure():
     assert [tool_call["tool"] for tool_call in run_step["tool_calls"]] == [
         tool_call["tool"] for tool_call in template_run_step["tool_calls"]
     ]
+    exact_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "exact_test")
+    top_genes_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "get_top_genes")
+    plot_step = next(step for step in plan["steps"] if step["kind"] == "GENERATE_DE_PLOT")
+    plot_call = plot_step["tool_calls"][0]
+    assert exact_call["params"]["significance_metric"] == "pvalue"
+    assert exact_call["params"]["significance_threshold"] == 0.05
+    assert top_genes_call["params"]["significance_metric"] == "pvalue"
+    assert top_genes_call["params"]["significance_threshold"] == 0.05
+    assert "use_fdr_y" not in plot_call["params"]
+
+
+def test_compose_plan_from_manifest_threads_explicit_pvalue_threshold():
+    from cortex.plan_composer import compose_plan_from_manifest
+
+    params = _de_params() | {
+        "significance_metric": "pvalue",
+        "significance_threshold": 0.01,
+        "significance_explicit": True,
+    }
+    plan = compose_plan_from_manifest("differential_expression", params, {"edgepython", "analyzer"})
+
+    run_step = next(step for step in plan["steps"] if step["kind"] == "RUN_DE_PIPELINE")
+    exact_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "exact_test")
+    top_genes_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "get_top_genes")
+    plot_step = next(step for step in plan["steps"] if step["kind"] == "GENERATE_DE_PLOT")
+    plot_call = plot_step["tool_calls"][0]
+
+    assert exact_call["params"]["significance_metric"] == "pvalue"
+    assert exact_call["params"]["significance_threshold"] == 0.01
+    assert top_genes_call["params"]["significance_metric"] == "pvalue"
+    assert top_genes_call["params"]["significance_threshold"] == 0.01
+    assert plot_call["params"]["use_fdr_y"] is False
+    assert plot_call["params"]["pvalue_cutoff"] == 0.01
 
 
 def test_compose_plan_from_manifest_warns_when_required_service_missing():

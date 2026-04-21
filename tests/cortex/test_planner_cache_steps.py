@@ -318,6 +318,23 @@ def test_extract_plan_params_grouped_de_from_dataframe_transcript_level():
     assert params["level"] == "transcript"
 
 
+def test_extract_plan_params_grouped_de_with_explicit_pvalue_threshold():
+    params = _extract_plan_params(
+        "compare the AD samples exc and jbh to the control samples gko and lwf2 with p-value of 0.01",
+        ConversationState(
+            active_skill="differential_expression",
+            active_project="proj-1",
+            work_dir="/tmp/project/workflow10",
+        ),
+        "run_de_pipeline",
+        project_dir="/tmp/project",
+    )
+
+    assert params["significance_metric"] == "pvalue"
+    assert params["significance_threshold"] == 0.01
+    assert params["significance_explicit"] is True
+
+
 def test_build_de_group_clarification_when_groups_are_missing():
     state = ConversationState(
         active_skill="differential_expression",
@@ -377,6 +394,47 @@ def test_run_de_pipeline_template_adds_prepare_and_save_steps_for_grouped_abunda
     assert "test_contrast" not in tool_names
     assert plan["work_dir"] == "/tmp/project/workflow10"
     assert plan["steps"][0]["tool_calls"][0]["params"]["work_dir"] == "/tmp/project/workflow10"
+    exact_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "exact_test")
+    top_genes_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "get_top_genes")
+    plot_step = next(step for step in plan["steps"] if step["kind"] == "GENERATE_DE_PLOT")
+    plot_call = plot_step["tool_calls"][0]
+    assert exact_call["params"]["significance_metric"] == "pvalue"
+    assert exact_call["params"]["significance_threshold"] == 0.05
+    assert top_genes_call["params"]["significance_metric"] == "pvalue"
+    assert top_genes_call["params"]["significance_threshold"] == 0.05
+    assert "use_fdr_y" not in plot_call["params"]
+    assert "fdr_cutoff" not in plot_call["params"]
+
+
+def test_run_de_pipeline_template_threads_explicit_pvalue_threshold_to_tools():
+    plan = _template_run_de_pipeline(
+        {
+            "goal": "compare grouped samples",
+            "work_dir": "/tmp/project/workflow10",
+            "group_a_label": "AD",
+            "group_a_samples": ["exc", "jbh"],
+            "group_b_label": "control",
+            "group_b_samples": ["gko", "lwf"],
+            "level": "gene",
+            "prep_output_dir": "/tmp/project/de_inputs",
+            "significance_metric": "pvalue",
+            "significance_threshold": 0.01,
+            "significance_explicit": True,
+        }
+    )
+
+    run_step = plan["steps"][2]
+    exact_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "exact_test")
+    top_genes_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "get_top_genes")
+    plot_step = next(step for step in plan["steps"] if step["kind"] == "GENERATE_DE_PLOT")
+    plot_call = plot_step["tool_calls"][0]
+
+    assert exact_call["params"]["significance_metric"] == "pvalue"
+    assert exact_call["params"]["significance_threshold"] == 0.01
+    assert top_genes_call["params"]["significance_metric"] == "pvalue"
+    assert top_genes_call["params"]["significance_threshold"] == 0.01
+    assert plot_call["params"]["use_fdr_y"] is False
+    assert plot_call["params"]["pvalue_cutoff"] == 0.01
 
 
 def test_extract_plan_params_reconcile_named_workflows_from_state():

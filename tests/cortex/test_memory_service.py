@@ -392,6 +392,55 @@ class TestAutoCapture:
         assert plot_payload["plot_path"] == "/tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png"
         assert plot_payload["comparison"]["group_b_samples"] == ["gko", "lwf2"]
 
+    def test_auto_capture_step_records_pvalue_based_de_summary(self, db_session, user_id, project_id):
+        prep_step = {
+            "id": "prep1",
+            "title": "Prepare DE inputs",
+            "kind": "PREPARE_DE_INPUT",
+            "result": {
+                "group_a_label": "AD",
+                "group_a_samples": ["exc", "jbh"],
+                "group_b_label": "control",
+                "group_b_samples": ["gko", "lwf2"],
+                "result_name": "ad_vs_control_gene",
+                "source_label": "reconciled_abundance.tsv",
+            },
+        }
+        run_step = {
+            "id": "run1",
+            "title": "Run DE",
+            "kind": "RUN_DE_PIPELINE",
+            "result": [
+                {
+                    "tool": "exact_test",
+                    "result": "Test: Exact\nDE genes (p-value < 0.01): 8 up, 3 down, 105 NS",
+                },
+            ],
+        }
+        plan = {
+            "plan_type": "run_de_pipeline",
+            "workflow_type": "de_analysis",
+            "work_dir": "/tmp/project/workflow7",
+            "de_work_dir": "/tmp/project/workflow8",
+            "steps": [prep_step, run_step],
+        }
+
+        auto_capture_step(
+            db_session,
+            user_id=user_id,
+            project_id=project_id,
+            step=run_step,
+            plan_payload=plan,
+            block_id="block-de-pvalue",
+        )
+
+        result_mems = list_memories(db_session, user_id, project_id=project_id, category="result")
+        payloads = [json.loads(mem.structured_data) for mem in result_mems]
+
+        assert any("11 significant genes at p-value < 0.01" in mem.content for mem in result_mems)
+        assert any(payload.get("deg_summary", {}).get("significance_metric") == "pvalue" for payload in payloads)
+        assert any(payload.get("deg_summary", {}).get("significance_threshold") == 0.01 for payload in payloads)
+
     def test_auto_capture_result(self, db_session, user_id, project_id):
         mem = auto_capture_result(
             db_session, user_id=user_id, project_id=project_id,

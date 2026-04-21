@@ -656,14 +656,23 @@ def _extract_de_result_summary(plan_payload: dict) -> dict[str, Any]:
             if test_match:
                 summary["test_name"] = test_match.group(1).strip()
             count_match = re.search(
-                r"DE genes \(FDR < 0\.05\):\s*(\d+)\s+up,\s*(\d+)\s+down(?:,\s*(\d+)\s+NS|\s*\((\d+)\s+total\))?",
+                r"DE genes \((FDR|p-value) < ([0-9.eE+-]+)\):\s*(\d+)\s+up,\s*(\d+)\s+down(?:,\s*(\d+)\s+NS|\s*\((\d+)\s+total\))?",
                 text,
+                re.IGNORECASE,
             )
             if count_match:
-                n_up = int(count_match.group(1))
-                n_down = int(count_match.group(2))
-                n_ns = count_match.group(3)
-                explicit_total = count_match.group(4)
+                metric_label = count_match.group(1)
+                threshold_text = count_match.group(2)
+                n_up = int(count_match.group(3))
+                n_down = int(count_match.group(4))
+                n_ns = count_match.group(5)
+                explicit_total = count_match.group(6)
+                summary["significance_label"] = metric_label
+                summary["significance_metric"] = "fdr" if metric_label.strip().lower() == "fdr" else "pvalue"
+                try:
+                    summary["significance_threshold"] = float(threshold_text)
+                except (TypeError, ValueError):
+                    summary["significance_threshold"] = threshold_text
                 summary["n_up"] = n_up
                 summary["n_down"] = n_down
                 summary["n_significant"] = int(explicit_total) if explicit_total else n_up + n_down
@@ -792,8 +801,11 @@ def _auto_capture_de_memories(
             return
         counts_line = None
         if summary.get("n_significant") is not None:
+            threshold_value = summary.get("significance_threshold", 0.05)
+            threshold_text = f"{threshold_value:g}" if isinstance(threshold_value, (int, float)) else str(threshold_value)
+            metric_label = str(summary.get("significance_label") or "FDR")
             counts_line = (
-                f"{int(summary['n_significant'])} significant genes at FDR < 0.05 "
+                f"{int(summary['n_significant'])} significant genes at {metric_label} < {threshold_text} "
                 f"({int(summary['n_up'])} up, {int(summary['n_down'])} down"
             )
             if summary.get("n_ns") is not None:

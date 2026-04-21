@@ -240,3 +240,18 @@ def _find_related_workflow_plan(agent_block: dict, all_blocks: list):
         if target_title and candidate_title == target_title:
             return candidate
     return None
+
+
+def _workflow_status_presentation(raw_status: str) -> tuple[str, str, str]:
+    normalized = (raw_status or "pending").strip().lower()
+    if normalized in {"completed", "complete", "done", "approved"}:
+        return "complete", raw_status.replace("_", " ").title(), "✅"
+    if normalized == "deleted":
+        return "pending", raw_status.replace("_", " ").title(), "🗑️"
+    if normalized in {"failed", "rejected", "cancelled"}:
+        return "failed", raw_status.replace("_", " ").title(), "❌"
+    if normalized in {"running", "active"}:
+        return "running", raw_status.replace("_", " ").title(), "🔄"
+    if normalized in {"follow_up", "waiting_approval", "blocked"}:
+        return "warning", raw_status.replace("_", " ").title(), "⏸️"
+    return "pending", raw_status.replace("_", " ").title(), "📝"

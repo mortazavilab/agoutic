@@ -1,5 +1,6 @@
 import pytest
 import base64
+import pandas as pd
 
 from cortex.plan_executor import STEP_TOOL_DEFAULTS, execute_step, should_auto_execute
 
@@ -722,3 +723,312 @@ async def test_execute_step_write_summary_records_de_comparison_and_volcano_plot
     assert summary["artifacts"]["volcano_plot"] == "/tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png"
     assert summary["artifacts"]["volcano_plot_svg"] == "/tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.svg"
     assert summary["image_files"][0]["path"] == "/tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png"
+
+
+@pytest.mark.asyncio
+async def test_execute_step_write_summary_uses_pvalue_threshold_when_reported(monkeypatch):
+    payload = {
+        "plan_type": "run_de_pipeline",
+        "workflow_type": "de_analysis",
+        "work_dir": "/tmp/project/workflow7",
+        "de_work_dir": "/tmp/project/workflow8",
+        "de_workflow_alias": "workflow8",
+        "steps": [
+            {
+                "id": "prep1",
+                "kind": "PREPARE_DE_INPUT",
+                "title": "Prepare DE inputs",
+                "status": "COMPLETED",
+                "result": {
+                    "group_a_label": "AD",
+                    "group_a_samples": ["exc", "jbh"],
+                    "group_b_label": "control",
+                    "group_b_samples": ["gko", "lwf2"],
+                    "result_name": "ad_vs_control_gene",
+                    "source_label": "reconciled_abundance.tsv",
+                },
+            },
+            {
+                "id": "de1",
+                "kind": "RUN_DE_PIPELINE",
+                "title": "Run DE",
+                "status": "COMPLETED",
+                "depends_on": ["prep1"],
+                "result": [
+                    {
+                        "tool": "exact_test",
+                        "source_key": "edgepython",
+                        "result": "Test: Exact\nDE genes (p-value < 0.01): 8 up, 3 down, 105 NS",
+                    },
+                    {
+                        "tool": "get_top_genes",
+                        "source_key": "edgepython",
+                        "result": "Top genes by p-value\nGENE1\nGENE2",
+                    },
+                ],
+            },
+            {
+                "id": "save1",
+                "kind": "SAVE_RESULTS",
+                "title": "Save results",
+                "status": "COMPLETED",
+                "depends_on": ["de1"],
+                "result": "Saved results to: /tmp/project/workflow8/de_results/de_results.tsv",
+            },
+            {
+                "id": "plot1",
+                "kind": "GENERATE_DE_PLOT",
+                "title": "Generate volcano plot",
+                "status": "COMPLETED",
+                "depends_on": ["de1"],
+                "result": "Volcano plot saved to: /tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png",
+            },
+            {
+                "id": "summary1",
+                "kind": "WRITE_SUMMARY",
+                "title": "Write DE analysis summary",
+                "status": "PENDING",
+                "depends_on": ["save1", "plot1"],
+            },
+        ],
+    }
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "summary1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    summary = payload["steps"][-1]["result"]
+    assert "Significant genes at p-value < 0.01: 11 total (8 up, 3 down, 105 not significant)." in summary["markdown"]
+    assert summary["deg_summary"]["significance_metric"] == "pvalue"
+    assert summary["deg_summary"]["significance_threshold"] == 0.01
+
+
+@pytest.mark.asyncio
+async def test_execute_step_interpret_results_returns_up_and_down_go_dataframes(monkeypatch):
+    payload = {
+        "plan_type": "run_de_pipeline",
+        "workflow_type": "de_analysis",
+        "significance_metric": "pvalue",
+        "significance_threshold": 0.05,
+        "steps": [
+            {
+                "id": "prep1",
+                "kind": "PREPARE_DE_INPUT",
+                "title": "Prepare DE inputs",
+                "status": "COMPLETED",
+                "result": {
+                    "group_a_label": "AD",
+                    "group_a_samples": ["exc", "jbh"],
+                    "group_b_label": "control",
+                    "group_b_samples": ["gko", "lwf2"],
+                    "result_name": "ad_vs_control_gene",
+                },
+            },
+            {
+                "id": "de1",
+                "kind": "RUN_DE_PIPELINE",
+                "title": "Run DE",
+                "status": "COMPLETED",
+                "depends_on": ["prep1"],
+                "result": [
+                    {
+                        "tool": "exact_test",
+                        "source_key": "edgepython",
+                        "result": "Test: Exact\nDE genes (p-value < 0.05): 2 up, 1 down, 3 NS",
+                    },
+                ],
+            },
+            {
+                "id": "interpret1",
+                "kind": "INTERPRET_RESULTS",
+                "title": "Interpret DE results",
+                "status": "PENDING",
+                "depends_on": ["de1"],
+            },
+        ],
+    }
+
+    de_result_table = pd.DataFrame(
+        [
+            {"Symbol": "GENE1", "logFC": 1.4, "PValue": 0.001, "FDR": 0.02},
+            {"Symbol": "GENE2", "logFC": 0.8, "PValue": 0.02, "FDR": 0.08},
+            {"Symbol": "GENE3", "logFC": -1.1, "PValue": 0.01, "FDR": 0.04},
+            {"Symbol": "GENE4", "logFC": 0.2, "PValue": 0.4, "FDR": 0.5},
+        ]
+    )
+    up_enrichment = pd.DataFrame(
+        [
+            {
+                "source": "GO:BP",
+                "native": "GO:0001",
+                "name": "axon development",
+                "p_value": 0.001,
+                "intersection_size": 2,
+                "term_size": 50,
+                "intersections": ["GENE1", "GENE2"],
+            },
+            {
+                "source": "GO:MF",
+                "native": "GO:0002",
+                "name": "binding",
+                "p_value": 0.02,
+                "intersection_size": 1,
+                "term_size": 30,
+                "intersections": ["GENE1"],
+            },
+        ]
+    )
+    down_enrichment = pd.DataFrame(
+        [
+            {
+                "source": "GO:CC",
+                "native": "GO:0003",
+                "name": "synapse",
+                "p_value": 0.03,
+                "intersection_size": 1,
+                "term_size": 25,
+                "intersections": ["GENE3"],
+            }
+        ]
+    )
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    async def _fake_call_mcp_tool(source, tool, params):
+        assert source == "edgepython"
+        assert tool == "get_result_table"
+        assert params["name"] == "ad_vs_control_gene"
+        return {"data": de_result_table.to_json(orient="records")}
+
+    def _fake_go_enrichment(genes, *, species="auto", sources="GO:BP,GO:MF,GO:CC"):
+        gene_set = tuple(genes)
+        if gene_set == ("GENE1", "GENE2"):
+            return up_enrichment.copy()
+        if gene_set == ("GENE3",):
+            return down_enrichment.copy()
+        raise AssertionError(f"Unexpected gene list: {gene_set}")
+
+    monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _fake_call_mcp_tool)
+    monkeypatch.setattr(
+        "cortex.plan_executor.analyzer_enrichment_engine.get_go_enrichment_dataframe",
+        _fake_go_enrichment,
+    )
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "interpret1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    step_result = payload["steps"][-1]["result"]
+    assert "Test: Exact found 3 significant genes at p-value < 0.05" not in step_result["markdown"]
+    assert "Exact found 3 significant genes at p-value < 0.05 (2 up, 1 down, 3 not significant)." in step_result["markdown"]
+    assert "Upregulated GO enrichment returned 2 terms at p-value < 0.05." in step_result["post_dataframe_markdown"]
+    assert "Downregulated GO enrichment returned 1 terms at p-value < 0.05." in step_result["post_dataframe_markdown"]
+
+    embedded = step_result["_dataframes"]
+    assert sorted(embedded) == [
+        "ad_vs_control_gene_downregulated_go.csv",
+        "ad_vs_control_gene_upregulated_go.csv",
+    ]
+
+    up_payload = embedded["ad_vs_control_gene_upregulated_go.csv"]
+    down_payload = embedded["ad_vs_control_gene_downregulated_go.csv"]
+    assert up_payload["metadata"]["direction"] == "upregulated"
+    assert down_payload["metadata"]["direction"] == "downregulated"
+    assert up_payload["metadata"]["visible"] is True
+    assert down_payload["metadata"]["visible"] is True
+    assert "go_namespace" in up_payload["columns"]
+    assert "genes_in_term" in up_payload["columns"]
+    assert up_payload["data"][0]["go_namespace"] == "BP"
+    assert up_payload["data"][1]["go_namespace"] == "MF"
+    assert down_payload["data"][0]["go_namespace"] == "CC"
+    assert up_payload["data"][0]["genes_in_term"] == "GENE1, GENE2"
+    assert down_payload["data"][0]["genes_in_term"] == "GENE3"
+
+
+@pytest.mark.asyncio
+async def test_execute_step_interpret_results_keeps_empty_direction_dataframe(monkeypatch):
+    payload = {
+        "plan_type": "run_de_pipeline",
+        "workflow_type": "de_analysis",
+        "steps": [
+            {
+                "id": "prep1",
+                "kind": "PREPARE_DE_INPUT",
+                "title": "Prepare DE inputs",
+                "status": "COMPLETED",
+                "result": {
+                    "group_a_label": "AD",
+                    "group_b_label": "control",
+                    "result_name": "ad_vs_control_gene",
+                },
+            },
+            {
+                "id": "de1",
+                "kind": "RUN_DE_PIPELINE",
+                "title": "Run DE",
+                "status": "COMPLETED",
+                "depends_on": ["prep1"],
+                "result": [
+                    {
+                        "tool": "exact_test",
+                        "source_key": "edgepython",
+                        "result": "Test: Exact\nDE genes (p-value < 0.05): 1 up, 0 down, 5 NS",
+                    },
+                ],
+            },
+            {
+                "id": "interpret1",
+                "kind": "INTERPRET_RESULTS",
+                "title": "Interpret DE results",
+                "status": "PENDING",
+                "depends_on": ["de1"],
+            },
+        ],
+    }
+
+    de_result_table = pd.DataFrame(
+        [
+            {"Symbol": "GENE1", "logFC": 1.4, "PValue": 0.001, "FDR": 0.02},
+            {"Symbol": "GENE2", "logFC": 0.2, "PValue": 0.4, "FDR": 0.5},
+        ]
+    )
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    async def _fake_call_mcp_tool(_source, _tool, _params):
+        return {"data": de_result_table.to_json(orient="records")}
+
+    monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _fake_call_mcp_tool)
+    monkeypatch.setattr(
+        "cortex.plan_executor.analyzer_enrichment_engine.get_go_enrichment_dataframe",
+        lambda genes, **_kwargs: pd.DataFrame(
+            [{"source": "GO:BP", "native": "GO:0001", "name": "axon", "p_value": 0.01, "intersections": list(genes)}]
+        ),
+    )
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "interpret1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    step_result = payload["steps"][-1]["result"]
+    down_payload = step_result["_dataframes"]["ad_vs_control_gene_downregulated_go.csv"]
+    assert down_payload["row_count"] == 0
+    assert "go_namespace" in down_payload["columns"]
+    assert "Downregulated GO enrichment returned no terms at p-value < 0.05." in step_result["post_dataframe_markdown"]

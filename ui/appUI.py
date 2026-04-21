@@ -516,6 +516,7 @@ def render_block(block, expected_project_id: str = ""):
         _format_duration=_format_duration,
         _block_timestamp=_block_timestamp,
         _render_workflow_plot_payload=_render_workflow_plot_payload,
+        _render_embedded_dataframes=_render_embedded_dataframes,
         _render_step_payload=_render_step_payload,
         _job_status_updated_at=_job_status_updated_at,
         _run_status_label=_run_status_label,

@@ -32,7 +32,7 @@ Species is auto-detected from gene ID prefixes (ENSG → human, ENSMUSG → mous
 
 ### Step 1: Filter DE genes (if starting from DE results)
 ```
-[[DATA_CALL:service:edgepython:filter_de_genes:result_name={name},fdr_threshold=0.05,logfc_threshold=0.0,direction=all]]
+[[DATA_CALL:service:edgepython:filter_de_genes:result_name={name},significance_metric=fdr,significance_threshold=0.05,logfc_threshold=0.0,direction=all]]
 ```
 
 ### Step 2: Run GO enrichment

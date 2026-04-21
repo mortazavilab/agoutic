@@ -218,7 +218,7 @@ class AgentEngine:
         [[DATA_CALL: service=edgepython, tool=estimate_dispersion, robust=true]]
         [[DATA_CALL: service=edgepython, tool=fit_model, robust=true]]
         [[DATA_CALL: service=edgepython, tool=test_contrast, contrast=treated - control]]
-        [[DATA_CALL: service=edgepython, tool=get_top_genes, n=20, fdr_threshold=0.05]]
+        [[DATA_CALL: service=edgepython, tool=get_top_genes, n=20, significance_metric=fdr, significance_threshold=0.05]]
         [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano]]
 
         🚨 CRITICAL: You MUST substitute actual values from the user's message into the parameters.

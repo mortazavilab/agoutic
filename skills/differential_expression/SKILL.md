@@ -124,7 +124,7 @@ Or for flexible loading (kallisto, salmon, 10x, AnnData):
 #### Step 8: Get Results
 
 ```
-[[DATA_CALL: service=edgepython, tool=get_top_genes, n=20, fdr_threshold=0.05]]
+[[DATA_CALL: service=edgepython, tool=get_top_genes, n=20, significance_metric=fdr, significance_threshold=0.05]]
 ```
 
 #### Step 9: Generate Plots
@@ -145,6 +145,7 @@ Supported publication-quality volcano controls in this slice include:
 	(`web`, `draft`, `publication`, `print`, `high res`, `poster`, `journal max`)
 - `use_fdr_y=true` to switch the y-axis from `-log10(p-value)` to `-log10(FDR)`
 - `pvalue_cutoff`, `fdr_cutoff`, and `logfc_cutoff`
+- `significance_metric` / `significance_threshold` on `exact_test`, `test_contrast`, `get_top_genes`, and `filter_de_genes` let the full DE workflow use raw `p-value` or `FDR` consistently
 - `top_n_labels` and `label_genes=[...]` for on-image gene labels
 - `label_transcripts=true` to add transcript or isoform IDs to volcano and heatmap labels when those IDs are available
 
@@ -225,6 +226,6 @@ Reset state for a new analysis:
 8. **For simple two-group comparisons**, exact_test is preferred over the GLM path.
 9. **For complex designs** (batch effects, interaction terms), use the full GLM pipeline.
 10. **Always generate at least a volcano plot** after testing to visualize results.
-11. **Default volcano y-axis is `-log10(p-value)`**. Use `use_fdr_y=true` only when the user explicitly asks for FDR on the y-axis.
+11. **Default full-DE significance is `p-value < 0.05`** unless the user explicitly asks for FDR. The default volcano y-axis is also `-log10(p-value)`; use `use_fdr_y=true` only when the user explicitly asks for FDR on the y-axis.
 12. **For publication-quality DE artifacts**, prefer `dpi=publication` or an explicit numeric DPI and let edgePython write the PNG/SVG pair.
 13. **When the user says "yes", "proceed", "go ahead", or "continue"**, emit the remaining pipeline DATA_CALLs. Do NOT ask clarifying questions — the user has already confirmed.

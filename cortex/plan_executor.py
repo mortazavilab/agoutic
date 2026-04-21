@@ -17,10 +17,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pandas as pd
+
+from analyzer import enrichment_engine as analyzer_enrichment_engine
 from common import MCPHttpClient
 from common.logging_config import get_logger
 from common.workflow_paths import next_workflow_number, workflow_dir_name
 from cortex.skill_manifest import check_service_availability
+from cortex.dataframe_transforms import dataframe_to_payload
 from sqlalchemy import select
 from cortex.config import get_service_url
 from cortex.plan_validation import PlanValidationError, validate_plan
@@ -962,16 +966,25 @@ def _extract_de_test_summary(de_outputs: dict[str, list[str]]) -> dict[str, Any]
         summary["test_name"] = test_name_match.group(1).strip()
 
     count_match = re.search(
-        r"DE genes \(FDR < 0\.05\):\s*(\d+)\s+up,\s*(\d+)\s+down(?:,\s*(\d+)\s+NS|\s*\((\d+)\s+total\))?",
+        r"DE genes \((FDR|p-value) < ([0-9.eE+-]+)\):\s*(\d+)\s+up,\s*(\d+)\s+down(?:,\s*(\d+)\s+NS|\s*\((\d+)\s+total\))?",
         test_text,
+        re.IGNORECASE,
     )
     if not count_match:
         return summary
 
-    n_up = int(count_match.group(1))
-    n_down = int(count_match.group(2))
-    n_ns = count_match.group(3)
-    explicit_total = count_match.group(4)
+    metric_label = count_match.group(1)
+    threshold_text = count_match.group(2)
+    n_up = int(count_match.group(3))
+    n_down = int(count_match.group(4))
+    n_ns = count_match.group(5)
+    explicit_total = count_match.group(6)
+    summary["significance_label"] = metric_label
+    summary["significance_metric"] = "fdr" if metric_label.strip().lower() == "fdr" else "pvalue"
+    try:
+        summary["significance_threshold"] = float(threshold_text)
+    except (TypeError, ValueError):
+        summary["significance_threshold"] = threshold_text
     summary["n_up"] = n_up
     summary["n_down"] = n_down
     summary["n_significant"] = int(explicit_total) if explicit_total else n_up + n_down
@@ -1005,6 +1018,281 @@ def _build_inline_image_entry(path_value: str, caption: str) -> dict[str, Any]:
     return entry
 
 
+_GO_NAMESPACE_MAP = {
+    "GO:BP": "BP",
+    "GO:MF": "MF",
+    "GO:CC": "CC",
+}
+
+
+def _normalize_go_namespace(source_value: object) -> str:
+    text = str(source_value or "").strip().upper()
+    return _GO_NAMESPACE_MAP.get(text, text or "")
+
+
+def _format_gene_members(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray, dict)):
+        return ", ".join(str(item) for item in value if str(item).strip())
+    return ""
+
+
+def _extract_de_gene_label(row: pd.Series) -> str:
+    for column in (
+        "Symbol",
+        "symbol",
+        "gene_symbol",
+        "GeneSymbol",
+        "gene_name",
+        "GeneName",
+        "GeneID",
+        "gene_id",
+        "gene",
+        "Gene",
+        "id",
+        "ID",
+    ):
+        if column in row.index:
+            raw_value = row.get(column)
+            if raw_value is None or pd.isna(raw_value):
+                continue
+            value = str(raw_value).strip()
+            if value and value.lower() != "nan":
+                return value
+    return ""
+
+
+async def _load_de_result_frame(plan_payload: dict, step: dict) -> pd.DataFrame:
+    comparison = _extract_de_comparison_context(plan_payload, step)
+    result_name = str(comparison.get("result_name") or "").strip() or None
+
+    tool_result = await _call_mcp_tool(
+        "edgepython",
+        "get_result_table",
+        {"name": result_name, "format": "json"},
+    )
+    if isinstance(tool_result, dict) and not tool_result.get("error"):
+        raw_data = tool_result.get("data")
+        if isinstance(raw_data, str):
+            text = raw_data.strip()
+            if text and not text.startswith("No test results") and not text.startswith("Result '"):
+                try:
+                    records = json.loads(text)
+                except json.JSONDecodeError:
+                    records = None
+                if isinstance(records, list):
+                    return pd.DataFrame(records)
+
+    de_outputs = _extract_edgepython_dependency_outputs(plan_payload, step)
+    saved_path = _extract_saved_output_path(de_outputs.get("saved", []), prefix="Saved results to:")
+    if saved_path and Path(saved_path).exists():
+        suffix = Path(saved_path).suffix.lower()
+        separator = "\t" if suffix == ".tsv" else ","
+        return pd.read_csv(saved_path, sep=separator)
+
+    return pd.DataFrame()
+
+
+def _resolve_de_significance_config(plan_payload: dict, step: dict) -> tuple[str, float, str]:
+    de_outputs = _extract_edgepython_dependency_outputs(plan_payload, step)
+    summary = _extract_de_test_summary(de_outputs)
+    metric = str(summary.get("significance_metric") or plan_payload.get("significance_metric") or "pvalue").strip().lower() or "pvalue"
+    threshold_value = summary.get("significance_threshold", plan_payload.get("significance_threshold", 0.05))
+    try:
+        threshold = float(threshold_value)
+    except (TypeError, ValueError):
+        threshold = 0.05
+    label = str(summary.get("significance_label") or ("FDR" if metric == "fdr" else "p-value"))
+    return metric, threshold, label
+
+
+def _filter_significant_directional_genes(
+    frame: pd.DataFrame,
+    *,
+    significance_metric: str,
+    significance_threshold: float,
+) -> tuple[list[str], list[str]]:
+    if frame.empty or "logFC" not in frame.columns:
+        return [], []
+
+    metric_column = "PValue" if significance_metric == "pvalue" else "FDR"
+    if metric_column not in frame.columns:
+        fallback_column = "PValue" if "PValue" in frame.columns else "FDR"
+        if fallback_column not in frame.columns:
+            return [], []
+        metric_column = fallback_column
+
+    metric_series = pd.to_numeric(frame[metric_column], errors="coerce")
+    logfc_series = pd.to_numeric(frame["logFC"], errors="coerce")
+    significant = frame.loc[(metric_series < significance_threshold) & logfc_series.notna()].copy()
+    if significant.empty:
+        return [], []
+
+    significant["__gene_label__"] = significant.apply(_extract_de_gene_label, axis=1)
+    significant = significant[significant["__gene_label__"].astype(str).str.strip() != ""]
+    if significant.empty:
+        return [], []
+
+    up = significant.loc[pd.to_numeric(significant["logFC"], errors="coerce") > 0, "__gene_label__"].tolist()
+    down = significant.loc[pd.to_numeric(significant["logFC"], errors="coerce") < 0, "__gene_label__"].tolist()
+    return up, down
+
+
+def _build_go_enrichment_payload(
+    enrichment_frame: pd.DataFrame,
+    *,
+    direction: str,
+    df_id: int,
+    result_name: str,
+) -> dict[str, Any]:
+    normalized = enrichment_frame.copy() if isinstance(enrichment_frame, pd.DataFrame) else pd.DataFrame()
+    if normalized.empty:
+        normalized = pd.DataFrame(columns=["term_id", "term_name", "go_namespace", "genes_in_term"])
+    else:
+        if "native" in normalized.columns:
+            normalized["term_id"] = normalized["native"]
+        elif "term_id" not in normalized.columns:
+            normalized["term_id"] = ""
+        if "name" in normalized.columns:
+            normalized["term_name"] = normalized["name"]
+        elif "term_name" not in normalized.columns:
+            normalized["term_name"] = ""
+        if "source" in normalized.columns:
+            normalized["go_namespace"] = normalized["source"].apply(_normalize_go_namespace)
+        else:
+            normalized["go_namespace"] = ""
+        if "intersections" in normalized.columns:
+            normalized["genes_in_term"] = normalized["intersections"].apply(_format_gene_members)
+        else:
+            normalized["genes_in_term"] = ""
+
+        preferred_columns = ["term_id", "term_name", "go_namespace"]
+        remaining_columns = [
+            column for column in normalized.columns
+            if column not in set(preferred_columns + ["genes_in_term"])
+        ]
+        normalized = normalized.loc[:, preferred_columns + remaining_columns + ["genes_in_term"]]
+
+    label = f"GO enrichment ({direction})"
+    payload = dataframe_to_payload(
+        normalized,
+        source_payload={"metadata": {}},
+        operation="go_enrichment",
+        label=label,
+        extra_metadata={
+            "df_id": df_id,
+            "visible": True,
+            "direction": direction,
+            "result_name": result_name,
+        },
+    )
+    payload["metadata"]["df_id"] = df_id
+    payload["metadata"]["visible"] = True
+    payload["metadata"]["row_count"] = payload.get("row_count", 0)
+    return payload
+
+
+def _summarize_go_enrichment(
+    enrichment_frame: pd.DataFrame,
+    *,
+    direction_label: str,
+    threshold: float,
+) -> str:
+    if enrichment_frame.empty:
+        return f"{direction_label} GO enrichment returned no terms at p-value < {threshold:g}."
+
+    namespaces = []
+    if "source" in enrichment_frame.columns:
+        namespace_counts = (
+            enrichment_frame["source"].fillna("").map(_normalize_go_namespace).value_counts().to_dict()
+        )
+        namespaces = [f"{name} ({count})" for name, count in namespace_counts.items() if name]
+
+    top_names = []
+    if "name" in enrichment_frame.columns:
+        top_names = [
+            str(value) for value in enrichment_frame["name"].head(3).tolist() if str(value).strip()
+        ]
+
+    summary = f"{direction_label} GO enrichment returned {len(enrichment_frame)} terms at p-value < {threshold:g}."
+    if namespaces:
+        summary += f" Namespaces: {', '.join(namespaces)}."
+    if top_names:
+        summary += f" Top terms: {', '.join(top_names)}."
+    return summary
+
+
+async def _build_de_interpretation_payload(plan_payload: dict, step: dict) -> dict[str, Any]:
+    interpretation = _build_de_interpretation(plan_payload, step)
+    comparison = _extract_de_comparison_context(plan_payload, step)
+    significance_metric, significance_threshold, significance_label = _resolve_de_significance_config(plan_payload, step)
+    result_frame = await _load_de_result_frame(plan_payload, step)
+    up_genes, down_genes = _filter_significant_directional_genes(
+        result_frame,
+        significance_metric=significance_metric,
+        significance_threshold=significance_threshold,
+    )
+
+    enrichment_threshold = 0.05
+    payload: dict[str, Any] = {
+        "markdown": interpretation,
+        "comparison": comparison,
+        "go_enrichment": {
+            "significance_metric": significance_metric,
+            "significance_label": significance_label,
+            "significance_threshold": significance_threshold,
+            "term_pvalue_threshold": enrichment_threshold,
+            "up_gene_count": len(up_genes),
+            "down_gene_count": len(down_genes),
+        },
+    }
+
+    dataframe_payloads: dict[str, Any] = {}
+    post_lines: list[str] = []
+    result_name = str(comparison.get("result_name") or "de_result").strip() or "de_result"
+
+    for df_id, (direction, genes, direction_label) in enumerate(
+        (("upregulated", up_genes, "Upregulated"), ("downregulated", down_genes, "Downregulated")),
+        start=1,
+    ):
+        if genes:
+            try:
+                enrichment_frame = analyzer_enrichment_engine.get_go_enrichment_dataframe(
+                    genes,
+                    species="auto",
+                    sources="GO:BP,GO:MF,GO:CC",
+                )
+            except Exception as exc:
+                enrichment_frame = pd.DataFrame(columns=["term_id", "term_name", "go_namespace", "genes_in_term"])
+                post_lines.append(f"{direction_label} GO enrichment failed: {exc}")
+            else:
+                if "p_value" in enrichment_frame.columns:
+                    enrichment_frame = enrichment_frame.loc[
+                        pd.to_numeric(enrichment_frame["p_value"], errors="coerce") <= enrichment_threshold
+                    ].reset_index(drop=True)
+        else:
+            enrichment_frame = pd.DataFrame(columns=["term_id", "term_name", "go_namespace", "genes_in_term"])
+
+        dataframe_payloads[f"{result_name}_{direction}_go.csv"] = _build_go_enrichment_payload(
+            enrichment_frame,
+            direction=direction,
+            df_id=df_id,
+            result_name=result_name,
+        )
+        post_lines.append(
+            _summarize_go_enrichment(
+                enrichment_frame,
+                direction_label=direction_label,
+                threshold=enrichment_threshold,
+            )
+        )
+
+    payload["_dataframes"] = dataframe_payloads
+    payload["post_dataframe_markdown"] = "\n\n".join(line for line in post_lines if line).strip()
+    return payload
+
+
 def _build_de_interpretation(plan_payload: dict, step: dict) -> str:
     de_outputs = _extract_edgepython_dependency_outputs(plan_payload, step)
     summary = _extract_de_test_summary(de_outputs)
@@ -1012,8 +1300,11 @@ def _build_de_interpretation(plan_payload: dict, step: dict) -> str:
     lines: list[str] = []
     if summary.get("n_significant") is not None:
         test_name = str(summary.get("test_name") or "DE test")
+        threshold_value = summary.get("significance_threshold", 0.05)
+        threshold_text = f"{threshold_value:g}" if isinstance(threshold_value, (int, float)) else str(threshold_value)
+        metric_label = str(summary.get("significance_label") or "FDR")
         line = (
-            f"{test_name} found {int(summary['n_significant'])} significant genes at FDR < 0.05 "
+            f"{test_name} found {int(summary['n_significant'])} significant genes at {metric_label} < {threshold_text} "
             f"({int(summary['n_up'])} up, {int(summary['n_down'])} down"
         )
         if summary.get("n_ns") is not None:
@@ -1069,8 +1360,11 @@ def _build_de_summary_payload(plan_payload: dict, step: dict) -> dict[str, Any]:
         summary_sections.append(" ".join(workflow_parts))
 
     if deg_summary.get("n_significant") is not None:
+        threshold_value = deg_summary.get("significance_threshold", 0.05)
+        threshold_text = f"{threshold_value:g}" if isinstance(threshold_value, (int, float)) else str(threshold_value)
+        metric_label = str(deg_summary.get("significance_label") or "FDR")
         counts_line = (
-            f"Significant genes at FDR < 0.05: {int(deg_summary['n_significant'])} total "
+            f"Significant genes at {metric_label} < {threshold_text}: {int(deg_summary['n_significant'])} total "
             f"({int(deg_summary['n_up'])} up, {int(deg_summary['n_down'])} down"
         )
         if deg_summary.get("n_ns") is not None:
@@ -1506,6 +1800,8 @@ async def execute_step(
     if kind in {"INTERPRET_RESULTS", "WRITE_SUMMARY", "RECOMMEND_NEXT"}:
         if plan_payload.get("plan_type") == "run_de_pipeline" and kind == "WRITE_SUMMARY":
             summary_payload = _build_de_summary_payload(plan_payload, step)
+        elif plan_payload.get("plan_type") == "run_de_pipeline" and kind == "INTERPRET_RESULTS":
+            summary_payload = await _build_de_interpretation_payload(plan_payload, step)
         else:
             summary_payload = {"markdown": _build_qc_interpretation(plan_payload, step)}
         step["status"] = "COMPLETED"

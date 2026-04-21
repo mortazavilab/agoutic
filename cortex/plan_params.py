@@ -74,6 +74,22 @@ _DE_SLASH_LABELED_RE = re.compile(
     r"^/de\s+([A-Za-z][\w.-]*)\s*=\s*([^=]+?)\s+(?:to|vs?\.?|versus|against)\s+([A-Za-z][\w.-]*)\s*=\s*(.+)$",
     re.I,
 )
+_DE_SIGNIFICANCE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "pvalue",
+        re.compile(
+            r"\b(?:raw\s+)?p(?:[- ]?value)?\b(?:\s+(?:threshold|cutoff))?(?:\s*(?:of|=|:|<|<=|at|to))?\s*([0-9]*\.?[0-9]+(?:e-?\d+)?)?",
+            re.I,
+        ),
+    ),
+    (
+        "fdr",
+        re.compile(
+            r"\b(?:fdr|q[- ]?value|adjusted\s+p(?:[- ]?value)?|adj\.?\s*p)\b(?:\s+(?:threshold|cutoff))?(?:\s*(?:of|=|:|<|<=|at|to))?\s*([0-9]*\.?[0-9]+(?:e-?\d+)?)?",
+            re.I,
+        ),
+    ),
+)
 
 
 def _split_de_samples(raw: str) -> list[str]:
@@ -81,6 +97,28 @@ def _split_de_samples(raw: str) -> list[str]:
     parts = re.split(r"\s*(?:,|and|&)\s*", cleaned)
     values = [part.strip().strip(".,;:!?") for part in parts if part.strip().strip(".,;:!?")]
     return values
+
+
+def _extract_de_significance_request(message: str) -> tuple[str, float, bool] | None:
+    matches: list[tuple[int, str, float, bool]] = []
+    for metric, pattern in _DE_SIGNIFICANCE_PATTERNS:
+        for match in pattern.finditer(message or ""):
+            numeric = match.group(1)
+            threshold = 0.05
+            explicit_threshold = False
+            if numeric is not None and numeric != "":
+                try:
+                    threshold = float(numeric)
+                    explicit_threshold = True
+                except ValueError:
+                    continue
+            matches.append((match.start(), metric, threshold, explicit_threshold))
+
+    if not matches:
+        return None
+
+    _pos, metric, threshold, explicit_threshold = min(matches, key=lambda item: item[0])
+    return metric, threshold, explicit_threshold
 
 
 def _resolve_de_source_path(path_value: str, conv_state: "ConversationState") -> str:
@@ -199,6 +237,13 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
     if plan_type == "run_de_pipeline":
         msg = message.strip()
         msg_lower = msg.lower()
+        significance_request = _extract_de_significance_request(msg)
+        if significance_request is not None:
+            metric, threshold, explicit_threshold = significance_request
+            params["significance_metric"] = metric
+            params["significance_threshold"] = threshold
+            params["significance_explicit"] = True
+            params["significance_threshold_explicit"] = explicit_threshold
 
         # Extract counts path and sample info path from message
         m = re.search(r"counts?\s+(?:at|in|from|path)?\s*[=:]?\s*(\S+\.(?:csv|tsv|txt))", message, re.I)

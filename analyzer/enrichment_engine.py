@@ -8,6 +8,7 @@ dependency on edgePython DE state.
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,37 @@ def _resolve_species(species: str, genes: list[str]) -> str:
     return sp_map.get(species, species)
 
 
+def get_go_enrichment_dataframe(
+    genes: list[str] | str,
+    *,
+    species: str = "auto",
+    sources: str = "GO:BP,GO:MF,GO:CC",
+) -> pd.DataFrame:
+    """Return GO enrichment results as a DataFrame.
+
+    This is the structured counterpart to ``run_go_enrichment`` for internal
+    callers that need the full table instead of only formatted text.
+    """
+    gene_list = _parse_gene_list(genes) if isinstance(genes, str) else [str(g).strip() for g in genes if str(g).strip()]
+    if not gene_list:
+        return pd.DataFrame()
+
+    sp = _resolve_species(species, gene_list)
+    sources_list = [s.strip() for s in sources.split(",") if s.strip()]
+
+    from gprofiler import GProfiler
+
+    gp = GProfiler(return_dataframe=True)
+    try:
+        df = gp.profile(organism=sp, query=gene_list, sources=sources_list)
+    except Exception as exc:
+        raise RuntimeError(f"GO enrichment failed: {exc}") from exc
+
+    if isinstance(df, pd.DataFrame):
+        return df.copy()
+    return pd.DataFrame(df)
+
+
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
@@ -85,16 +117,12 @@ def run_go_enrichment(
     genes = _parse_gene_list(gene_list)
     if not genes:
         return "No genes provided. Pass a comma-separated gene list."
-
-    sp = _resolve_species(species, genes)
-    sources_list = [s.strip() for s in sources.split(",")]
-
-    from gprofiler import GProfiler
-    gp = GProfiler(return_dataframe=True)
     try:
-        df = gp.profile(organism=sp, query=genes, sources=sources_list)
-    except Exception as exc:
-        return f"GO enrichment failed: {exc}"
+        df = get_go_enrichment_dataframe(genes, species=species, sources=sources)
+    except RuntimeError as exc:
+        return str(exc)
+
+    sources_list = [s.strip() for s in sources.split(",") if s.strip()]
 
     if df.empty:
         return "No significant GO terms found."
