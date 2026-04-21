@@ -1834,8 +1834,8 @@ _DPI_PRESETS = {
     "draft": 300,
     "publication": 600,
     "print": 600,
-    "high res": 600,
-    "high resolution": 600,
+    "high res": 900,
+    "high resolution": 900,
     "poster": 900,
     "journal max": 1200,
 }
@@ -1959,6 +1959,305 @@ def _place_legend_outside(
     return legend
 
 
+def _load_plot_input_table(input_path: str) -> pd.DataFrame:
+    resolved = _resolve_existing_path(input_path)
+    if resolved is None or not resolved.is_file():
+        raise ValueError(f"Input path '{input_path}' was not found.")
+
+    suffix = resolved.suffix.lower()
+    sep_candidates: list[object]
+    if suffix == ".csv":
+        sep_candidates = [","]
+    elif suffix in {".tsv", ".tab"}:
+        sep_candidates = ["\t"]
+    else:
+        sep_candidates = [None, "\t", ","]
+
+    last_error = ""
+    for sep in sep_candidates:
+        try:
+            if sep is None:
+                frame = pd.read_csv(resolved, sep=None, engine="python")
+            else:
+                frame = pd.read_csv(resolved, sep=sep)
+            frame = frame.dropna(axis=0, how="all").dropna(axis=1, how="all")
+            if frame.empty:
+                last_error = "table is empty"
+                continue
+            return frame
+        except Exception as exc:
+            last_error = str(exc)
+
+    raise ValueError(f"Could not read plot input table: {last_error}")
+
+
+def _coerce_numeric_plot_frame(
+    df: pd.DataFrame,
+    *,
+    exclude: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    base = df.drop(columns=[col for col in exclude if col in df.columns], errors="ignore")
+    numeric = base.apply(pd.to_numeric, errors="coerce")
+    numeric = numeric.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    return numeric
+
+
+def _infer_unique_label_column(
+    df: pd.DataFrame,
+    *,
+    exclude: tuple[str, ...] = (),
+) -> Optional[str]:
+    excluded = set(exclude)
+    for col in df.columns:
+        if col in excluded or pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        values = df[col].dropna().astype(str).str.strip()
+        if not values.empty and len(values) == len(df) and values.nunique() == len(df):
+            return str(col)
+    for col in df.columns:
+        if col in excluded or pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        return str(col)
+    return None
+
+
+def _infer_heatmap_mode(matrix_df: pd.DataFrame) -> str:
+    row_labels = [str(label).strip() for label in matrix_df.index]
+    col_labels = [str(label).strip() for label in matrix_df.columns]
+    if matrix_df.shape[0] == matrix_df.shape[1] and row_labels and set(row_labels) == set(col_labels):
+        return "correlation"
+    return "raw"
+
+
+def _prepare_heatmap_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    label_col = _infer_unique_label_column(df)
+    matrix_df = _coerce_numeric_plot_frame(df, exclude=(label_col,) if label_col else ())
+    if matrix_df.empty:
+        raise ValueError("heatmap requires at least one numeric column")
+
+    if label_col:
+        row_labels = df.loc[matrix_df.index, label_col].fillna("").astype(str).tolist()
+        matrix_df.index = [label or f"row_{idx + 1}" for idx, label in enumerate(row_labels)]
+    else:
+        matrix_df.index = [str(idx) for idx in matrix_df.index]
+    matrix_df.columns = [str(col) for col in matrix_df.columns]
+
+    if _infer_heatmap_mode(matrix_df) == "correlation":
+        matrix_df = matrix_df.loc[matrix_df.index, matrix_df.index]
+
+    return matrix_df
+
+
+def _heatmap_style(matrix_df: pd.DataFrame, *, mode: str) -> tuple[str, Optional[float], Optional[float], str]:
+    values = matrix_df.to_numpy(dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        raise ValueError("heatmap matrix has no finite numeric values")
+
+    if mode == "correlation":
+        limit = max(1.0, float(np.nanmax(np.abs(finite))))
+        return "RdBu_r", -limit, limit, "Correlation"
+
+    token_text = " ".join(str(col) for col in matrix_df.columns)
+    diverging = (
+        float(np.nanmin(finite)) < 0 < float(np.nanmax(finite))
+        or bool(re.search(r"(?:log2?fc|fold[_ -]?change|z[_ -]?score|zscore|delta)", token_text, flags=re.IGNORECASE))
+    )
+    if diverging:
+        limit = float(np.nanmax(np.abs(finite)))
+        return "RdBu_r", -limit, limit, "Value"
+    return "viridis", None, None, "Value"
+
+
+def _prepare_pca_inputs(
+    df: pd.DataFrame,
+    *,
+    color: Optional[str] = None,
+) -> tuple[pd.DataFrame, list[str], Optional[pd.Series], Optional[str]]:
+    group_col = color if color in df.columns else None
+    label_col = _infer_unique_label_column(df, exclude=(group_col,) if group_col else ())
+    if group_col is None:
+        for col in df.columns:
+            if col == label_col or pd.api.types.is_numeric_dtype(df[col]):
+                continue
+            n_unique = df[col].nunique(dropna=True)
+            if 1 < n_unique < len(df):
+                group_col = str(col)
+                break
+
+    numeric_df = _coerce_numeric_plot_frame(
+        df,
+        exclude=tuple(col for col in (label_col, group_col) if col),
+    )
+    if numeric_df.shape[0] < 2 or numeric_df.shape[1] < 2:
+        raise ValueError("PCA requires at least two rows and two numeric columns")
+
+    if label_col:
+        labels = df.loc[numeric_df.index, label_col].fillna("").astype(str).tolist()
+    else:
+        labels = [str(idx) for idx in numeric_df.index]
+    groups = df.loc[numeric_df.index, group_col].fillna("Unknown").astype(str) if group_col else None
+    return numeric_df, labels, groups, group_col
+
+
+def _coerce_bar_mode(value: object, *, default: str) -> str:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "grouped": "group",
+        "stacked": "stack",
+        "stack": "stack",
+        "percent": "percent",
+        "percentage": "percent",
+        "normalized": "percent",
+    }
+    return aliases.get(normalized, normalized) if aliases.get(normalized, normalized) in {"group", "stack", "percent"} else default
+
+
+def _coerce_bar_agg(value: object, *, default: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"count", "sum", "mean"} else default
+
+
+def _infer_bar_stat_columns(
+    df: pd.DataFrame,
+    *,
+    y_column: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    error_candidates: list[str] = []
+    n_candidates: list[str] = []
+    if y_column:
+        y_norm = str(y_column).strip().lower()
+        error_candidates.extend([
+            f"{y_norm}_sem",
+            f"{y_norm}_se",
+            f"{y_norm}_stderr",
+            f"{y_norm}_std",
+            f"{y_norm}_sd",
+            f"{y_norm}_ci",
+            f"sem_{y_norm}",
+            f"se_{y_norm}",
+        ])
+        n_candidates.extend([
+            f"{y_norm}_n",
+            f"n_{y_norm}",
+            f"{y_norm}_count",
+            f"count_{y_norm}",
+        ])
+    error_candidates.extend(["sem", "se", "stderr", "std", "sd", "ci", "ci95", "error"])
+    n_candidates.extend(["n", "count", "replicates", "n_reps", "sample_size"])
+
+    normalized_columns = {str(col).strip().lower(): str(col) for col in df.columns}
+    error_col = next((normalized_columns[key] for key in error_candidates if key in normalized_columns), None)
+    n_col = next((normalized_columns[key] for key in n_candidates if key in normalized_columns), None)
+    return error_col, n_col
+
+
+def _prepare_bar_plot_table(
+    df: pd.DataFrame,
+    *,
+    plot_type: str,
+    x: Optional[str] = None,
+    y: Optional[str] = None,
+    color: Optional[str] = None,
+    mode: Optional[str] = None,
+    agg: Optional[str] = None,
+) -> tuple[pd.DataFrame, str, Optional[str], str, str]:
+    working = df.copy()
+    for column_name, value in (("x", x), ("y", y), ("color", color)):
+        if value and value not in working.columns:
+            raise ValueError(f"{column_name} column '{value}' was not found")
+
+    if x is None:
+        for col in working.columns:
+            if col == color or pd.api.types.is_numeric_dtype(working[col]):
+                continue
+            x = str(col)
+            break
+    if x is None:
+        working = working.reset_index().rename(columns={"index": "__row__"})
+        x = "__row__"
+
+    numeric_cols = list(_coerce_numeric_plot_frame(working, exclude=tuple(col for col in (x, color) if col)).columns)
+    if y and y not in numeric_cols:
+        working[y] = pd.to_numeric(working[y], errors="coerce")
+        if working[y].notna().sum() == 0:
+            raise ValueError(f"y column '{y}' is not numeric")
+        if y not in numeric_cols:
+            numeric_cols.append(y)
+
+    default_mode = "stack" if plot_type == "stacked_bar" else "group"
+    resolved_mode = _coerce_bar_mode(mode, default=default_mode)
+
+    if y is None and color is None and len(numeric_cols) > 1:
+        working = working[[x] + numeric_cols].melt(
+            id_vars=[x],
+            value_vars=numeric_cols,
+            var_name="series",
+            value_name="value",
+        )
+        color = "series"
+        y = "value"
+    elif y is None and len(numeric_cols) == 1:
+        y = numeric_cols[0]
+
+    group_keys = [x] + ([color] if color else [])
+
+    if y is None:
+        plot_df = working.groupby(group_keys, dropna=False).size().reset_index(name="value")
+        plot_df["n"] = plot_df["value"]
+        agg_name = "count"
+    else:
+        repeated_groups = working[group_keys].duplicated(keep=False).any()
+        agg_name = _coerce_bar_agg(
+            agg,
+            default=("sum" if plot_type == "stacked_bar" else ("mean" if repeated_groups else "value")),
+        )
+        if agg_name == "count":
+            plot_df = working.groupby(group_keys, dropna=False).size().reset_index(name="value")
+            plot_df["n"] = plot_df["value"]
+        elif agg_name == "sum":
+            plot_df = working.groupby(group_keys, dropna=False)[y].agg(["sum", "count"]).reset_index()
+            plot_df = plot_df.rename(columns={"sum": "value", "count": "n"})
+        elif agg_name == "mean":
+            plot_df = working.groupby(group_keys, dropna=False)[y].agg(["mean", "count", "sem"]).reset_index()
+            plot_df = plot_df.rename(columns={"mean": "value", "count": "n", "sem": "yerr"})
+        else:
+            keep_cols = group_keys + [y]
+            plot_df = working[keep_cols].copy().rename(columns={y: "value"})
+            error_col, n_col = _infer_bar_stat_columns(working, y_column=y)
+            if error_col:
+                plot_df["yerr"] = pd.to_numeric(working[error_col], errors="coerce")
+            if n_col:
+                plot_df["n"] = pd.to_numeric(working[n_col], errors="coerce")
+
+    plot_df["value"] = pd.to_numeric(plot_df["value"], errors="coerce")
+    plot_df = plot_df[np.isfinite(plot_df["value"])].copy()
+    if plot_df.empty:
+        raise ValueError("bar plot requires at least one finite numeric value")
+
+    plot_df[x] = plot_df[x].fillna("").astype(str)
+    if color:
+        plot_df[color] = plot_df[color].fillna("Unknown").astype(str)
+    if "yerr" in plot_df.columns:
+        plot_df["yerr"] = pd.to_numeric(plot_df["yerr"], errors="coerce")
+    if "n" in plot_df.columns:
+        plot_df["n"] = pd.to_numeric(plot_df["n"], errors="coerce")
+    return plot_df, x, color, resolved_mode, agg_name
+
+
+def _annotate_bar_counts(ax, x_positions, heights, counts) -> None:
+    if counts is None:
+        return
+    y_min, y_max = ax.get_ylim()
+    offset = max((y_max - y_min) * 0.02, 0.02)
+    for xpos, height, count in zip(x_positions, heights, counts):
+        if not np.isfinite(height) or not np.isfinite(count):
+            continue
+        y_text = height + offset if height >= 0 else height - offset
+        va = "bottom" if height >= 0 else "top"
+        ax.text(xpos, y_text, f"n={int(count)}", ha="center", va=va, fontsize=7, color="#374151")
+
+
 def _benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
     pvals = np.asarray(p_values, dtype=float)
     adjusted = np.full_like(pvals, np.nan, dtype=float)
@@ -2002,6 +2301,13 @@ def generate_plot(
     top_n_labels: object = 12,
     label_genes: Optional[object] = None,
     label_transcripts: object = False,
+    x: Optional[str] = None,
+    y: Optional[str] = None,
+    color: Optional[str] = None,
+    mode: Optional[str] = None,
+    agg: Optional[str] = None,
+    xlabel: Optional[str] = None,
+    ylabel: Optional[str] = None,
     title: Optional[str] = None,
     subtitle: Optional[str] = None,
 ) -> str:
@@ -2012,9 +2318,12 @@ def generate_plot(
             'mds' — multi-dimensional scaling of samples,
             'bcv' — biological coefficient of variation vs abundance,
             'ql_dispersion' — quasi-likelihood dispersion plot,
-            'md' — mean-difference (MA) plot for a test result,
+            'md'/'ma' — mean-difference (MA) plot for a test result,
             'volcano' — volcano plot (logFC vs -log10 p-value),
-            'heatmap' — heatmap of top DE genes,
+            'pca' — principal component analysis of an input table,
+            'heatmap' — heatmap of top DE genes or an input table,
+            'bar' — publication-style categorical bar chart from an input table,
+            'stacked_bar' — stacked or percent bar chart from an input table,
             'enrichment_bar' — horizontal bar chart of enrichment results,
             'enrichment_dot' — dot/bubble plot of enrichment results.
         result_name: Which test result to plot (for md/volcano/heatmap).
@@ -2027,15 +2336,32 @@ def generate_plot(
         svg_output_path: Optional path to save the SVG companion.
         dpi: Raster DPI value or preset phrase.
         label_transcripts: Include transcript/isoform IDs in labels when available.
+        x/y/color/mode/agg: Optional generic table plotting parameters for
+            bar/stacked_bar/PCA input tables.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    valid_types = {"mds", "bcv", "ql_dispersion", "md", "volcano", "heatmap",
-                   "enrichment_bar", "enrichment_dot"}
+    plot_type = str(plot_type or "").strip().lower()
+    valid_types = {
+        "mds",
+        "bcv",
+        "ql_dispersion",
+        "md",
+        "ma",
+        "volcano",
+        "pca",
+        "heatmap",
+        "bar",
+        "stacked_bar",
+        "enrichment_bar",
+        "enrichment_dot",
+    }
     if plot_type not in valid_types:
         return f"Invalid plot_type '{plot_type}'. Choose from: {', '.join(sorted(valid_types))}"
+
+    branch_plot_type = "md" if plot_type == "ma" else plot_type
 
     output_path, svg_output_path = _resolve_plot_output_paths(
         plot_type,
@@ -2054,7 +2380,94 @@ def generate_plot(
 
     d = _state["dgelist"]
 
-    if plot_type == "mds":
+    if branch_plot_type == "pca":
+        if not input_path:
+            return "PCA plot requires input_path resolved from a dataframe."
+        try:
+            table = _load_plot_input_table(input_path)
+            numeric_df, point_labels, groups, group_col = _prepare_pca_inputs(table, color=color)
+        except ValueError as exc:
+            return f"PCA plot could not be generated: {exc}"
+
+        values = numeric_df.to_numpy(dtype=float)
+        column_means = np.nanmean(values, axis=0)
+        if np.isnan(column_means).any():
+            return "PCA plot could not be generated because some numeric columns contain only missing values."
+        nan_rows, nan_cols = np.where(~np.isfinite(values))
+        if nan_rows.size:
+            values[nan_rows, nan_cols] = column_means[nan_cols]
+
+        column_stds = values.std(axis=0, ddof=0)
+        keep_mask = np.isfinite(column_stds) & (column_stds > 0)
+        if int(keep_mask.sum()) < 2:
+            return "PCA plot requires at least two varying numeric columns."
+        values = values[:, keep_mask]
+        values = values - values.mean(axis=0)
+        values = values / column_stds[keep_mask]
+
+        try:
+            u, singular_values, _ = np.linalg.svd(values, full_matrices=False)
+        except np.linalg.LinAlgError as exc:
+            return f"PCA plot could not be generated: {exc}"
+        if singular_values.size < 2:
+            return "PCA plot requires at least two principal components."
+
+        scores = u[:, :2] * singular_values[:2]
+        explained = (singular_values ** 2) / np.sum(singular_values ** 2)
+
+        fig, ax = plt.subplots(figsize=(8.5, 7))
+        _apply_plot_frame(ax)
+        ax.axhline(0, color="#d1d5db", linewidth=0.8)
+        ax.axvline(0, color="#d1d5db", linewidth=0.8)
+
+        if groups is not None:
+            categories = list(dict.fromkeys(groups.tolist()))
+            palette = plt.cm.tab10(np.linspace(0, 1, max(len(categories), 1)))
+            for idx, category in enumerate(categories):
+                mask = groups == category
+                ax.scatter(
+                    scores[mask, 0],
+                    scores[mask, 1],
+                    s=52,
+                    alpha=0.88,
+                    linewidths=0.5,
+                    edgecolors="white",
+                    color=palette[idx],
+                    label=category,
+                )
+        else:
+            ax.scatter(
+                scores[:, 0],
+                scores[:, 1],
+                s=56,
+                alpha=0.88,
+                linewidths=0.5,
+                edgecolors="white",
+                color="#2563eb",
+            )
+
+        if len(point_labels) <= 20:
+            for px, py, label in zip(scores[:, 0], scores[:, 1], point_labels):
+                ax.text(px, py, label, fontsize=8, ha="left", va="bottom", color="#111827")
+
+        ax.set_xlabel(xlabel or f"PC1 ({explained[0] * 100:.1f}%)")
+        ax.set_ylabel(ylabel or f"PC2 ({explained[1] * 100:.1f}%)")
+        pca_label = df_label or Path(str(input_path)).stem
+        pca_subtitle = subtitle or f"Input: {pca_label}; numeric columns standardized before SVD"
+        _apply_plot_header(fig, ax, title=title or f"PCA: {pca_label}", subtitle=pca_subtitle)
+        if groups is not None:
+            _place_legend_outside(ax, loc="upper left", anchor=(1.02, 1.0), fontsize=8)
+        saved_text = _save_plot_outputs(
+            fig,
+            label="PCA plot",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
+        plt.close(fig)
+        return saved_text
+
+    if branch_plot_type == "mds":
         _require("dgelist", "DGEList")
         fig, ax = ep.plot_mds(d)
         _apply_plot_header(fig, ax, title=title or "MDS plot", subtitle=subtitle)
@@ -2068,7 +2481,7 @@ def generate_plot(
         plt.close(fig)
         return saved_text
 
-    elif plot_type == "bcv":
+    elif branch_plot_type == "bcv":
         _require("dgelist", "DGEList")
         if not _state["dispersions_estimated"]:
             return "Dispersions not estimated yet. Run estimate_dispersion() first."
@@ -2084,7 +2497,7 @@ def generate_plot(
         plt.close(fig)
         return saved_text
 
-    elif plot_type == "ql_dispersion":
+    elif branch_plot_type == "ql_dispersion":
         _require("fit", "fitted model")
         fig, ax = ep.plot_ql_disp(_state["fit"])
         _apply_plot_header(fig, ax, title=title or "QL dispersion plot", subtitle=subtitle)
@@ -2098,7 +2511,7 @@ def generate_plot(
         plt.close(fig)
         return saved_text
 
-    elif plot_type == "md":
+    elif branch_plot_type == "md":
         if result_name is None:
             result_name = _state["last_result"]
         if result_name is None or result_name not in _state["results"]:
@@ -2112,11 +2525,12 @@ def generate_plot(
         if logfc_cutoff > 0:
             ax.axhline(logfc_cutoff, color="#9ca3af", linestyle="--", linewidth=0.8)
             ax.axhline(-logfc_cutoff, color="#9ca3af", linestyle="--", linewidth=0.8)
+        md_label = "MA plot" if plot_type == "ma" else "MD plot"
         md_subtitle = subtitle or f"Thresholds: |log2FC| >= {logfc_cutoff:g}"
-        _apply_plot_header(fig, ax, title=title or f"MD plot: {result_name}", subtitle=md_subtitle)
+        _apply_plot_header(fig, ax, title=title or f"{md_label}: {result_name}", subtitle=md_subtitle)
         saved_text = _save_plot_outputs(
             fig,
-            label="MD plot",
+            label=md_label,
             output_path=output_path,
             svg_output_path=svg_output_path,
             dpi=raster_dpi,
@@ -2124,7 +2538,7 @@ def generate_plot(
         plt.close(fig)
         return saved_text
 
-    elif plot_type == "volcano":
+    elif branch_plot_type == "volcano":
         if result_name is None:
             result_name = _state["last_result"]
         if result_name is None or result_name not in _state["results"]:
@@ -2298,7 +2712,48 @@ def generate_plot(
         plt.close(fig)
         return saved_text
 
-    elif plot_type == "heatmap":
+    elif branch_plot_type == "heatmap" and input_path:
+        try:
+            table = _load_plot_input_table(input_path)
+            matrix_df = _prepare_heatmap_matrix(table)
+            heatmap_mode = _infer_heatmap_mode(matrix_df)
+            cmap, vmin, vmax, colorbar_label = _heatmap_style(matrix_df, mode=heatmap_mode)
+        except ValueError as exc:
+            return f"Heatmap could not be generated: {exc}"
+
+        fig, ax = plt.subplots(
+            figsize=(max(6, matrix_df.shape[1] * 0.45), max(5, matrix_df.shape[0] * 0.28))
+        )
+        image = ax.imshow(
+            matrix_df.to_numpy(dtype=float),
+            aspect="auto",
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        ax.set_xticks(range(matrix_df.shape[1]))
+        ax.set_xticklabels(matrix_df.columns, rotation=45, ha="right", fontsize=8)
+        ax.set_yticks(range(matrix_df.shape[0]))
+        ax.set_yticklabels(matrix_df.index, fontsize=7)
+        heatmap_label = df_label or Path(str(input_path)).stem
+        heatmap_subtitle = subtitle or (
+            "Correlation heatmap (square row/column labels matched)"
+            if heatmap_mode == "correlation"
+            else f"Raw numeric matrix from {heatmap_label}"
+        )
+        _apply_plot_header(fig, ax, title=title or f"Heatmap: {heatmap_label}", subtitle=heatmap_subtitle)
+        fig.colorbar(image, ax=ax, label=colorbar_label, shrink=0.7)
+        saved_text = _save_plot_outputs(
+            fig,
+            label="Heatmap",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
+        plt.close(fig)
+        return saved_text
+
+    elif branch_plot_type == "heatmap":
         if result_name is None:
             result_name = _state["last_result"]
         if result_name is None or result_name not in _state["results"]:
@@ -2349,7 +2804,149 @@ def generate_plot(
         plt.close(fig)
         return saved_text
 
-    elif plot_type == "enrichment_bar":
+    elif branch_plot_type in {"bar", "stacked_bar"}:
+        if not input_path:
+            return "Bar plots require input_path resolved from a dataframe."
+        try:
+            table = _load_plot_input_table(input_path)
+            plot_df, x_col, color_col, bar_mode, agg_name = _prepare_bar_plot_table(
+                table,
+                plot_type=branch_plot_type,
+                x=x,
+                y=y,
+                color=color,
+                mode=mode,
+                agg=agg,
+            )
+        except ValueError as exc:
+            return f"Bar plot could not be generated: {exc}"
+
+        category_order = list(dict.fromkeys(plot_df[x_col].tolist()))
+        fig, ax = plt.subplots(figsize=(max(7, len(category_order) * 0.7), 6.5))
+        _apply_plot_frame(ax)
+        ax.margins(y=0.18)
+        positions = np.arange(len(category_order), dtype=float)
+
+        if color_col:
+            series_names = list(dict.fromkeys(plot_df[color_col].tolist()))
+            palette = plt.cm.tab10(np.linspace(0, 1, max(len(series_names), 1)))
+            if bar_mode in {"stack", "percent"}:
+                value_pivot = plot_df.pivot_table(
+                    index=x_col,
+                    columns=color_col,
+                    values="value",
+                    aggfunc="sum",
+                    fill_value=0.0,
+                ).reindex(category_order).fillna(0.0)
+                if bar_mode == "percent":
+                    row_sums = value_pivot.sum(axis=1).replace(0, np.nan)
+                    value_pivot = value_pivot.div(row_sums, axis=0).fillna(0.0) * 100.0
+                bottoms = np.zeros(len(category_order), dtype=float)
+                for idx, series_name in enumerate(value_pivot.columns):
+                    values = value_pivot[series_name].to_numpy(dtype=float)
+                    ax.bar(
+                        positions,
+                        values,
+                        width=0.72,
+                        bottom=bottoms,
+                        color=palette[idx],
+                        label=series_name,
+                    )
+                    bottoms += values
+                if "n" in plot_df.columns:
+                    total_counts = (
+                        plot_df.groupby(x_col)["n"].sum().reindex(category_order).to_numpy(dtype=float)
+                    )
+                    _annotate_bar_counts(ax, positions, bottoms, total_counts)
+            else:
+                width = 0.82 / max(len(series_names), 1)
+                for idx, series_name in enumerate(series_names):
+                    subset = plot_df[plot_df[color_col] == series_name].set_index(x_col).reindex(category_order)
+                    values = pd.to_numeric(subset["value"], errors="coerce").fillna(0).to_numpy(dtype=float)
+                    candidate_yerr = None
+                    if "yerr" in subset.columns:
+                        candidate_yerr = pd.to_numeric(subset["yerr"], errors="coerce").to_numpy(dtype=float)
+                        if not np.isfinite(candidate_yerr).any():
+                            candidate_yerr = None
+                    offset = (idx - (len(series_names) - 1) / 2) * width
+                    ax.bar(
+                        positions + offset,
+                        values,
+                        width=width,
+                        color=palette[idx],
+                        label=series_name,
+                        yerr=np.nan_to_num(candidate_yerr, nan=0.0) if candidate_yerr is not None else None,
+                        capsize=4 if candidate_yerr is not None else 0,
+                    )
+                    if "n" in subset.columns:
+                        counts = pd.to_numeric(subset["n"], errors="coerce").to_numpy(dtype=float)
+                        _annotate_bar_counts(ax, positions + offset, values, counts)
+        else:
+            ordered = plot_df.drop_duplicates(subset=[x_col], keep="last").set_index(x_col).reindex(category_order)
+            values = pd.to_numeric(ordered["value"], errors="coerce").fillna(0).to_numpy(dtype=float)
+            candidate_yerr = None
+            if "yerr" in ordered.columns:
+                candidate_yerr = pd.to_numeric(ordered["yerr"], errors="coerce").to_numpy(dtype=float)
+                if not np.isfinite(candidate_yerr).any():
+                    candidate_yerr = None
+            ax.bar(
+                positions,
+                values,
+                width=0.72,
+                color="#2563eb",
+                yerr=np.nan_to_num(candidate_yerr, nan=0.0) if candidate_yerr is not None else None,
+                capsize=4 if candidate_yerr is not None else 0,
+            )
+            if "n" in ordered.columns:
+                counts = pd.to_numeric(ordered["n"], errors="coerce").to_numpy(dtype=float)
+                _annotate_bar_counts(ax, positions, values, counts)
+
+        rotate = any(len(str(label)) > 10 for label in category_order)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(category_order, rotation=35 if rotate else 0, ha="right" if rotate else "center")
+        ax.set_xlabel(xlabel or x_col)
+        if bar_mode == "percent":
+            y_axis_label = ylabel or "Percent of total"
+        elif agg_name == "count":
+            y_axis_label = ylabel or "Count"
+        elif y:
+            y_axis_label = ylabel or y
+        else:
+            y_axis_label = ylabel or "Value"
+        ax.set_ylabel(y_axis_label)
+
+        source_label = df_label or Path(str(input_path)).stem
+        bar_title = title or (
+            f"Stacked bar chart: {source_label}"
+            if branch_plot_type == "stacked_bar" or bar_mode in {"stack", "percent"}
+            else f"Bar chart: {source_label}"
+        )
+        if subtitle is None:
+            subtitle_bits = []
+            if agg_name in {"count", "sum", "mean"}:
+                subtitle_bits.append(f"{agg_name} by category")
+            if "yerr" in plot_df.columns and pd.to_numeric(plot_df["yerr"], errors="coerce").notna().any():
+                subtitle_bits.append("error bars shown")
+            if "n" in plot_df.columns and pd.to_numeric(plot_df["n"], errors="coerce").notna().any():
+                subtitle_bits.append("n annotated above bars")
+            subtitle_bits.append(f"input: {source_label}")
+            bar_subtitle = "; ".join(subtitle_bits)
+        else:
+            bar_subtitle = subtitle
+        _apply_plot_header(fig, ax, title=bar_title, subtitle=bar_subtitle)
+        if color_col:
+            _place_legend_outside(ax, loc="upper left", anchor=(1.02, 1.0), fontsize=8)
+        saved_text = _save_plot_outputs(
+            fig,
+            label="Bar plot" if branch_plot_type == "bar" else "Stacked bar plot",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
+        plt.close(fig)
+        return saved_text
+
+    elif branch_plot_type == "enrichment_bar":
         ename = result_name or _state.get("last_enrichment")
         if not ename or ename not in _state.get("enrichment_results", {}):
             return "No enrichment results available. Run run_go_enrichment() first."
@@ -2393,7 +2990,7 @@ def generate_plot(
         plt.close(fig)
         return saved_text
 
-    elif plot_type == "enrichment_dot":
+    elif branch_plot_type == "enrichment_dot":
         ename = result_name or _state.get("last_enrichment")
         if not ename or ename not in _state.get("enrichment_results", {}):
             return "No enrichment results available. Run run_go_enrichment() first."

@@ -305,11 +305,11 @@ TOOL_SCHEMAS = {
         },
     },
     "generate_plot": {
-        "description": "Generate and save a visualization (mds, bcv, ql_dispersion, md, volcano, heatmap, enrichment_bar, enrichment_dot).",
+        "description": "Generate and save a visualization (mds, bcv, ql_dispersion, md/ma, volcano, pca, heatmap, bar, stacked_bar, enrichment_bar, enrichment_dot).",
         "parameters": {
             "type": "object",
             "properties": {
-                "plot_type": {"type": "string", "description": "Type of plot: mds, bcv, ql_dispersion, md, volcano, heatmap, enrichment_bar, enrichment_dot."},
+                "plot_type": {"type": "string", "description": "Type of plot: mds, bcv, ql_dispersion, md, ma, volcano, pca, heatmap, bar, stacked_bar, enrichment_bar, enrichment_dot."},
                 "result_name": {"type": "string", "description": "Which result to plot (for md/volcano/heatmap) or enrichment result name."},
                 "df": {"type": "string", "description": "Optional chat dataframe reference like DF1. Cortex resolves this to an input_path before calling edgePython."},
                 "df_id": {"type": "integer", "description": "Optional numeric chat dataframe reference. Cortex resolves this to an input_path before calling edgePython."},
@@ -325,6 +325,13 @@ TOOL_SCHEMAS = {
                 "top_n_labels": {"type": "integer", "description": "Number of top volcano genes to label automatically (default: 12)."},
                 "label_genes": {"type": "array", "description": "Optional list of gene symbols, gene IDs, or transcript IDs to force-label on the volcano plot."},
                 "label_transcripts": {"type": "boolean", "description": "When true, include transcript/isoform IDs in volcano and heatmap labels when those identifiers are available."},
+                "x": {"type": "string", "description": "Optional x-axis/category column for generic input_path-backed bar plots."},
+                "y": {"type": "string", "description": "Optional numeric value column for generic input_path-backed bar plots."},
+                "color": {"type": "string", "description": "Optional grouping/color column for generic input_path-backed PCA or bar plots."},
+                "mode": {"type": "string", "description": "Optional bar mode: group, stack, or percent."},
+                "agg": {"type": "string", "description": "Optional aggregation for generic bars: count, sum, or mean."},
+                "xlabel": {"type": "string", "description": "Optional x-axis label override."},
+                "ylabel": {"type": "string", "description": "Optional y-axis label override."},
                 "title": {"type": "string", "description": "Optional plot title override."},
                 "subtitle": {"type": "string", "description": "Optional subtitle shown under the main title when supported."},
             },

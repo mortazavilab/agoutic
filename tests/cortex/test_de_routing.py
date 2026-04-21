@@ -168,6 +168,33 @@ class TestEdgepythonParamExtraction(unittest.TestCase):
         self.assertEqual(result["plot_type"], "stacked_bar")
         self.assertEqual(result["df_id"], 2)
 
+    def test_generate_plot_infers_plot_type_from_text_when_missing(self):
+        result = _validate_edgepython_params(
+            "generate_plot",
+            {"df": "DF3"},
+            "make a PCA plot of DF3",
+        )
+        self.assertEqual(result["plot_type"], "pca")
+        self.assertEqual(result["df_id"], 3)
+
+    def test_generate_plot_promotes_bar_to_stacked_bar_from_text(self):
+        result = _validate_edgepython_params(
+            "generate_plot",
+            {"plot_type": "bar", "df": "DF2"},
+            "make a stacked bar chart of DF2",
+        )
+        self.assertEqual(result["plot_type"], "stacked_bar")
+        self.assertEqual(result["mode"], "stack")
+
+    def test_generate_plot_extracts_percent_bar_mode(self):
+        result = _validate_edgepython_params(
+            "generate_plot",
+            {"plot_type": "bar", "df": "DF2"},
+            "make a normalized stacked bar chart of DF2",
+        )
+        self.assertEqual(result["plot_type"], "stacked_bar")
+        self.assertEqual(result["mode"], "percent")
+
 
 class TestPlotRouting(unittest.TestCase):
     def test_simple_bar_stays_declarative(self):

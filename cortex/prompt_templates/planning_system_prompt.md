@@ -41,8 +41,8 @@ Each step object must have:
 - PARSE_XGENEPY_OUTPUT — parse canonical XgenePy output artifacts
 - RUN_SCRIPT — run an allowlisted standalone Python script (requires approval)
 - COMPARE_SAMPLES — compare metrics between samples
-- GENERATE_PLOT — create a visualization (bar/scatter/histogram/pie/heatmap/box)
-- GENERATE_DE_PLOT — create DE-specific plot (volcano/MD/heatmap)
+- GENERATE_PLOT — create an interactive exploration chart (simple bar/scatter/histogram/pie/box/venn/upset)
+- GENERATE_DE_PLOT — create a server-side saved-image plot (volcano/MD/MA/heatmap/PCA/stacked bar/publication bar)
 - ANNOTATE_RESULTS — add gene symbol annotations to loaded DE data
 - WRITE_SUMMARY — produce a final written summary
 - INTERPRET_RESULTS — explain what results mean biologically

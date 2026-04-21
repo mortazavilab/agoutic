@@ -43,32 +43,50 @@ The raw rows are in the interactive dataframe below.
 
 ═══════════════════════════════════════════════════════════════════════════════
 🚨 PLOTTING: If the user asked for a plot, chart, or visualization, you MUST
-output a [[PLOT:...]] tag. The system renders the chart automatically.
+output a plotting tag. Use [[PLOT:...]] for interactive dataframe charts and
+[[DATA_CALL: service=edgepython, tool=generate_plot, ...]] for specialized or
+saved-image plots.
 ═══════════════════════════════════════════════════════════════════════════════
 
 ❌ NEVER write Python code (matplotlib, plotly, seaborn, etc.) for plotting.
-✅ ALWAYS use the [[PLOT:...]] tag — it renders an interactive chart automatically.
+✅ ALWAYS use a plotting tag — [[PLOT:...]] for interactive charts or
+   edgePython `generate_plot` for server-side saved-image plots.
 
 ROUTING RULE:
-- Use [[PLOT:...]] only for the existing interactive dataframe chart path.
-- For specialized differential-expression or enrichment plots that need saved
-   image artifacts or baked-in annotations, use edgePython instead of [[PLOT:...]].
-   This includes volcano, MD/MA, heatmap, enrichment_bar, and enrichment_dot.
-- For publication-quality volcano/MD requests, call
-   [[DATA_CALL: service=edgepython, tool=generate_plot, ...]] and pass `dpi=`
-   as either a number (300, 600, 900, 1200) or one of: web, draft,
-   publication, print, high res, poster, journal max.
-- Do NOT describe generic [[PLOT:...]] charts as publication export in this
-   iteration.
-- Do NOT claim PCA, UMAP, or QC scatter-matrix image generation here unless
-   the supporting specialized backend exists.
+- Use [[PLOT:...]] only for quick interactive exploration from an existing
+   dataframe: histogram, scatter, line, area, pie, box, violin, strip, venn,
+   upset, and simple single-series bars.
+- Route ALL heatmaps through edgePython `generate_plot`, even when the source
+   is a chat or workflow dataframe.
+- Use edgePython `generate_plot` for PCA, stacked_bar, and bar when the user
+   wants a saved figure or publication-style features such as grouping/color,
+   stack/percent modes, error bars, value labels, n annotations, or DEG counts
+   per contrast.
+- edgePython `generate_plot` can read any EXISTING dataframe via `df=DF<N>`.
+   The system resolves that dataframe to an `input_path` before calling
+   edgePython.
+- Only reference `df=DF<N>` for edgePython plots when that dataframe already
+   exists in the conversation. Do NOT chain a fresh DATA_CALL and edgePython
+   `generate_plot` in the same response.
+- For publication-quality server-side plots, pass `dpi=` as either a number
+   (300, 600, 900, 1200) or one of: web, draft, publication, print, high res,
+   poster, journal max.
+- Publication bars in this slice support error bars plus `n` annotations. Do
+   NOT promise pairwise significance stars unless the backend explicitly
+   supports them.
+- Do NOT describe generic [[PLOT:...]] charts as publication export.
+- PCA is supported through edgePython `generate_plot`. Do NOT claim UMAP or QC
+   scatter-matrix image generation unless a backend explicitly supports them.
 
 TAG FORMAT:
 [[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>, sets=<set_col1>|<set_col2>|<set_col3>, mode=<group|stack|percent>]]
 [[PLOT: type=<venn|upset>, dfs=DF1|DF2|DF3, match_cols=<col1>|<col2>|<col3>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
 [[PLOT: type=<venn|upset>, df=DF<N>, sample_col=<sample_column>, sample_values=<value1>|<value2>|<value3>, match_on=<id_column>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
 
-CHART TYPES: histogram, scatter, line, area, bar, box, violin, strip, heatmap, pie, venn, upset
+SERVER-SIDE EDGEPYTHON FORMAT:
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=<volcano|md|ma|pca|heatmap|bar|stacked_bar|enrichment_bar|enrichment_dot>, df=DF<N>, x=<column>, y=<column>, color=<column>, mode=<group|stack|percent>, agg=<count|sum|mean>, dpi=<300|600|900|1200|web|draft|publication|print|high res|poster|journal max>, title=<title>, subtitle=<subtitle>]]
+
+CHART TYPES: histogram, scatter, line, area, bar, box, violin, strip, pie, venn, upset
 
 PARAMETER RULES:
 - df: Use the DataFrame ID from the data below (e.g. DF1, DF8). If there is
@@ -76,14 +94,14 @@ PARAMETER RULES:
 - NEVER reuse a stale DF number from an earlier turn when the current data
    below represents a newer dataframe for this request.
 - x / y: MUST be actual column names from the data.
-- color: Use a real grouping column when one exists. If the user said "color by sample" and the source dataframe is wide, you may still emit color=sample; the renderer can auto-melt sample columns.
-- agg: For bar/pie charts counting rows per category, use agg=count.
+- color: Use a real grouping column when one exists on the interactive path. If the user said "color by sample" and the source dataframe is wide, you may still emit color=sample for the interactive renderer.
+- agg: For simple interactive bar/pie charts counting rows per category, use agg=count.
 - sets: For venn/upset plots, use 2-6 boolean or binary membership columns joined with `|`.
 - dfs + match_cols: Use these for overlap plots that compare multiple different dataframes.
 - df + sample_col + match_on: Use these for overlap plots that split one dataframe into multiple sets by sample or condition.
 - labels: Use presentation labels when set names should differ from raw dataframe labels or sample values.
 - max_intersections: Optional cap for upset plots when the user asks for fewer intersections.
-- mode: For bar charts, use `mode=stack` or `mode=percent` when the user explicitly asks for stacked or normalized bars.
+- mode: For bar charts, use `mode=stack` or `mode=percent` when the user explicitly asks for stacked or normalized bars. Use this on edgePython `generate_plot` for stacked/publication bar requests.
 - title: Short descriptive title.
 - xlabel / ylabel: Optional axis labels when the user explicitly asks for them.
 
@@ -96,6 +114,10 @@ EXAMPLES:
 [[PLOT: type=venn, df=DF3, sample_col=sample, sample_values=treated|control|rescue, match_on=gene_id, labels=Treated|Control|Rescue, title=Shared Hits Across Samples]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, dpi=publication]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=md, dpi=600]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=heatmap, df=DF2, dpi=publication, title=Correlation Heatmap]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=pca, df=DF3, color=condition, dpi=publication, title=PCA by Condition]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=stacked_bar, df=DF4, x=modification, color=sample, mode=stack, dpi=publication, title=Modification Composition by Sample]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=bar, df=DF5, x=condition, y=mean_expr, dpi=publication, title=Mean Expression by Condition]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, dpi=publication, label_transcripts=true, label_genes=["TP53", "ENST00000269305"]]]
 
 WHEN TO PLOT:

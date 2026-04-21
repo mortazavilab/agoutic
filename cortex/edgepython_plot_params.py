@@ -29,6 +29,20 @@ _PLOT_TRANSCRIPT_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_PLOT_TYPE_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:principal\s+component(?:s)?(?:\s+analysis)?|pca)\b", re.IGNORECASE), "pca"),
+    (re.compile(r"\bstacked\s+bar\b", re.IGNORECASE), "stacked_bar"),
+    (re.compile(r"\bheat\s*map\b|\bheatmap\b", re.IGNORECASE), "heatmap"),
+    (re.compile(r"\bvolcano\b", re.IGNORECASE), "volcano"),
+    (re.compile(r"\bma\s+plot\b|\bmean\s+average\b", re.IGNORECASE), "ma"),
+    (re.compile(r"\bmd\s+plot\b|\bmean[- ]difference\b", re.IGNORECASE), "md"),
+    (re.compile(r"\bbar(?:\s+chart|\s+plot|\s+graph)?\b", re.IGNORECASE), "bar"),
+)
+
+_STACKED_MODE_RE = re.compile(r"\bstacked\b", re.IGNORECASE)
+_PERCENT_MODE_RE = re.compile(r"\b(?:percent|percentage|normalized|normalised)\b", re.IGNORECASE)
+_GROUP_MODE_RE = re.compile(r"\b(?:grouped|side[- ]by[- ]side|dodged)\b", re.IGNORECASE)
+
 
 def _normalize_phrase(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[-_]", " ", value.strip().lower())).strip()
@@ -96,6 +110,49 @@ def extract_label_transcripts(text: str) -> bool:
     return bool(_PLOT_TRANSCRIPT_LABEL_RE.search(text))
 
 
+def extract_plot_type(text: str) -> str | None:
+    """Infer a generate_plot plot_type from the surrounding user text."""
+    if not text:
+        return None
+    for pattern, plot_type in _PLOT_TYPE_HINTS:
+        if pattern.search(text):
+            return plot_type
+    return None
+
+
+def normalize_bar_mode(value: Any) -> str | None:
+    """Normalize supported bar mode aliases to group/stack/percent."""
+    if value is None or value == "":
+        return None
+    normalized = _normalize_phrase(str(value))
+    aliases = {
+        "group": "group",
+        "grouped": "group",
+        "stack": "stack",
+        "stacked": "stack",
+        "percent": "percent",
+        "percentage": "percent",
+        "normalized": "percent",
+        "normalised": "percent",
+    }
+    return aliases.get(normalized)
+
+
+def extract_bar_mode(text: str, *, plot_type: str | None = None) -> str | None:
+    """Infer group/stack/percent mode from the user request when omitted."""
+    if not text:
+        return "stack" if plot_type == "stacked_bar" else None
+    if _PERCENT_MODE_RE.search(text):
+        return "percent"
+    if _STACKED_MODE_RE.search(text):
+        return "stack"
+    if _GROUP_MODE_RE.search(text):
+        return "group"
+    if plot_type == "stacked_bar":
+        return "stack"
+    return None
+
+
 def build_svg_companion_path(output_path: str) -> str:
     """Return the SVG companion path for a raster plot output path."""
     return str(Path(str(output_path).strip()).with_suffix(".svg"))
@@ -107,12 +164,27 @@ def normalize_generate_plot_params(params: dict[str, Any], *, text_pool: str = "
 
     if normalized.get("plot_type"):
         normalized["plot_type"] = normalize_plot_type(str(normalized.get("plot_type") or ""))
+    else:
+        inferred_plot_type = extract_plot_type(text_pool)
+        if inferred_plot_type:
+            normalized["plot_type"] = inferred_plot_type
+
+    if normalized.get("plot_type") == "bar":
+        hinted_plot_type = extract_plot_type(text_pool)
+        if hinted_plot_type == "stacked_bar":
+            normalized["plot_type"] = hinted_plot_type
 
     df_ref = normalized.get("df")
     if df_ref and not normalized.get("df_id"):
         match = re.match(r'(?:DF)?\s*(\d+)', str(df_ref), re.IGNORECASE)
         if match:
             normalized["df_id"] = int(match.group(1))
+
+    mode = normalize_bar_mode(normalized.get("mode"))
+    if mode is None:
+        mode = extract_bar_mode(text_pool, plot_type=str(normalized.get("plot_type") or ""))
+    if mode is not None:
+        normalized["mode"] = mode
 
     if "resolution" in normalized and not normalized.get("dpi"):
         normalized["dpi"] = normalized.pop("resolution")

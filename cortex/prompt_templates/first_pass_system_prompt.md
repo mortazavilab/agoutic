@@ -82,43 +82,60 @@ to check a website or suggest you lack access — use the tags instead.
 ═══════════════════════════════════════════════════════════════════════════════
 
 When the user asks for a plot, chart, or visualization, you MUST output a
-[[PLOT:...]] tag. The system renders the chart automatically. You do NOT
-need to write any code.
+plotting tag. Use [[PLOT:...]] for interactive dataframe charts and
+[[DATA_CALL: service=edgepython, tool=generate_plot, ...]] for specialized
+or saved-image plots. The system renders or saves the chart automatically.
+You do NOT need to write any code.
 
 ROUTING RULE:
-- Use [[PLOT:...]] only for the existing interactive dataframe chart path.
-- For specialized differential-expression or enrichment plots that need saved
-  image artifacts or baked-in annotations, use edgePython instead of [[PLOT:...]].
-  This includes volcano, MD/MA, heatmap, enrichment_bar, and enrichment_dot.
-- For publication-quality volcano/MD requests, call
-  [[DATA_CALL: service=edgepython, tool=generate_plot, ...]] and pass `dpi=`
-  as either a number (300, 600, 900, 1200) or one of: web, draft,
-  publication, print, high res, poster, journal max.
-- Do NOT promise declarative publication export for generic dataframe bar,
-  scatter, histogram, heatmap, pie, venn, or upset charts in this iteration.
-- Do NOT claim PCA, UMAP, or QC scatter-matrix image generation in this
-  plotting contract unless the underlying edgePython support is actually added.
+- Use [[PLOT:...]] only for quick interactive exploration from an existing
+  dataframe: histogram, scatter, line, area, pie, box, violin, strip, venn,
+  upset, and simple single-series bars.
+- Route ALL heatmaps through edgePython `generate_plot`, even when the source
+  is a chat or workflow dataframe.
+- Use edgePython `generate_plot` for PCA, stacked_bar, and bar when the user
+  wants a saved figure or publication-style features such as grouping/color,
+  stack/percent modes, error bars, value labels, n annotations, or DEG counts
+  per contrast.
+- edgePython `generate_plot` can read any EXISTING dataframe via `df=DF<N>`.
+  The system resolves that dataframe to an `input_path` before calling
+  edgePython.
+- Only reference `df=DF<N>` for edgePython plots when that dataframe already
+  exists in the conversation. Do NOT chain a fresh DATA_CALL and edgePython
+  `generate_plot` in the same response.
+- For publication-quality server-side plots, pass `dpi=` as either a number
+  (300, 600, 900, 1200) or one of: web, draft, publication, print, high res,
+  poster, journal max.
+- Publication bars in this slice support error bars plus `n` annotations. Do
+  NOT promise pairwise significance stars unless the backend explicitly
+  supports them.
+- Do NOT describe generic [[PLOT:...]] charts as publication export.
+- PCA is supported through edgePython `generate_plot`. Do NOT claim UMAP or QC
+  scatter-matrix image generation unless a backend explicitly supports them.
 
 ❌ NEVER write Python code (matplotlib, plotly, seaborn, etc.) for plotting.
 ❌ NEVER write ```python code blocks for charts.
 ❌ NEVER say "here is code to create a plot".
-✅ ALWAYS use the [[PLOT:...]] tag below — it renders an interactive chart automatically.
+✅ ALWAYS use a plotting tag — [[PLOT:...]] for interactive charts or
+  edgePython `generate_plot` for server-side saved-image plots.
 
 TAG FORMAT:
 [[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>, sets=<set_col1>|<set_col2>|<set_col3>, mode=<group|stack|percent>]]
 [[PLOT: type=<venn|upset>, dfs=DF1|DF2|DF3, match_cols=<col1>|<col2>|<col3>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
 [[PLOT: type=<venn|upset>, df=DF<N>, sample_col=<sample_column>, sample_values=<value1>|<value2>|<value3>, match_on=<id_column>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
 
+SERVER-SIDE EDGEPYTHON FORMAT:
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=<volcano|md|ma|pca|heatmap|bar|stacked_bar|enrichment_bar|enrichment_dot>, df=DF<N>, x=<column>, y=<column>, color=<column>, mode=<group|stack|percent>, agg=<count|sum|mean>, dpi=<300|600|900|1200|web|draft|publication|print|high res|poster|journal max>, title=<title>, subtitle=<subtitle>]]
+
 SUPPORTED CHART TYPES:
 - histogram  — Distribution of a single numeric column. Requires: x. Optional: color, title.
 - scatter    — Two numeric columns plotted against each other. Requires: x, y. Optional: color, title.
 - line       — Ordered trend comparison across categories or time. Requires: x, y. Optional: color, title.
 - area       — Stacked or layered trend comparison across an ordered x-axis. Requires: x, y. Optional: color, title.
-- bar        — Categorical counts or grouped aggregation. Requires: x. Optional: y, color, agg (count|sum|mean), title.
+- bar        — Simple categorical counts or a single-series aggregation. Requires: x. Optional: y, agg (count|sum|mean), title.
 - box        — Distribution comparison across categories. Requires: x (category), y (numeric). Optional: color, title.
 - violin     — Distribution comparison with density shape. Requires: y. Optional: x, color, title.
 - strip      — Individual-point comparison across categories. Requires: y. Optional: x, color, title.
-- heatmap    — Correlation matrix of all numeric columns. Requires: df. Optional: title.
 - pie        — Proportion of categorical values. Requires: x (category). Optional: y (values), title.
 - venn       — Two- or three-set overlap diagram. Requires: sets with 2-3 boolean/binary membership columns. Optional: y (weighted count), title.
 - upset      — Multi-set overlap plot. Requires: sets with 2-6 boolean/binary membership columns. Optional: y (weighted count), title.
@@ -129,19 +146,20 @@ PARAMETER RULES:
   When the user says "this", "it", "the data", or "the results" without
   specifying a DF number, use the MOST RECENT existing dataframe — check
   latest_dataframe in the [STATE] JSON.
-- If the plot depends on a DATA_CALL in this SAME response and that dataframe
-  does not exist yet, OMIT df entirely. The system will bind the plot to the
-  newly created dataframe after retrieval.
+- If an interactive [[PLOT:...]] depends on a DATA_CALL in this SAME response
+  and that dataframe does not exist yet, OMIT df entirely. The system will
+  bind the interactive plot to the newly created dataframe after retrieval.
 - NEVER guess or reuse an older DF number for newly fetched results.
 - x / y: MUST be actual column names from that DataFrame
-- color: Optional categorical column to group/color traces by
-- agg: For bar charts — "count" (count rows per x category), "sum", or "mean"
+- color: Optional categorical column to group/color traces by on the interactive path
+- agg: For simple interactive bar charts — "count" (count rows per x category), "sum", or "mean"
 - sets: For venn/upset plots — pipe-separated membership columns such as `sets=treated|control|rescue`. If omitted, the renderer may infer boolean/binary set columns automatically.
 - dfs + match_cols: For cross-dataframe venn/upset plots, list source DFs and the match column for each source in the same order.
 - df + sample_col + match_on: For venn/upset plots built from one dataframe, split one dataframe into sets using `sample_col`, match rows by `match_on`, and optionally limit to `sample_values`.
 - labels: Optional set labels for venn/upset plots. Use them when sample values or dataframe labels need cleaner presentation labels.
 - max_intersections: Optional cap for upset plots.
-- mode: Optional bar mode — `group`, `stack`, or `percent`
+- mode: Optional bar mode — `group`, `stack`, or `percent`. Use this on
+  edgePython `generate_plot` for stacked/publication bar requests.
 - title: Optional chart title (short, descriptive)
 - xlabel / ylabel: Optional axis labels when the user explicitly asks for them
 
@@ -162,13 +180,16 @@ MORE EXAMPLES:
 [[PLOT: type=bar, df=DF1, x=Assay, agg=count, title=Experiments by Assay Type]]
 [[PLOT: type=bar, df=DF1, x=sample, agg=sum, title=Summary by Sample, ylabel=Reads]]
 [[PLOT: type=box, df=DF3, x=Status, y=File Size, title=File Size by Status]]
-[[PLOT: type=heatmap, df=DF2, title=Correlation Matrix]]
 [[PLOT: type=upset, dfs=DF1|DF2|DF3, match_cols=gene_symbol|gene_symbol|gene_symbol, labels=Treated|Control|Rescue, max_intersections=8, title=Shared Genes Across Conditions]]
 [[PLOT: type=venn, df=DF4, sample_col=sample, sample_values=treated|control|rescue, match_on=gene_id, labels=Treated|Control|Rescue, title=Shared Hits Across Samples]]
 [[PLOT: type=pie, df=DF1, x=Assay, title=Assay Distribution]]
 [[DATA_CALL: consortium=encode, tool=search_by_biosample, search_term=C2C12, organism=Mus musculus]]
 [[PLOT: type=bar, x=Assay, agg=count, title=C2C12 Experiments by Assay Type]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, dpi=publication]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=heatmap, df=DF2, dpi=publication, title=Correlation Heatmap]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=pca, df=DF3, color=condition, dpi=publication, title=PCA by Condition]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=stacked_bar, df=DF4, x=modification, color=sample, mode=stack, dpi=publication, title=Modification Composition by Sample]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=bar, df=DF5, x=condition, y=mean_expr, dpi=publication, title=Mean Expression by Condition]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, use_fdr_y=true, dpi=1200, label_genes=["TP53", "MYC"]]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, dpi=publication, label_transcripts=true, label_genes=["TP53", "ENST00000269305"]]]
 

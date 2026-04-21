@@ -1749,6 +1749,176 @@ class TestDataCallExecution:
 
 
 # ===========================================================================
+# 2b. edgePython generate_plot DATA_CALL regressions
+# ===========================================================================
+
+class TestEdgepythonPlotDataCallExecution:
+    def _seed_dataframe_block(self, SL, *, label: str, rows: list[dict], active_skill: str = "analyze_job_results"):
+        s = SL()
+        df_block = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="AGENT_PLAN",
+            status="DONE",
+            payload_json=json.dumps({
+                "markdown": "Existing dataframe.",
+                "state": {
+                    "active_skill": active_skill,
+                    "known_dataframes": [f"DF1 ({label}, {len(rows)} rows)"],
+                    "latest_dataframe": "DF1",
+                },
+                "_dataframes": {
+                    label: {
+                        "columns": list(rows[0].keys()) if rows else [],
+                        "data": rows,
+                        "row_count": len(rows),
+                        "metadata": {
+                            "df_id": 1,
+                            "visible": True,
+                            "label": label,
+                            "row_count": len(rows),
+                        },
+                    }
+                },
+            }),
+            created_at=datetime.datetime.utcnow(),
+        )
+        s.add(df_block)
+        s.commit()
+        s.close()
+
+    def test_heatmap_data_call_resolves_existing_df_to_input_path(self, SL, seed, tmp_path):
+        self._seed_dataframe_block(
+            SL,
+            label="counts matrix",
+            rows=[
+                {"gene": "G1", "sampleA": 10, "sampleB": 8, "sampleC": 12},
+                {"gene": "G2", "sampleA": 4, "sampleB": 6, "sampleC": 5},
+                {"gene": "G3", "sampleA": 7, "sampleB": 9, "sampleC": 11},
+            ],
+        )
+
+        mock_mcp = AsyncMock()
+        mock_mcp.connect = AsyncMock()
+        mock_mcp.disconnect = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value="Heatmap saved to: /tmp/heatmap.png")
+
+        def think(msg, skill, history):
+            return (
+                "Here is the requested heatmap.\n"
+                "[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=heatmap, df=DF1, dpi=publication, title=Correlation Heatmap]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://edgepython:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "make a heatmap of DF1", skill="analyze_job_results")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        agent_payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        assert not data.get("plot_blocks")
+        assert "DATA_CALL" not in agent_payload.get("markdown", "")
+
+        mock_mcp.call_tool.assert_awaited_once()
+        call_args = mock_mcp.call_tool.await_args
+        assert call_args.args == ("generate_plot",)
+
+        kwargs = call_args.kwargs
+        assert kwargs["plot_type"] == "heatmap"
+        assert kwargs["dpi"] == 600
+        assert kwargs["df_label"] == "counts matrix"
+        assert "df" not in kwargs
+        assert "df_id" not in kwargs
+
+        input_path = Path(kwargs["input_path"])
+        assert input_path.exists()
+        assert input_path.suffix == ".tsv"
+        assert input_path.parent.name == "plot_inputs"
+        input_text = input_path.read_text(encoding="utf-8")
+        assert "sampleA" in input_text
+        assert "sampleC" in input_text
+
+        output_path = Path(kwargs["output_path"])
+        svg_output_path = Path(kwargs["svg_output_path"])
+        assert output_path.parent.name == "de_results"
+        assert output_path.name == "heatmap.png"
+        assert svg_output_path.name == "heatmap.svg"
+
+    def test_stacked_bar_data_call_preserves_bar_params_after_df_resolution(self, SL, seed, tmp_path):
+        self._seed_dataframe_block(
+            SL,
+            label="composition summary",
+            rows=[
+                {"condition": "control", "sample": "S1", "fraction": 40},
+                {"condition": "control", "sample": "S2", "fraction": 60},
+                {"condition": "treated", "sample": "S1", "fraction": 55},
+                {"condition": "treated", "sample": "S2", "fraction": 45},
+            ],
+        )
+
+        mock_mcp = AsyncMock()
+        mock_mcp.connect = AsyncMock()
+        mock_mcp.disconnect = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value="Stacked bar plot saved to: /tmp/stacked_bar.png")
+
+        def think(msg, skill, history):
+            return (
+                "Here is the requested composition plot.\n"
+                "[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=stacked_bar, df=DF1, x=condition, color=sample, mode=percent, dpi=high res, title=Composition by Condition]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://edgepython:8000"),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        resp = _chat(client, "make a normalized stacked bar chart of DF1 by condition and sample", skill="analyze_job_results")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        agent_payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        assert not data.get("plot_blocks")
+        assert "DATA_CALL" not in agent_payload.get("markdown", "")
+
+        mock_mcp.call_tool.assert_awaited_once()
+        call_args = mock_mcp.call_tool.await_args
+        assert call_args.args == ("generate_plot",)
+
+        kwargs = call_args.kwargs
+        assert kwargs["plot_type"] == "stacked_bar"
+        assert kwargs["x"] == "condition"
+        assert kwargs["color"] == "sample"
+        assert kwargs["mode"] == "percent"
+        assert kwargs["dpi"] == 900
+        assert kwargs["df_label"] == "composition summary"
+        assert "df" not in kwargs
+        assert "df_id" not in kwargs
+
+        input_path = Path(kwargs["input_path"])
+        assert input_path.exists()
+        assert input_path.suffix == ".tsv"
+        assert input_path.parent.name == "plot_inputs"
+        input_text = input_path.read_text(encoding="utf-8")
+        assert "condition" in input_text
+        assert "fraction" in input_text
+
+        output_path = Path(kwargs["output_path"])
+        svg_output_path = Path(kwargs["svg_output_path"])
+        assert output_path.parent.name == "de_results"
+        assert output_path.name == "stacked_bar.png"
+        assert svg_output_path.name == "stacked_bar.svg"
+
+
+# ===========================================================================
 # 3. Legacy ENCODE_CALL / ANALYSIS_CALL tag parsing
 # ===========================================================================
 

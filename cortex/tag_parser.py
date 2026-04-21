@@ -385,7 +385,7 @@ def apply_plot_code_fallback(
             if ld_m:
                 auto_df_id = int(ld_m.group(1))
 
-    auto_type = _detect_chart_type(user_message)
+    auto_type = detect_chart_type(user_message)
     auto_x = _detect_x_column(user_message)
 
     if auto_df_id is not None:
