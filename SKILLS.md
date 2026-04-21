@@ -254,6 +254,11 @@ instead of `[[PLOT:...]]`, and pass `dpi=` as either a number (`300`, `600`,
 `900`, `1200`) or one of `web`, `draft`, `publication`, `print`, `high res`,
 `poster`, `journal max`.
 
+Built-in chart styling follows a light publication-style default: warm off-
+white backgrounds, dark axes, y-only grids, restrained sans-serif typography,
+colorblind-safe series colors, and gentler category-label rotation when labels
+need angling. Correctness and readability still take priority over styling.
+
 **Parameter rules:**
 - `df` — Must reference a valid DF from the conversation (e.g. `DF1`).
 - `x` / `y` — Must be actual column names from that DataFrame.

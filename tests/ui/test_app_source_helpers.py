@@ -1732,6 +1732,9 @@ class TestBuildPlotlyFigure:
         assert fig.data[0].type == "bar"
         assert any(trace.type == "scatter" for trace in fig.data[1:])
         assert fig.layout.title.text == "UpSet plot"
+        assert fig.layout.xaxis2.tickangle == -30
+        assert fig.data[1].marker.color == "#E8E8E8"
+        assert fig.data[0].marker.color[0] == "#2E5A87"
 
     def test_upset_treats_positive_numeric_sets_as_present_when_explicit(self):
         fn = _load_function("_build_plotly_figure")
@@ -1753,6 +1756,7 @@ class TestBuildPlotlyFigure:
         assert len(fig.data[0].y) == 7
         assert list(fig.data[0].y).count(0.0) == 4
         assert fig.layout.title.text == "UpSet plot"
+        assert list(fig.layout.yaxis2.categoryarray)[:3] == ["r3", "r2", "r1"]
 
     def test_bar_applies_title_and_y_axis_label(self):
         fn = _load_function("_build_plotly_figure")

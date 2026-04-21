@@ -19,7 +19,76 @@ import numpy as np
 import pandas as pd
 from typing import Optional
 
+import matplotlib as mpl
+
 from fastmcp import FastMCP
+
+mpl.use("Agg")
+
+_AGOUTIC_CANVAS = "#FFFFFF"
+_AGOUTIC_CANVAS_WARM = "#FAFAF7"
+_AGOUTIC_TEXT = "#1A1A1A"
+_AGOUTIC_AXIS = "#2B2B2B"
+_AGOUTIC_TICK = "#555555"
+_AGOUTIC_GRID = "#E8E8E8"
+_AGOUTIC_THRESHOLD = "#888888"
+_AGOUTIC_DE_UP = "#D7263D"
+_AGOUTIC_DE_DOWN = "#1B5E87"
+_AGOUTIC_DE_NS = "#9AA0A6"
+_AGOUTIC_SINGLE_SERIES = "#2E5A87"
+_AGOUTIC_OKABE_ITO = [
+    "#E69F00",
+    "#56B4E9",
+    "#009E73",
+    "#F0E442",
+    "#0072B2",
+    "#D55E00",
+    "#CC79A7",
+    "#000000",
+]
+_SUPERSCRIPT_TRANSLATION = str.maketrans("0123456789-+", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺")
+
+mpl.rcParams.update(
+    {
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Inter", "IBM Plex Sans", "Helvetica Neue", "Source Sans Pro", "DejaVu Sans"],
+        "font.size": 11,
+        "axes.titlesize": 16,
+        "axes.titleweight": 600,
+        "axes.titlelocation": "left",
+        "axes.titlepad": 12,
+        "axes.labelsize": 12,
+        "axes.labelweight": 500,
+        "axes.labelcolor": _AGOUTIC_AXIS,
+        "axes.edgecolor": _AGOUTIC_AXIS,
+        "axes.linewidth": 1.1,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": True,
+        "axes.grid.axis": "y",
+        "axes.axisbelow": True,
+        "grid.color": _AGOUTIC_GRID,
+        "grid.linewidth": 0.8,
+        "grid.alpha": 0.6,
+        "xtick.color": _AGOUTIC_TICK,
+        "ytick.color": _AGOUTIC_TICK,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "xtick.major.size": 4,
+        "ytick.major.size": 4,
+        "xtick.major.width": 0.8,
+        "ytick.major.width": 0.8,
+        "figure.facecolor": _AGOUTIC_CANVAS,
+        "axes.facecolor": _AGOUTIC_CANVAS,
+        "savefig.facecolor": _AGOUTIC_CANVAS,
+        "savefig.dpi": 600,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.15,
+        "legend.frameon": False,
+        "legend.fontsize": 10,
+        "legend.title_fontsize": 11,
+    }
+)
 
 # Ensure edgePython is importable
 _edgepython_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2023,18 +2092,129 @@ def _save_plot_outputs(
     return f"{label} saved to: {png_path}\n{label} SVG saved to: {svg_path}"
 
 
+def _format_decimal(value: float, *, decimals: int = 2, trim: bool = True) -> str:
+    text = f"{float(value):,.{decimals}f}"
+    return text.rstrip("0").rstrip(".") if trim else text
+
+
+def _format_scientific_notation(value: float, *, decimals: int = 2) -> str:
+    numeric = float(value)
+    if not np.isfinite(numeric) or numeric == 0:
+        return "0"
+    exponent = int(np.floor(np.log10(abs(numeric))))
+    coefficient = numeric / (10 ** exponent)
+    coefficient_text = _format_decimal(coefficient, decimals=decimals)
+    return f"{coefficient_text} × 10{str(exponent).translate(_SUPERSCRIPT_TRANSLATION)}"
+
+
+def _format_threshold_value(value: float) -> str:
+    numeric = abs(float(value))
+    if numeric == 0:
+        return "0"
+    if numeric < 1e-3:
+        return _format_scientific_notation(numeric)
+    if numeric < 1:
+        return _format_decimal(numeric, decimals=3)
+    if numeric >= 10_000:
+        return _format_decimal(numeric, decimals=0)
+    return _format_decimal(numeric, decimals=2)
+
+
+def _format_count(value: float, *, compact: bool = False) -> str:
+    numeric = abs(float(value))
+    if compact and numeric >= 1_000_000:
+        return f"{numeric / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if compact and numeric >= 10_000:
+        return f"{numeric / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+    return f"{int(round(numeric)):,}"
+
+
+def _darker_hex(color: str, factor: float = 0.78) -> str:
+    rgb = np.array(mpl.colors.to_rgb(color), dtype=float)
+    return mpl.colors.to_hex(np.clip(rgb * factor, 0, 1))
+
+
+def _okabe_ito_palette(size: int) -> list[str]:
+    if size <= 0:
+        return []
+    repeats = (size // len(_AGOUTIC_OKABE_ITO)) + 1
+    return (_AGOUTIC_OKABE_ITO * repeats)[:size]
+
+
+def _add_confidence_ellipse(ax, x_values: np.ndarray, y_values: np.ndarray, *, color: str) -> None:
+    if len(x_values) < 3 or len(y_values) < 3:
+        return
+    cov = np.cov(x_values, y_values)
+    if cov.shape != (2, 2) or not np.isfinite(cov).all():
+        return
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    if np.any(eigvals <= 0):
+        return
+    order = eigvals.argsort()[::-1]
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+    angle = float(np.degrees(np.arctan2(*eigvecs[:, 0][::-1])))
+    chi2_scale = np.sqrt(5.991464547)
+    width, height = 2 * chi2_scale * np.sqrt(eigvals)
+    from matplotlib.patches import Ellipse
+
+    ellipse = Ellipse(
+        (float(np.mean(x_values)), float(np.mean(y_values))),
+        width=width,
+        height=height,
+        angle=angle,
+        facecolor=mpl.colors.to_rgba(color, 0.12),
+        edgecolor=color,
+        linewidth=1.5,
+        zorder=1,
+    )
+    ax.add_patch(ellipse)
+
+
+def _annotate_bar_values(ax, bar_container, *, compact: bool = False) -> None:
+    labels: list[str] = []
+    for patch in bar_container.patches:
+        height = float(patch.get_height())
+        if not np.isfinite(height):
+            labels.append("")
+            continue
+        sign = "-" if height < 0 else ""
+        labels.append(f"{sign}{_format_count(height, compact=compact)}")
+    ax.bar_label(
+        bar_container,
+        labels=labels,
+        padding=3,
+        fontsize=10,
+        color=_AGOUTIC_AXIS,
+        label_type="edge",
+    )
+
+
 def _apply_plot_header(fig, ax, *, title: str, subtitle: Optional[str] = None) -> None:
-    ax.set_title(title, loc="left", fontsize=14, fontweight="bold", pad=18)
+    fig.patch.set_facecolor(_AGOUTIC_CANVAS)
+    ax.set_facecolor(_AGOUTIC_CANVAS)
+    fig.subplots_adjust(
+        left=max(fig.subplotpars.left, 0.11),
+        right=min(fig.subplotpars.right, 0.96),
+        bottom=max(fig.subplotpars.bottom, 0.12),
+        top=0.86 if subtitle else 0.89,
+    )
+    ax.set_title(title, loc="left", fontsize=16, fontweight=600, pad=18, color=_AGOUTIC_TEXT)
     if subtitle:
-        fig.subplots_adjust(top=0.84)
-        fig.text(0.125, 0.93, subtitle, ha="left", va="center", fontsize=10, color="#4b5563")
+        fig.text(0.11, 0.925, subtitle, ha="left", va="center", fontsize=11, color=_AGOUTIC_TICK)
 
 
 def _apply_plot_frame(ax) -> None:
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.grid(True, color="#e5e7eb", linewidth=0.6, alpha=0.9)
+    ax.spines["left"].set_color(_AGOUTIC_AXIS)
+    ax.spines["bottom"].set_color(_AGOUTIC_AXIS)
+    ax.spines["left"].set_linewidth(1.1)
+    ax.spines["bottom"].set_linewidth(1.1)
+    ax.grid(True, axis="y", color=_AGOUTIC_GRID, linewidth=0.8, alpha=0.6)
+    ax.grid(False, axis="x")
     ax.set_axisbelow(True)
+    ax.tick_params(axis="both", colors=_AGOUTIC_TICK, labelsize=10, width=0.8, length=4)
 
 
 def _place_legend_outside(
@@ -2052,13 +2232,16 @@ def _place_legend_outside(
     legend = ax.legend(
         handles,
         labels,
+        title=None,
         frameon=False,
         loc=loc,
         bbox_to_anchor=anchor,
         borderaxespad=0.0,
-        fontsize=fontsize,
+        fontsize=max(fontsize, 10),
         ncol=ncol,
     )
+    for text in legend.get_texts():
+        text.set_color(_AGOUTIC_TICK)
     return legend
 
 
@@ -2442,8 +2625,6 @@ def generate_plot(
         x/y/color/mode/agg: Optional generic table plotting parameters for
             bar/stacked_bar/PCA input tables.
     """
-    import matplotlib
-    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     plot_type = str(plot_type or "").strip().lower()
@@ -2518,40 +2699,62 @@ def generate_plot(
         scores = u[:, :2] * singular_values[:2]
         explained = (singular_values ** 2) / np.sum(singular_values ** 2)
 
-        fig, ax = plt.subplots(figsize=(8.5, 7))
+        fig, ax = plt.subplots(figsize=(8.8, 7.2))
         _apply_plot_frame(ax)
-        ax.axhline(0, color="#d1d5db", linewidth=0.8)
-        ax.axvline(0, color="#d1d5db", linewidth=0.8)
+        if np.nanmin(scores[:, 0]) < 0 < np.nanmax(scores[:, 0]):
+            ax.axvline(0, color="#d1d5db", linewidth=0.8, zorder=0)
+        if np.nanmin(scores[:, 1]) < 0 < np.nanmax(scores[:, 1]):
+            ax.axhline(0, color="#d1d5db", linewidth=0.8, zorder=0)
 
         if groups is not None:
             categories = list(dict.fromkeys(groups.tolist()))
-            palette = plt.cm.tab10(np.linspace(0, 1, max(len(categories), 1)))
+            palette = _okabe_ito_palette(max(len(categories), 1))
             for idx, category in enumerate(categories):
                 mask = groups == category
+                color_value = palette[idx]
+                _add_confidence_ellipse(ax, scores[mask, 0], scores[mask, 1], color=color_value)
                 ax.scatter(
                     scores[mask, 0],
                     scores[mask, 1],
-                    s=52,
-                    alpha=0.88,
+                    s=62,
+                    alpha=0.9,
                     linewidths=0.5,
-                    edgecolors="white",
-                    color=palette[idx],
+                    edgecolors=mpl.colors.to_rgba(_AGOUTIC_CANVAS, 0.8),
+                    color=color_value,
                     label=category,
+                    zorder=3,
                 )
         else:
             ax.scatter(
                 scores[:, 0],
                 scores[:, 1],
-                s=56,
-                alpha=0.88,
+                s=62,
+                alpha=0.9,
                 linewidths=0.5,
-                edgecolors="white",
-                color="#2563eb",
+                edgecolors=mpl.colors.to_rgba(_AGOUTIC_CANVAS, 0.8),
+                color=_AGOUTIC_SINGLE_SERIES,
+                zorder=3,
             )
 
         if len(point_labels) <= 20:
-            for px, py, label in zip(scores[:, 0], scores[:, 1], point_labels):
-                ax.text(px, py, label, fontsize=8, ha="left", va="bottom", color="#111827")
+            texts = [
+                ax.text(px, py, label, fontsize=9, ha="left", va="bottom", color="#333333", zorder=4)
+                for px, py, label in zip(scores[:, 0], scores[:, 1], point_labels)
+            ]
+            try:
+                from adjustText import adjust_text
+
+                adjust_text(
+                    texts,
+                    x=scores[:, 0],
+                    y=scores[:, 1],
+                    ax=ax,
+                    expand_points=(1.05, 1.15),
+                    expand_text=(1.02, 1.12),
+                    arrowprops={"arrowstyle": "-", "color": _AGOUTIC_THRESHOLD, "lw": 0.5, "alpha": 0.6},
+                )
+            except ImportError:
+                pass
 
         ax.set_xlabel(xlabel or f"PC1 ({explained[0] * 100:.1f}%)")
         ax.set_ylabel(ylabel or f"PC2 ({explained[1] * 100:.1f}%)")
@@ -2559,7 +2762,7 @@ def generate_plot(
         pca_subtitle = subtitle or f"Input: {pca_label}; numeric columns standardized before SVD"
         _apply_plot_header(fig, ax, title=title or f"PCA: {pca_label}", subtitle=pca_subtitle)
         if groups is not None:
-            _place_legend_outside(ax, loc="upper left", anchor=(1.02, 1.0), fontsize=8)
+            _place_legend_outside(ax, loc="upper left", anchor=(1.02, 1.0), fontsize=10)
         saved_text = _save_plot_outputs(
             fig,
             label="PCA plot",
@@ -2681,55 +2884,57 @@ def generate_plot(
         down_mask = sig_mask & (logfc < 0)
         ns_mask = valid_mask & ~(up_mask | down_mask)
 
-        up_color = "#d55e00"
-        down_color = "#0072b2"
-        ns_color = "#b8b8b8"
+        up_color = _AGOUTIC_DE_UP
+        down_color = _AGOUTIC_DE_DOWN
+        ns_color = _AGOUTIC_DE_NS
         fig, ax = plt.subplots(figsize=(9.5, 7))
         _apply_plot_frame(ax)
-        ax.scatter(logfc[ns_mask], neg_log_metric[ns_mask], c=ns_color, s=14, alpha=0.55, linewidths=0, label="Not significant")
-        ax.scatter(logfc[down_mask], neg_log_metric[down_mask], c=down_color, s=18, alpha=0.8, linewidths=0, label="Down")
-        ax.scatter(logfc[up_mask], neg_log_metric[up_mask], c=up_color, s=18, alpha=0.8, linewidths=0, label="Up")
+        ax.scatter(logfc[ns_mask], neg_log_metric[ns_mask], c=ns_color, s=14, alpha=0.35, linewidths=0, label="Not significant", zorder=2)
+        ax.scatter(logfc[down_mask], neg_log_metric[down_mask], c=down_color, s=24, alpha=0.92, linewidths=0.3, edgecolors=_AGOUTIC_CANVAS, label="Down", zorder=3)
+        ax.scatter(logfc[up_mask], neg_log_metric[up_mask], c=up_color, s=24, alpha=0.92, linewidths=0.3, edgecolors=_AGOUTIC_CANVAS, label="Up", zorder=3)
         ax.set_xlabel("log2 fold change")
         ax.set_ylabel(f"-log10({metric_label})")
 
         threshold_y = -np.log10(max(metric_cutoff, 1e-300))
-        ax.axvline(logfc_cutoff, color="#6b7280", linestyle="--", linewidth=0.9)
-        ax.axvline(-logfc_cutoff, color="#6b7280", linestyle="--", linewidth=0.9)
-        ax.axhline(threshold_y, color="#6b7280", linestyle="--", linewidth=0.9)
+        dashed = (0, (6, 6))
+        ax.axvline(logfc_cutoff, color=_AGOUTIC_THRESHOLD, linestyle=dashed, linewidth=1.0, zorder=1)
+        ax.axvline(-logfc_cutoff, color=_AGOUTIC_THRESHOLD, linestyle=dashed, linewidth=1.0, zorder=1)
+        ax.axhline(threshold_y, color=_AGOUTIC_THRESHOLD, linestyle=dashed, linewidth=1.0, zorder=1)
 
         finite_logfc_values = logfc[valid_mask]
         finite_metric_values = neg_log_metric[valid_mask]
         max_x = max(float(np.nanpercentile(np.abs(finite_logfc_values), 99.5)), logfc_cutoff * 1.3, 1.5)
         max_y = max(float(np.nanpercentile(finite_metric_values, 99.5)), threshold_y * 1.25, 2.0)
-        ax.set_xlim(-max_x * 1.05, max_x * 1.05)
-        ax.set_ylim(0, max_y * 1.05)
+        ax.set_xlim(-max_x * 1.08, max_x * 1.08)
+        ax.set_ylim(0, max_y * 1.08)
         ax.text(
-            ax.get_xlim()[1] * 0.98,
+            ax.get_xlim()[1] * 0.985,
             threshold_y,
-            f"{metric_label} <= {metric_cutoff:g}",
+            f"{metric_label} ≤ {_format_threshold_value(metric_cutoff)}",
             ha="right",
             va="bottom",
-            fontsize=8,
-            color="#374151",
-            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85, "pad": 1.5},
+            fontsize=9,
+            color="#666666",
+            bbox={"facecolor": _AGOUTIC_CANVAS, "edgecolor": "none", "alpha": 0.8, "pad": 1.5},
         )
-        ax.text(logfc_cutoff, ax.get_ylim()[1] * 0.98, f"+|log2FC| >= {logfc_cutoff:g}", rotation=90, va="top", ha="left", fontsize=8, color="#374151")
-        ax.text(-logfc_cutoff, ax.get_ylim()[1] * 0.98, f"-|log2FC| >= {logfc_cutoff:g}", rotation=90, va="top", ha="right", fontsize=8, color="#374151")
+        ax.text(logfc_cutoff, ax.get_ylim()[1] * 0.985, f"|logFC| = {_format_threshold_value(logfc_cutoff)}", rotation=90, va="top", ha="left", fontsize=9, color="#666666")
+        ax.text(-logfc_cutoff, ax.get_ylim()[1] * 0.985, f"|logFC| = {_format_threshold_value(logfc_cutoff)}", rotation=90, va="top", ha="right", fontsize=9, color="#666666")
 
         counts_text = "\n".join([
-            f"n_up: {int(up_mask.sum())}",
-            f"n_down: {int(down_mask.sum())}",
-            f"n_ns: {int(ns_mask.sum())}",
+            f"↑ n = {_format_count(up_mask.sum())}",
+            f"↓ n = {_format_count(down_mask.sum())}",
+            f"n.s. = {_format_count(ns_mask.sum())}",
         ])
         ax.text(
-            0.02,
+            0.98,
             0.98,
             counts_text,
             transform=ax.transAxes,
-            ha="left",
+            ha="right",
             va="top",
             fontsize=9,
-            bbox={"facecolor": "white", "edgecolor": "#d1d5db", "boxstyle": "round,pad=0.35", "alpha": 0.95},
+            color=_AGOUTIC_AXIS,
+            bbox={"facecolor": _AGOUTIC_CANVAS, "edgecolor": "none", "boxstyle": "round,pad=0.35", "alpha": 0.92},
         )
 
         forced_labels = {label.lower() for label in label_genes}
@@ -2765,7 +2970,8 @@ def generate_plot(
                         plot_labels[idx],
                         fontsize=8,
                         fontstyle=label_fontstyle,
-                        color="#111827",
+                        color=_AGOUTIC_TEXT,
+                        bbox={"facecolor": _AGOUTIC_CANVAS, "edgecolor": "none", "alpha": 0.78, "pad": 1.2},
                         zorder=5,
                     )
                     for idx in label_indices
@@ -2778,7 +2984,7 @@ def generate_plot(
                     expand_points=(1.2, 1.3),
                     expand_text=(1.05, 1.2),
                     force_text=(0.18, 0.25),
-                    arrowprops={"arrowstyle": "-", "color": "#6b7280", "lw": 0.6, "alpha": 0.9},
+                    arrowprops={"arrowstyle": "-", "color": _AGOUTIC_THRESHOLD, "lw": 0.6, "alpha": 0.75},
                 )
             else:
                 x_span = max(ax.get_xlim()[1] - ax.get_xlim()[0], 1.0)
@@ -2795,8 +3001,9 @@ def generate_plot(
                         va="bottom",
                         fontsize=8,
                         fontstyle=label_fontstyle,
-                        color="#111827",
-                        arrowprops={"arrowstyle": "-", "color": "#6b7280", "lw": 0.6, "alpha": 0.9},
+                        color=_AGOUTIC_TEXT,
+                        bbox={"facecolor": _AGOUTIC_CANVAS, "edgecolor": "none", "alpha": 0.78, "pad": 1.2},
+                        arrowprops={"arrowstyle": "-", "color": _AGOUTIC_THRESHOLD, "lw": 0.6, "alpha": 0.75},
                     )
 
         volcano_subtitle = subtitle or (
@@ -2804,7 +3011,7 @@ def generate_plot(
             f"colors use a colorblind-safe palette"
         )
         _apply_plot_header(fig, ax, title=title or f"Volcano plot: {result_name}", subtitle=volcano_subtitle)
-        _place_legend_outside(ax, loc="upper left", anchor=(1.02, 1.0), fontsize=8)
+        _place_legend_outside(ax, loc="upper left", anchor=(1.02, 1.0), fontsize=10)
         saved_text = _save_plot_outputs(
             fig,
             label="Volcano plot",
@@ -2834,10 +3041,12 @@ def generate_plot(
             vmin=vmin,
             vmax=vmax,
         )
+        ax.grid(False)
         ax.set_xticks(range(matrix_df.shape[1]))
-        ax.set_xticklabels(matrix_df.columns, rotation=45, ha="right", fontsize=8)
+        ax.set_xticklabels(matrix_df.columns, rotation=30, ha="right", rotation_mode="anchor", fontsize=9)
         ax.set_yticks(range(matrix_df.shape[0]))
-        ax.set_yticklabels(matrix_df.index, fontsize=7)
+        ax.set_yticklabels(matrix_df.index, fontsize=8)
+        ax.tick_params(axis="both", length=0, pad=6)
         heatmap_label = df_label or Path(str(input_path)).stem
         heatmap_subtitle = subtitle or (
             "Correlation heatmap (square row/column labels matched)"
@@ -2845,7 +3054,10 @@ def generate_plot(
             else f"Raw numeric matrix from {heatmap_label}"
         )
         _apply_plot_header(fig, ax, title=title or f"Heatmap: {heatmap_label}", subtitle=heatmap_subtitle)
-        fig.colorbar(image, ax=ax, label=colorbar_label, shrink=0.7)
+        colorbar = fig.colorbar(image, ax=ax, label=colorbar_label, shrink=0.75, fraction=0.035, pad=0.04)
+        colorbar.outline.set_visible(False)
+        colorbar.ax.tick_params(labelsize=9, length=0, colors=_AGOUTIC_TICK)
+        colorbar.ax.yaxis.label.set_color(_AGOUTIC_AXIS)
         saved_text = _save_plot_outputs(
             fig,
             label="Heatmap",
@@ -2888,15 +3100,20 @@ def generate_plot(
         mat = logcpm[idx, :]
         mat_z = (mat - mat.mean(axis=1, keepdims=True)) / (mat.std(axis=1, keepdims=True) + 1e-10)
 
-        fig, ax = plt.subplots(figsize=(max(6, len(d.get("_sample_names", [])) * 0.6), max(6, len(idx) * 0.3)))
+        fig, ax = plt.subplots(figsize=(max(6, len(d.get("_sample_names", [])) * 0.62), max(6, len(idx) * 0.3)))
         im = ax.imshow(mat_z, aspect="auto", cmap="RdBu_r", vmin=-3, vmax=3)
+        ax.grid(False)
         sample_names = d.get("_sample_names", [f"S{i+1}" for i in range(mat.shape[1])])
         ax.set_xticks(range(len(sample_names)))
-        ax.set_xticklabels(sample_names, rotation=45, ha="right", fontsize=8)
+        ax.set_xticklabels(sample_names, rotation=30, ha="right", rotation_mode="anchor", fontsize=9)
         ax.set_yticks(range(len(gene_labels)))
-        ax.set_yticklabels(gene_labels, fontsize=7)
+        ax.set_yticklabels(gene_labels, fontsize=8)
+        ax.tick_params(axis="both", length=0, pad=6)
         _apply_plot_header(fig, ax, title=title or f"Top DE genes: {result_name}", subtitle=subtitle)
-        fig.colorbar(im, ax=ax, label="z-score (log-CPM)", shrink=0.6)
+        colorbar = fig.colorbar(im, ax=ax, label="z-score (log-CPM)", shrink=0.72, fraction=0.035, pad=0.04)
+        colorbar.outline.set_visible(False)
+        colorbar.ax.tick_params(labelsize=9, length=0, colors=_AGOUTIC_TICK)
+        colorbar.ax.yaxis.label.set_color(_AGOUTIC_AXIS)
         saved_text = _save_plot_outputs(
             fig,
             label="Heatmap",
@@ -2929,10 +3146,11 @@ def generate_plot(
         _apply_plot_frame(ax)
         ax.margins(y=0.18)
         positions = np.arange(len(category_order), dtype=float)
+        bar_containers = []
 
         if color_col:
             series_names = list(dict.fromkeys(plot_df[color_col].tolist()))
-            palette = plt.cm.tab10(np.linspace(0, 1, max(len(series_names), 1)))
+            palette = _okabe_ito_palette(max(len(series_names), 1))
             if bar_mode in {"stack", "percent"}:
                 value_pivot = plot_df.pivot_table(
                     index=x_col,
@@ -2947,14 +3165,17 @@ def generate_plot(
                 bottoms = np.zeros(len(category_order), dtype=float)
                 for idx, series_name in enumerate(value_pivot.columns):
                     values = value_pivot[series_name].to_numpy(dtype=float)
-                    ax.bar(
+                    container = ax.bar(
                         positions,
                         values,
-                        width=0.72,
+                        width=0.76,
                         bottom=bottoms,
                         color=palette[idx],
+                        edgecolor=_darker_hex(palette[idx]),
+                        linewidth=0.5,
                         label=series_name,
                     )
+                    bar_containers.append(container)
                     bottoms += values
                 if "n" in plot_df.columns:
                     total_counts = (
@@ -2972,15 +3193,18 @@ def generate_plot(
                         if not np.isfinite(candidate_yerr).any():
                             candidate_yerr = None
                     offset = (idx - (len(series_names) - 1) / 2) * width
-                    ax.bar(
+                    container = ax.bar(
                         positions + offset,
                         values,
                         width=width,
                         color=palette[idx],
+                        edgecolor=_darker_hex(palette[idx]),
+                        linewidth=0.5,
                         label=series_name,
                         yerr=np.nan_to_num(candidate_yerr, nan=0.0) if candidate_yerr is not None else None,
                         capsize=4 if candidate_yerr is not None else 0,
                     )
+                    bar_containers.append(container)
                     if "n" in subset.columns:
                         counts = pd.to_numeric(subset["n"], errors="coerce").to_numpy(dtype=float)
                         _annotate_bar_counts(ax, positions + offset, values, counts)
@@ -2992,21 +3216,30 @@ def generate_plot(
                 candidate_yerr = pd.to_numeric(ordered["yerr"], errors="coerce").to_numpy(dtype=float)
                 if not np.isfinite(candidate_yerr).any():
                     candidate_yerr = None
-            ax.bar(
+            container = ax.bar(
                 positions,
                 values,
-                width=0.72,
-                color="#2563eb",
+                width=0.76,
+                color=_AGOUTIC_SINGLE_SERIES,
+                edgecolor=_darker_hex(_AGOUTIC_SINGLE_SERIES),
+                linewidth=0.5,
                 yerr=np.nan_to_num(candidate_yerr, nan=0.0) if candidate_yerr is not None else None,
                 capsize=4 if candidate_yerr is not None else 0,
             )
+            bar_containers.append(container)
             if "n" in ordered.columns:
                 counts = pd.to_numeric(ordered["n"], errors="coerce").to_numpy(dtype=float)
                 _annotate_bar_counts(ax, positions, values, counts)
 
+        if bar_mode not in {"stack", "percent"}:
+            max_value = float(np.nanmax(np.abs(plot_df["value"].to_numpy(dtype=float)))) if not plot_df.empty else 0.0
+            compact_labels = max_value >= 10_000
+            for container in bar_containers:
+                _annotate_bar_values(ax, container, compact=compact_labels)
+
         rotate = any(len(str(label)) > 10 for label in category_order)
         ax.set_xticks(positions)
-        ax.set_xticklabels(category_order, rotation=35 if rotate else 0, ha="right" if rotate else "center")
+        ax.set_xticklabels(category_order, rotation=30 if rotate else 0, ha="right" if rotate else "center", rotation_mode="anchor")
         ax.set_xlabel(xlabel or x_col)
         if bar_mode == "percent":
             y_axis_label = ylabel or "Percent of total"
@@ -3017,6 +3250,10 @@ def generate_plot(
         else:
             y_axis_label = ylabel or "Value"
         ax.set_ylabel(y_axis_label)
+        if bar_mode == "percent":
+            ax.set_ylim(0, 100)
+            ax.set_yticks([0, 25, 50, 75, 100])
+            ax.set_yticklabels(["0%", "25%", "50%", "75%", "100%"])
 
         source_label = df_label or Path(str(input_path)).stem
         bar_title = title or (
@@ -3038,7 +3275,7 @@ def generate_plot(
             bar_subtitle = subtitle
         _apply_plot_header(fig, ax, title=bar_title, subtitle=bar_subtitle)
         if color_col:
-            _place_legend_outside(ax, loc="upper left", anchor=(1.02, 1.0), fontsize=8)
+            _place_legend_outside(ax, loc="upper left", anchor=(1.02, 1.0), fontsize=10)
         saved_text = _save_plot_outputs(
             fig,
             label="Bar plot" if branch_plot_type == "bar" else "Stacked bar plot",

@@ -236,10 +236,10 @@ def _default_publication_settings(chart_type: str, fig: go.Figure, default_name:
         "file_stem": default_name,
         "figure_width": width_default,
         "figure_height": height_default,
-        "title_size": 24,
-        "axis_title_size": 18,
-        "tick_font_size": 13,
-        "legend_font_size": 13,
+        "title_size": 16,
+        "axis_title_size": 12,
+        "tick_font_size": 10,
+        "legend_font_size": 10,
         "legend_position": "right",
         "show_grid": True,
         "title_bold": True,
@@ -284,8 +284,6 @@ def _apply_publication_style(fig: go.Figure, settings: dict) -> go.Figure:
             return 0
         unique = list(dict.fromkeys(categories))
         max_len = max(len(item) for item in unique)
-        if len(unique) >= 6 or max_len >= 18:
-            return -45
         if len(unique) >= 4 or max_len >= 12:
             return -30
         return 0
@@ -321,11 +319,11 @@ def _apply_publication_style(fig: go.Figure, settings: dict) -> go.Figure:
             total_bars += len(value_list)
             for value in value_list:
                 max_len = max(max_len, len(_format_bar_value_label(value)))
-        return 45 if total_bars >= 8 or max_len >= 7 else 0
+        return 30 if total_bars >= 8 or max_len >= 7 else 0
 
     transparent = bool(settings.get("transparent_background"))
     paper_bg = "rgba(0,0,0,0)" if transparent else "#ffffff"
-    plot_bg = "rgba(0,0,0,0)" if transparent else "#f8fafc"
+    plot_bg = "rgba(0,0,0,0)" if transparent else "#FAFAF7"
     width = int(settings.get("figure_width") or 1400)
     height = int(settings.get("figure_height") or 850)
     title_size = int(settings.get("title_size") or 24)
@@ -345,13 +343,13 @@ def _apply_publication_style(fig: go.Figure, settings: dict) -> go.Figure:
 
     legend_position = str(settings.get("legend_position") or "right").lower()
     legend_updates = {
-        "font": {"size": legend_font_size, "color": "#1f2937"},
+        "font": {"size": legend_font_size, "color": "#555555"},
         "bgcolor": paper_bg,
-        "bordercolor": "#d7dee8",
+        "borderwidth": 0,
     }
     showlegend = legend_position != "hidden"
-    extra_bottom = 72
-    extra_top = 72
+    extra_bottom = 84
+    extra_top = 90
     if legend_position == "top":
         legend_updates.update({
             "orientation": "h",
@@ -384,36 +382,76 @@ def _apply_publication_style(fig: go.Figure, settings: dict) -> go.Figure:
         height=height,
         paper_bgcolor=paper_bg,
         plot_bgcolor=plot_bg,
-        font={"size": tick_font_size, "color": "#1f2937", "family": "Arial, sans-serif"},
+        font={
+            "size": tick_font_size,
+            "color": "#1A1A1A",
+            "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+        },
         title={
             "text": title_text,
-            "x": 0.03,
+            "x": 0.02,
             "xanchor": "left",
-            "font": {"size": title_size, "color": "#1f2937", "family": "Arial, sans-serif"},
+            "font": {
+                "size": title_size,
+                "color": "#1A1A1A",
+                "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+            },
         },
         showlegend=showlegend,
         legend=legend_updates,
-        margin={"l": 96, "r": 36, "t": extra_top, "b": extra_bottom},
+        margin={"l": 96, "r": 42, "t": extra_top, "b": extra_bottom},
     )
     fig.update_xaxes(
-        title={"text": x_title_text, "font": {"size": axis_title_size, "color": "#1f2937", "family": "Arial, sans-serif"}},
-        tickfont={"size": tick_font_size, "color": "#334155", "family": "Arial, sans-serif"},
+        title={
+            "text": x_title_text,
+            "font": {
+                "size": axis_title_size,
+                "color": "#2B2B2B",
+                "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+            },
+        },
+        tickfont={
+            "size": tick_font_size,
+            "color": "#555555",
+            "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+        },
         tickangle=x_tick_angle,
-        showgrid=show_grid,
-        gridcolor="#dbe4ee",
+        showgrid=False,
+        gridcolor="#E8E8E8",
+        showline=True,
+        linecolor="#2B2B2B",
+        linewidth=1.1,
+        ticks="outside",
+        zeroline=False,
         automargin=True,
         title_standoff=16,
     )
     fig.update_yaxes(
-        title={"text": y_title_text, "font": {"size": axis_title_size, "color": "#1f2937", "family": "Arial, sans-serif"}},
-        tickfont={"size": tick_font_size, "color": "#334155", "family": "Arial, sans-serif"},
+        title={
+            "text": y_title_text,
+            "font": {
+                "size": axis_title_size,
+                "color": "#2B2B2B",
+                "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+            },
+        },
+        tickfont={
+            "size": tick_font_size,
+            "color": "#555555",
+            "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+        },
         showgrid=show_grid,
-        gridcolor="#dbe4ee",
+        gridcolor="#E8E8E8",
+        showline=True,
+        linecolor="#2B2B2B",
+        linewidth=1.1,
+        ticks="outside",
+        zeroline=False,
         automargin=True,
         title_standoff=16,
     )
 
-    label_family = "Arial Black, Arial, sans-serif" if label_bold else "Arial, sans-serif"
+    label_family = "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif"
     stacked_modes = {"stack", "relative"}
     is_stacked = str(getattr(fig.layout, "barmode", "") or "").lower() in stacked_modes or bool(getattr(fig.layout, "barnorm", None))
     bar_traces = [trace for trace in fig.data if getattr(trace, "type", None) == "bar"]
@@ -516,7 +554,7 @@ def _apply_publication_style(fig: go.Figure, settings: dict) -> go.Figure:
                 max_label_len = max(len(spec["text"]) for spec in specs)
                 annotation_angle = effective_label_angle
                 if requested_label_angle == "auto":
-                    annotation_angle = -90 if len(specs) >= 3 or max_label_len >= 5 else 0
+                    annotation_angle = -30 if len(specs) >= 3 or max_label_len >= 5 else 0
                 if annotation_angle != 0:
                     uses_angled_annotations = True
                 for tier_rank, spec in enumerate(specs):
@@ -1609,6 +1647,27 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 max_intersections = 12
             combo_items = combo_items[:max(1, max_intersections)]
 
+            shared_prefix = str(set_columns[0]) if set_columns else ""
+            for set_name in set_columns[1:]:
+                set_name = str(set_name)
+                while shared_prefix and not set_name.startswith(shared_prefix):
+                    shared_prefix = shared_prefix[:-1]
+            shared_prefix = shared_prefix.rstrip("_- ")
+            if len(shared_prefix) < 3:
+                shared_prefix = ""
+            display_set_names = []
+            for set_name in set_columns:
+                label = str(set_name)
+                if shared_prefix and label.startswith(shared_prefix):
+                    compact = label[len(shared_prefix):].lstrip("_- ")
+                    if compact.isdigit():
+                        trailing_alpha = re.search(r"([A-Za-z]+)$", shared_prefix)
+                        if trailing_alpha:
+                            compact = f"{trailing_alpha.group(1)}{compact}"
+                    label = compact or label
+                display_set_names.append(label)
+            display_label_map = dict(zip(set_columns, display_set_names))
+
             combo_labels = []
             combo_values = []
             combo_text = []
@@ -1619,12 +1678,12 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
             connector_x = []
             connector_y = []
             for idx, (combo, count_value) in enumerate(combo_items):
-                active_sets = [set_columns[pos] for pos, flag in enumerate(combo) if flag]
+                active_sets = [display_label_map[set_columns[pos]] for pos, flag in enumerate(combo) if flag]
                 combo_labels.append(" ∩ ".join(active_sets) if active_sets else "None")
                 combo_values.append(count_value)
                 combo_text.append(str(int(count_value)) if float(count_value).is_integer() else f"{count_value:g}")
                 active_indices = [pos for pos, flag in enumerate(combo) if flag]
-                for set_idx, set_name in enumerate(set_columns):
+                for set_idx, set_name in enumerate(display_set_names):
                     if set_idx in active_indices:
                         active_points_x.append(idx)
                         active_points_y.append(set_name)
@@ -1633,9 +1692,12 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                         inactive_points_y.append(set_name)
                 if len(active_indices) > 1:
                     connector_x.extend([idx] * len(active_indices) + [None])
-                    connector_y.extend([set_columns[pos] for pos in active_indices] + [None])
+                    connector_y.extend([display_set_names[pos] for pos in active_indices] + [None])
 
-            accent_color = _resolve_overlap_colors_local(1)[0]
+            accent_color = "#2E5A87"
+            muted_color = "rgba(46, 90, 135, 0.82)"
+            edge_color = "#244766"
+            bar_colors = [accent_color if idx == 0 else muted_color for idx in range(len(combo_items))]
             fig = make_subplots(
                 rows=2,
                 cols=1,
@@ -1647,9 +1709,18 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 go.Bar(
                     x=list(range(len(combo_items))),
                     y=combo_values,
-                    marker_color=accent_color,
+                    width=0.76,
+                    marker={
+                        "color": bar_colors,
+                        "line": {"color": [edge_color] * len(combo_items), "width": 0.5},
+                    },
                     text=combo_text,
                     textposition="outside",
+                    textfont={
+                        "size": 10,
+                        "color": "#2B2B2B",
+                        "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+                    },
                     cliponaxis=False,
                     showlegend=False,
                 ),
@@ -1661,7 +1732,7 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                     x=inactive_points_x,
                     y=inactive_points_y,
                     mode="markers",
-                    marker={"color": "#cbd5e1", "size": 11},
+                    marker={"color": "#E8E8E8", "size": 10},
                     hoverinfo="skip",
                     showlegend=False,
                 ),
@@ -1674,7 +1745,7 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                         x=connector_x,
                         y=connector_y,
                         mode="lines",
-                        line={"color": accent_color, "width": 2},
+                        line={"color": accent_color, "width": 1.5},
                         hoverinfo="skip",
                         showlegend=False,
                     ),
@@ -1693,17 +1764,100 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
                 row=2,
                 col=1,
             )
+            tick_angle = -30 if len(combo_labels) >= 4 or max((len(label) for label in combo_labels), default=0) >= 12 else 0
+            fig.update_xaxes(
+                row=1,
+                col=1,
+                showgrid=False,
+                showticklabels=False,
+                zeroline=False,
+                showline=True,
+                linecolor="#2B2B2B",
+                linewidth=1.1,
+                ticks="outside",
+            )
             fig.update_xaxes(
                 row=2,
                 col=1,
                 tickmode="array",
                 tickvals=list(range(len(combo_items))),
                 ticktext=combo_labels,
-                tickangle=-30,
+                tickangle=tick_angle,
+                tickfont={
+                    "size": 10,
+                    "color": "#555555",
+                    "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+                },
+                showgrid=False,
+                zeroline=False,
+                showline=True,
+                linecolor="#2B2B2B",
+                linewidth=1.1,
+                ticks="outside",
+                automargin=True,
             )
-            fig.update_yaxes(row=1, col=1, title_text=y_axis_label or (y_col if y_col else "Intersection size"))
-            fig.update_yaxes(row=2, col=1, categoryorder="array", categoryarray=list(reversed(set_columns)))
-            fig.update_layout(title=title or "UpSet plot", showlegend=False)
+            fig.update_yaxes(
+                row=1,
+                col=1,
+                title_text=y_axis_label or (y_col if y_col else "Intersection size"),
+                title_font={
+                    "size": 12,
+                    "color": "#2B2B2B",
+                    "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+                },
+                tickfont={
+                    "size": 10,
+                    "color": "#555555",
+                    "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+                },
+                showgrid=True,
+                gridcolor="#E8E8E8",
+                gridwidth=0.8,
+                zeroline=False,
+                showline=True,
+                linecolor="#2B2B2B",
+                linewidth=1.1,
+                ticks="outside",
+                rangemode="tozero",
+                automargin=True,
+            )
+            fig.update_yaxes(
+                row=2,
+                col=1,
+                categoryorder="array",
+                categoryarray=list(reversed(display_set_names)),
+                tickfont={
+                    "size": 11,
+                    "color": "#555555",
+                    "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+                },
+                showgrid=False,
+                zeroline=False,
+                showline=False,
+                ticks="",
+                automargin=True,
+            )
+            fig.update_layout(
+                title={
+                    "text": title or "UpSet plot",
+                    "x": 0.02,
+                    "xanchor": "left",
+                    "font": {
+                        "size": 16,
+                        "color": "#1A1A1A",
+                        "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+                    },
+                },
+                paper_bgcolor="#FFFFFF",
+                plot_bgcolor="#FFFFFF",
+                font={
+                    "size": 11,
+                    "color": "#1A1A1A",
+                    "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+                },
+                margin={"l": 112, "r": 32, "t": 86, "b": 112},
+                showlegend=False,
+            )
         else:
             return None
 

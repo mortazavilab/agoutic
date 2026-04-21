@@ -151,6 +151,13 @@ Supported publication-quality volcano controls in this slice include:
 
 Publication legends for the edgePython image plots render outside the plotting area by default so they do not cover the data points.
 
+These publication plots also default to AGOUTIC's light publication style:
+white background, dark axes, y-only grids, restrained sans-serif typography,
+colorblind-safe categorical colors, semantic red/teal/gray DE colors, gentler
+label angles, slimmer heatmap colorbars, and readability-first threshold or
+count annotations. When a visual rule conflicts with correctness or
+readability, correctness wins.
+
 #### Step 10: Save Results
 
 ```

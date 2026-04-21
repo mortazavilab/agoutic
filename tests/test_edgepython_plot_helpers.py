@@ -54,6 +54,17 @@ class TestEdgePythonPlotHelpers(unittest.TestCase):
         finally:
             plt.close(fig)
 
+    def test_module_import_sets_publication_rcparams(self):
+        import matplotlib as mpl
+
+        self.assertEqual(mpl.rcParams["figure.facecolor"], "#FFFFFF")
+        self.assertEqual(mpl.rcParams["axes.facecolor"], "#FFFFFF")
+        self.assertEqual(mpl.rcParams["grid.color"], "#E8E8E8")
+        self.assertEqual(mpl.rcParams["axes.grid.axis"], "y")
+        self.assertFalse(mpl.rcParams["axes.spines.top"])
+        self.assertFalse(mpl.rcParams["axes.spines.right"])
+        self.assertEqual(mpl.rcParams["savefig.dpi"], 600.0)
+
     def test_infer_heatmap_mode_prefers_correlation_for_square_matching_labels(self):
         matrix = pd.DataFrame(
             [[1.0, 0.4], [0.4, 1.0]],

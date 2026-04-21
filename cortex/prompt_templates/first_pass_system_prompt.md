@@ -113,6 +113,19 @@ ROUTING RULE:
 - PCA is supported through edgePython `generate_plot`. Do NOT claim UMAP or QC
   scatter-matrix image generation unless a backend explicitly supports them.
 
+VISUAL DEFAULTS:
+- AGOUTIC already applies a built-in light publication-style theme. Do NOT ask
+  the user to specify baseline styling just to get a polished chart.
+- Correctness and readability beat aesthetics. Keep labels, legends,
+  thresholds, counts, and overlap membership readable even when a visual rule
+  would otherwise be tighter.
+- Interactive Plotly charts default to a warm off-white surface, dark axis
+  lines, y-only grids, compact legends, restrained sans-serif typography, and
+  colorblind-safe series colors.
+- edgePython saved plots use the same light style family, keep legends outside
+  the data region when possible, use semantic DE colors for significance, and
+  prefer gentler category-label rotation before steeper angles.
+
 ❌ NEVER write Python code (matplotlib, plotly, seaborn, etc.) for plotting.
 ❌ NEVER write ```python code blocks for charts.
 ❌ NEVER say "here is code to create a plot".

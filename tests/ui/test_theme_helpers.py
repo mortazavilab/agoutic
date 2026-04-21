@@ -49,15 +49,20 @@ def test_get_plotly_template_uses_light_plot_surfaces():
     layout = namespace["get_plotly_template"]()["layout"]
 
     assert layout["paper_bgcolor"] == "#ffffff"
-    assert layout["plot_bgcolor"] == "#f8fafc"
-    assert layout["font"]["color"] == "#1f2937"
+    assert layout["plot_bgcolor"] == "#FAFAF7"
+    assert layout["font"]["color"] == "#1A1A1A"
+    assert layout["font"]["family"].startswith("Inter")
     assert layout["colorway"] == namespace["COLOR_PLOT_SERIES"]
-    assert layout["title"]["x"] == 0.03
+    assert layout["title"]["x"] == 0.02
     assert layout["legend"]["bgcolor"] == "#ffffff"
-    assert layout["xaxis"]["gridcolor"] == "#dbe4ee"
+    assert layout["legend"]["borderwidth"] == 0
+    assert layout["xaxis"]["gridcolor"] == "#E8E8E8"
+    assert layout["xaxis"]["showgrid"] is False
     assert layout["xaxis"]["automargin"] is True
-    assert layout["yaxis"]["tickfont"]["color"] == "#475569"
-    assert layout["margin"] == {"l": 84, "r": 24, "t": 72, "b": 72}
+    assert layout["yaxis"]["showgrid"] is True
+    assert layout["yaxis"]["tickfont"]["color"] == "#555555"
+    assert layout["hoverlabel"]["bordercolor"] == "#D0D0D0"
+    assert layout["margin"] == {"l": 96, "r": 42, "t": 86, "b": 84}
 
 
 def test_inject_global_css_wraps_plot_and_image_blocks_in_light_surface():

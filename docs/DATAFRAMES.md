@@ -101,6 +101,10 @@ Current scope note:
 - Publication-quality PNG/SVG artifact generation is currently provided by
   edgePython for specialized DE/enrichment plots such as volcano and MD, not by
   generic dataframe bar/scatter/histogram rendering.
+- Interactive charts still use the same light publication-leaning defaults:
+  warm off-white plotting surfaces, dark axes, y-only grids, compact legends,
+  colorblind-safe series colors, and concise overlap labels or counts where
+  the renderer supports them.
 
 ### Wide Sample Tables And Auto-Melt
 

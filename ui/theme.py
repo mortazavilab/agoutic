@@ -24,19 +24,21 @@ COLOR_BORDER = "#3a3f42"
 COLOR_BORDER_SOFT = "#2e3336"
 
 COLOR_PLOT_PAPER = "#ffffff"
-COLOR_PLOT_SURFACE = "#f8fafc"
-COLOR_PLOT_TEXT = "#1f2937"
-COLOR_PLOT_TEXT_MUTED = "#475569"
-COLOR_PLOT_GRID = "#dbe4ee"
-COLOR_PLOT_BORDER = "#d7dee8"
+COLOR_PLOT_SURFACE = "#FAFAF7"
+COLOR_PLOT_TEXT = "#1A1A1A"
+COLOR_PLOT_TEXT_MUTED = "#555555"
+COLOR_PLOT_GRID = "#E8E8E8"
+COLOR_PLOT_BORDER = "#2B2B2B"
 COLOR_PLOT_SERIES = [
-    "#9fd3ff",
-    "#1f6fd1",
-    "#f7a3a8",
-    "#ff2b2b",
-    "#7ee094",
-    "#3bb4a6",
-    "#f7cb69",
+    "#2E5A87",
+    "#E69F00",
+    "#56B4E9",
+    "#009E73",
+    "#F0E442",
+    "#0072B2",
+    "#D55E00",
+    "#CC79A7",
+    "#000000",
 ]
 
 RADIUS_SM = "10px"
@@ -78,44 +80,60 @@ def get_plotly_template() -> dict:
             "paper_bgcolor": COLOR_PLOT_PAPER,
             "plot_bgcolor": COLOR_PLOT_SURFACE,
             "colorway": COLOR_PLOT_SERIES,
-            "font": {"color": COLOR_PLOT_TEXT, "size": 12},
+            "font": {
+                "color": COLOR_PLOT_TEXT,
+                "size": 11,
+                "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+            },
             "title": {
-                "font": {"color": COLOR_PLOT_TEXT},
-                "x": 0.03,
+                "font": {"color": COLOR_PLOT_TEXT, "size": 16},
+                "x": 0.02,
                 "xanchor": "left",
             },
             "xaxis": {
+                "showgrid": False,
                 "gridcolor": COLOR_PLOT_GRID,
                 "linecolor": COLOR_PLOT_BORDER,
                 "tickcolor": COLOR_PLOT_BORDER,
-                "tickfont": {"color": COLOR_PLOT_TEXT_MUTED},
-                "title": {"font": {"color": COLOR_PLOT_TEXT}},
-                "title_standoff": 14,
+                "linewidth": 1.1,
+                "showline": True,
+                "ticks": "outside",
+                "tickfont": {"color": COLOR_PLOT_TEXT_MUTED, "size": 10},
+                "title": {"font": {"color": COLOR_PLOT_BORDER, "size": 12}},
+                "title_standoff": 16,
                 "automargin": True,
-                "zerolinecolor": COLOR_PLOT_GRID,
+                "zeroline": False,
             },
             "yaxis": {
+                "showgrid": True,
                 "gridcolor": COLOR_PLOT_GRID,
                 "linecolor": COLOR_PLOT_BORDER,
                 "tickcolor": COLOR_PLOT_BORDER,
-                "tickfont": {"color": COLOR_PLOT_TEXT_MUTED},
-                "title": {"font": {"color": COLOR_PLOT_TEXT}},
-                "title_standoff": 14,
+                "linewidth": 1.1,
+                "showline": True,
+                "ticks": "outside",
+                "tickfont": {"color": COLOR_PLOT_TEXT_MUTED, "size": 10},
+                "title": {"font": {"color": COLOR_PLOT_BORDER, "size": 12}},
+                "title_standoff": 16,
                 "automargin": True,
-                "zerolinecolor": COLOR_PLOT_GRID,
+                "zeroline": False,
             },
             "legend": {
                 "bgcolor": COLOR_PLOT_PAPER,
-                "bordercolor": COLOR_PLOT_BORDER,
-                "borderwidth": 1,
-                "font": {"color": COLOR_PLOT_TEXT},
+                "borderwidth": 0,
+                "font": {"color": COLOR_PLOT_TEXT_MUTED, "size": 10},
+                "title": {"font": {"color": COLOR_PLOT_BORDER, "size": 11}},
             },
             "hoverlabel": {
                 "bgcolor": COLOR_PLOT_PAPER,
-                "bordercolor": COLOR_PLOT_BORDER,
-                "font": {"color": COLOR_PLOT_TEXT},
+                "bordercolor": "#D0D0D0",
+                "font": {
+                    "color": COLOR_PLOT_TEXT,
+                    "size": 11,
+                    "family": "Inter, IBM Plex Sans, Helvetica Neue, Source Sans Pro, Arial, sans-serif",
+                },
             },
-            "margin": {"l": 84, "r": 24, "t": 72, "b": 72},
+            "margin": {"l": 96, "r": 42, "t": 86, "b": 84},
         }
     }
 
