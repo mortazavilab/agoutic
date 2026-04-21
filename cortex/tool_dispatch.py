@@ -25,6 +25,7 @@ from common import MCPHttpClient
 from common.logging_config import get_logger
 from cortex.config import SERVICE_REGISTRY, get_service_url
 from cortex.dataframe_actions import execute_local_dataframe_call, is_local_dataframe_tool
+from cortex.edgepython_plot_params import build_svg_companion_path, normalize_generate_plot_params
 from cortex.encode_helpers import (
     _looks_like_assay,
     _correct_tool_routing,
@@ -904,12 +905,15 @@ def _inject_edgepython_output_path(
 ) -> None:
     """Redirect edgepython output files into the provided root's de_results folder."""
     ep_output_dir = project_dir_path / "de_results"
-    if tool_name == "generate_plot" and not params.get("output_path"):
-        ep_output_dir.mkdir(parents=True, exist_ok=True)
-        plot_type = params.get("plot_type", "plot")
-        result_name = params.get("result_name", "")
-        suffix = f"_{result_name}" if result_name else ""
-        params["output_path"] = str(ep_output_dir / f"{plot_type}{suffix}.png")
+    if tool_name == "generate_plot":
+        params.update(normalize_generate_plot_params(params))
+        if not params.get("output_path"):
+            ep_output_dir.mkdir(parents=True, exist_ok=True)
+            plot_type = params.get("plot_type", "plot")
+            result_name = params.get("result_name", "")
+            suffix = f"_{result_name}" if result_name else ""
+            params["output_path"] = str(ep_output_dir / f"{plot_type}{suffix}.png")
+        params.setdefault("svg_output_path", build_svg_companion_path(str(params["output_path"])))
     elif tool_name == "save_results":
         ep_output_dir.mkdir(parents=True, exist_ok=True)
         fmt = params.get("format", "csv")

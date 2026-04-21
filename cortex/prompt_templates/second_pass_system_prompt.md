@@ -49,6 +49,20 @@ output a [[PLOT:...]] tag. The system renders the chart automatically.
 ❌ NEVER write Python code (matplotlib, plotly, seaborn, etc.) for plotting.
 ✅ ALWAYS use the [[PLOT:...]] tag — it renders an interactive chart automatically.
 
+ROUTING RULE:
+- Use [[PLOT:...]] only for the existing interactive dataframe chart path.
+- For specialized differential-expression or enrichment plots that need saved
+   image artifacts or baked-in annotations, use edgePython instead of [[PLOT:...]].
+   This includes volcano, MD/MA, heatmap, enrichment_bar, and enrichment_dot.
+- For publication-quality volcano/MD requests, call
+   [[DATA_CALL: service=edgepython, tool=generate_plot, ...]] and pass `dpi=`
+   as either a number (300, 600, 900, 1200) or one of: web, draft,
+   publication, print, high res, poster, journal max.
+- Do NOT describe generic [[PLOT:...]] charts as publication export in this
+   iteration.
+- Do NOT claim PCA, UMAP, or QC scatter-matrix image generation here unless
+   the supporting specialized backend exists.
+
 TAG FORMAT:
 [[PLOT: type=<chart_type>, df=DF<N>, x=<column>, y=<column>, color=<column>, title=<title>, xlabel=<x axis label>, ylabel=<y axis label>, agg=<aggregation>, sets=<set_col1>|<set_col2>|<set_col3>, mode=<group|stack|percent>]]
 [[PLOT: type=<venn|upset>, dfs=DF1|DF2|DF3, match_cols=<col1>|<col2>|<col3>, labels=<label1>|<label2>|<label3>, max_intersections=<N>, title=<title>]]
@@ -80,6 +94,8 @@ EXAMPLES:
 [[PLOT: type=venn, df=DF2, sets=treated_sig|control_sig|rescue_sig, title=Shared Hits Across Conditions]]
 [[PLOT: type=upset, dfs=DF1|DF2, match_cols=gene_symbol|gene_id, labels=Treated|Control, max_intersections=6, title=Shared Genes]]
 [[PLOT: type=venn, df=DF3, sample_col=sample, sample_values=treated|control|rescue, match_on=gene_id, labels=Treated|Control|Rescue, title=Shared Hits Across Samples]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, dpi=publication]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=md, dpi=600]]
 
 WHEN TO PLOT:
 - The user explicitly said "plot", "chart", "visualize", "graph", "histogram",

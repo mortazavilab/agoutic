@@ -130,10 +130,22 @@ Or for flexible loading (kallisto, salmon, 10x, AnnData):
 #### Step 9: Generate Plots
 
 ```
-[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano]]
-[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=md]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=volcano, dpi=publication]]
+[[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=md, dpi=600]]
 [[DATA_CALL: service=edgepython, tool=generate_plot, plot_type=heatmap]]
 ```
+
+Use edgePython `generate_plot` for DE/enrichment plots that need saved PNG/SVG
+artifacts or baked-in annotations. Do NOT use `[[PLOT:...]]` for volcano or
+MD/MA plots.
+
+Supported publication-quality volcano controls in this slice include:
+
+- `dpi=` as either a number (`300`, `600`, `900`, `1200`) or a preset phrase
+	(`web`, `draft`, `publication`, `print`, `high res`, `poster`, `journal max`)
+- `use_fdr_y=true` to switch the y-axis from `-log10(p-value)` to `-log10(FDR)`
+- `pvalue_cutoff`, `fdr_cutoff`, and `logfc_cutoff`
+- `top_n_labels` and `label_genes=[...]` for on-image gene labels
 
 #### Step 10: Save Results
 
@@ -210,4 +222,6 @@ Reset state for a new analysis:
 8. **For simple two-group comparisons**, exact_test is preferred over the GLM path.
 9. **For complex designs** (batch effects, interaction terms), use the full GLM pipeline.
 10. **Always generate at least a volcano plot** after testing to visualize results.
-11. **When the user says "yes", "proceed", "go ahead", or "continue"**, emit the remaining pipeline DATA_CALLs. Do NOT ask clarifying questions — the user has already confirmed.
+11. **Default volcano y-axis is `-log10(p-value)`**. Use `use_fdr_y=true` only when the user explicitly asks for FDR on the y-axis.
+12. **For publication-quality DE artifacts**, prefer `dpi=publication` or an explicit numeric DPI and let edgePython write the PNG/SVG pair.
+13. **When the user says "yes", "proceed", "go ahead", or "continue"**, emit the remaining pipeline DATA_CALLs. Do NOT ask clarifying questions — the user has already confirmed.

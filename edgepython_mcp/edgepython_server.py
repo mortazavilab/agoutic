@@ -1762,11 +1762,153 @@ def save_results(
 # Tool 10: generate_plot
 # ---------------------------------------------------------------------------
 
+_DPI_PRESETS = {
+    "web": 300,
+    "draft": 300,
+    "publication": 600,
+    "print": 600,
+    "high res": 600,
+    "high resolution": 600,
+    "poster": 900,
+    "journal max": 1200,
+}
+
+
+def _coerce_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _coerce_int(value: object, default: int) -> int:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return default
+    return coerced if coerced > 0 else default
+
+
+def _coerce_float(value: object, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_plot_dpi(value: object, default: int = 600) -> int:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        dpi = int(value)
+        return dpi if dpi > 0 else default
+    text = str(value).strip()
+    if not text:
+        return default
+    if text.isdigit():
+        dpi = int(text)
+        return dpi if dpi > 0 else default
+    normalized = re.sub(r"\s+", " ", re.sub(r"[-_]", " ", text.lower())).strip()
+    return _DPI_PRESETS.get(normalized, default)
+
+
+def _resolve_plot_output_paths(
+    plot_type: str,
+    result_name: Optional[str],
+    output_path: Optional[str],
+    svg_output_path: Optional[str],
+) -> tuple[str, str]:
+    if output_path is None:
+        suffix = f"_{result_name}" if result_name else ""
+        output_path = os.path.join(os.getcwd(), f"{plot_type}{suffix}.png")
+    if svg_output_path is None:
+        svg_output_path = str(Path(output_path).with_suffix(".svg"))
+    return output_path, svg_output_path
+
+
+def _save_plot_outputs(
+    fig,
+    *,
+    label: str,
+    output_path: str,
+    svg_output_path: str,
+    dpi: int,
+) -> str:
+    png_path = Path(output_path)
+    svg_path = Path(svg_output_path)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    svg_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(png_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    fig.savefig(svg_path, format="svg", bbox_inches="tight", facecolor="white")
+    return f"{label} saved to: {png_path}\n{label} SVG saved to: {svg_path}"
+
+
+def _apply_plot_header(fig, ax, *, title: str, subtitle: Optional[str] = None) -> None:
+    ax.set_title(title, loc="left", fontsize=14, fontweight="bold", pad=18)
+    if subtitle:
+        fig.subplots_adjust(top=0.84)
+        fig.text(0.125, 0.93, subtitle, ha="left", va="center", fontsize=10, color="#4b5563")
+
+
+def _apply_plot_frame(ax) -> None:
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(True, color="#e5e7eb", linewidth=0.6, alpha=0.9)
+    ax.set_axisbelow(True)
+
+
+def _benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
+    pvals = np.asarray(p_values, dtype=float)
+    adjusted = np.full_like(pvals, np.nan, dtype=float)
+    valid_mask = np.isfinite(pvals)
+    valid = pvals[valid_mask]
+    if valid.size == 0:
+        return adjusted
+    order = np.argsort(valid)
+    ranked = valid[order] * valid.size / np.arange(1, valid.size + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    valid_adjusted = np.empty_like(valid)
+    valid_adjusted[order] = np.clip(ranked, 0, 1)
+    adjusted[valid_mask] = valid_adjusted
+    return adjusted
+
+
+def _normalize_label_genes(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = re.split(r"[|,]", value)
+        return [part.strip() for part in parts if part.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
 @mcp.tool()
 def generate_plot(
     plot_type: str,
     result_name: Optional[str] = None,
     output_path: Optional[str] = None,
+    svg_output_path: Optional[str] = None,
+    dpi: Optional[object] = None,
+    use_fdr_y: object = False,
+    pvalue_cutoff: object = 0.05,
+    fdr_cutoff: object = 0.05,
+    logfc_cutoff: object = 1.0,
+    top_n_labels: object = 12,
+    label_genes: Optional[object] = None,
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
 ) -> str:
     """Generate and save a visualization.
 
@@ -1783,8 +1925,10 @@ def generate_plot(
         result_name: Which test result to plot (for md/volcano/heatmap).
             For enrichment plots, the name of the enrichment result.
             Default: most recent result.
-        output_path: Path to save the PNG. Default: auto-generated
+        output_path: Path to save the raster output. Default: auto-generated
             in the current working directory.
+        svg_output_path: Optional path to save the SVG companion.
+        dpi: Raster DPI value or preset phrase.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -1795,34 +1939,65 @@ def generate_plot(
     if plot_type not in valid_types:
         return f"Invalid plot_type '{plot_type}'. Choose from: {', '.join(sorted(valid_types))}"
 
-    if output_path is None:
-        suffix = f"_{result_name}" if result_name else ""
-        output_path = os.path.join(os.getcwd(), f"{plot_type}{suffix}.png")
+    output_path, svg_output_path = _resolve_plot_output_paths(
+        plot_type,
+        result_name,
+        output_path,
+        svg_output_path,
+    )
+    raster_dpi = _coerce_plot_dpi(dpi, default=600)
+    use_fdr_y = _coerce_bool(use_fdr_y, default=False)
+    pvalue_cutoff = _coerce_float(pvalue_cutoff, 0.05)
+    fdr_cutoff = _coerce_float(fdr_cutoff, 0.05)
+    logfc_cutoff = abs(_coerce_float(logfc_cutoff, 1.0))
+    top_n_labels = max(0, _coerce_int(top_n_labels, 12))
+    label_genes = _normalize_label_genes(label_genes)
 
     d = _state["dgelist"]
 
     if plot_type == "mds":
         _require("dgelist", "DGEList")
         fig, ax = ep.plot_mds(d)
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        _apply_plot_header(fig, ax, title=title or "MDS plot", subtitle=subtitle)
+        saved_text = _save_plot_outputs(
+            fig,
+            label="MDS plot",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
         plt.close(fig)
-        return f"MDS plot saved to: {output_path}"
+        return saved_text
 
     elif plot_type == "bcv":
         _require("dgelist", "DGEList")
         if not _state["dispersions_estimated"]:
             return "Dispersions not estimated yet. Run estimate_dispersion() first."
         fig, ax = ep.plot_bcv(d)
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        _apply_plot_header(fig, ax, title=title or "BCV plot", subtitle=subtitle)
+        saved_text = _save_plot_outputs(
+            fig,
+            label="BCV plot",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
         plt.close(fig)
-        return f"BCV plot saved to: {output_path}"
+        return saved_text
 
     elif plot_type == "ql_dispersion":
         _require("fit", "fitted model")
         fig, ax = ep.plot_ql_disp(_state["fit"])
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        _apply_plot_header(fig, ax, title=title or "QL dispersion plot", subtitle=subtitle)
+        saved_text = _save_plot_outputs(
+            fig,
+            label="QL dispersion plot",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
         plt.close(fig)
-        return f"QL dispersion plot saved to: {output_path}"
+        return saved_text
 
     elif plot_type == "md":
         if result_name is None:
@@ -1832,10 +2007,23 @@ def generate_plot(
         res = _state["results"][result_name]
         status = ep.decide_tests(res)
         fig, ax = ep.plot_md(res, status=status)
-        ax.set_title(f"MD plot: {result_name}")
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        _apply_plot_frame(ax)
+        ax.set_xlabel(ax.get_xlabel() or "Average logCPM")
+        ax.set_ylabel(ax.get_ylabel() or "log2 fold change")
+        if logfc_cutoff > 0:
+            ax.axhline(logfc_cutoff, color="#9ca3af", linestyle="--", linewidth=0.8)
+            ax.axhline(-logfc_cutoff, color="#9ca3af", linestyle="--", linewidth=0.8)
+        md_subtitle = subtitle or f"Thresholds: |log2FC| >= {logfc_cutoff:g}"
+        _apply_plot_header(fig, ax, title=title or f"MD plot: {result_name}", subtitle=md_subtitle)
+        saved_text = _save_plot_outputs(
+            fig,
+            label="MD plot",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
         plt.close(fig)
-        return f"MD plot saved to: {output_path}"
+        return saved_text
 
     elif plot_type == "volcano":
         if result_name is None:
@@ -1846,25 +2034,162 @@ def generate_plot(
         tt = ep.top_tags(res, n=res["table"].shape[0])
         table = tt["table"]
 
-        fig, ax = plt.subplots(figsize=(8, 6))
-        logfc = table["logFC"].values
-        pval = table["PValue"].values
-        neg_log_p = -np.log10(np.clip(pval, 1e-300, 1))
-        fdr = table["FDR"].values
+        if "logFC" not in table.columns or "PValue" not in table.columns:
+            return "Volcano plot requires logFC and PValue columns in the result table."
 
-        # Color by significance
-        colors = np.where(
-            (fdr < 0.05) & (logfc > 0), "red",
-            np.where((fdr < 0.05) & (logfc < 0), "blue", "grey")
-        )
-        ax.scatter(logfc, neg_log_p, c=colors, s=4, alpha=0.5)
+        logfc = pd.to_numeric(table["logFC"], errors="coerce").to_numpy(dtype=float)
+        pval = pd.to_numeric(table["PValue"], errors="coerce").to_numpy(dtype=float)
+        if "FDR" in table.columns:
+            fdr = pd.to_numeric(table["FDR"], errors="coerce").to_numpy(dtype=float)
+        else:
+            fdr = _benjamini_hochberg(pval)
+        gene_names = [_gene_name(row) for _, row in table.iterrows()]
+
+        metric_source = fdr if use_fdr_y else pval
+        metric_label = "FDR" if use_fdr_y else "p-value"
+        metric_cutoff = fdr_cutoff if use_fdr_y else pvalue_cutoff
+        finite_metric = np.isfinite(metric_source) & (metric_source > 0)
+        finite_logfc = np.isfinite(logfc)
+        valid_mask = finite_metric & finite_logfc
+        if not valid_mask.any():
+            return "Volcano plot could not be generated because no valid logFC/p-value points were found."
+
+        clipped_metric = np.clip(metric_source, 1e-300, 1)
+        neg_log_metric = -np.log10(clipped_metric)
+        sig_mask = valid_mask & (metric_source <= metric_cutoff) & (np.abs(logfc) >= logfc_cutoff)
+        up_mask = sig_mask & (logfc > 0)
+        down_mask = sig_mask & (logfc < 0)
+        ns_mask = valid_mask & ~(up_mask | down_mask)
+
+        up_color = "#d55e00"
+        down_color = "#0072b2"
+        ns_color = "#b8b8b8"
+        fig, ax = plt.subplots(figsize=(9.5, 7))
+        _apply_plot_frame(ax)
+        ax.scatter(logfc[ns_mask], neg_log_metric[ns_mask], c=ns_color, s=14, alpha=0.55, linewidths=0, label="Not significant")
+        ax.scatter(logfc[down_mask], neg_log_metric[down_mask], c=down_color, s=18, alpha=0.8, linewidths=0, label="Down")
+        ax.scatter(logfc[up_mask], neg_log_metric[up_mask], c=up_color, s=18, alpha=0.8, linewidths=0, label="Up")
         ax.set_xlabel("log2 fold change")
-        ax.set_ylabel("-log10(p-value)")
-        ax.set_title(f"Volcano: {result_name}")
-        ax.axhline(-np.log10(0.05), color="grey", linestyle="--", linewidth=0.5)
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        ax.set_ylabel(f"-log10({metric_label})")
+
+        threshold_y = -np.log10(max(metric_cutoff, 1e-300))
+        ax.axvline(logfc_cutoff, color="#6b7280", linestyle="--", linewidth=0.9)
+        ax.axvline(-logfc_cutoff, color="#6b7280", linestyle="--", linewidth=0.9)
+        ax.axhline(threshold_y, color="#6b7280", linestyle="--", linewidth=0.9)
+
+        finite_logfc_values = logfc[valid_mask]
+        finite_metric_values = neg_log_metric[valid_mask]
+        max_x = max(float(np.nanpercentile(np.abs(finite_logfc_values), 99.5)), logfc_cutoff * 1.3, 1.5)
+        max_y = max(float(np.nanpercentile(finite_metric_values, 99.5)), threshold_y * 1.25, 2.0)
+        ax.set_xlim(-max_x * 1.05, max_x * 1.05)
+        ax.set_ylim(0, max_y * 1.05)
+        ax.text(
+            ax.get_xlim()[1] * 0.98,
+            threshold_y,
+            f"{metric_label} <= {metric_cutoff:g}",
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            color="#374151",
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85, "pad": 1.5},
+        )
+        ax.text(logfc_cutoff, ax.get_ylim()[1] * 0.98, f"+|log2FC| >= {logfc_cutoff:g}", rotation=90, va="top", ha="left", fontsize=8, color="#374151")
+        ax.text(-logfc_cutoff, ax.get_ylim()[1] * 0.98, f"-|log2FC| >= {logfc_cutoff:g}", rotation=90, va="top", ha="right", fontsize=8, color="#374151")
+
+        counts_text = "\n".join([
+            f"n_up: {int(up_mask.sum())}",
+            f"n_down: {int(down_mask.sum())}",
+            f"n_ns: {int(ns_mask.sum())}",
+        ])
+        ax.text(
+            0.02,
+            0.98,
+            counts_text,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            bbox={"facecolor": "white", "edgecolor": "#d1d5db", "boxstyle": "round,pad=0.35", "alpha": 0.95},
+        )
+
+        forced_labels = {label.lower() for label in label_genes}
+        forced_indices = [idx for idx, gene in enumerate(gene_names) if gene.lower() in forced_labels]
+        sig_candidates = np.where(sig_mask)[0]
+        ranked_candidates = sorted(
+            sig_candidates.tolist(),
+            key=lambda idx: (neg_log_metric[idx], abs(logfc[idx])),
+            reverse=True,
+        )
+        label_indices: list[int] = []
+        for idx in forced_indices + ranked_candidates:
+            if idx not in label_indices:
+                label_indices.append(idx)
+            if len(label_indices) >= len(forced_indices) + top_n_labels:
+                break
+
+        if label_indices:
+            try:
+                from adjustText import adjust_text
+            except ImportError:
+                adjust_text = None
+
+            if adjust_text is not None:
+                texts = [
+                    ax.text(
+                        logfc[idx],
+                        neg_log_metric[idx],
+                        gene_names[idx],
+                        fontsize=8,
+                        fontstyle="italic",
+                        color="#111827",
+                        zorder=5,
+                    )
+                    for idx in label_indices
+                ]
+                adjust_text(
+                    texts,
+                    x=logfc[label_indices],
+                    y=neg_log_metric[label_indices],
+                    ax=ax,
+                    expand_points=(1.2, 1.3),
+                    expand_text=(1.05, 1.2),
+                    force_text=(0.18, 0.25),
+                    arrowprops={"arrowstyle": "-", "color": "#6b7280", "lw": 0.6, "alpha": 0.9},
+                )
+            else:
+                x_span = max(ax.get_xlim()[1] - ax.get_xlim()[0], 1.0)
+                y_span = max(ax.get_ylim()[1] - ax.get_ylim()[0], 1.0)
+                for offset, idx in enumerate(label_indices):
+                    x_offset = (0.03 * x_span) * (1 if logfc[idx] >= 0 else -1)
+                    y_offset = 0.03 * y_span * (1 + (offset % 4) * 0.35)
+                    ax.annotate(
+                        gene_names[idx],
+                        xy=(logfc[idx], neg_log_metric[idx]),
+                        xytext=(logfc[idx] + x_offset, neg_log_metric[idx] + y_offset),
+                        textcoords="data",
+                        ha="left" if logfc[idx] >= 0 else "right",
+                        va="bottom",
+                        fontsize=8,
+                        fontstyle="italic",
+                        color="#111827",
+                        arrowprops={"arrowstyle": "-", "color": "#6b7280", "lw": 0.6, "alpha": 0.9},
+                    )
+
+        volcano_subtitle = subtitle or (
+            f"Thresholds: |log2FC| >= {logfc_cutoff:g}, {metric_label} <= {metric_cutoff:g}; "
+            f"colors use a colorblind-safe palette"
+        )
+        _apply_plot_header(fig, ax, title=title or f"Volcano plot: {result_name}", subtitle=volcano_subtitle)
+        ax.legend(frameon=False, loc="upper right")
+        saved_text = _save_plot_outputs(
+            fig,
+            label="Volcano plot",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
         plt.close(fig)
-        return f"Volcano plot saved to: {output_path}"
+        return saved_text
 
     elif plot_type == "heatmap":
         if result_name is None:
@@ -1875,15 +2200,7 @@ def generate_plot(
         tt = ep.top_tags(res, n=30)
         table = tt["table"]
 
-        # Get log-CPM for top genes
         logcpm = ep.cpm(d, log=True)
-
-        # The table from top_tags has gene annotation columns (e.g. GeneID)
-        # plus stat columns. The original row positions in the result table
-        # correspond to gene indices in the count matrix.
-        # Use the original table's row ordering from the test result.
-        all_tt = ep.top_tags(res, n=res["table"].shape[0])
-        all_genes = [_gene_name(row) for _, row in all_tt["table"].iterrows()]
         top_genes = [_gene_name(row) for _, row in table.iterrows()]
 
         gene_ids = d.get("_gene_ids", [])
@@ -1894,12 +2211,10 @@ def generate_plot(
                 idx.append(gene_ids.index(gn))
                 gene_labels.append(gn)
         if not idx:
-            # Fallback: use row positions from the sorted result
             idx = list(range(min(30, logcpm.shape[0])))
             gene_labels = [str(i) for i in idx]
 
         mat = logcpm[idx, :]
-        # Z-score per gene
         mat_z = (mat - mat.mean(axis=1, keepdims=True)) / (mat.std(axis=1, keepdims=True) + 1e-10)
 
         fig, ax = plt.subplots(figsize=(max(6, len(d.get("_sample_names", [])) * 0.6), max(6, len(idx) * 0.3)))
@@ -1909,11 +2224,17 @@ def generate_plot(
         ax.set_xticklabels(sample_names, rotation=45, ha="right", fontsize=8)
         ax.set_yticks(range(len(gene_labels)))
         ax.set_yticklabels(gene_labels, fontsize=7)
-        ax.set_title(f"Top DE genes: {result_name}")
+        _apply_plot_header(fig, ax, title=title or f"Top DE genes: {result_name}", subtitle=subtitle)
         fig.colorbar(im, ax=ax, label="z-score (log-CPM)", shrink=0.6)
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        saved_text = _save_plot_outputs(
+            fig,
+            label="Heatmap",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
         plt.close(fig)
-        return f"Heatmap saved to: {output_path}"
+        return saved_text
 
     elif plot_type == "enrichment_bar":
         ename = result_name or _state.get("last_enrichment")
@@ -1930,20 +2251,25 @@ def generate_plot(
         }
         colors = [source_colors.get(s, "#999999") for s in plot_df["source"]]
         fig, ax = plt.subplots(figsize=(10, max(4, len(plot_df) * 0.35)))
-        bars = ax.barh(range(len(plot_df)), plot_df["neg_log10_p"].values, color=colors)
+        ax.barh(range(len(plot_df)), plot_df["neg_log10_p"].values, color=colors)
         ax.set_yticks(range(len(plot_df)))
         ax.set_yticklabels(plot_df["name"].values, fontsize=8)
         ax.invert_yaxis()
         ax.set_xlabel("-log10(p-value)")
-        ax.set_title(f"Enrichment: {ename}")
-        # Legend for sources present
+        _apply_plot_header(fig, ax, title=title or f"Enrichment: {ename}", subtitle=subtitle)
         from matplotlib.patches import Patch
         present = plot_df["source"].unique()
         legend_handles = [Patch(color=source_colors.get(s, "#999"), label=s) for s in present]
         ax.legend(handles=legend_handles, loc="lower right", fontsize=8)
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        saved_text = _save_plot_outputs(
+            fig,
+            label="Enrichment bar plot",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
         plt.close(fig)
-        return f"Enrichment bar plot saved to: {output_path}"
+        return saved_text
 
     elif plot_type == "enrichment_dot":
         ename = result_name or _state.get("last_enrichment")
@@ -1965,11 +2291,17 @@ def generate_plot(
         ax.set_yticklabels(plot_df["name"].values, fontsize=8)
         ax.invert_yaxis()
         ax.set_xlabel("Gene Ratio")
-        ax.set_title(f"Enrichment: {ename}")
+        _apply_plot_header(fig, ax, title=title or f"Enrichment: {ename}", subtitle=subtitle)
         fig.colorbar(scatter, ax=ax, label="-log10(p-value)", shrink=0.6)
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        saved_text = _save_plot_outputs(
+            fig,
+            label="Enrichment dot plot",
+            output_path=output_path,
+            svg_output_path=svg_output_path,
+            dpi=raster_dpi,
+        )
         plt.close(fig)
-        return f"Enrichment dot plot saved to: {output_path}"
+        return saved_text
 
 
 # ===========================================================================

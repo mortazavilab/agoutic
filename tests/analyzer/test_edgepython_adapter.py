@@ -43,6 +43,31 @@ class TestEdgePythonArtifactHelpers(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertIn(str(target), rewritten)
 
+    def test_relocate_edgepython_artifact_with_svg_companion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_png = Path(tmpdir) / "volcano.png"
+            source_svg = Path(tmpdir) / "volcano.svg"
+            source_png.write_bytes(b"png-bytes")
+            source_svg.write_text("<svg></svg>", encoding="utf-8")
+            project_dir = Path(tmpdir) / "project-a"
+            result_text = (
+                f"Volcano plot saved to: {source_png}\n"
+                f"Volcano plot SVG saved to: {source_svg}"
+            )
+
+            rewritten, target = relocate_edgepython_artifact(
+                result_text,
+                project_dir=project_dir,
+            )
+
+            self.assertEqual(target, project_dir / "de_results" / "volcano.png")
+            self.assertTrue((project_dir / "de_results" / "volcano.png").exists())
+            self.assertTrue((project_dir / "de_results" / "volcano.svg").exists())
+            self.assertFalse(source_png.exists())
+            self.assertFalse(source_svg.exists())
+            self.assertIn(str(project_dir / "de_results" / "volcano.png"), rewritten)
+            self.assertIn(str(project_dir / "de_results" / "volcano.svg"), rewritten)
+
 
 class TestEdgePythonSessionHelpers(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
@@ -90,3 +115,30 @@ class TestEdgePythonProxyRegistry(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn(str(project_dir / "de_results" / "volcano.png"), result)
             self.assertTrue((project_dir / "de_results" / "volcano.png").exists())
+
+    async def test_proxy_generate_plot_relocates_png_and_svg_with_explicit_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_png = Path(tmpdir) / "volcano.png"
+            source_svg = Path(tmpdir) / "volcano.svg"
+            source_png.write_bytes(b"png-bytes")
+            source_svg.write_text("<svg></svg>", encoding="utf-8")
+            project_dir = Path(tmpdir) / "project-a"
+            proxy = EDGEPYTHON_PROXY_TOOL_REGISTRY["edgepython_generate_plot"]
+
+            result_text = (
+                f"Volcano plot saved to: {source_png}\n"
+                f"Volcano plot SVG saved to: {source_svg}"
+            )
+            with patch("analyzer.mcp_tools.call_edgepython_tool", new=AsyncMock(return_value=result_text)):
+                result = await proxy(
+                    conversation_id="conv-plot",
+                    project_dir=str(project_dir),
+                    plot_type="volcano",
+                    output_path="/tmp/custom-volcano.png",
+                    svg_output_path="/tmp/custom-volcano.svg",
+                )
+
+            self.assertIn(str(project_dir / "de_results" / "custom-volcano.png"), result)
+            self.assertIn(str(project_dir / "de_results" / "custom-volcano.svg"), result)
+            self.assertTrue((project_dir / "de_results" / "custom-volcano.png").exists())
+            self.assertTrue((project_dir / "de_results" / "custom-volcano.svg").exists())

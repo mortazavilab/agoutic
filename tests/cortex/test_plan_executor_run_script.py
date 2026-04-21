@@ -558,8 +558,10 @@ async def test_execute_step_save_results_prefers_dedicated_de_workflow_dir(monke
 @pytest.mark.asyncio
 async def test_execute_step_generate_de_plot_embeds_inline_image_payload(monkeypatch, tmp_path):
     plot_path = tmp_path / "workflow8" / "de_results" / "volcano_ad_vs_control_gene.png"
+    svg_path = tmp_path / "workflow8" / "de_results" / "volcano_ad_vs_control_gene.svg"
     plot_path.parent.mkdir(parents=True)
     plot_path.write_bytes(b"fake-png")
+    svg_path.write_text("<svg></svg>", encoding="utf-8")
 
     payload = {
         "plan_type": "run_de_pipeline",
@@ -597,7 +599,7 @@ async def test_execute_step_generate_de_plot_embeds_inline_image_payload(monkeyp
     monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
 
     async def _fake_call_mcp_tool(_source, _tool, _params):
-        return {"data": f"Volcano plot saved to: {plot_path}"}
+        return {"data": f"Volcano plot saved to: {plot_path}\nVolcano plot SVG saved to: {svg_path}"}
 
     monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _fake_call_mcp_tool)
 
@@ -612,6 +614,7 @@ async def test_execute_step_generate_de_plot_embeds_inline_image_payload(monkeyp
     assert result.success is True
     step_result = payload["steps"][1]["result"]
     assert step_result["artifacts"]["volcano_plot"] == str(plot_path)
+    assert step_result["artifacts"]["volcano_plot_svg"] == str(svg_path)
     assert step_result["image_files"][0]["path"] == str(plot_path)
     assert step_result["image_files"][0]["data_b64"] == base64.b64encode(b"fake-png").decode("ascii")
 
@@ -686,7 +689,7 @@ async def test_execute_step_write_summary_records_de_comparison_and_volcano_plot
                         "params": {"plot_type": "volcano", "result_name": "ad_vs_control_gene"},
                     }
                 ],
-                "result": "Volcano plot saved to: /tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png",
+                "result": "Volcano plot saved to: /tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png\nVolcano plot SVG saved to: /tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.svg",
             },
             {
                 "id": "summary1",
@@ -717,4 +720,5 @@ async def test_execute_step_write_summary_records_de_comparison_and_volcano_plot
     assert summary["deg_summary"]["n_significant"] == 16
     assert summary["artifacts"]["results_table"] == "/tmp/project/workflow8/de_results/de_results.tsv"
     assert summary["artifacts"]["volcano_plot"] == "/tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png"
+    assert summary["artifacts"]["volcano_plot_svg"] == "/tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.svg"
     assert summary["image_files"][0]["path"] == "/tmp/project/workflow8/de_results/volcano_ad_vs_control_gene.png"

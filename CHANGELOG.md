@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Features
+
+- **DE plot artifacts now default to publication-quality raster output and ship an SVG companion** — edgePython-backed `generate_plot` calls now normalize publication DPI presets before execution, write 600 dpi raster output by default, generate an SVG companion artifact, and upgrade volcano plots with threshold annotations, counts boxes, and collision-aware gene labeling while keeping Cortex and workflow summaries on the existing PNG-first path.
+  (`cortex/edgepython_plot_params.py`, `cortex/data_call_generator.py`, `cortex/tool_dispatch.py`, `edgepython_mcp/edgepython_server.py`, `edgepython_mcp/tool_schemas.py`, `analyzer/edgepython_adapter.py`, `analyzer/mcp_tools.py`, `cortex/plan_executor.py`, `tests/cortex/test_de_routing.py`, `tests/analyzer/test_edgepython_adapter.py`, `tests/cortex/test_plan_executor_run_script.py`, `environment.yml`)
+
 ### Bug Fixes
 
 - **Parsed dataframe previews stay lightweight while full-data consumers now rehydrate the real table on demand** — CSV/TSV parsing keeps the default 100-row preview behavior, but `head DFn <rows>` can now expand past the stored preview, local dataframe actions rehydrate the full source before filtering or transforming, and plot assembly rebuilds charts from the full parsed table instead of silently using truncated previews. The shared dataframe-source resolver also now prefers visible dataframe history over hidden helper payloads and falls back to local file reload when analyzer reparse responses are still truncated.

@@ -42,12 +42,23 @@ _EDGEPYTHON_SESSIONS: dict[str, EdgePythonSession] = {}
 _EDGEPYTHON_SESSION_LOCK = asyncio.Lock()
 
 
+def _extract_saved_paths(result_text: str) -> list[str]:
+    """Extract every artifact path from multiline 'saved to:' output."""
+    paths: list[str] = []
+    for raw_line in result_text.splitlines():
+        match = _SAVED_PATH_PATTERN.search(raw_line.strip())
+        if not match:
+            continue
+        path = match.group(1).strip()
+        if path:
+            paths.append(path)
+    return paths
+
+
 def _extract_saved_path(result_text: str) -> str | None:
     """Extract a filesystem path from tool output like 'Saved ... to: /x/y'."""
-    match = _SAVED_PATH_PATTERN.search(result_text.strip())
-    if not match:
-        return None
-    return match.group(1).strip()
+    paths = _extract_saved_paths(result_text)
+    return paths[0] if paths else None
 
 
 def _build_project_output_path(
@@ -65,32 +76,49 @@ def relocate_edgepython_artifact(
     *,
     project_dir: str | Path,
     filename: str | None = None,
+    filename_overrides: dict[str, str] | None = None,
 ) -> tuple[str, Path] | tuple[None, None]:
     """Move an upstream-generated artifact into the project DE output folder.
 
     Returns the rewritten result text and the final destination path.
     If no source path is found in the result text, returns (None, None).
     """
-    source_path_str = _extract_saved_path(result_text)
-    if not source_path_str:
+    source_path_strs = _extract_saved_paths(result_text)
+    if not source_path_strs:
         return None, None
 
-    source_path = Path(source_path_str)
-    if not source_path.exists():
-        raise FileNotFoundError(f"edgePython artifact not found: {source_path}")
+    suffix_overrides = {
+        str(suffix).lower(): override
+        for suffix, override in (filename_overrides or {}).items()
+        if override
+    }
+    rewritten = result_text
+    primary_target: Path | None = None
 
-    target_name = filename or source_path.name
-    target_path = _build_project_output_path(project_dir, target_name)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(source_path), str(target_path))
+    for index, source_path_str in enumerate(source_path_strs):
+        source_path = Path(source_path_str)
+        if not source_path.exists():
+            raise FileNotFoundError(f"edgePython artifact not found: {source_path}")
 
-    rewritten = result_text.replace(source_path_str, str(target_path))
-    logger.info(
-        "Relocated edgePython artifact",
-        source_path=str(source_path),
-        target_path=str(target_path),
-    )
-    return rewritten, target_path
+        target_name = suffix_overrides.get(source_path.suffix.lower())
+        if target_name is None:
+            target_name = filename if index == 0 and filename else source_path.name
+        target_path = _build_project_output_path(project_dir, target_name)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if source_path.resolve() != target_path.resolve():
+            shutil.move(str(source_path), str(target_path))
+
+        rewritten = rewritten.replace(source_path_str, str(target_path))
+        if primary_target is None:
+            primary_target = target_path
+        logger.info(
+            "Relocated edgePython artifact",
+            source_path=str(source_path),
+            target_path=str(target_path),
+        )
+
+    return rewritten, primary_target
 
 
 async def _connect_new_client(conversation_id: str) -> EdgePythonSession:

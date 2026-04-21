@@ -11,6 +11,7 @@ import re
 
 from cortex.conversation_state import _extract_job_context_from_history
 from cortex.dataframe_actions import build_auto_dataframe_call
+from cortex.edgepython_plot_params import normalize_generate_plot_params
 from cortex.encode_helpers import (
     _ENCODE_ASSAY_ALIASES,
     _extract_encode_search_term,
@@ -1262,6 +1263,9 @@ def _validate_edgepython_params(
             )
             if ct_match:
                 params["pair"] = [ct_match.group(1).strip(), ct_match.group(2).strip()]
+
+    elif tool == "generate_plot":
+        params = normalize_generate_plot_params(params, text_pool=text_pool)
 
     elif tool in ("run_go_enrichment", "run_pathway_enrichment", "filter_de_genes"):
         # Auto-detect direction from user message

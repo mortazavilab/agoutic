@@ -110,11 +110,18 @@ async def _edgepython_proxy_tool(
         and edgepython_tool_name in {"generate_plot", "save_results", "save_sc_results"}
     ):
         explicit_output = params.get("output_path")
+        explicit_svg_output = params.get("svg_output_path")
         filename = Path(explicit_output).name if explicit_output else None
+        filename_overrides = {}
+        if explicit_output:
+            filename_overrides[Path(explicit_output).suffix.lower()] = Path(explicit_output).name
+        if explicit_svg_output:
+            filename_overrides[Path(explicit_svg_output).suffix.lower()] = Path(explicit_svg_output).name
         relocated, _target_path = relocate_edgepython_artifact(
             result,
             project_dir=project_dir,
             filename=filename,
+            filename_overrides=filename_overrides or None,
         )
         if relocated is not None:
             return relocated

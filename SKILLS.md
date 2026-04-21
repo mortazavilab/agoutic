@@ -232,6 +232,11 @@ Executes a tool call against a service or consortium.
 
 Renders an interactive chart from a DataFrame already in the conversation.
 
+This tag is for the interactive dataframe path only. Use
+`[[DATA_CALL: service=edgepython, tool=generate_plot, ...]]` for specialized
+DE or enrichment plots that need baked-in labels, threshold overlays, or saved
+PNG/SVG artifacts.
+
 ```
 [[PLOT: type=bar, df=DF1, x=assay_title, agg=count, title=Experiments by assay]]
 [[PLOT: type=pie, df=DF1, x=biosample, title=Sample distribution]]
@@ -243,6 +248,11 @@ Renders an interactive chart from a DataFrame already in the conversation.
 
 **Supported chart types:** `histogram`, `scatter`, `line`, `area`, `bar`,
 `box`, `violin`, `strip`, `heatmap`, `pie`, `venn`, `upset`.
+
+For publication-quality volcano/MD artifacts, use edgePython `generate_plot`
+instead of `[[PLOT:...]]`, and pass `dpi=` as either a number (`300`, `600`,
+`900`, `1200`) or one of `web`, `draft`, `publication`, `print`, `high res`,
+`poster`, `journal max`.
 
 **Parameter rules:**
 - `df` — Must reference a valid DF from the conversation (e.g. `DF1`).

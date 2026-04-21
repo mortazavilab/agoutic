@@ -1,7 +1,9 @@
 """Tests for DE skill routing and parameter extraction."""
+import tempfile
 import unittest
 from cortex.llm_validators import _auto_detect_skill_switch
 from cortex.data_call_generator import _validate_edgepython_params
+from cortex.tool_dispatch import _inject_edgepython_output_path
 
 
 class TestDERouting(unittest.TestCase):
@@ -115,6 +117,23 @@ class TestEdgepythonParamExtraction(unittest.TestCase):
         result = _validate_edgepython_params("load_data", {}, self.FULL_MSG)
         self.assertNotEqual(result.get("counts_path"), result.get("sample_info_path"))
 
+    def test_generate_plot_extracts_named_dpi(self):
+        result = _validate_edgepython_params(
+            "generate_plot",
+            {"plot_type": "volcano"},
+            "make a publication volcano plot",
+        )
+        self.assertEqual(result["dpi"], 600)
+
+    def test_generate_plot_builds_svg_companion_for_explicit_output(self):
+        result = _validate_edgepython_params(
+            "generate_plot",
+            {"plot_type": "volcano", "output_path": "/tmp/volcano.png", "dpi": "1200"},
+            "volcano plot at 1200 dpi",
+        )
+        self.assertEqual(result["dpi"], 1200)
+        self.assertEqual(result["svg_output_path"], "/tmp/volcano.svg")
+
 
 class TestEdgepythonToolSchemas(unittest.TestCase):
     """Verify tool_schemas.py uses JSON Schema format compatible with validate_against_schema."""
@@ -188,55 +207,59 @@ class TestMistralToolCallConversion(unittest.TestCase):
 class TestEdgepythonOutputPathInjection(unittest.TestCase):
     """Verify that edgepython output tools get redirected to the project folder."""
 
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.project_dir = f"{self._tmpdir.name}/project"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
     def _inject(self, tool_name, params, project_dir):
-        """Simulate the output path injection logic from cortex/app.py."""
+        """Use the real output path injection logic from cortex.tool_dispatch."""
         from pathlib import Path
-        source_key = "edgepython"
-        _project_dir_path = Path(project_dir)
-        if source_key == "edgepython" and _project_dir_path:
-            _ep_output_dir = _project_dir_path / "de_results"
-            if tool_name == "generate_plot" and not params.get("output_path"):
-                _plot_type = params.get("plot_type", "plot")
-                _result_name = params.get("result_name", "")
-                _suffix = f"_{_result_name}" if _result_name else ""
-                params["output_path"] = str(_ep_output_dir / f"{_plot_type}{_suffix}.png")
-            elif tool_name == "save_results":
-                _fmt = params.get("format", "csv")
-                _orig = params.get("output_path", "")
-                _fname = Path(_orig).name if _orig else f"de_results.{_fmt}"
-                params["output_path"] = str(_ep_output_dir / _fname)
-        return params
+        injected = dict(params)
+        Path(project_dir).mkdir(parents=True, exist_ok=True)
+        _inject_edgepython_output_path(tool_name, injected, Path(project_dir))
+        return injected
 
     def test_volcano_plot_redirected(self):
         params = {"plot_type": "volcano"}
-        result = self._inject("generate_plot", params, "/data/users/eli/my-project")
-        self.assertEqual(result["output_path"], "/data/users/eli/my-project/de_results/volcano.png")
+        result = self._inject("generate_plot", params, self.project_dir)
+        self.assertEqual(result["output_path"], f"{self.project_dir}/de_results/volcano.png")
+        self.assertEqual(result["svg_output_path"], f"{self.project_dir}/de_results/volcano.svg")
 
     def test_md_plot_redirected(self):
         params = {"plot_type": "md", "result_name": "treated-control"}
-        result = self._inject("generate_plot", params, "/data/users/eli/my-project")
-        self.assertEqual(result["output_path"], "/data/users/eli/my-project/de_results/md_treated-control.png")
+        result = self._inject("generate_plot", params, self.project_dir)
+        self.assertEqual(result["output_path"], f"{self.project_dir}/de_results/md_treated-control.png")
+        self.assertEqual(result["svg_output_path"], f"{self.project_dir}/de_results/md_treated-control.svg")
+
+    def test_named_dpi_is_normalized(self):
+        params = {"plot_type": "volcano", "dpi": "publication"}
+        result = self._inject("generate_plot", params, self.project_dir)
+        self.assertEqual(result["dpi"], 600)
 
     def test_save_results_redirected(self):
         params = {"output_path": "/media/test-edgepy/de_results.csv", "format": "csv"}
-        result = self._inject("save_results", params, "/data/users/eli/my-project")
-        self.assertEqual(result["output_path"], "/data/users/eli/my-project/de_results/de_results.csv")
+        result = self._inject("save_results", params, self.project_dir)
+        self.assertEqual(result["output_path"], f"{self.project_dir}/de_results/de_results.csv")
 
     def test_save_results_default_name(self):
         params = {"format": "tsv"}
-        result = self._inject("save_results", params, "/data/users/eli/my-project")
-        self.assertEqual(result["output_path"], "/data/users/eli/my-project/de_results/de_results.tsv")
+        result = self._inject("save_results", params, self.project_dir)
+        self.assertEqual(result["output_path"], f"{self.project_dir}/de_results/de_results.tsv")
 
     def test_load_data_not_affected(self):
         params = {"counts_path": "/media/test/counts.csv"}
-        result = self._inject("load_data", params, "/data/users/eli/my-project")
+        result = self._inject("load_data", params, self.project_dir)
         self.assertNotIn("output_path", result)
         self.assertEqual(result["counts_path"], "/media/test/counts.csv")
 
     def test_plot_with_explicit_output_path_not_overridden(self):
         params = {"plot_type": "volcano", "output_path": "/custom/path/volcano.png"}
-        result = self._inject("generate_plot", params, "/data/users/eli/my-project")
+        result = self._inject("generate_plot", params, self.project_dir)
         self.assertEqual(result["output_path"], "/custom/path/volcano.png")
+        self.assertEqual(result["svg_output_path"], "/custom/path/volcano.svg")
 
 
 if __name__ == "__main__":

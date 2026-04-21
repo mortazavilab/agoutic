@@ -73,6 +73,11 @@ chat.
 
 AGOUTIC renders inline Plotly charts from conversation dataframes.
 
+This is the interactive dataframe plotting path only. For differential
+expression plots that need saved image artifacts or baked-in annotations, use
+the DE skill's edgePython `generate_plot` flow instead of dataframe `[[PLOT]]`
+tags.
+
 ### Common Examples
 
 - `plot DF5 by assay`
@@ -89,6 +94,13 @@ Supported chart families:
 - box
 - heatmap
 - pie
+
+Current scope note:
+
+- Dataframe plots are interactive exploration views.
+- Publication-quality PNG/SVG artifact generation is currently provided by
+  edgePython for specialized DE/enrichment plots such as volcano and MD, not by
+  generic dataframe bar/scatter/histogram rendering.
 
 ### Wide Sample Tables And Auto-Melt
 

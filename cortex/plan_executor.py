@@ -1037,6 +1037,7 @@ def _build_de_summary_payload(plan_payload: dict, step: dict) -> dict[str, Any]:
     deg_summary = _extract_de_test_summary(de_outputs)
     result_path = _extract_saved_output_path(de_outputs.get("saved", []), prefix="Saved results to:")
     plot_path = _extract_saved_output_path(de_outputs.get("plots", []), prefix="Volcano plot saved to:")
+    plot_svg_path = _extract_saved_output_path(de_outputs.get("plots", []), prefix="Volcano plot SVG saved to:")
     interpretation = _build_de_interpretation(plan_payload, step)
 
     def _format_group(label: str, samples: list[str]) -> str:
@@ -1087,6 +1088,9 @@ def _build_de_summary_payload(plan_payload: dict, step: dict) -> dict[str, Any]:
     if plot_path:
         artifacts["volcano_plot"] = plot_path
         artifact_lines.append(f"Volcano plot: {plot_path}")
+    if plot_svg_path:
+        artifacts["volcano_plot_svg"] = plot_svg_path
+        artifact_lines.append(f"Volcano plot SVG: {plot_svg_path}")
     if artifact_lines:
         summary_sections.append("\n".join(artifact_lines))
 
@@ -1120,6 +1124,7 @@ def _build_de_plot_step_payload(plan_payload: dict, step: dict, result_payload: 
     plot_path = _extract_saved_output_path([result_text], prefix="Volcano plot saved to:")
     if not plot_path:
         return result_payload
+    plot_svg_path = _extract_saved_output_path([result_text], prefix="Volcano plot SVG saved to:")
 
     comparison = _extract_de_comparison_context(plan_payload, step)
     group_a_label = str(comparison.get("group_a_label") or "group 1")
@@ -1133,6 +1138,8 @@ def _build_de_plot_step_payload(plan_payload: dict, step: dict, result_payload: 
         **(payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}),
         "volcano_plot": plot_path,
     }
+    if plot_svg_path:
+        payload["artifacts"]["volcano_plot_svg"] = plot_svg_path
     payload["image_files"] = [
         _build_inline_image_entry(
             plot_path,

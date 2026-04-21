@@ -155,10 +155,11 @@ The analysis layer returns:
 ### Visualization Support
 
 - Inline Plotly visualizations directly in chat
-- Interactive bar, scatter, heatmap, box, histogram, pie, venn, and upset plots
+- Interactive bar, scatter, heatmap, box, histogram, pie, venn, and upset plots from conversation dataframes
 - Automatic plotting from parsed tables when chartable data are detected
 - Saved venn/upset overlap plots over earlier chat dataframes reload the full source table from analyzer provenance or matching project files when only preview rows are available, so overlap counts stay accurate
-- Plot generation from DE and enrichment outputs for rapid interpretation
+- edgePython-backed DE and enrichment plots now default to 600 dpi raster export with an SVG companion for project-scoped artifact output
+- Publication-style volcano and MD plots route through edgePython, while generic dataframe charts remain an interactive Plotly path rather than a server-side publication export path
 
 ### Current Analysis Limitations
 
