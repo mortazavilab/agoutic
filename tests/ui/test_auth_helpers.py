@@ -6,6 +6,22 @@ import requests.exceptions
 import pytest
 
 
+class TestResolveBrowserLoginBase:
+    def test_remote_api_url_is_left_alone(self):
+        from ui.auth import _resolve_browser_login_base
+
+        assert _resolve_browser_login_base("http://dhcp-7-223.bio.uci.edu:8000") == "http://dhcp-7-223.bio.uci.edu:8000"
+
+    def test_local_api_url_uses_browser_host(self):
+        from ui.auth import _resolve_browser_login_base
+        import ui.auth as auth_mod
+
+        mock_st = MagicMock()
+        mock_st.context.headers = {"Host": "dhcp-7-223.bio.uci.edu:8501"}
+        with patch.object(auth_mod, "st", mock_st):
+            assert _resolve_browser_login_base("http://127.0.0.1:8000") == "http://dhcp-7-223.bio.uci.edu:8000"
+
+
 class TestGetCurrentUserState:
     def test_timeout_is_server_unavailable(self):
         from ui.auth import get_current_user_state
@@ -87,3 +103,25 @@ class TestRequireAuth:
 
         error_calls = [str(c) for c in mock_st.error.call_args_list]
         assert any("not logged in" in c.lower() for c in error_calls)
+
+    def test_actual_logout_rewrites_local_login_link_for_remote_browser(self):
+        from ui.auth import require_auth
+        import ui.auth as auth_mod
+
+        mock_st = MagicMock()
+        mock_st.stop.side_effect = SystemExit
+        mock_st.context.headers = {"Host": "dhcp-7-223.bio.uci.edu:8501"}
+
+        with patch.object(auth_mod, "st", mock_st), \
+             patch.object(
+                 auth_mod, "get_current_user_state",
+                 return_value=(None, None, False),
+             ):
+            with pytest.raises(SystemExit):
+                require_auth("http://127.0.0.1:8000")
+
+        mock_st.link_button.assert_called_once_with(
+            "🔐 Log in with Google",
+            "http://dhcp-7-223.bio.uci.edu:8000/auth/login",
+            width="stretch",
+        )
