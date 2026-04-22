@@ -54,7 +54,8 @@ LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "32768"))
 # Keys are the "nicknames" you use in code; Values are the exact Ollama tags.
 LLM_MODELS = {
     "heavy": "devstral-2:latest",       # Your main high-IQ brain (74GB)
-    "default": "devstral-small-2:latest",    # Faster, lighter checks (15GB)
+    "default": "gemma4:31b",             # Default model (31B parameters, 20 GB RAM)
+    "previous": "devstral-small-2:latest",    # Faster, lighter checks (15GB)
     "coder": "qwen3-coder:latest",        # Specialized for writing code
     "backup": "gpt-oss:120b",             # Alternative heavy model
 }
