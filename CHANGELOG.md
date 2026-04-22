@@ -5,6 +5,9 @@
 - **The Streamlit UI now closes short-lived API responses eagerly to avoid `Too many open files` under rerun-heavy polling paths** — the shared authenticated request helper and the direct chat/upload request paths now buffer response bodies and close their underlying sockets immediately, reducing descriptor churn during chat status polling, upload actions, and other fast UI rerenders.
   (`ui/auth.py`, `ui/appui_chat_runtime.py`)
 
+- **The Streamlit auth helper now routes its direct `/auth/me` and `/auth/logout` calls through the same eager-close response path as the rest of the UI** — remote sessions that rerun frequently no longer leave those short-lived auth responses open while checking login state or logging out, reducing socket/file-descriptor churn that could accumulate into `Too many open files` on long-lived Streamlit processes.
+  (`ui/auth.py`)
+
 ## [3.6.5] - 2026-04-21
 
 ### Features

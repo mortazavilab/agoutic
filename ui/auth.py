@@ -16,6 +16,14 @@ from urllib.parse import urlparse
 _LOCAL_API_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0"}
 
 
+def _buffer_and_close_response(response: requests.Response) -> requests.Response:
+    try:
+        _ = response.content
+    finally:
+        response.close()
+    return response
+
+
 def _resolve_browser_login_base(api_url: str) -> str:
     """Return the API base URL the browser should use for login/logout links.
 
@@ -86,10 +94,12 @@ def get_current_user_state(api_url: str) -> tuple:
         return None, None, False
 
     try:
-        response = requests.get(
-            f"{api_url}/auth/me",
-            cookies={"session": session_token},
-            timeout=5,
+        response = _buffer_and_close_response(
+            requests.get(
+                f"{api_url}/auth/me",
+                cookies={"session": session_token},
+                timeout=5,
+            )
         )
         if response.status_code == 200:
             return response.json(), None, False
@@ -195,10 +205,12 @@ def logout_button(api_url: str):
         session_token = get_session_cookie()
         if session_token:
             try:
-                requests.post(
-                    f"{api_url}/auth/logout",
-                    cookies={"session": session_token},
-                    timeout=5
+                _buffer_and_close_response(
+                    requests.post(
+                        f"{api_url}/auth/logout",
+                        cookies={"session": session_token},
+                        timeout=5,
+                    )
                 )
             except Exception:
                 pass  # Ignore errors
@@ -234,10 +246,6 @@ def make_authenticated_request(method: str, url: str, **kwargs) -> requests.Resp
         kwargs["cookies"]["session"] = session_token
 
     response = requests.request(method, url, **kwargs)
-    try:
-        # Eagerly buffer the body so we can close the underlying socket before
-        # handing the response object back to rerun-heavy Streamlit callers.
-        _ = response.content
-    finally:
-        response.close()
-    return response
+    # Eagerly buffer the body so we can close the underlying socket before
+    # handing the response object back to rerun-heavy Streamlit callers.
+    return _buffer_and_close_response(response)
