@@ -6,6 +6,14 @@ import requests
 import streamlit as st
 
 
+def _buffer_and_close_response(response: requests.Response) -> requests.Response:
+    try:
+        _ = response.content
+    finally:
+        response.close()
+    return response
+
+
 def render_file_upload(*, api_url: str, active_id: str, get_session_cookie_fn):
     """Render file upload UI and perform uploads for the active project."""
     with st.expander("📎 Upload files", expanded=False):
@@ -22,11 +30,11 @@ def render_file_upload(*, api_url: str, active_id: str, get_session_cookie_fn):
                 for uf in uploaded_files
             ]
             try:
-                resp = requests.post(
+                resp = _buffer_and_close_response(requests.post(
                     f"{api_url}/projects/{active_id}/upload",
                     files=files_payload,
                     cookies=cookies,
-                )
+                ))
                 if resp.status_code == 200:
                     result = resp.json()
                     st.success(f"✅ Uploaded {result['count']} file(s)")
@@ -68,11 +76,11 @@ def handle_active_chat(*, api_url: str, active_project_id: str | None = None):
             elapsed = time.time() - ac_start
             try:
                 cookies = {"session": ac_session_token} if ac_session_token else {}
-                sr = requests.get(
+                sr = _buffer_and_close_response(requests.get(
                     f"{api_url}/chat/status/{ac_request_id}",
                     cookies=cookies,
                     timeout=3,
-                )
+                ))
                 if sr.status_code == 200:
                     info = sr.json()
                     stage = info.get("stage", "thinking")
@@ -87,11 +95,11 @@ def handle_active_chat(*, api_url: str, active_project_id: str | None = None):
             if st.button("⏹️ Stop", key="_stop_chat_btn"):
                 try:
                     cookies = {"session": ac_session_token} if ac_session_token else {}
-                    requests.post(
+                    _buffer_and_close_response(requests.post(
                         f"{api_url}/chat/cancel/{ac_request_id}",
                         cookies=cookies,
                         timeout=5,
-                    )
+                    ))
                 except Exception:
                     pass
                 status_box.update(label="⏹️ Stopping...", state="error")
@@ -153,7 +161,7 @@ def launch_chat_request(*, api_url: str, active_id: str, prompt: str, model_choi
     def _send_chat_request():
         try:
             cookies = {"session": session_token} if session_token else {}
-            result_holder["response"] = requests.post(
+            result_holder["response"] = _buffer_and_close_response(requests.post(
                 f"{api_url}/chat",
                 json={
                     "project_id": active_id,
@@ -164,7 +172,7 @@ def launch_chat_request(*, api_url: str, active_id: str, prompt: str, model_choi
                 },
                 cookies=cookies,
                 timeout=900,
-            )
+            ))
         except Exception as exc:
             result_holder["error"] = exc
 

@@ -195,5 +195,12 @@ def make_authenticated_request(method: str, url: str, **kwargs) -> requests.Resp
     
     if session_token:
         kwargs["cookies"]["session"] = session_token
-    
-    return requests.request(method, url, **kwargs)
+
+    response = requests.request(method, url, **kwargs)
+    try:
+        # Eagerly buffer the body so we can close the underlying socket before
+        # handing the response object back to rerun-heavy Streamlit callers.
+        _ = response.content
+    finally:
+        response.close()
+    return response

@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Bug Fixes
+
+- **The Streamlit UI now closes short-lived API responses eagerly to avoid `Too many open files` under rerun-heavy polling paths** — the shared authenticated request helper and the direct chat/upload request paths now buffer response bodies and close their underlying sockets immediately, reducing descriptor churn during chat status polling, upload actions, and other fast UI rerenders.
+  (`ui/auth.py`, `ui/appui_chat_runtime.py`)
+
 ## [3.6.5] - 2026-04-21
 
 ### Features
