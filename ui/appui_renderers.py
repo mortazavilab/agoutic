@@ -648,88 +648,162 @@ def _build_plot_download_payload(fig: go.Figure, settings: dict) -> tuple[bytes 
         return None, "", str(exc)
 
 
+def _get_plot_display_dimensions(fig: go.Figure) -> tuple[int, int]:
+    layout = getattr(fig, "layout", None)
+    width = getattr(layout, "width", None) if layout is not None else None
+    height = getattr(layout, "height", None) if layout is not None else None
+    return int(width or 1400), int(height or 850)
+
+
 def _render_plot_publication_tools(fig: go.Figure, plot_key_base: str, chart_type: str, default_name: str) -> tuple[go.Figure, dict]:
     defaults = _default_publication_settings(chart_type, fig, default_name)
-    with st.popover("Publication settings"):  # executed on every rerun; preview updates live
-        st.caption("Tune the figure for publication and download the current preview.")
-        col_left, col_right = st.columns(2)
-        with col_left:
-            file_stem = st.text_input("Filename", value=defaults["file_stem"], key=f"{plot_key_base}_file_stem")
-            figure_width = st.number_input("Width (px)", min_value=400, max_value=4000, value=defaults["figure_width"], step=50, key=f"{plot_key_base}_figure_width")
-            figure_height = st.number_input("Height (px)", min_value=300, max_value=3000, value=defaults["figure_height"], step=50, key=f"{plot_key_base}_figure_height")
-            title_size = st.number_input("Title size", min_value=10, max_value=64, value=defaults["title_size"], step=1, key=f"{plot_key_base}_title_size")
-            axis_title_size = st.number_input("Axis title size", min_value=8, max_value=48, value=defaults["axis_title_size"], step=1, key=f"{plot_key_base}_axis_title_size")
-            tick_font_size = st.number_input("Tick label size", min_value=8, max_value=32, value=defaults["tick_font_size"], step=1, key=f"{plot_key_base}_tick_font_size")
-            legend_font_size = st.number_input("Legend size", min_value=8, max_value=32, value=defaults["legend_font_size"], step=1, key=f"{plot_key_base}_legend_font_size")
-        with col_right:
-            legend_position = st.selectbox("Legend", ["right", "top", "bottom", "hidden"], index=["right", "top", "bottom", "hidden"].index(defaults["legend_position"]), key=f"{plot_key_base}_legend_position")
-            x_tick_angle = st.selectbox("X tick angle", ["auto", "0", "-30", "-45", "-60", "90"], index=0, key=f"{plot_key_base}_x_tick_angle")
-            show_grid = st.checkbox("Show grid lines", value=defaults["show_grid"], key=f"{plot_key_base}_show_grid")
-            title_bold = st.checkbox("Bold title", value=defaults["title_bold"], key=f"{plot_key_base}_title_bold")
-            axis_title_bold = st.checkbox("Bold axis titles", value=defaults["axis_title_bold"], key=f"{plot_key_base}_axis_title_bold")
-            transparent_background = st.checkbox("Transparent background", value=defaults["transparent_background"], key=f"{plot_key_base}_transparent_background")
-            export_format = st.selectbox("Download format", ["PNG", "SVG", "PDF", "HTML"], index=["PNG", "SVG", "PDF", "HTML"].index(defaults["export_format"]), key=f"{plot_key_base}_export_format")
-            export_scale = st.number_input("Export scale", min_value=1, max_value=6, value=defaults["export_scale"], step=1, key=f"{plot_key_base}_export_scale")
+    session_state = st.session_state
+    applied_settings_key = f"{plot_key_base}_publication_applied_settings"
+    download_payload_key = f"{plot_key_base}_publication_download_payload"
+    download_name_key = f"{plot_key_base}_publication_download_name"
+    download_mime_key = f"{plot_key_base}_publication_download_mime"
+    download_error_key = f"{plot_key_base}_publication_download_error"
 
-        show_value_labels = defaults["show_value_labels"]
-        value_label_size = defaults["value_label_size"]
-        value_label_angle = defaults["value_label_angle"]
-        value_label_bold = defaults["value_label_bold"]
-        if chart_type == "bar":
-            st.divider()
-            st.caption("Bar label formatting")
-            label_col1, label_col2 = st.columns(2)
-            with label_col1:
-                show_value_labels = st.checkbox("Show value labels", value=defaults["show_value_labels"], key=f"{plot_key_base}_show_value_labels")
-                value_label_size = st.number_input("Bar label size", min_value=8, max_value=32, value=defaults["value_label_size"], step=1, key=f"{plot_key_base}_value_label_size")
-            with label_col2:
-                value_label_angle = st.selectbox("Bar label angle", ["auto", "0", "30", "45", "60", "90", "-30", "-45", "-60", "-90"], index=0, key=f"{plot_key_base}_value_label_angle")
-                value_label_bold = st.checkbox("Bold value labels", value=defaults["value_label_bold"], key=f"{plot_key_base}_value_label_bold")
+    applied_settings = dict(defaults)
+    applied_settings.update(dict(session_state.get(applied_settings_key) or {}))
 
-        settings = {
-            "file_stem": file_stem,
-            "figure_width": int(figure_width),
-            "figure_height": int(figure_height),
-            "title_size": int(title_size),
-            "axis_title_size": int(axis_title_size),
-            "tick_font_size": int(tick_font_size),
-            "legend_font_size": int(legend_font_size),
-            "legend_position": legend_position,
-            "show_grid": bool(show_grid),
-            "title_bold": bool(title_bold),
-            "axis_title_bold": bool(axis_title_bold),
-            "x_tick_angle": x_tick_angle,
-            "show_value_labels": bool(show_value_labels),
-            "value_label_size": int(value_label_size),
-            "value_label_angle": value_label_angle,
-            "value_label_bold": bool(value_label_bold),
-            "export_format": export_format,
-            "export_scale": int(export_scale),
-            "transparent_background": bool(transparent_background),
-        }
+    widget_defaults = {
+        "file_stem": applied_settings["file_stem"],
+        "figure_width": applied_settings["figure_width"],
+        "figure_height": applied_settings["figure_height"],
+        "title_size": applied_settings["title_size"],
+        "axis_title_size": applied_settings["axis_title_size"],
+        "tick_font_size": applied_settings["tick_font_size"],
+        "legend_font_size": applied_settings["legend_font_size"],
+        "legend_position": applied_settings["legend_position"],
+        "x_tick_angle": applied_settings["x_tick_angle"],
+        "show_grid": applied_settings["show_grid"],
+        "title_bold": applied_settings["title_bold"],
+        "axis_title_bold": applied_settings["axis_title_bold"],
+        "transparent_background": applied_settings["transparent_background"],
+        "export_format": applied_settings["export_format"],
+        "export_scale": applied_settings["export_scale"],
+        "show_value_labels": applied_settings["show_value_labels"],
+        "value_label_size": applied_settings["value_label_size"],
+        "value_label_angle": applied_settings["value_label_angle"],
+        "value_label_bold": applied_settings["value_label_bold"],
+    }
+    for field_name, field_value in widget_defaults.items():
+        session_state.setdefault(f"{plot_key_base}_{field_name}", field_value)
 
-        export_fig = _apply_publication_style(go.Figure(fig), settings)
-        payload_bytes, file_name, export_error = _build_plot_download_payload(export_fig, settings)
+    preview_fig = _apply_publication_style(go.Figure(fig), applied_settings)
+    with st.popover("Publication settings"):
+        st.caption("Tune the figure for publication. Preview changes apply only when you click Update preview.")
+        with st.form(key=f"{plot_key_base}_publication_form"):
+            col_left, col_right = st.columns(2)
+            with col_left:
+                file_stem = st.text_input("Filename", value=session_state[f"{plot_key_base}_file_stem"], key=f"{plot_key_base}_file_stem")
+                figure_width = st.number_input("Width (px)", min_value=400, max_value=4000, value=session_state[f"{plot_key_base}_figure_width"], step=50, key=f"{plot_key_base}_figure_width")
+                figure_height = st.number_input("Height (px)", min_value=300, max_value=3000, value=session_state[f"{plot_key_base}_figure_height"], step=50, key=f"{plot_key_base}_figure_height")
+                title_size = st.number_input("Title size", min_value=10, max_value=64, value=session_state[f"{plot_key_base}_title_size"], step=1, key=f"{plot_key_base}_title_size")
+                axis_title_size = st.number_input("Axis title size", min_value=8, max_value=48, value=session_state[f"{plot_key_base}_axis_title_size"], step=1, key=f"{plot_key_base}_axis_title_size")
+                tick_font_size = st.number_input("Tick label size", min_value=8, max_value=32, value=session_state[f"{plot_key_base}_tick_font_size"], step=1, key=f"{plot_key_base}_tick_font_size")
+                legend_font_size = st.number_input("Legend size", min_value=8, max_value=32, value=session_state[f"{plot_key_base}_legend_font_size"], step=1, key=f"{plot_key_base}_legend_font_size")
+            with col_right:
+                legend_position = st.selectbox("Legend", ["right", "top", "bottom", "hidden"], index=["right", "top", "bottom", "hidden"].index(str(session_state[f"{plot_key_base}_legend_position"])), key=f"{plot_key_base}_legend_position")
+                x_tick_angle = st.selectbox("X tick angle", ["auto", "0", "-30", "-45", "-60", "90"], index=["auto", "0", "-30", "-45", "-60", "90"].index(str(session_state[f"{plot_key_base}_x_tick_angle"])), key=f"{plot_key_base}_x_tick_angle")
+                show_grid = st.checkbox("Show grid lines", value=bool(session_state[f"{plot_key_base}_show_grid"]), key=f"{plot_key_base}_show_grid")
+                title_bold = st.checkbox("Bold title", value=bool(session_state[f"{plot_key_base}_title_bold"]), key=f"{plot_key_base}_title_bold")
+                axis_title_bold = st.checkbox("Bold axis titles", value=bool(session_state[f"{plot_key_base}_axis_title_bold"]), key=f"{plot_key_base}_axis_title_bold")
+                transparent_background = st.checkbox("Transparent background", value=bool(session_state[f"{plot_key_base}_transparent_background"]), key=f"{plot_key_base}_transparent_background")
+                export_format = st.selectbox("Download format", ["PNG", "SVG", "PDF", "HTML"], index=["PNG", "SVG", "PDF", "HTML"].index(str(session_state[f"{plot_key_base}_export_format"])), key=f"{plot_key_base}_export_format")
+                export_scale = st.number_input("Export scale", min_value=1, max_value=6, value=session_state[f"{plot_key_base}_export_scale"], step=1, key=f"{plot_key_base}_export_scale")
+
+            show_value_labels = bool(session_state[f"{plot_key_base}_show_value_labels"])
+            value_label_size = session_state[f"{plot_key_base}_value_label_size"]
+            value_label_angle = str(session_state[f"{plot_key_base}_value_label_angle"])
+            value_label_bold = bool(session_state[f"{plot_key_base}_value_label_bold"])
+            if chart_type == "bar":
+                st.divider()
+                st.caption("Bar label formatting")
+                label_col1, label_col2 = st.columns(2)
+                with label_col1:
+                    show_value_labels = st.checkbox("Show value labels", value=bool(session_state[f"{plot_key_base}_show_value_labels"]), key=f"{plot_key_base}_show_value_labels")
+                    value_label_size = st.number_input("Bar label size", min_value=8, max_value=32, value=session_state[f"{plot_key_base}_value_label_size"], step=1, key=f"{plot_key_base}_value_label_size")
+                with label_col2:
+                    value_label_angle = st.selectbox("Bar label angle", ["auto", "0", "30", "45", "60", "90", "-30", "-45", "-60", "-90"], index=["auto", "0", "30", "45", "60", "90", "-30", "-45", "-60", "-90"].index(str(session_state[f"{plot_key_base}_value_label_angle"])), key=f"{plot_key_base}_value_label_angle")
+                    value_label_bold = st.checkbox("Bold value labels", value=bool(session_state[f"{plot_key_base}_value_label_bold"]), key=f"{plot_key_base}_value_label_bold")
+
+            settings = {
+                "file_stem": file_stem,
+                "figure_width": int(figure_width),
+                "figure_height": int(figure_height),
+                "title_size": int(title_size),
+                "axis_title_size": int(axis_title_size),
+                "tick_font_size": int(tick_font_size),
+                "legend_font_size": int(legend_font_size),
+                "legend_position": legend_position,
+                "show_grid": bool(show_grid),
+                "title_bold": bool(title_bold),
+                "axis_title_bold": bool(axis_title_bold),
+                "x_tick_angle": x_tick_angle,
+                "show_value_labels": bool(show_value_labels),
+                "value_label_size": int(value_label_size),
+                "value_label_angle": value_label_angle,
+                "value_label_bold": bool(value_label_bold),
+                "export_format": export_format,
+                "export_scale": int(export_scale),
+                "transparent_background": bool(transparent_background),
+            }
+
+            action_col1, action_col2 = st.columns(2)
+            with action_col1:
+                update_preview = st.form_submit_button("Update preview", type="primary")
+            with action_col2:
+                prepare_download = st.form_submit_button("Prepare download")
+
+        if update_preview or prepare_download:
+            applied_settings = dict(settings)
+            session_state[applied_settings_key] = dict(applied_settings)
+            preview_fig = _apply_publication_style(go.Figure(fig), applied_settings)
+            if update_preview and not prepare_download:
+                session_state.pop(download_payload_key, None)
+                session_state.pop(download_name_key, None)
+                session_state.pop(download_mime_key, None)
+                session_state.pop(download_error_key, None)
+
+        if prepare_download:
+            payload_bytes, file_name, export_error = _build_plot_download_payload(go.Figure(preview_fig), applied_settings)
+            if export_error:
+                session_state.pop(download_payload_key, None)
+                session_state.pop(download_name_key, None)
+                session_state.pop(download_mime_key, None)
+                session_state[download_error_key] = str(export_error)
+            elif payload_bytes is not None:
+                mime_map = {
+                    "png": "image/png",
+                    "svg": "image/svg+xml",
+                    "pdf": "application/pdf",
+                    "html": "text/html",
+                }
+                ext = file_name.rsplit(".", 1)[-1].lower()
+                session_state[download_payload_key] = payload_bytes
+                session_state[download_name_key] = file_name
+                session_state[download_mime_key] = mime_map.get(ext, "application/octet-stream")
+                session_state.pop(download_error_key, None)
+
+        export_error = session_state.get(download_error_key)
+        prepared_payload = session_state.get(download_payload_key)
+        prepared_name = session_state.get(download_name_key)
+        prepared_mime = session_state.get(download_mime_key)
         if export_error:
             st.caption(f"Export unavailable: {export_error}")
-        elif payload_bytes is not None:
-            mime_map = {
-                "png": "image/png",
-                "svg": "image/svg+xml",
-                "pdf": "application/pdf",
-                "html": "text/html",
-            }
-            ext = file_name.rsplit(".", 1)[-1].lower()
+        elif prepared_payload is not None and prepared_name:
             st.download_button(
-                f"Download {settings['export_format']}",
-                data=payload_bytes,
-                file_name=file_name,
-                mime=mime_map.get(ext, "application/octet-stream"),
+                f"Download {applied_settings['export_format']}",
+                data=prepared_payload,
+                file_name=prepared_name,
+                mime=prepared_mime or "application/octet-stream",
                 key=f"{plot_key_base}_download",
             )
             st.caption("SVG and PDF preserve vector text for publication. PNG uses the export scale above.")
 
-    return _apply_publication_style(go.Figure(fig), settings), settings
+    return preview_fig, applied_settings
 
 
 def _match_column_name(columns: list[str], requested: str | None) -> str | None:
@@ -1965,10 +2039,11 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str, plotly_te
                 _safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"plot_{block_id}_{chart_idx}")
                 default_name = _default_plot_export_name(chart_type, df_label, fig)
                 fig, pub_settings = _render_plot_publication_tools(fig, _safe_key, chart_type, default_name)
+                display_width, display_height = _get_plot_display_dimensions(fig)
                 st.plotly_chart(
                     fig,
-                    width=int(pub_settings.get("figure_width") or 1400),
-                    height=int(pub_settings.get("figure_height") or 850),
+                    width=display_width,
+                    height=display_height,
                     key=_safe_key,
                     theme=None,
                 )
@@ -2003,10 +2078,11 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str, plotly_te
                 _safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"plot_{block_id}_{chart_idx}")
                 default_name = _default_plot_export_name(chart_type, df_label, combined)
                 combined, pub_settings = _render_plot_publication_tools(combined, _safe_key, chart_type, default_name)
+                display_width, display_height = _get_plot_display_dimensions(combined)
                 st.plotly_chart(
                     combined,
-                    width=int(pub_settings.get("figure_width") or 1400),
-                    height=int(pub_settings.get("figure_height") or 850),
+                    width=display_width,
+                    height=display_height,
                     key=_safe_key,
                     theme=None,
                 )
@@ -2095,10 +2171,11 @@ def _render_workflow_plot_payload(payload: dict, block_id: str, step_suffix: str
             str(chart.get("type") or "plot"),
             default_name,
         )
+        display_width, display_height = _get_plot_display_dimensions(fig)
         st.plotly_chart(
             fig,
-            width=int(pub_settings.get("figure_width") or 1400),
-            height=int(pub_settings.get("figure_height") or 850),
+            width=display_width,
+            height=display_height,
             key=_safe_key,
             theme=None,
         )

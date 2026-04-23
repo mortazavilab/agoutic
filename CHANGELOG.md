@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [3.6.6] - 2026-04-22
+
 ### Bug Fixes
 
 - **The Streamlit UI now closes short-lived API responses eagerly to avoid `Too many open files` under rerun-heavy polling paths** — the shared authenticated request helper and the direct chat/upload request paths now buffer response bodies and close their underlying sockets immediately, reducing descriptor churn during chat status polling, upload actions, and other fast UI rerenders.
@@ -7,6 +9,12 @@
 
 - **The Streamlit auth helper now routes its direct `/auth/me` and `/auth/logout` calls through the same eager-close response path as the rest of the UI** — remote sessions that rerun frequently no longer leave those short-lived auth responses open while checking login state or logging out, reducing socket/file-descriptor churn that could accumulate into `Too many open files` on long-lived Streamlit processes.
   (`ui/auth.py`)
+
+- **Project pages with rendered figures no longer leak Streamlit threads and file descriptors through the publication controls path** — project-page live auto-refresh is now disabled in favor of an explicit refresh button while jobs are running, publication settings keep axis/title/legend controls but only apply preview changes when `Update preview` is clicked, and export payloads are prepared only on demand instead of on every rerun, removing the figure-driven rerun path that was exhausting the Streamlit process over time.
+  (`ui/appUI.py`, `ui/appui_sidebar.py`, `ui/appui_renderers.py`, `tests/ui/test_app_source_helpers.py`)
+
+- **Switching into an existing project with saved figures now renders chats and plots on the first visit** — after the transient project-switch loading state is cleared, the app now forces one follow-up rerun so the newly selected project fetches and paints its blocks immediately instead of staying blank until a second navigation.
+  (`ui/appUI.py`, `tests/ui/test_app_source_helpers.py`)
 
 ## [3.6.5] - 2026-04-21
 

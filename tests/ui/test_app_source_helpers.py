@@ -266,6 +266,18 @@ class TestProjectSwitchHelpers:
         assert fn("project_panel", "project-a") != fn("project_panel", "project-b")
         assert fn("project_panel", "project-a") == "project_panel_project_scope_project-a"
 
+    def test_finish_project_switch_loading_clears_flag_and_reruns(self):
+        fake_st = SimpleNamespace(
+            session_state={"_project_switch_loading_for": "project-b"},
+            rerun=MagicMock(),
+        )
+        fn = _load_function("_finish_project_switch_loading", {"st": fake_st})
+
+        fn("project-b")
+
+        assert "_project_switch_loading_for" not in fake_st.session_state
+        fake_st.rerun.assert_called_once()
+
     def test_set_active_project_resets_project_view_state(self):
         fake_st = SimpleNamespace(
             session_state={
@@ -1195,7 +1207,7 @@ class TestRenderWorkflowPlotPayload:
 
 
 class TestRenderPlotBlock:
-    def test_plotly_charts_render_with_streamlit_theme_disabled(self):
+    def test_plotly_charts_render_without_live_publication_preview_dimensions(self):
         fake_st = SimpleNamespace(
             plotly_chart=MagicMock(),
             warning=MagicMock(),
@@ -1211,6 +1223,7 @@ class TestRenderPlotBlock:
                     fig,
                     {"figure_width": 900, "figure_height": 500},
                 ),
+                "_get_plot_display_dimensions": lambda fig: (1400, 850),
                 "_resolve_df_by_id": lambda df_id, all_blocks: (pd.DataFrame({"x": [1], "y": [2]}), "DF1"),
                 "_build_plotly_figure": lambda chart, df, label, plotly_template: go.Figure(go.Bar(x=[1], y=[2])),
             },
@@ -1224,6 +1237,8 @@ class TestRenderPlotBlock:
 
         fake_st.plotly_chart.assert_called_once()
         assert fake_st.plotly_chart.call_args.kwargs["theme"] is None
+        assert fake_st.plotly_chart.call_args.kwargs["width"] == 1400
+        assert fake_st.plotly_chart.call_args.kwargs["height"] == 850
 
     def test_renders_inline_base64_image_artifacts(self):
         fake_st = SimpleNamespace(
@@ -1262,6 +1277,134 @@ class TestRenderPlotBlock:
 
 
 class TestPublicationPlotHelpers:
+    def test_publication_tools_apply_preview_only_when_submitted(self):
+        plot_key = "plot_preview"
+        build_payload = MagicMock()
+
+        widget_values = {
+            f"{plot_key}_file_stem": "custom_preview",
+            f"{plot_key}_figure_width": 1600,
+            f"{plot_key}_figure_height": 920,
+            f"{plot_key}_title_size": 30,
+            f"{plot_key}_axis_title_size": 20,
+            f"{plot_key}_tick_font_size": 15,
+            f"{plot_key}_legend_font_size": 14,
+            f"{plot_key}_legend_position": "top",
+            f"{plot_key}_x_tick_angle": "-45",
+            f"{plot_key}_show_grid": False,
+            f"{plot_key}_title_bold": True,
+            f"{plot_key}_axis_title_bold": True,
+            f"{plot_key}_transparent_background": False,
+            f"{plot_key}_export_format": "SVG",
+            f"{plot_key}_export_scale": 3,
+            f"{plot_key}_show_value_labels": False,
+            f"{plot_key}_value_label_size": 14,
+            f"{plot_key}_value_label_angle": "auto",
+            f"{plot_key}_value_label_bold": False,
+        }
+
+        fake_st = SimpleNamespace(
+            session_state={},
+            popover=MagicMock(return_value=_ContextManagerStub()),
+            form=MagicMock(return_value=_ContextManagerStub()),
+            columns=MagicMock(side_effect=lambda n: [_ContextManagerStub() for _ in range(n)]),
+            caption=MagicMock(),
+            download_button=MagicMock(),
+            divider=MagicMock(),
+            text_input=MagicMock(side_effect=lambda label, value=None, key=None: widget_values.get(key, value)),
+            number_input=MagicMock(side_effect=lambda label, min_value=None, max_value=None, value=None, step=None, key=None: widget_values.get(key, value)),
+            selectbox=MagicMock(side_effect=lambda label, options, index=0, key=None: widget_values.get(key, options[index])),
+            checkbox=MagicMock(side_effect=lambda label, value=False, key=None: widget_values.get(key, value)),
+            form_submit_button=MagicMock(side_effect=[True, False]),
+        )
+        fn = _load_function(
+            "_render_plot_publication_tools",
+            {
+                "st": fake_st,
+                "_default_publication_settings": _load_function("_default_publication_settings"),
+                "_apply_publication_style": _load_function("_apply_publication_style"),
+                "_build_plot_download_payload": build_payload,
+            },
+        )
+        fig = go.Figure(go.Scatter(x=[1, 2], y=[3, 4]))
+        fig.update_layout(title="My Plot", xaxis_title="X", yaxis_title="Y")
+
+        preview_fig, settings = fn(fig, plot_key, "line", "default_plot")
+
+        assert settings["figure_width"] == 1600
+        assert settings["figure_height"] == 920
+        assert preview_fig.layout.width == 1600
+        assert preview_fig.layout.height == 920
+        assert fake_st.session_state[f"{plot_key}_publication_applied_settings"]["legend_position"] == "top"
+        build_payload.assert_not_called()
+        fake_st.download_button.assert_not_called()
+
+    def test_publication_tools_prepare_download_on_demand(self):
+        plot_key = "plot_download"
+        build_payload = MagicMock(return_value=(b"svg-bytes", "prepared_plot.svg", None))
+
+        widget_values = {
+            f"{plot_key}_file_stem": "prepared_plot",
+            f"{plot_key}_figure_width": 1500,
+            f"{plot_key}_figure_height": 880,
+            f"{plot_key}_title_size": 28,
+            f"{plot_key}_axis_title_size": 18,
+            f"{plot_key}_tick_font_size": 14,
+            f"{plot_key}_legend_font_size": 12,
+            f"{plot_key}_legend_position": "right",
+            f"{plot_key}_x_tick_angle": "auto",
+            f"{plot_key}_show_grid": True,
+            f"{plot_key}_title_bold": True,
+            f"{plot_key}_axis_title_bold": True,
+            f"{plot_key}_transparent_background": False,
+            f"{plot_key}_export_format": "SVG",
+            f"{plot_key}_export_scale": 2,
+            f"{plot_key}_show_value_labels": False,
+            f"{plot_key}_value_label_size": 14,
+            f"{plot_key}_value_label_angle": "auto",
+            f"{plot_key}_value_label_bold": False,
+        }
+
+        fake_st = SimpleNamespace(
+            session_state={},
+            popover=MagicMock(return_value=_ContextManagerStub()),
+            form=MagicMock(return_value=_ContextManagerStub()),
+            columns=MagicMock(side_effect=lambda n: [_ContextManagerStub() for _ in range(n)]),
+            caption=MagicMock(),
+            download_button=MagicMock(),
+            divider=MagicMock(),
+            text_input=MagicMock(side_effect=lambda label, value=None, key=None: widget_values.get(key, value)),
+            number_input=MagicMock(side_effect=lambda label, min_value=None, max_value=None, value=None, step=None, key=None: widget_values.get(key, value)),
+            selectbox=MagicMock(side_effect=lambda label, options, index=0, key=None: widget_values.get(key, options[index])),
+            checkbox=MagicMock(side_effect=lambda label, value=False, key=None: widget_values.get(key, value)),
+            form_submit_button=MagicMock(side_effect=[False, True]),
+        )
+        fn = _load_function(
+            "_render_plot_publication_tools",
+            {
+                "st": fake_st,
+                "_default_publication_settings": _load_function("_default_publication_settings"),
+                "_apply_publication_style": _load_function("_apply_publication_style"),
+                "_build_plot_download_payload": build_payload,
+            },
+        )
+        fig = go.Figure(go.Scatter(x=[1, 2], y=[3, 4]))
+        fig.update_layout(title="My Plot", xaxis_title="X", yaxis_title="Y")
+
+        preview_fig, settings = fn(fig, plot_key, "line", "default_plot")
+
+        assert settings["export_format"] == "SVG"
+        assert preview_fig.layout.width == 1500
+        build_payload.assert_called_once()
+        fake_st.download_button.assert_called_once_with(
+            "Download SVG",
+            data=b"svg-bytes",
+            file_name="prepared_plot.svg",
+            mime="image/svg+xml",
+            key=f"{plot_key}_download",
+        )
+        assert fake_st.session_state[f"{plot_key}_publication_download_name"] == "prepared_plot.svg"
+
     def test_apply_publication_style_updates_fonts_layout_and_bar_labels(self):
         fn = _load_function("_apply_publication_style")
         fig = go.Figure(go.Bar(x=["Condition Alpha", "Condition Beta", "Condition Gamma"], y=[12, 30, 18]))

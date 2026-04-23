@@ -3,7 +3,6 @@ import requests
 import datetime
 import json
 import os
-from datetime import timedelta
 from pathlib import Path as _Path
 import pandas as pd
 import streamlit as st
@@ -220,6 +219,12 @@ def _project_scope_mount_key(scope_name: str, project_id: str) -> str:
     scope_token = (scope_name or "scope").strip() or "scope"
     project_token = (project_id or "none").strip() or "none"
     return f"{scope_token}_project_scope_{project_token}"
+
+
+def _finish_project_switch_loading(active_project_id: str) -> None:
+    if st.session_state.get("_project_switch_loading_for") == active_project_id:
+        st.session_state.pop("_project_switch_loading_for", None)
+        st.rerun()
 
 # Check if we're creating a new project (flag set by New Project button)
 if st.session_state.get("_create_new_project", False):
@@ -549,28 +554,13 @@ for _p in st.session_state.get("_cached_projects", []):
         _active_project_name = _p.get("name", _active_project_name)
         break
 
-# Determine if the chat area needs periodic auto-refresh.
-# This is evaluated ONCE per full script run; the fragment uses it.
-_auto_refresh_suppressed = _auto_refresh_is_suppressed()
+# Determine whether the page is in a transient project-switch state.
 _project_switch_loading = st.session_state.get("_project_switch_loading_for") == active_id
-_needs_auto_refresh = bool((auto_refresh or st.session_state.get("_has_running_job", False)) and not _auto_refresh_suppressed)
-_needs_full_page_auto_refresh = bool(auto_refresh and st.session_state.get("_has_full_refresh_job", False) and not _auto_refresh_suppressed)
-_refresh_seconds = min(poll_seconds, 2) if st.session_state.get("_has_running_job", False) else poll_seconds
-if _project_switch_loading:
-    _refresh_interval = timedelta(milliseconds=100)
-else:
-    _refresh_interval = timedelta(seconds=_refresh_seconds) if _needs_auto_refresh else None
 project_loading_slot = None
 
 
-@st.fragment(run_every=_refresh_interval)
 def _render_chat():
-    """Fragment that renders all chat blocks.
-
-    When ``run_every`` is set (job is running), Streamlit re-executes
-    ONLY this function on a timer — the sidebar, title, and chat-input
-    all stay stable so there is no visible page flash.
-    """
+    """Render all chat blocks for the active project."""
     _active_id = st.session_state.active_project_id
     with st.container(key=_project_scope_mount_key("chat", _active_id)):
         if st.session_state.get("_project_switch_loading_for") == _active_id:
@@ -696,12 +686,15 @@ def _render_chat():
                 except Exception:
                     pass
 
-        # Show refresh indicator inside the fragment
-        if _needs_auto_refresh:
-            st.caption(
-                f"🔄 Live updating "
-                f"(last: {datetime.datetime.now().strftime('%H:%M:%S')})"
-            )
+        if _has_running_job:
+            refresh_col, detail_col = st.columns([1, 4])
+            with refresh_col:
+                st.button("Refresh now", key=f"_manual_project_refresh_{_active_id}")
+            with detail_col:
+                st.caption(
+                    f"Live auto-refresh is disabled to avoid a Streamlit thread leak. "
+                    f"Last update: {datetime.datetime.now().strftime('%H:%M:%S')}"
+                )
 
 with st.container(key=_project_scope_mount_key("project_panel", active_id)):
     st.title(f"🧬 {_active_project_name}")
@@ -712,7 +705,6 @@ with st.container(key=_project_scope_mount_key("project_panel", active_id)):
     _render_chat()
 
 
-@st.fragment(run_every=_refresh_interval)
 def _render_task_dock():
     """Render an inline task pane only when the project has tasks."""
     _active_id = st.session_state.active_project_id
@@ -737,7 +729,7 @@ def _render_task_dock():
 
 
     # Pagination button — rendered outside the fragment to avoid duplicate-key
-    # errors when the fragment's run_every timer overlaps with a full page rerun.
+    # errors when the fragment's timer overlaps with a manual full-page rerun.
     _hbc = st.session_state.get("_hidden_block_count", 0)
     if _hbc > 0:
         if st.button(f"⬆️ Load {min(_hbc, 30)} older messages ({_hbc} hidden)"):
@@ -758,17 +750,7 @@ if _captured_prompt and not st.session_state.get("_pending_prompt"):
 
 _render_task_dock()
 
-if st.session_state.get("_project_switch_loading_for") == active_id:
-    st.session_state.pop("_project_switch_loading_for", None)
-
-# Bootstrap: if the desired fragment auto-refresh state changed during the
-# fragment run, trigger one full rerun so Streamlit re-registers the fragment
-# with the new run_every value.
-_refresh_now = bool((auto_refresh or st.session_state.get("_has_running_job", False)) and not _auto_refresh_suppressed)
-_full_refresh_now = bool(auto_refresh and st.session_state.get("_has_full_refresh_job", False) and not _auto_refresh_suppressed)
-if _refresh_now != _needs_auto_refresh or _full_refresh_now != _needs_full_page_auto_refresh:
-    time.sleep(0.3)
-    st.rerun()
+_finish_project_switch_loading(active_id)
 
 st.write("---")
 
@@ -816,13 +798,3 @@ if prompt:
         model_choice=model_choice,
         get_session_cookie_fn=get_session_cookie,
     )
-
-# 4. Auto-Refresh suppression bookkeeping
-if _auto_refresh_is_suppressed():
-    pass
-elif auto_refresh and st.session_state.get("_has_full_refresh_job", False):
-    # Restore the older double-polling path for active execution/download jobs.
-    # This is heavier than fragment-only refresh, but it keeps Nextflow status
-    # cards updating reliably.
-    time.sleep(min(poll_seconds, 2))
-    st.rerun()
