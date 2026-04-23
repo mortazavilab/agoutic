@@ -420,7 +420,6 @@ agoutic/
 ├── environment.yml               # Conda environment specification
 ├── alembic.ini                  # Alembic migration configuration
 ├── CONFIGURATION.md              # Path configuration guide
-├── ARCHITECTURE_UPDATE.md        # System architecture (all servers)
 ├── ATLAS_IMPLEMENTATION.md     # Atlas integration guide
 ├── ATLAS_QUICKSTART.md         # Atlas quick reference
 │
