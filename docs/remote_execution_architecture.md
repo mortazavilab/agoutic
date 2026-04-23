@@ -3,8 +3,8 @@
 ## Scope
 
 This document describes the **current implemented architecture** for AGOUTIC
-remote execution support as of `3.4.1`, with emphasis on the parts that are
-already live in code:
+remote execution support for the `3.6.6` release series, with emphasis on the
+parts that are already live in code:
 
 - saved SSH profiles
 - broker-mediated unlock and session reuse

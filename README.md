@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.6.5
+**Release:** 3.6.6
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -44,7 +44,7 @@ Remote execution features:
 
 Phase 1 limitation: Analyzer operates on local-accessible files only. Remote results must be copied back before downstream analysis.
 
-See [`docs/remote_execution_architecture.md`](docs/remote_execution_architecture.md) for architecture details, [`docs/cluster_slurm_setup.md`](docs/cluster_slurm_setup.md) for setup, and [`docs/user_guide_execution_modes.md`](docs/user_guide_execution_modes.md) for usage.
+See [`docs/remote_execution_architecture.md`](docs/remote_execution_architecture.md) for architecture details, [`docs/cluster_slurm_setup.md`](docs/cluster_slurm_setup.md) for setup, [`docs/user_guide_execution_modes.md`](docs/user_guide_execution_modes.md) for usage, and [`TUTORIAL.md`](TUTORIAL.md) for an end-to-end user walkthrough.
 
 ## 🔬 Analysis Capabilities
 
@@ -916,7 +916,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.6.5 — manifest-first planning now ships with deterministic skill commands, GTF-backed annotation prefers workflow-local `reconciled.gtf` outputs, remote staging supports refresh/cancel/resume/delete plus live byte-progress telemetry, SLURM DNA runs default to the shared OpenChromatin GPU runtime, and cross-workflow overlap workflows reopen accurately with readable large-count venn diagrams and publication-style DE plot exports
+- **Release**: 3.6.6 — rerun-heavy Streamlit polling paths now close short-lived API responses eagerly, auth helper calls use the same eager-close path, publication controls no longer leak threads or file descriptors on figure-heavy project pages, and projects with saved figures render chats and plots correctly on first visit
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

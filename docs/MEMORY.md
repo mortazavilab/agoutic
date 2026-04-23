@@ -1,6 +1,6 @@
 # Memory System Architecture
 
-> **Current as of v3.4.17**
+> **Current as of v3.6.6**
 
 The memory system gives AGOUTIC a long-lived, cross-session store for results,
 sample annotations, pipeline steps, preferences, findings, and dataframes.

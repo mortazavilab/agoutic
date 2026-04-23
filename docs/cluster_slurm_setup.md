@@ -17,6 +17,10 @@ In the examples below, the saved SSH profile nickname is `localCluster`.
 Replace the sample hostnames, usernames, accounts, and filesystem paths with
 values from your own environment.
 
+If you want the end-to-end user workflow after setup, including staging local
+or remote data, launching Dogme runs, reconciling BAMs, and syncing results
+back, see [`../TUTORIAL.md`](../TUTORIAL.md).
+
 ## Step 1: Create an SSH Key Pair
 
 Skip this step if you plan to use `ssh_agent` authentication.

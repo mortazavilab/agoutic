@@ -2,6 +2,8 @@
 
 AGOUTIC supports two execution modes: **Local** and **Remote SLURM**. This guide explains when to use each, how to configure them, and how to monitor your jobs.
 
+For a hands-on walkthrough that combines SSH profile setup, staging, SLURM runs, reconcile, and copy-back, see [`../TUTORIAL.md`](../TUTORIAL.md).
+
 ## When to Use Local Execution
 
 | Scenario | Why Local |
@@ -145,6 +147,18 @@ Set your default in **Settings → Execution Preferences**. Override per-job whe
 
 > **Phase 1 Note:** Analysis (Analyzer) runs locally. If you choose "remote only," you must manually trigger a download before running analysis on the results.
 
+### Manual Result Sync
+
+If you chose **Remote only**, or if a remote-to-local copy-back needs to be retried, you can trigger a manual sync from chat.
+
+Use prompts such as:
+
+- _"sync results back to local for workflow2"_
+- _"retry sync results for workflow2"_
+- _"sync results for 12345678-1234-1234-1234-123456789abc"_
+
+AGOUTIC resolves the current run from the named `workflowN` when possible, or from an explicit run UUID when you provide one. If the sync starts successfully, progress appears in the task dock and job status updates.
+
 ---
 
 ## Post-Execution Analysis
@@ -213,6 +227,26 @@ Visualization and biological interpretation
 
 - Analyzer operates on local-accessible files only
 - Remote-only results must be copied back before downstream analysis
+
+## Reconcile Annotated BAMs
+
+Use reconcile when you want to merge or compare annotated BAM outputs across multiple workflows that share the same reference and annotation context.
+
+Typical prompts:
+
+- _"Reconcile annotated BAMs from workflow1 and workflow2"_
+- _"Run reconcile bams for workflow1 and workflow2 with output prefix merged_sample"_
+- _"Reconcile workflow2 and workflow3 using 16 threads"_
+
+What AGOUTIC does for you:
+
+- locates candidate `*.annotated.bam` files from the selected workflows
+- validates that the workflows resolve to one shared reference genome
+- resolves the annotation GTF from workflow config artifacts when possible
+- asks for approval before running reconcile
+- writes outputs into a standard `workflowN` directory with staged input symlinks under `workflowN/input`
+
+Because reconcile operates on local-accessible workflow outputs, remote SLURM runs should use **Local only** or **Both**, or you should run a manual result sync before reconciling.
 
 ---
 
