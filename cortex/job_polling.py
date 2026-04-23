@@ -22,7 +22,7 @@ from cortex.task_service import sync_project_tasks
 logger = get_logger(__name__)
 
 _TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
-_JOB_STATUS_CACHE_MAX_AGE_SECONDS = 180.0
+_JOB_STATUS_CACHE_MAX_AGE_SECONDS = 5.0
 _latest_job_status_by_run_uuid: dict[str, dict] = {}
 
 

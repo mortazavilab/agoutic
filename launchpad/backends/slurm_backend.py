@@ -791,6 +791,29 @@ class SlurmBackend:
         stdout_content: str,
         scheduler_status: str,
     ) -> tuple[int, dict | None, str | None]:
+        def _iter_stdout_task_segments(line: str) -> list[str]:
+            """Split a stdout summary line into individual task segments.
+
+            Nextflow often writes one composite line that starts with
+            ``executor >`` and then appends multiple ``[hash] task`` entries on
+            the same line. The parser needs those trailing entries to recover
+            fresher progress even when the trace file lags.
+            """
+            stripped = str(line or "").strip()
+            if not stripped or "[" not in stripped or "]" not in stripped:
+                return []
+
+            segments: list[str] = []
+            for match in re.finditer(r"(\[[^\]]+\]\s+.*?)(?=\s+\[[^\]]+\]\s+|$)", stripped):
+                segment = match.group(1).strip()
+                if "]" not in segment:
+                    continue
+                tail = segment.split("]", 1)[1]
+                if ":" not in tail:
+                    continue
+                segments.append(segment)
+            return segments
+
         def _task_suffix(name: str) -> str:
             """Return the last task segment for cross-prefix matching."""
             parts = name.rsplit(":", 1)
@@ -873,38 +896,37 @@ class SlurmBackend:
                 except Exception:
                     pass
 
-            if not line.startswith("[") or "]" not in line or ":" not in line.split("]", 1)[-1]:
-                continue
-            hash_part = line.split("]", 1)[0] + "]"
-            if "/" not in hash_part:
-                continue
-            rest = line.split("]", 1)[1].strip()
-            # Handle "Submitted process > taskName" and "process > taskName"
-            if ">" in rest:
-                rest = rest.split(">", 1)[1].strip()
-            task_name = rest.split()[0] if rest else ""
-            match = re.search(r"(\(\d+\))", rest)
-            if match and match.group(1) not in task_name:
-                task_name = f"{task_name} {match.group(1)}"
-            if not task_name:
-                continue
+            for task_line in _iter_stdout_task_segments(line):
+                hash_part = task_line.split("]", 1)[0] + "]"
+                if "/" not in hash_part:
+                    continue
+                rest = task_line.split("]", 1)[1].strip()
+                # Handle "Submitted process > taskName" and "process > taskName"
+                if ">" in rest:
+                    rest = rest.split(">", 1)[1].strip()
+                task_name = rest.split()[0] if rest else ""
+                match = re.search(r"(\(\d+\))", rest)
+                if match and match.group(1) not in task_name:
+                    task_name = f"{task_name} {match.group(1)}"
+                if not task_name:
+                    continue
 
-            progress_match = re.search(r'\|\s*(\d+)\s+of\s+(\d+)\b', line)
-            if progress_match:
-                try:
-                    family_key = _task_family_key(task_name)
-                    progress_state = family_progress.setdefault(
-                        family_key,
-                        {"completed": 0, "total": 0},
-                    )
-                    progress_state["completed"] = max(progress_state["completed"], int(progress_match.group(1)))
-                    progress_state["total"] = max(progress_state["total"], int(progress_match.group(2)))
-                except Exception:
-                    pass
+                progress_match = re.search(r'\|\s*(\d+)\s+of\s+(\d+)\b', task_line)
+                if progress_match:
+                    try:
+                        family_key = _task_family_key(task_name)
+                        progress_state = family_progress.setdefault(
+                            family_key,
+                            {"completed": 0, "total": 0},
+                        )
+                        progress_state["completed"] = max(progress_state["completed"], int(progress_match.group(1)))
+                        progress_state["total"] = max(progress_state["total"], int(progress_match.group(2)))
+                    except Exception:
+                        pass
 
-            is_completed_stdout = "✔" in line
-            is_failed_stdout = not is_completed_stdout and "FAILED" in line.upper()
-            task_events_by_hash[hash_part] = (task_name, is_completed_stdout, is_failed_stdout)
+                is_completed_stdout = "✔" in task_line
+                is_failed_stdout = not is_completed_stdout and "FAILED" in task_line.upper()
+                task_events_by_hash[hash_part] = (task_name, is_completed_stdout, is_failed_stdout)
 
         # Use trace file as authoritative source for completed/failed.
         # Only fall back to stdout ✔/FAILED when trace has no results.

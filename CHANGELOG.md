@@ -5,6 +5,12 @@
 - **Gate-approved GPU account and partition overrides are now respected in generated `nextflow.config`** — Launchpad's submit endpoint now accepts `slurm_gpu_account` and `slurm_gpu_partition` fields and passes them through to `SubmitParams`, so GPU account approval overrides from the gate no longer drop off before config generation. The SLURM backend continues to correctly fall back to CPU account/partition only when GPU overrides are missing or empty.
   (`launchpad/schemas.py`, `launchpad/app.py`, `tests/launchpad/test_schemas.py`, `tests/launchpad/test_app_submit_script.py`)
 
+- **Nextflow live monitoring no longer freezes completed-task counts when stdout shifts to composite `executor > slurm (...)` summary lines** — the SLURM backend now parses embedded `[hash] task | x of y` segments from those executor summary lines instead of only handling stdout lines that begin with a bracketed task entry, so live execution cards keep advancing completed counts even when the trace file lags behind fresher stdout progress.
+  (`launchpad/backends/slurm_backend.py`, `tests/launchpad/test_slurm_backend.py`)
+
+- **Transient scheduler poll failures no longer pin execution cards to an old completed count indefinitely** — Cortex still preserves the last good job snapshot across temporary `Failed to poll scheduler` responses, but preserved snapshots marked with `last_poll_error` are now treated as fallback-only rather than authoritative cache hits, so the proxy retries Launchpad for fresher live status before serving the preserved snapshot again.
+  (`cortex/app.py`, `tests/cortex/test_background_tasks.py`)
+
 ## [3.6.6] - 2026-04-22
 
 ### Bug Fixes

@@ -408,6 +408,15 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
     user = request.state.user
     require_run_uuid_access(run_uuid, user)
 
+    def _cache_hit_is_authoritative(status_data: dict | None) -> bool:
+        if not isinstance(status_data, dict):
+            return False
+        last_poll_error = str(status_data.get("last_poll_error") or "").strip()
+        status = str(status_data.get("status") or "").upper()
+        if last_poll_error and status in {"RUNNING", "PENDING", "QUEUED"}:
+            return False
+        return True
+
     from cortex.config import INTERNAL_API_SECRET
     launchpad_rest = SERVICE_REGISTRY.get("launchpad", {}).get(
         "rest_url", os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
@@ -416,7 +425,7 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
     if INTERNAL_API_SECRET:
         headers["X-Internal-Secret"] = INTERNAL_API_SECRET
     cached_status = job_polling.get_cached_job_status(run_uuid)
-    if cached_status is not None:
+    if _cache_hit_is_authoritative(cached_status):
         return cached_status
 
     status_proxy_timeout = float(os.getenv("CORTEX_JOB_STATUS_PROXY_TIMEOUT_SECONDS", "150"))
@@ -431,6 +440,9 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
             payload = resp.json()
             if isinstance(payload, dict):
                 job_polling.cache_job_status(run_uuid, payload)
+                cached_payload = job_polling.get_cached_job_status(run_uuid, max_age_seconds=0)
+                if cached_payload is not None:
+                    return cached_payload
             return payload
     except Exception as e:
         cached_status = job_polling.get_cached_job_status(run_uuid, max_age_seconds=0)

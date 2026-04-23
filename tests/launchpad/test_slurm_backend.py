@@ -796,6 +796,31 @@ def test_parse_task_status_texts_adds_prior_completed_families_to_pipeline_total
     assert message == "Pipeline: 454/731 completed, 277 remaining"
 
 
+def test_parse_task_status_texts_uses_executor_summary_segments_when_trace_lags():
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content=(
+            "task_id\thash\tnative_id\tname\tstatus\texit\n"
+            "1\taa/bb0011\t1001\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
+            "2\tcc/dd0022\t1002\tmainWorkflow:softwareVTask\tCOMPLETED\t0\n"
+            "3\tee/ff0033\t1003\tmainWorkflow:doradoTask (1)\tCOMPLETED\t0\n"
+            "4\tgg/hh0044\t1004\tmainWorkflow:doradoTask (2)\tCOMPLETED\t0\n"
+        ),
+        stdout_content=(
+            "executor >  slurm (7) "
+            "[11/aaaaaa] mainWorkflow:doradoDownloadTask | 1 of 1 ✔ "
+            "[22/bbbbbb] mainWorkflow:softwareVTask | 1 of 1 ✔ "
+            "[33/cccccc] mainWorkflow:doradoTask (5) | 5 of 6\n"
+        ),
+        scheduler_status="RUNNING",
+    )
+
+    assert progress == int((7 / 8) * 90)
+    assert tasks["completed_count"] == 7
+    assert tasks["total"] == 8
+    assert tasks["remaining_count"] == 1
+    assert message == "Pipeline: 7/8 completed, 1 remaining"
+
+
 def test_parse_scheduler_queue_text_counts_running_and_pending_jobs():
     counts = SlurmBackend._parse_scheduler_queue_text(
         queue_output=(

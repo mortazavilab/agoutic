@@ -2732,6 +2732,132 @@ class TestJobStatusProxyCache:
         async_client.assert_called_once()
 
     @pytest.mark.anyio
+    async def test_refreshes_preserved_cached_status_from_live_proxy(self, monkeypatch):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+        job_polling_module.cache_job_status(
+            "proxy-refresh-test",
+            {
+                "run_uuid": "proxy-refresh-test",
+                "status": "RUNNING",
+                "progress_percent": 17,
+                "message": "Pipeline: 32/162 completed, 130 remaining",
+                "tasks": {
+                    "total": 162,
+                    "completed_count": 32,
+                    "remaining_count": 130,
+                },
+            },
+        )
+        job_polling_module.cache_job_status(
+            "proxy-refresh-test",
+            {
+                "run_uuid": "proxy-refresh-test",
+                "status": "RUNNING",
+                "progress_percent": 0,
+                "message": "Failed to poll scheduler: [Errno 111] Connection refused",
+                "tasks": {},
+            },
+        )
+
+        request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u-bg")))
+        monkeypatch.setattr("cortex.app.require_run_uuid_access", lambda run_uuid, user: None)
+
+        live_payload = {
+            "run_uuid": "proxy-refresh-test",
+            "status": "RUNNING",
+            "progress_percent": 33,
+            "message": "Pipeline: 61/162 completed, 101 remaining",
+            "tasks": {
+                "total": 162,
+                "completed_count": 61,
+                "remaining_count": 101,
+            },
+        }
+
+        class _LiveAsyncClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, *args, **kwargs):
+                response = MagicMock()
+                response.raise_for_status.return_value = None
+                response.json.return_value = live_payload
+                return response
+
+        async_client = MagicMock(return_value=_LiveAsyncClient())
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", async_client)
+
+        result = await get_job_status_proxy("proxy-refresh-test", request)
+
+        assert result == live_payload
+        refreshed = job_polling_module.get_cached_job_status("proxy-refresh-test", max_age_seconds=0)
+        assert refreshed["tasks"]["completed_count"] == 61
+        assert "last_poll_error" not in refreshed
+        async_client.assert_called_once()
+
+    @pytest.mark.anyio
+    async def test_live_transient_failure_still_returns_preserved_cached_status(self, monkeypatch):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+        job_polling_module.cache_job_status(
+            "proxy-preserve-test",
+            {
+                "run_uuid": "proxy-preserve-test",
+                "status": "RUNNING",
+                "progress_percent": 17,
+                "message": "Pipeline: 32/162 completed, 130 remaining",
+                "tasks": {
+                    "total": 162,
+                    "completed_count": 32,
+                    "remaining_count": 130,
+                },
+            },
+        )
+        job_polling_module.cache_job_status(
+            "proxy-preserve-test",
+            {
+                "run_uuid": "proxy-preserve-test",
+                "status": "RUNNING",
+                "progress_percent": 0,
+                "message": "Failed to poll scheduler: [Errno 111] Connection refused",
+                "tasks": {},
+            },
+        )
+
+        request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u-bg")))
+        monkeypatch.setattr("cortex.app.require_run_uuid_access", lambda run_uuid, user: None)
+
+        class _LiveAsyncClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, *args, **kwargs):
+                response = MagicMock()
+                response.raise_for_status.return_value = None
+                response.json.return_value = {
+                    "run_uuid": "proxy-preserve-test",
+                    "status": "RUNNING",
+                    "progress_percent": 0,
+                    "message": "Failed to poll scheduler: [Errno 111] Connection refused",
+                    "tasks": {},
+                }
+                return response
+
+        async_client = MagicMock(return_value=_LiveAsyncClient())
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", async_client)
+
+        result = await get_job_status_proxy("proxy-preserve-test", request)
+
+        assert result["tasks"]["completed_count"] == 32
+        assert result["last_poll_error"] == "Failed to poll scheduler: [Errno 111] Connection refused"
+        async_client.assert_called_once()
+
+    @pytest.mark.anyio
     async def test_poll_job_status_preserves_previous_progress_on_transient_poll_failure(self, session_factory, seed_data):
         job_polling_module._latest_job_status_by_run_uuid.clear()
 
