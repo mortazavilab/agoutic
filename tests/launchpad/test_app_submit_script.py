@@ -303,3 +303,61 @@ async def test_submit_dogme_job_omitted_gpu_limit_uses_default(monkeypatch, tmp_
 
     assert result["run_uuid"] == "run-dogme"
     assert executor_kwargs["max_gpu_tasks"] == 3
+
+
+@pytest.mark.asyncio
+async def test_submit_slurm_job_preserves_gpu_account_overrides(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    fake_job = _fake_dogme_job()
+    captured = {}
+
+    async def fake_create_job(*_args, **_kwargs):
+        return fake_job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_get_workflow_identity_for_path(*_args, **_kwargs):
+        return (None, None, None)
+
+    async def fake_get_next_workflow_index(*_args, **_kwargs):
+        return 1
+
+    class _FakeBackend:
+        async def submit(self, _run_uuid, submit_params):
+            captured["submit_params"] = submit_params
+            return "run-dogme"
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "create_job", fake_create_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "get_workflow_identity_for_path", fake_get_workflow_identity_for_path)
+    monkeypatch.setattr(launchpad_app, "get_next_workflow_index", fake_get_next_workflow_index)
+    monkeypatch.setattr(launchpad_app, "get_backend", lambda mode: _FakeBackend())
+    monkeypatch.setattr(launchpad_app.uuid, "uuid4", lambda: "run-dogme")
+
+    req = SubmitJobRequest(
+        project_id="proj-1",
+        user_id="user-1",
+        username="alice",
+        project_slug="proj-1",
+        sample_name="sample-a",
+        mode="RNA",
+        input_directory=str(tmp_path / "input"),
+        execution_mode="slurm",
+        ssh_profile_id="profile-1",
+        slurm_account="BIOD132_CLASS",
+        slurm_partition="standard",
+        slurm_gpu_account="BIOD132_CLASS_GPU ",
+        slurm_gpu_partition="gpu",
+        slurm_cpus=4,
+        slurm_memory_gb=16,
+        slurm_walltime="48:00:00",
+        slurm_gpus=1,
+    )
+
+    result = await launchpad_app.submit_job(req)
+
+    assert result["run_uuid"] == "run-dogme"
+    assert captured["submit_params"].slurm_gpu_account == "BIOD132_CLASS_GPU "
+    assert captured["submit_params"].slurm_gpu_partition == "gpu"

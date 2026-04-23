@@ -1,7 +1,9 @@
 import asyncio
+import copy
 import datetime
 import json
 import re
+import time
 
 from fastapi.concurrency import run_in_threadpool
 
@@ -20,6 +22,84 @@ from cortex.task_service import sync_project_tasks
 logger = get_logger(__name__)
 
 _TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
+_JOB_STATUS_CACHE_MAX_AGE_SECONDS = 180.0
+_latest_job_status_by_run_uuid: dict[str, dict] = {}
+
+
+def _job_status_has_useful_progress(status_data: dict | None) -> bool:
+    if not isinstance(status_data, dict):
+        return False
+    tasks = status_data.get("tasks")
+    if isinstance(tasks, dict):
+        if int(tasks.get("completed_count", 0) or 0) > 0:
+            return True
+        if int(tasks.get("total", 0) or 0) > 0 and int(tasks.get("remaining_count", 0) or 0) >= 0:
+            return True
+    try:
+        if int(status_data.get("progress_percent", 0) or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    message = str(status_data.get("message") or "")
+    return message.startswith("Pipeline:")
+
+
+def _is_transient_scheduler_poll_failure(status_data: dict | None) -> bool:
+    if not isinstance(status_data, dict):
+        return False
+    message = str(status_data.get("message") or "")
+    if not message.startswith("Failed to poll scheduler:"):
+        return False
+    status = str(status_data.get("status") or "").upper()
+    if status and status not in {"RUNNING", "PENDING", "QUEUED"}:
+        return False
+    tasks = status_data.get("tasks")
+    return not isinstance(tasks, dict) or not bool(tasks)
+
+
+def _prefer_richer_job_status(previous_status: dict | None, incoming_status: dict | None) -> dict | None:
+    if not isinstance(incoming_status, dict):
+        return None
+    if _is_transient_scheduler_poll_failure(incoming_status) and _job_status_has_useful_progress(previous_status):
+        preserved = copy.deepcopy(previous_status)
+        preserved["last_poll_error"] = incoming_status.get("message")
+        for key in ("slurm_state", "transfer_state", "transfer_detail", "ssh_profile_nickname", "work_directory"):
+            value = incoming_status.get(key)
+            if value not in (None, "", [], {}):
+                preserved[key] = value
+        return preserved
+    return copy.deepcopy(incoming_status)
+
+
+def cache_job_status(run_uuid: str, status_data: dict | None) -> None:
+    if not run_uuid or not isinstance(status_data, dict):
+        return
+    previous_status = None
+    existing = _latest_job_status_by_run_uuid.get(run_uuid)
+    if isinstance(existing, dict) and isinstance(existing.get("status_data"), dict):
+        previous_status = existing["status_data"]
+    resolved_status = _prefer_richer_job_status(previous_status, status_data)
+    if not isinstance(resolved_status, dict):
+        return
+    _latest_job_status_by_run_uuid[run_uuid] = {
+        "cached_at": time.time(),
+        "status_data": resolved_status,
+    }
+
+
+def get_cached_job_status(run_uuid: str, *, max_age_seconds: float = _JOB_STATUS_CACHE_MAX_AGE_SECONDS) -> dict | None:
+    if not run_uuid:
+        return None
+    entry = _latest_job_status_by_run_uuid.get(run_uuid)
+    if not isinstance(entry, dict):
+        return None
+    cached_at = float(entry.get("cached_at") or 0.0)
+    if max_age_seconds > 0 and (time.time() - cached_at) > max_age_seconds:
+        return None
+    status_data = entry.get("status_data")
+    if not isinstance(status_data, dict):
+        return None
+    return copy.deepcopy(status_data)
 
 
 def _sanitize_work_directory(value: str | None) -> str | None:
@@ -61,7 +141,6 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                 await client.connect()
                 try:
                     status_data = await client.call_tool("check_nextflow_status", run_uuid=run_uuid)
-                    logs_data = await client.call_tool("get_job_logs", run_uuid=run_uuid, limit=50)
                 finally:
                     await client.disconnect()
 
@@ -69,21 +148,40 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                     logger.warning("Failed to get status", run_uuid=run_uuid)
                     continue
 
-                logs = logs_data.get("logs", []) if isinstance(logs_data, dict) else []
+                cache_job_status(run_uuid, status_data)
+
+                logs: list = []
+                logs_fetch_failed = False
+                try:
+                    launchpad_url = get_service_url("launchpad")
+                    client = MCPHttpClient(name="launchpad", base_url=launchpad_url)
+                    await client.connect()
+                    try:
+                        logs_data = await client.call_tool("get_job_logs", run_uuid=run_uuid, limit=50)
+                    finally:
+                        await client.disconnect()
+                    logs = logs_data.get("logs", []) if isinstance(logs_data, dict) else []
+                except Exception as log_exc:
+                    logs_fetch_failed = True
+                    logger.warning("Failed to get job logs during polling", run_uuid=run_uuid, error=str(log_exc))
 
                 # Update the block with new data
                 block = session.query(ProjectBlock).filter(ProjectBlock.id == block_id).first()
                 if block:
                     # Create new payload dict to ensure SQLAlchemy detects the change
                     payload = get_block_payload(block)
+                    previous_job_status = payload.get("job_status") if isinstance(payload.get("job_status"), dict) else None
+                    status_data = _prefer_richer_job_status(previous_job_status, status_data) or status_data
                     resolved_work_directory = _resolved_job_work_directory(payload.get("work_directory"), status_data)
                     if resolved_work_directory:
                         status_data = dict(status_data)
                         status_data["work_directory"] = resolved_work_directory
+                    cache_job_status(run_uuid, status_data)
                     payload["job_status"] = status_data
                     if resolved_work_directory:
                         payload["work_directory"] = resolved_work_directory
-                    payload["logs"] = logs
+                    if not logs_fetch_failed:
+                        payload["logs"] = logs
                     payload["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
 
                     # Update block status based on job status

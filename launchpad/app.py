@@ -1050,6 +1050,8 @@ async def submit_job(req: SubmitJobRequest):
                         ssh_profile_id=req.ssh_profile_id,
                         slurm_account=req.slurm_account,
                         slurm_partition=req.slurm_partition,
+                        slurm_gpu_account=req.slurm_gpu_account,
+                        slurm_gpu_partition=req.slurm_gpu_partition,
                         slurm_cpus=req.slurm_cpus,
                         slurm_memory_gb=req.slurm_memory_gb,
                         slurm_walltime=req.slurm_walltime,

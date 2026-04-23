@@ -266,6 +266,35 @@ class TestProjectSwitchHelpers:
         assert fn("project_panel", "project-a") != fn("project_panel", "project-b")
         assert fn("project_panel", "project-a") == "project_panel_project_scope_project-a"
 
+    def test_project_refresh_interval_keeps_running_jobs_polling_during_suppression(self):
+        fn = _load_function("_project_refresh_interval", {"timedelta": dt.timedelta})
+
+        value = fn(
+            auto_refresh=False,
+            poll_seconds=5,
+            auto_refresh_suppressed=True,
+            project_switch_loading=False,
+            has_running_job=True,
+        )
+
+        assert value == dt.timedelta(seconds=2)
+
+    def test_bootstrap_suppressed_monitoring_only_when_timer_is_missing(self):
+        fn = _load_function("_should_bootstrap_suppressed_monitoring")
+
+        assert fn(
+            auto_refresh_suppressed=True,
+            project_switch_loading=False,
+            refresh_interval=None,
+            has_running_job=True,
+        ) is True
+        assert fn(
+            auto_refresh_suppressed=True,
+            project_switch_loading=False,
+            refresh_interval=dt.timedelta(seconds=2),
+            has_running_job=True,
+        ) is False
+
     def test_finish_project_switch_loading_clears_flag_and_reruns(self):
         fake_st = SimpleNamespace(
             session_state={"_project_switch_loading_for": "project-b"},
@@ -1166,6 +1195,115 @@ class TestRenderWorkflowStepDataframes:
         assert "Up table summary." in markdown_values
         render_step_payload.assert_called_once_with({"comparison": {"group_a_label": "AD"}})
 
+    def test_execution_job_uses_live_polled_status_for_running_metrics(self):
+        fake_st = SimpleNamespace(
+            chat_message=MagicMock(return_value=_ContextManagerStub()),
+            session_state={},
+            caption=MagicMock(),
+            divider=MagicMock(),
+            progress=MagicMock(),
+            write=MagicMock(),
+            code=MagicMock(),
+            button=MagicMock(return_value=False),
+            checkbox=MagicMock(return_value=False),
+        )
+        progress_stats = MagicMock()
+        request = MagicMock()
+        get_cached_job_status = MagicMock(
+            return_value=(
+                {
+                    "status": "RUNNING",
+                    "progress_percent": 10,
+                    "message": "Pipeline: 15/162 completed, 147 remaining, 12 SLURM running, 70 SLURM pending",
+                    "tasks": {
+                        "completed": [],
+                        "running": [],
+                        "total": 162,
+                        "completed_count": 15,
+                        "failed_count": 0,
+                        "remaining_count": 147,
+                        "scheduler_running_count": 12,
+                        "scheduler_pending_count": 70,
+                    },
+                    "run_stage": "RUNNING",
+                },
+                True,
+            )
+        )
+        fn = _load_block_part2_function(
+            "render_block_part2",
+            {
+                "st": fake_st,
+                "section_header": lambda *args, **kwargs: None,
+                "metadata_row": lambda *args, **kwargs: None,
+                "status_chip": lambda *args, **kwargs: None,
+                "info_callout": lambda *args, **kwargs: None,
+                "progress_stats": progress_stats,
+                "segmented_progress": lambda *args, **kwargs: None,
+                "timeline": lambda *args, **kwargs: None,
+            },
+        )
+
+        fn(
+            btype="EXECUTION_JOB",
+            block={"status": "RUNNING", "created_at": "2026-04-23T06:17:37Z"},
+            content={
+                "run_uuid": "run-123",
+                "sample_name": "igvfr_767-22",
+                "mode": "RNA",
+                "work_directory": "/tmp/workflow11",
+                "job_status": {
+                    "status": "RUNNING",
+                    "progress_percent": 10,
+                    "message": "Pipeline: 2/162 completed, 160 remaining, 14 SLURM running, 86 SLURM pending",
+                    "tasks": {
+                        "completed": [],
+                        "running": [],
+                        "total": 162,
+                        "completed_count": 2,
+                        "failed_count": 0,
+                        "remaining_count": 160,
+                        "scheduler_running_count": 14,
+                        "scheduler_pending_count": 86,
+                    },
+                },
+            },
+            block_id="block-1",
+            status="RUNNING",
+            API_URL="http://api.test",
+            active_id="proj-1",
+            LIVE_JOB_STATUS_TIMEOUT_SECONDS=30,
+            make_authenticated_request=request,
+            get_cached_job_status=get_cached_job_status,
+            show_metadata=lambda: None,
+            _workflow_status_presentation=lambda status: ("running", status, "🔄"),
+            _format_plan_timestamp=lambda value: value,
+            _format_duration=lambda *_args, **_kwargs: "",
+            _block_timestamp=lambda: "",
+            _render_workflow_plot_payload=lambda *_args, **_kwargs: None,
+            _render_embedded_dataframes=lambda *_args, **_kwargs: None,
+            _render_step_payload=lambda *_args, **_kwargs: None,
+            _job_status_updated_at=lambda persisted, live_poll_succeeded, now=None: persisted if not live_poll_succeeded else "2026-04-23T06:30:00Z",
+            _run_status_label=lambda status: ("running", status.title(), "🔄"),
+            _format_timestamp=lambda value: value,
+            _workflow_label_from_path=lambda path: "workflow11",
+            _pause_auto_refresh=lambda *_args, **_kwargs: None,
+            get_job_debug_info=lambda *_args, **_kwargs: None,
+            _render_plot_block=lambda *_args, **_kwargs: None,
+        )
+
+        get_cached_job_status.assert_called_once_with("run-123")
+        request.assert_not_called()
+        progress_stats.assert_called_with(
+            {
+                "Completed": "15/162",
+                "SLURM Running": 12,
+                "SLURM Pending": 70,
+                "Remaining": 147,
+                "Failed": 0,
+            }
+        )
+
 
 class TestRenderWorkflowPlotPayload:
     def test_renders_saved_image_artifacts(self, tmp_path):
@@ -1570,7 +1708,7 @@ class TestCachedJobStatus:
         request.assert_called_once_with(
             "GET",
             "http://api.test/jobs/run-123/status",
-            timeout=1.5,
+            timeout=5.0,
         )
 
     def test_reuses_recent_cached_status_without_refetch(self):

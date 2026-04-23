@@ -163,6 +163,7 @@ def render_block_part2(
     active_id,
     LIVE_JOB_STATUS_TIMEOUT_SECONDS,
     make_authenticated_request,
+    get_cached_job_status=None,
     show_metadata,
     _workflow_status_presentation,
     _format_plan_timestamp,
@@ -627,34 +628,46 @@ def render_block_part2(
             # Also check session state — the block payload may be stale but a
             # previous poll already saw the transfer become active.
             _cached_transfer = (st.session_state.get(f"_transfer_state_{run_uuid}") or "").strip().lower()
+            run_type = str(content.get("run_type") or "").strip().lower()
+            script_id = str(content.get("script_id") or "").strip()
+            run_stage_hint = str(
+                job_status.get("run_stage")
+                or content.get("run_stage")
+                or content.get("job_status", {}).get("run_stage")
+                or ""
+            ).strip().upper()
+            is_script_job = run_type == "script" or bool(script_id) or run_stage_hint.startswith("SCRIPT_")
             _needs_live_poll = (
                 block_status_str == "RUNNING"
                 or _persisted_transfer in {"downloading_outputs"}
                 or _cached_transfer in {"downloading_outputs"}
             )
             if run_uuid and _needs_live_poll:
-                try:
-                    live_resp = make_authenticated_request(
-                        "GET",
-                        f"{API_URL}/jobs/{run_uuid}/status",
-                        timeout=LIVE_JOB_STATUS_TIMEOUT_SECONDS,
-                    )
-                    if live_resp.status_code == 200:
-                        job_status = live_resp.json()
-                        live_status_poll_succeeded = True
-                        run_stage_hint = str(job_status.get("run_stage") or run_stage_hint).strip().upper()
-                        is_script_job = is_script_job or run_stage_hint.startswith("SCRIPT_")
-                        st.session_state[f"_job_polled_at_{run_uuid}"] = (
-                            datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                if callable(get_cached_job_status):
+                    live_job_status, live_status_poll_succeeded = get_cached_job_status(run_uuid)
+                    if isinstance(live_job_status, dict) and live_job_status:
+                        job_status = live_job_status
+                else:
+                    try:
+                        live_resp = make_authenticated_request(
+                            "GET",
+                            f"{API_URL}/jobs/{run_uuid}/status",
+                            timeout=LIVE_JOB_STATUS_TIMEOUT_SECONDS,
                         )
-                        # Cache transfer_state so auto-refresh keeps polling
-                        _live_ts = (job_status.get("transfer_state") or "").strip().lower()
-                        st.session_state[f"_transfer_state_{run_uuid}"] = _live_ts
-                except Exception:
-                    pass  # Fall back to block payload
+                        if live_resp.status_code == 200:
+                            live_job_status = live_resp.json()
+                            if isinstance(live_job_status, dict):
+                                job_status = live_job_status
+                                live_status_poll_succeeded = True
+                                st.session_state[f"_job_polled_at_{run_uuid}"] = (
+                                    datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                                )
+                                # Cache transfer_state so auto-refresh keeps polling
+                                _live_ts = (job_status.get("transfer_state") or "").strip().lower()
+                                st.session_state[f"_transfer_state_{run_uuid}"] = _live_ts
+                    except Exception:
+                        pass  # Fall back to block payload
 
-            run_type = str(content.get("run_type") or "").strip().lower()
-            script_id = str(content.get("script_id") or "").strip()
             run_stage_hint = str(
                 job_status.get("run_stage")
                 or content.get("run_stage")

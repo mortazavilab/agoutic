@@ -356,9 +356,9 @@ def render_sidebar(
         st.divider()
 
         model_choice = st.selectbox("Brain Model", ["default", "fast", "smart"], index=0)
-        auto_refresh = st.toggle("Live Stream", value=False, disabled=True)
-        poll_seconds = st.slider("Poll interval (sec)", 1, 5, 2, disabled=True)
-        st.caption("Live auto-refresh is temporarily disabled on project pages to avoid a Streamlit thread leak. Use the page-level refresh button while jobs are running.")
+        auto_refresh = st.toggle("Live Stream", value=True)
+        poll_seconds = st.slider("Poll interval (sec)", 1, 5, 2)
+        st.caption("Live Stream controls automatic project-page monitoring. Turn it off if a figure-heavy page becomes unstable.")
         debug_mode = st.toggle("🐛 Debug", value=False)
         st.session_state["_debug_mode"] = debug_mode
 

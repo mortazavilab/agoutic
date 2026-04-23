@@ -724,6 +724,26 @@ def test_parse_task_status_texts_uses_stdout_progress_hint_when_trace_missing():
     assert message == "Pipeline: 418/730 completed, 312 remaining"
 
 
+def test_parse_task_status_texts_counts_repeated_unnumbered_trace_rows_separately():
+    progress, tasks, message = SlurmBackend._parse_task_status_texts(
+        trace_content=(
+            "task_id\thash\tnative_id\tname\tstatus\texit\n"
+            "1\taa/bb0011\t1001\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
+            "2\tcc/dd0022\t1002\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
+            "3\tee/ff0033\t1003\tmainWorkflow:softwareVTask\tCOMPLETED\t0\n"
+            "4\tgg/hh0044\t1004\tmainWorkflow:softwareVTask\tCOMPLETED\t0\n"
+        ),
+        stdout_content="executor >  slurm (10)\n",
+        scheduler_status="RUNNING",
+    )
+
+    assert progress == int((4 / 10) * 90)
+    assert tasks["completed_count"] == 4
+    assert tasks["total"] == 10
+    assert tasks["remaining_count"] == 6
+    assert message == "Pipeline: 4/10 completed, 6 remaining"
+
+
 @pytest.mark.asyncio
 async def test_read_remote_task_status_falls_back_to_stdout_when_trace_read_fails():
     backend = SlurmBackend()

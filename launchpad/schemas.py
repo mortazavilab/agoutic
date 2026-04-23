@@ -31,6 +31,8 @@ class SubmitJobRequest(BaseModel):
     ssh_profile_id: Optional[str] = None
     slurm_account: Optional[str] = None
     slurm_partition: Optional[str] = None
+    slurm_gpu_account: Optional[str] = None
+    slurm_gpu_partition: Optional[str] = None
     slurm_cpus: Optional[int] = None
     slurm_memory_gb: Optional[int] = None
     slurm_walltime: Optional[str] = None

@@ -801,6 +801,22 @@ class SlurmBackend:
             suffix = _task_suffix(name).strip()
             return re.sub(r"\s*\(\d+\)$", "", suffix)
 
+        def _trace_task_key(task_name: str, task_hash: str, line_index: int) -> str:
+            """Collapse retry lines for numbered tasks without flattening unnumbered repeats.
+
+            Nextflow trace rows sometimes omit per-instance numbering for repeated
+            processes, so keying by task name alone collapses many completed rows
+            into a single count. Keep numbered tasks grouped by logical instance
+            name so retries overwrite earlier failed attempts, but use the trace
+            hash for unnumbered tasks so repeated completions still count.
+            """
+            suffix = _task_suffix(task_name).strip()
+            if re.search(r"\(\d+\)$", suffix):
+                return f"named:{suffix}"
+            if task_hash:
+                return f"hash:{task_hash}"
+            return f"line:{line_index}"
+
         completed_tasks: list[str] = []
         failed_tasks: list[str] = []
         running_tasks: list[str] = []
@@ -808,7 +824,7 @@ class SlurmBackend:
         retried_count = 0
 
         trace_lines = trace_content.splitlines() if trace_content else []
-        terminal_status_by_task: dict[str, tuple[int, str]] = {}
+        terminal_status_by_task: dict[str, tuple[int, str, str]] = {}
         if len(trace_lines) > 1:
             for line_index, line in enumerate(trace_lines[1:], start=1):
                 if not line.strip():
@@ -816,15 +832,17 @@ class SlurmBackend:
                 parts = line.split("\t")
                 if len(parts) < 5:
                     continue
+                task_hash = parts[1].strip() if len(parts) > 1 else ""
                 task_name = parts[3].strip()
                 task_status = parts[4].strip()
                 if ":" not in task_name:
                     continue
                 if task_status in {"COMPLETED", "FAILED", "ABORTED"}:
-                    terminal_status_by_task[task_name] = (line_index, task_status)
+                    task_key = _trace_task_key(task_name, task_hash, line_index)
+                    terminal_status_by_task[task_key] = (line_index, task_status, task_name)
 
         if terminal_status_by_task:
-            for task_name, (_line_index, task_status) in sorted(
+            for _task_key, (_line_index, task_status, task_name) in sorted(
                 terminal_status_by_task.items(),
                 key=lambda item: item[1][0],
             ):

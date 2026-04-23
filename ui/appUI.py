@@ -3,6 +3,7 @@ import requests
 import datetime
 import json
 import os
+from datetime import timedelta
 from pathlib import Path as _Path
 import pandas as pd
 import streamlit as st
@@ -225,6 +226,40 @@ def _finish_project_switch_loading(active_project_id: str) -> None:
     if st.session_state.get("_project_switch_loading_for") == active_project_id:
         st.session_state.pop("_project_switch_loading_for", None)
         st.rerun()
+
+
+def _project_refresh_interval(
+    *,
+    auto_refresh: bool,
+    poll_seconds: int,
+    auto_refresh_suppressed: bool,
+    project_switch_loading: bool,
+    has_running_job: bool,
+):
+    if project_switch_loading:
+        return timedelta(milliseconds=100)
+
+    refresh_seconds = min(max(int(poll_seconds or 2), 1), 2) if has_running_job else max(int(poll_seconds or 2), 1)
+    if has_running_job and auto_refresh_suppressed:
+        return timedelta(seconds=refresh_seconds)
+    if not (auto_refresh or has_running_job) or auto_refresh_suppressed:
+        return None
+    return timedelta(seconds=refresh_seconds)
+
+
+def _should_bootstrap_suppressed_monitoring(
+    *,
+    auto_refresh_suppressed: bool,
+    project_switch_loading: bool,
+    refresh_interval,
+    has_running_job: bool,
+) -> bool:
+    return bool(
+        auto_refresh_suppressed
+        and not project_switch_loading
+        and refresh_interval is None
+        and has_running_job
+    )
 
 # Check if we're creating a new project (flag set by New Project button)
 if st.session_state.get("_create_new_project", False):
@@ -521,6 +556,7 @@ def render_block(block, expected_project_id: str = ""):
         active_id=st.session_state.active_project_id,
         LIVE_JOB_STATUS_TIMEOUT_SECONDS=LIVE_JOB_STATUS_TIMEOUT_SECONDS,
         make_authenticated_request=make_authenticated_request,
+        get_cached_job_status=get_cached_job_status,
         show_metadata=show_metadata,
         _workflow_status_presentation=_workflow_status_presentation,
         _format_plan_timestamp=_format_plan_timestamp,
@@ -555,10 +591,20 @@ for _p in st.session_state.get("_cached_projects", []):
         break
 
 # Determine whether the page is in a transient project-switch state.
+_auto_refresh_suppressed = _auto_refresh_is_suppressed()
 _project_switch_loading = st.session_state.get("_project_switch_loading_for") == active_id
+_needs_auto_refresh = bool((auto_refresh or st.session_state.get("_has_running_job", False)) and not _auto_refresh_suppressed)
+_refresh_interval = _project_refresh_interval(
+    auto_refresh=auto_refresh,
+    poll_seconds=poll_seconds,
+    auto_refresh_suppressed=_auto_refresh_suppressed,
+    project_switch_loading=_project_switch_loading,
+    has_running_job=bool(st.session_state.get("_has_running_job", False)),
+)
 project_loading_slot = None
 
 
+@st.fragment(run_every=_refresh_interval)
 def _render_chat():
     """Render all chat blocks for the active project."""
     _active_id = st.session_state.active_project_id
@@ -686,13 +732,18 @@ def _render_chat():
                 except Exception:
                     pass
 
-        if _has_running_job:
+        if _has_running_job and _needs_auto_refresh:
+            st.caption(
+                f"🔄 Live updating "
+                f"(last: {datetime.datetime.now().strftime('%H:%M:%S')})"
+            )
+        elif _has_running_job:
             refresh_col, detail_col = st.columns([1, 4])
             with refresh_col:
                 st.button("Refresh now", key=f"_manual_project_refresh_{_active_id}")
             with detail_col:
                 st.caption(
-                    f"Live auto-refresh is disabled to avoid a Streamlit thread leak. "
+                    f"Live auto-refresh is temporarily paused. "
                     f"Last update: {datetime.datetime.now().strftime('%H:%M:%S')}"
                 )
 
@@ -705,6 +756,7 @@ with st.container(key=_project_scope_mount_key("project_panel", active_id)):
     _render_chat()
 
 
+@st.fragment(run_every=_refresh_interval)
 def _render_task_dock():
     """Render an inline task pane only when the project has tasks."""
     _active_id = st.session_state.active_project_id
@@ -749,6 +801,20 @@ if _captured_prompt and not st.session_state.get("_pending_prompt"):
     st.session_state["_pending_prompt"] = _captured_prompt
 
 _render_task_dock()
+
+if _should_bootstrap_suppressed_monitoring(
+    auto_refresh_suppressed=_auto_refresh_suppressed,
+    project_switch_loading=_project_switch_loading,
+    refresh_interval=_refresh_interval,
+    has_running_job=bool(st.session_state.get("_has_running_job", False)),
+):
+    time.sleep(0.3)
+    st.rerun()
+
+_refresh_now = bool((auto_refresh or st.session_state.get("_has_running_job", False)) and not _auto_refresh_suppressed)
+if _refresh_now != _needs_auto_refresh:
+    time.sleep(0.3)
+    st.rerun()
 
 _finish_project_switch_loading(active_id)
 

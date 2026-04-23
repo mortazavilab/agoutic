@@ -17,14 +17,17 @@ import datetime
 import json
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock, MagicMock, PropertyMock
 
 import pytest
+import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from common.database import Base
+import cortex.job_polling as job_polling_module
 from cortex.models import (
     User, Session as SessionModel, Project, ProjectAccess,
     ProjectBlock,
@@ -39,6 +42,7 @@ from cortex.app import (
     _build_auto_analysis_context,
     _build_static_analysis_summary,
     get_block_payload,
+    get_job_status_proxy,
     _create_block_internal,
     _active_downloads,
 )
@@ -2593,6 +2597,197 @@ class TestPollJobStatus:
         sess = session_factory()
         updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
         assert updated.status == "FAILED"
+        sess.close()
+
+    @pytest.mark.anyio
+    async def test_updates_block_when_log_fetch_fails(self, session_factory, seed_data):
+        """A log-fetch failure should not discard a successful status sample."""
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess, "proj-bg", "EXECUTION_JOB",
+            {
+                "run_uuid": "log-fail-test",
+                "job_status": {"status": "RUNNING", "progress_percent": 40},
+                "logs": [{"message": "older log"}],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            {"status": "COMPLETED", "progress_percent": 100, "message": "Done"},
+            RuntimeError("log fetch failed"),
+        ])
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+             patch("cortex.job_polling._auto_trigger_analysis", new_callable=AsyncMock):
+            mock_sleep.return_value = None
+            await poll_job_status("proj-bg", job_block.id, "log-fail-test")
+
+        sess = session_factory()
+        updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
+        payload = get_block_payload(updated)
+        assert updated.status == "DONE"
+        assert payload["job_status"]["status"] == "COMPLETED"
+        assert payload["logs"] == [{"message": "older log"}]
+        assert job_polling_module.get_cached_job_status("log-fail-test")["status"] == "COMPLETED"
+        sess.close()
+
+
+class TestJobStatusProxyCache:
+    def test_cache_job_status_preserves_previous_progress_on_transient_poll_failure(self):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+        job_polling_module.cache_job_status(
+            "cache-merge-test",
+            {
+                "run_uuid": "cache-merge-test",
+                "status": "RUNNING",
+                "progress_percent": 17,
+                "message": "Pipeline: 32/162 completed, 130 remaining",
+                "tasks": {
+                    "total": 162,
+                    "completed_count": 32,
+                    "remaining_count": 130,
+                },
+            },
+        )
+
+        job_polling_module.cache_job_status(
+            "cache-merge-test",
+            {
+                "run_uuid": "cache-merge-test",
+                "status": "RUNNING",
+                "progress_percent": 0,
+                "message": "Failed to poll scheduler: [Errno 111] Connection refused",
+                "tasks": {},
+            },
+        )
+
+        cached = job_polling_module.get_cached_job_status("cache-merge-test", max_age_seconds=0)
+        assert cached["progress_percent"] == 17
+        assert cached["tasks"]["completed_count"] == 32
+        assert cached["last_poll_error"] == "Failed to poll scheduler: [Errno 111] Connection refused"
+
+    @pytest.mark.anyio
+    async def test_returns_cached_status_without_live_proxy_call(self, monkeypatch):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+        cached = {
+            "run_uuid": "proxy-cache-test",
+            "status": "RUNNING",
+            "progress_percent": 16,
+            "message": "Pipeline: 30/162 completed, 132 remaining",
+        }
+        job_polling_module.cache_job_status("proxy-cache-test", cached)
+
+        request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u-bg")))
+        monkeypatch.setattr("cortex.app.require_run_uuid_access", lambda run_uuid, user: None)
+        async_client = MagicMock()
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", async_client)
+
+        result = await get_job_status_proxy("proxy-cache-test", request)
+
+        assert result == cached
+        async_client.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_returns_cached_status_when_live_proxy_times_out(self, monkeypatch):
+        cached = {
+            "run_uuid": "proxy-fallback-test",
+            "status": "RUNNING",
+            "progress_percent": 17,
+            "message": "Pipeline: 32/162 completed, 130 remaining",
+        }
+
+        request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u-bg")))
+        monkeypatch.setattr("cortex.app.require_run_uuid_access", lambda run_uuid, user: None)
+
+        cache_lookup = MagicMock(side_effect=[None, cached])
+        monkeypatch.setattr("cortex.app.job_polling.get_cached_job_status", cache_lookup)
+
+        class _TimeoutAsyncClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, *args, **kwargs):
+                raise httpx.ReadTimeout("timed out")
+
+        async_client = MagicMock(return_value=_TimeoutAsyncClient())
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", async_client)
+
+        result = await get_job_status_proxy("proxy-fallback-test", request)
+
+        assert result == cached
+        assert cache_lookup.call_count == 2
+        assert cache_lookup.call_args_list[1].kwargs["max_age_seconds"] == 0
+        async_client.assert_called_once()
+
+    @pytest.mark.anyio
+    async def test_poll_job_status_preserves_previous_progress_on_transient_poll_failure(self, session_factory, seed_data):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess, "proj-bg", "EXECUTION_JOB",
+            {
+                "run_uuid": "poll-cache-merge-test",
+                "job_status": {
+                    "status": "RUNNING",
+                    "progress_percent": 17,
+                    "message": "Pipeline: 32/162 completed, 130 remaining",
+                    "tasks": {
+                        "total": 162,
+                        "completed_count": 32,
+                        "remaining_count": 130,
+                    },
+                },
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            {
+                "status": "RUNNING",
+                "progress_percent": 0,
+                "message": "Failed to poll scheduler: [Errno 111] Connection refused",
+                "tasks": {},
+            },
+            {"logs": []},
+        ])
+
+        sleep_calls = {"count": 0}
+
+        async def _sleep_once_then_stop(_seconds):
+            sleep_calls["count"] += 1
+            if sleep_calls["count"] > 1:
+                raise RuntimeError("stop test loop")
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new=_sleep_once_then_stop):
+            with pytest.raises(RuntimeError, match="stop test loop"):
+                await poll_job_status("proj-bg", job_block.id, "poll-cache-merge-test")
+
+        sess = session_factory()
+        updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
+        payload = get_block_payload(updated)
+        assert payload["job_status"]["progress_percent"] == 17
+        assert payload["job_status"]["tasks"]["completed_count"] == 32
+        assert payload["job_status"]["last_poll_error"] == "Failed to poll scheduler: [Errno 111] Connection refused"
         sess.close()
 
     @pytest.mark.anyio

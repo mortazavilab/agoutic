@@ -133,6 +133,23 @@ class TestSubmitJobRequest:
         assert req.remote_base_path == "/remote/agoutic"
         assert req.result_destination == "both"
 
+    def test_slurm_accepts_gpu_account_overrides(self):
+        req = SubmitJobRequest(
+            project_id="p",
+            user_id="user-1",
+            sample_name="s",
+            mode="DNA",
+            input_directory="/d",
+            execution_mode="slurm",
+            ssh_profile_id="prof-1",
+            slurm_account="cpu-acct",
+            slurm_partition="standard",
+            slurm_gpu_account="gpu-acct",
+            slurm_gpu_partition="gpu",
+        )
+        assert req.slurm_gpu_account == "gpu-acct"
+        assert req.slurm_gpu_partition == "gpu"
+
     def test_slurm_accepts_staged_remote_input_reuse(self):
         req = SubmitJobRequest(
             project_id="p",

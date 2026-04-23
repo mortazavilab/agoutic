@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Bug Fixes
+
+- **Gate-approved GPU account and partition overrides are now respected in generated `nextflow.config`** — Launchpad's submit endpoint now accepts `slurm_gpu_account` and `slurm_gpu_partition` fields and passes them through to `SubmitParams`, so GPU account approval overrides from the gate no longer drop off before config generation. The SLURM backend continues to correctly fall back to CPU account/partition only when GPU overrides are missing or empty.
+  (`launchpad/schemas.py`, `launchpad/app.py`, `tests/launchpad/test_schemas.py`, `tests/launchpad/test_app_submit_script.py`)
+
 ## [3.6.6] - 2026-04-22
 
 ### Bug Fixes
@@ -10,7 +15,7 @@
 - **The Streamlit auth helper now routes its direct `/auth/me` and `/auth/logout` calls through the same eager-close response path as the rest of the UI** — remote sessions that rerun frequently no longer leave those short-lived auth responses open while checking login state or logging out, reducing socket/file-descriptor churn that could accumulate into `Too many open files` on long-lived Streamlit processes.
   (`ui/auth.py`)
 
-- **Project pages with rendered figures no longer leak Streamlit threads and file descriptors through the publication controls path** — project-page live auto-refresh is now disabled in favor of an explicit refresh button while jobs are running, publication settings keep axis/title/legend controls but only apply preview changes when `Update preview` is clicked, and export payloads are prepared only on demand instead of on every rerun, removing the figure-driven rerun path that was exhausting the Streamlit process over time.
+- **Project pages with rendered figures no longer leak Streamlit threads and file descriptors through the publication controls path** — publication settings keep axis/title/legend controls but now apply preview changes only when `Update preview` is clicked, export payloads are prepared only on demand instead of on every rerun, and project-page monitoring is back on the lighter fragment-based refresh path so live Nextflow status and controls continue updating without the older full-page rerun loop.
   (`ui/appUI.py`, `ui/appui_sidebar.py`, `ui/appui_renderers.py`, `tests/ui/test_app_source_helpers.py`)
 
 - **Switching into an existing project with saved figures now renders chats and plots on the first visit** — after the transient project-switch loading state is cleared, the app now forces one follow-up rerun so the newly selected project fetches and paints its blocks immediately instead of staying blank until a second navigation.

@@ -562,6 +562,7 @@ class NextflowConfig:
             config_lines.append("        queue = \"${gpuPartition}\"")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
+        config_lines.append("        time = '12:00:00'")
         if max_gpu_tasks is not None:
             config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:

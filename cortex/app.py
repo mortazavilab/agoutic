@@ -415,7 +415,11 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
     headers = {}
     if INTERNAL_API_SECRET:
         headers["X-Internal-Secret"] = INTERNAL_API_SECRET
-    status_proxy_timeout = float(os.getenv("CORTEX_JOB_STATUS_PROXY_TIMEOUT_SECONDS", "60"))
+    cached_status = job_polling.get_cached_job_status(run_uuid)
+    if cached_status is not None:
+        return cached_status
+
+    status_proxy_timeout = float(os.getenv("CORTEX_JOB_STATUS_PROXY_TIMEOUT_SECONDS", "150"))
 
     try:
         async with httpx.AsyncClient(timeout=status_proxy_timeout) as client:
@@ -424,8 +428,19 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
                 headers=headers,
             )
             resp.raise_for_status()
-            return resp.json()
+            payload = resp.json()
+            if isinstance(payload, dict):
+                job_polling.cache_job_status(run_uuid, payload)
+            return payload
     except Exception as e:
+        cached_status = job_polling.get_cached_job_status(run_uuid, max_age_seconds=0)
+        if cached_status is not None:
+            logger.info(
+                "Returning cached job status after Launchpad proxy failure",
+                run_uuid=run_uuid,
+                error=str(e),
+            )
+            return cached_status
         logger.warning("Failed to proxy job status from Launchpad",
                        run_uuid=run_uuid, error=str(e))
         raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
