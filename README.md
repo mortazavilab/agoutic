@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Version:** 3.0.3  
+**Release:** 3.6.6
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -14,6 +14,166 @@ The system is composed of:
 - **Analyzer**: Analysis Engine - Results analysis and QC reporting
 - **UI**: Web interface for monitoring and control
 
+Current status: database infrastructure centralized in `common/database.py`
+with Alembic migrations. Gene annotation and enrichment tools moved from
+edgePython to Analyzer. The analyzer/server4 adapter layer proxies remaining
+edgePython MCP calls upstream. Atlas now exposes both ENCODE and IGVF
+consortium MCP servers through the same schema-aware routing and formatting
+layer.
+
+## 🖥️ Execution Modes
+
+AGOUTIC supports **dual execution modes**:
+
+- **Local**: Runs Nextflow/Dogme pipelines directly on the local machine (default, original behavior)
+- **Remote SLURM**: Submits jobs to a remote SLURM cluster via SSH
+
+Remote execution features:
+- **Saved SSH profiles** — per-user connection profiles with secure key references (no raw secrets stored). Supports local OS user key access through a per-session broker launched under that Unix account with `su` (password used transiently, never stored)
+- **SLURM resource management** — configurable account, partition, CPUs, memory, walltime, GPUs with validation
+- **Shared OpenChromatin GPU runtime defaults** — DNA SLURM runs now default to the shared Dogme OpenChromatin GPU container and task-scoped runtime wiring instead of the older custom host-mounted modkit path
+- **Remote base path model** — a single `remote_base_path` anchors `ref/`, `data/`, and per-workflow remote directories
+- **Remote browsing and stage-only intake** — browse saved-cluster paths and stage references/input data without submitting a job
+- **Stage transfer controls** — running stage-only transfers can be refreshed, cancelled, resumed, and failed staging cards can delete their reserved local workflow folders directly from the UI
+- **Result destination policy** — keep results remote-only, copy back locally, or both
+- **Staged approval prompts** — Cortex collects details progressively, presents summary before submission
+- **Run and staging status tracking** — dedicated staging tasks plus remote execution stage labels through `completed`, including byte-level transfer progress, current-file details, and faster live refresh while transfers are active
+- **Scheduler integration** — SLURM job ID tracking, state polling via sacct/squeue, cancellation via scancel
+
+Phase 1 limitation: Analyzer operates on local-accessible files only. Remote results must be copied back before downstream analysis.
+
+See [`docs/remote_execution_architecture.md`](docs/remote_execution_architecture.md) for architecture details, [`docs/cluster_slurm_setup.md`](docs/cluster_slurm_setup.md) for setup, [`docs/user_guide_execution_modes.md`](docs/user_guide_execution_modes.md) for usage, and [`TUTORIAL.md`](TUTORIAL.md) for an end-to-end user walkthrough.
+
+## 🔬 Analysis Capabilities
+
+AGOUTIC combines computational workflow execution with agent-guided biological
+interpretation. After a pipeline finishes, the platform helps users move from
+raw output folders to scientific insight, including isoform behavior,
+modification patterns, pathway shifts, and gene-level functional context.
+
+### Analysis Goals
+
+AGOUTIC is designed to help users:
+- Interpret isoform discovery and transcript structure outputs from long-read workflows
+- Summarize RNA and DNA modification signals from workflow artifacts
+- Review QC metrics across runs and identify quality or completeness issues
+- Inspect gene-level and transcript-level result tables with context
+- Run downstream differential expression and enrichment analysis
+- Compare outputs across samples, conditions, and workflows
+
+### Supported Analysis Types
+
+- **Quality Control (QC) analysis**
+  - Parse run summaries, count/stat tables, alignment summaries, and basecalling outputs
+  - Validate run completeness and surface troubleshooting context from logs and artifacts
+  - Generate QC summaries for quick review across workflow outputs
+
+- **Transcriptomic analysis**
+  - Explore gene- and transcript-level quantification outputs
+  - Support isoform-aware interpretation from long-read RNA/cDNA pipelines
+  - Review splice-aware and transcript-structure-relevant outputs
+
+- **Epitranscriptomic and epigenomic analysis**
+  - Summarize RNA modification outputs from direct RNA workflows
+  - Summarize DNA modification outputs from DNA workflows
+  - Parse and interpret `bedMethyl` outputs, including region- and gene-linked review where applicable
+
+- **Differential analysis**
+  - Run bulk and single-cell RNA-seq differential expression through edgePython
+  - Compare grouped samples directly from reconciled workflow abundance tables
+    or saved dataframes
+  - Use the stateful DE flow: load → filter → normalize → design → fit → test → results
+  - Prefer workflow-local `reconciled.gtf` annotation when present so transcript-aware plots and summaries stay aligned with the active workflow output
+  - Filter by FDR/logFC and report annotated top genes for interpretation
+
+- **Functional interpretation**
+  - Run GO enrichment (BP, MF, CC)
+  - Run Reactome and KEGG pathway enrichment
+  - Translate Ensembl IDs and normalize symbols for human and mouse datasets
+  - Build and reuse colocated GTF-backed gene/transcript caches for workflow-local or custom annotations
+
+For deeper tool-level details, see [`analyzer/README.md`](analyzer/README.md),
+[`skills/differential_expression/SKILL.md`](skills/differential_expression/SKILL.md),
+[`skills/enrichment_analysis/SKILL.md`](skills/enrichment_analysis/SKILL.md), and
+[`SKILLS.md`](SKILLS.md).
+
+### Typical Analysis Workflow
+
+Pipeline execution
+  ↓
+Result discovery
+  ↓
+QC parsing and summary generation
+  ↓
+Expression / isoform / modification result extraction
+  ↓
+Optional differential expression analysis
+  ↓
+Functional enrichment
+  ↓
+Agent-guided visualization and biological interpretation
+
+### What Happens Next in Analysis
+
+Once parsing and summaries are complete, AGOUTIC can pivot into follow-up
+interpretation tasks such as cross-workflow comparison, condition-focused
+differential analysis, and targeted functional hypotheses (for example,
+pathway-level shifts or biologically coherent gene programs).
+
+### Analysis Inputs
+
+The analysis layer consumes:
+- Pipeline result folders (for example `workflow1/`, `workflow2/`)
+- CSV/TSV/BED/bedMethyl files
+- Counts and summary/statistics tables
+- Annotation and quantification outputs
+- User-selected files from workflow subdirectories
+
+### Analysis Outputs
+
+The analysis layer returns:
+- Parsed result tables
+- QC summaries and run-validation context
+- Annotated gene/transcript lists
+- Differential expression result tables
+- GO/pathway enrichment tables
+- Interactive plots and chart-ready summaries
+- Chat-readable scientific interpretation for downstream decisions
+
+### Example Analysis Requests
+
+- `Summarize the QC for workflow2`
+- `List the important files in workflow1/annot`
+- `Parse the bedMethyl output and summarize methylation patterns`
+- `Show the top expressed genes from this result file`
+- `Run differential expression between control and treatment`
+- `Compare the treated samples treated_1 and treated_2 to the control samples ctrl_1 and ctrl_2`
+- `Compare treated_1 and treated_2 to ctrl_1 and ctrl_2 from DF1 at transcript level`
+- `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`
+- `Annotate these Ensembl IDs`
+- `Run GO enrichment on the upregulated genes`
+- `Compare workflow1 and workflow2 outputs`
+
+### Visualization Support
+
+- Inline Plotly visualizations directly in chat
+- Interactive bar, scatter, heatmap, box, histogram, pie, venn, and upset plots from conversation dataframes
+- Automatic plotting from parsed tables when chartable data are detected
+- Cross-workflow open-chromatin overlap requests can run as approval-gated background workflows that write workflow-scoped overlap CSVs and manifests for downstream plotting
+- Saved venn/upset overlap plots over earlier chat dataframes reload the full source table from analyzer provenance or matching project files when only preview rows are available, so overlap counts stay accurate and two-set venn diagrams remain readable for large overlaps
+- edgePython-backed DE and enrichment plots now default to 600 dpi raster export with an SVG companion for project-scoped artifact output
+- Publication-style volcano and MD plots route through edgePython, while generic dataframe charts remain an interactive Plotly path rather than a server-side publication export path
+
+### Current Analysis Limitations
+
+- Analyzer currently requires local-accessible files
+- Remote-only results must be copied back before downstream analysis
+- Some analysis pathways are file-format dependent and assume expected output conventions
+- Cross-run comparison is strongest when workflows use consistent references and naming
+- Interpretation depth depends on pipeline completeness and annotation availability
+
+See [`docs/remote_execution_architecture.md`](docs/remote_execution_architecture.md)
+for remote execution constraints and staging/copy-back behavior.
 ## 🔒 Security & Multi-User Isolation
 
 AGOUTIC enforces access control at every layer:
@@ -588,7 +748,7 @@ pylint cortex launchpad
 
 ## 📦 Version Information
 
-- **Release**: 3.0.1 — Job monitoring recovery after restart, skill routing fixes
+- **Release**: 3.6.6 — rerun-heavy Streamlit polling paths now close short-lived API responses eagerly, auth helper calls use the same eager-close path, publication controls no longer leak threads or file descriptors on figure-heavy project pages, and projects with saved figures render chats and plots correctly on first visit
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

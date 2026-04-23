@@ -1,6 +1,7 @@
 # AGOUTIC Launchpad: Dogme/Nextflow Job Execution Engine
 
-**Version:** 0.3.0  
+**Docs Current For:** AGOUTIC 3.6.6  
+**Service Version:** 0.3.0  
 **Status:** Active Development
 
 ## Overview
