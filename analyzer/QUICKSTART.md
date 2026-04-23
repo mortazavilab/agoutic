@@ -196,8 +196,8 @@ lsof -i :8004
 # Run full test suite
 ./analyzer/start.sh test
 
-# Or run directly
-python3 analyzer/test_analysis.py
+# Or run directly with pytest
+python3 -m pytest tests/analyzer -q
 
 # Test specific endpoint
 curl http://localhost:8004/health

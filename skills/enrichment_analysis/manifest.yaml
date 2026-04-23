@@ -1,0 +1,36 @@
+display_name: GO / Pathway Enrichment
+description: Run GO, KEGG, or Reactome enrichment on gene lists.
+category: analysis
+source:
+  type: service
+  key: edgepython
+required_services:
+  - edgepython
+expected_inputs:
+  - gene_list
+  - organism
+output_types:
+  - dataframe
+  - report
+  - annotation
+sample_types:
+  - any
+plan_type: run_enrichment
+trigger_patterns:
+  - '(?:run|do|perform)\s+(?:a\s+)?(?:GO|gene\s+ontology|enrichment|pathway)\s+(?:analysis|enrichment)'
+  - '(?:GO|gene\s+ontology|enrichment|pathway)\s+(?:analysis|enrichment)\s+(?:on|for|of)'
+  - '(?:what|which)\s+(?:GO\s+terms?|pathways?|biological\s+processes?)\s+(?:are\s+)?enriched'
+  - '(?:KEGG|Reactome)\s+(?:enrichment|analysis|pathway)'
+  - '(?:enrichment|GO)\s+(?:on|for)\s+(?:the\s+)?(?:up|down|significant|DE)'
+mcp_tool_chain:
+  - source_key: edgepython
+    tool: filter_de_genes
+  - source_key: edgepython
+    tool: run_go_enrichment
+  - source_key: edgepython
+    tool: run_pathway_enrichment
+  - source_key: edgepython
+    tool: generate_plot
+depends_on_skills:
+  - differential_expression
+classification_priority: 20

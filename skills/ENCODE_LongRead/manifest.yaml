@@ -1,0 +1,15 @@
+display_name: ENCODE Long-Read
+description: Browse and download long-read experiments from ENCODE.
+category: data_retrieval
+source:
+  type: consortium
+  key: encode
+required_services:
+  - encode
+expected_inputs:
+  - experiment_accession
+output_types:
+  - dataframe
+  - file
+sample_types:
+  - any

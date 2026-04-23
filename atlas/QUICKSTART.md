@@ -74,9 +74,9 @@ This launches:
 | `launchpad/mcp_server.py` | Added `get_job_logs`, `get_job_debug` tools; expanded `submit_dogme_job` params |
 | `launchpad/mcp_tools.py` | Implemented `get_job_logs`, `get_job_debug`; added advanced submit params |
 | `analyzer/mcp_server.py` | Migrated from official MCP SDK (stdio) to FastMCP with HTTP support |
-| `skills/ENCODE_Search.md` | `ENCODE_CALL` → `DATA_CALL: consortium=encode, tool=...` |
-| `skills/ENCODE_LongRead.md` | `ENCODE_CALL` → `DATA_CALL: consortium=encode, tool=...` |
-| `skills/Analyze_Job_Results.md` | `ANALYSIS_CALL` → `DATA_CALL: service=analyzer, tool=...` |
+| `skills/ENCODE_Search/SKILL.md` | `ENCODE_CALL` → `DATA_CALL: consortium=encode, tool=...` |
+| `skills/ENCODE_LongRead/SKILL.md` | `ENCODE_CALL` → `DATA_CALL: consortium=encode, tool=...` |
+| `skills/analyze_job_results/SKILL.md` | `ANALYSIS_CALL` → `DATA_CALL: service=analyzer, tool=...` |
 
 ### Deleted
 | File | Reason |
@@ -110,5 +110,6 @@ async def search_encode():
 1. Add entry to `CONSORTIUM_REGISTRY` in `atlas/config.py`
 2. Create a launcher script (like `atlas/launch_encode.py`)
 3. Add port to `agoutic_servers.sh`
-4. Create skill files in `skills/`
-5. The unified dispatch in `cortex/app.py` handles routing automatically
+4. Create `skills/<skill_key>/SKILL.md` and `skills/<skill_key>/manifest.yaml`
+5. Set `source.type: consortium` and `source.key: <consortium_key>` in that manifest
+6. The unified dispatch in `cortex/app.py` handles routing automatically

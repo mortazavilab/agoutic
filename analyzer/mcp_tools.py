@@ -5,6 +5,8 @@ Provides file discovery, reading, parsing, and analysis tools via MCP protocol.
 
 import json
 from datetime import datetime
+from functools import partial
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 from analyzer.analysis_engine import (
@@ -13,11 +15,27 @@ from analyzer.analysis_engine import (
     read_file_content,
     parse_csv_file,
     parse_bed_file,
+    compare_bed_region_overlaps,
+    parse_xgenepy_outputs,
     generate_analysis_summary,
     get_job_work_dir,
     resolve_work_dir,
 )
+from analyzer.edgepython_adapter import call_edgepython_tool, relocate_edgepython_artifact
 from analyzer.config import MAX_PREVIEW_LINES
+from edgepython_mcp.tool_schemas import TOOL_SCHEMAS as EDGEPYTHON_TOOL_SCHEMAS
+from analyzer.gene_tools import build_gene_cache, lookup_gene, translate_gene_ids
+from analyzer.enrichment_engine import (
+    run_go_enrichment, run_pathway_enrichment,
+    get_enrichment_results, get_term_genes,
+)
+
+# Tools that have moved from edgePython to analyzer — exclude from proxy
+_EXCLUDED_FROM_PROXY = {
+    "translate_gene_ids", "lookup_gene", "build_gene_cache",
+    "run_go_enrichment", "run_pathway_enrichment",
+    "get_enrichment_results", "get_term_genes",
+}
 
 
 def _json_serial(obj: Any) -> str:
@@ -32,6 +50,93 @@ def _dumps(obj: Any) -> str:
     return json.dumps(obj, indent=2, default=_json_serial)
 
 
+def _prefixed_edgepython_schema() -> Dict[str, Any]:
+    """Return analyzer-owned proxy schemas for edgePython tools.
+
+    The adapter adds a required conversation_id so analyzer can reuse upstream
+    MCP sessions, and project_dir for artifact-producing tools.
+    """
+    proxy_schemas: Dict[str, Any] = {}
+    for tool_name, schema in EDGEPYTHON_TOOL_SCHEMAS.items():
+        if tool_name in _EXCLUDED_FROM_PROXY:
+            continue
+        prefixed_name = f"edgepython_{tool_name}"
+        parameters = json.loads(json.dumps(schema.get("parameters", {})))
+        properties = parameters.setdefault("properties", {})
+        required = parameters.setdefault("required", [])
+        properties.setdefault(
+            "conversation_id",
+            {
+                "type": "string",
+                "description": "Conversation/session identifier used by analyzer to reuse an upstream edgePython MCP session.",
+            },
+        )
+        if "conversation_id" not in required:
+            required.append("conversation_id")
+        if tool_name in {"generate_plot", "save_results", "save_sc_results"}:
+            properties.setdefault(
+                "project_dir",
+                {
+                    "type": "string",
+                    "description": "Absolute Agoutic project directory used to relocate generated DE artifacts into project-scoped storage.",
+                },
+            )
+        proxy_schemas[prefixed_name] = {
+            "description": f"Analyzer adapter wrapper for edgePython tool '{tool_name}'.",
+            "parameters": parameters,
+        }
+    return proxy_schemas
+
+
+EDGEPYTHON_PROXY_TOOL_SCHEMAS = _prefixed_edgepython_schema()
+
+
+async def _edgepython_proxy_tool(
+    edgepython_tool_name: str,
+    *,
+    conversation_id: str,
+    project_dir: Optional[str] = None,
+    **params: Any,
+) -> Any:
+    """Proxy a DE tool call to the upstream edgePython MCP service."""
+    result = await call_edgepython_tool(
+        edgepython_tool_name,
+        conversation_id=conversation_id,
+        **params,
+    )
+
+    if (
+        isinstance(result, str)
+        and project_dir
+        and edgepython_tool_name in {"generate_plot", "save_results", "save_sc_results"}
+    ):
+        explicit_output = params.get("output_path")
+        explicit_svg_output = params.get("svg_output_path")
+        filename = Path(explicit_output).name if explicit_output else None
+        filename_overrides = {}
+        if explicit_output:
+            filename_overrides[Path(explicit_output).suffix.lower()] = Path(explicit_output).name
+        if explicit_svg_output:
+            filename_overrides[Path(explicit_svg_output).suffix.lower()] = Path(explicit_svg_output).name
+        relocated, _target_path = relocate_edgepython_artifact(
+            result,
+            project_dir=project_dir,
+            filename=filename,
+            filename_overrides=filename_overrides or None,
+        )
+        if relocated is not None:
+            return relocated
+
+    return result
+
+
+EDGEPYTHON_PROXY_TOOL_REGISTRY = {
+    f"edgepython_{tool_name}": partial(_edgepython_proxy_tool, tool_name)
+    for tool_name in EDGEPYTHON_TOOL_SCHEMAS.keys()
+    if tool_name not in _EXCLUDED_FROM_PROXY
+}
+
+
 # ==================== MCP Tool Definitions ====================
 
 async def list_job_files(
@@ -41,6 +146,7 @@ async def list_job_files(
     compact: bool = True,
     max_depth: Optional[int] = None,
     name_pattern: Optional[str] = None,
+    allow_missing: bool = False,
 ) -> Dict[str, Any]:
     """
     List all files in a job's work directory.
@@ -82,6 +188,16 @@ async def list_job_files(
         }
     
     except FileNotFoundError as e:
+        if allow_missing:
+            requested = str(Path(work_dir).expanduser()) if work_dir else ""
+            return {
+                "success": True,
+                "work_dir": requested,
+                "file_count": 0,
+                "total_size_bytes": 0,
+                "files": [],
+                "missing_work_dir": True,
+            }
         return {
             "success": False,
             "error": "Job not found or work directory missing",
@@ -225,7 +341,7 @@ async def parse_csv_file_tool(
         file_path: Relative path to CSV/TSV file
         work_dir: Absolute path to the workflow directory (preferred)
         run_uuid: Job UUID (legacy fallback)
-        max_rows: Maximum rows to return (default: 100)
+        max_rows: Maximum rows to return (default: 100). Use null to load the full file.
 
     Returns:
         Dict with parsed table data including columns and rows
@@ -315,6 +431,112 @@ async def parse_bed_file_tool(
         return {
             "success": False,
             "error": "Failed to parse BED file",
+            "detail": str(e)
+        }
+
+
+async def compare_bed_region_overlaps_tool(
+    bed_a_path: Optional[str] = None,
+    bed_b_path: Optional[str] = None,
+    folder_a: Optional[str] = None,
+    folder_b: Optional[str] = None,
+    pattern_a: Optional[str] = None,
+    pattern_b: Optional[str] = None,
+    sample_a_label: Optional[str] = None,
+    sample_b_label: Optional[str] = None,
+    min_overlap_bp: int = 1,
+    export_dir: Optional[str] = None,
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compare two BED sources and build overlap/dataframe outputs."""
+    try:
+        min_overlap_bp = int(min_overlap_bp)
+        resolved_work_dir = resolve_work_dir(work_dir=work_dir, run_uuid=run_uuid)
+        result = compare_bed_region_overlaps(
+            bed_a_path=bed_a_path,
+            bed_b_path=bed_b_path,
+            folder_a=folder_a,
+            folder_b=folder_b,
+            pattern_a=pattern_a,
+            pattern_b=pattern_b,
+            sample_a_label=sample_a_label,
+            sample_b_label=sample_b_label,
+            min_overlap_bp=min_overlap_bp,
+            export_dir=export_dir,
+            work_dir_path=str(resolved_work_dir) if resolved_work_dir else work_dir,
+        )
+        return {
+            "success": True,
+            "work_dir": str(resolved_work_dir) if resolved_work_dir else (work_dir or ""),
+            **result,
+        }
+    except (FileNotFoundError, NotADirectoryError) as e:
+        return {
+            "success": False,
+            "error": "BED source not found",
+            "detail": str(e),
+        }
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Invalid BED overlap request",
+            "detail": str(e),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "Failed to compare BED overlaps",
+            "detail": str(e),
+        }
+
+
+async def parse_xgenepy_outputs_tool(
+    output_dir: str,
+    work_dir: Optional[str] = None,
+    run_uuid: Optional[str] = None,
+    max_rows: Optional[int] = 200,
+) -> Dict[str, Any]:
+    """Parse canonical XgenePy output artifacts and return structured content."""
+    try:
+        parsed_data = parse_xgenepy_outputs(
+            run_uuid=run_uuid,
+            output_dir=output_dir,
+            max_rows=max_rows,
+            work_dir_path=work_dir,
+        )
+
+        return {
+            "success": True,
+            "work_dir": work_dir or "",
+            "output_dir": parsed_data.output_dir,
+            "required_outputs_present": parsed_data.required_outputs_present,
+            "missing_outputs": parsed_data.missing_outputs,
+            "fit_summary": parsed_data.fit_summary,
+            "model_metadata": parsed_data.model_metadata,
+            "run_manifest": parsed_data.run_manifest,
+            "assignments": parsed_data.assignments,
+            "proportion_cis": parsed_data.proportion_cis,
+            "plots": parsed_data.plots,
+            "metadata": parsed_data.metadata,
+        }
+
+    except FileNotFoundError as e:
+        return {
+            "success": False,
+            "error": "XgenePy output directory not found",
+            "detail": str(e)
+        }
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Invalid XgenePy output path or parse error",
+            "detail": str(e)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": "Failed to parse XgenePy outputs",
             "detail": str(e)
         }
 
@@ -476,9 +698,22 @@ TOOL_REGISTRY = {
     "read_file_content": read_file_content_tool,
     "parse_csv_file": parse_csv_file_tool,
     "parse_bed_file": parse_bed_file_tool,
+    "compare_bed_region_overlaps": compare_bed_region_overlaps_tool,
+    "parse_xgenepy_outputs": parse_xgenepy_outputs_tool,
     "get_analysis_summary": get_analysis_summary_tool,
-    "categorize_job_files": categorize_job_files_tool
+    "categorize_job_files": categorize_job_files_tool,
+    # Gene annotation tools (moved from edgePython)
+    "translate_gene_ids": translate_gene_ids,
+    "build_gene_cache": build_gene_cache,
+    "lookup_gene": lookup_gene,
+    # Enrichment tools (moved from edgePython)
+    "run_go_enrichment": run_go_enrichment,
+    "run_pathway_enrichment": run_pathway_enrichment,
+    "get_enrichment_results": get_enrichment_results,
+    "get_term_genes": get_term_genes,
 }
+
+TOOL_REGISTRY.update(EDGEPYTHON_PROXY_TOOL_REGISTRY)
 
 
 # Tool schemas for MCP server
@@ -577,7 +812,7 @@ TOOL_SCHEMAS = {
                 },
                 "max_rows": {
                     "type": "integer",
-                    "description": "Maximum rows to return (default: 100)"
+                    "description": "Maximum rows to return (default: 100). Use null to load the full file."
                 }
             },
             "required": ["file_path"]
@@ -606,6 +841,88 @@ TOOL_SCHEMAS = {
                 }
             },
             "required": ["file_path"]
+        }
+    },
+    "compare_bed_region_overlaps": {
+        "description": "Compare two BED files or folder-discovered BED files, treating even 1 bp overlaps as shared connected components. Returns overlap dataframes plus BED exports for shared and sample-specific regions.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "bed_a_path": {
+                    "type": "string",
+                    "description": "Explicit path to sample A BED file. Use this or folder_a."
+                },
+                "bed_b_path": {
+                    "type": "string",
+                    "description": "Explicit path to sample B BED file. Use this or folder_b."
+                },
+                "folder_a": {
+                    "type": "string",
+                    "description": "Folder to search recursively for sample A BED file when bed_a_path is not provided."
+                },
+                "folder_b": {
+                    "type": "string",
+                    "description": "Folder to search recursively for sample B BED file when bed_b_path is not provided."
+                },
+                "pattern_a": {
+                    "type": "string",
+                    "description": "Optional filename glob or substring for resolving sample A BED file. Newest match is selected."
+                },
+                "pattern_b": {
+                    "type": "string",
+                    "description": "Optional filename glob or substring for resolving sample B BED file. Newest match is selected."
+                },
+                "sample_a_label": {
+                    "type": "string",
+                    "description": "Optional display label for sample A. Defaults to the BED filename stem."
+                },
+                "sample_b_label": {
+                    "type": "string",
+                    "description": "Optional display label for sample B. Defaults to the BED filename stem."
+                },
+                "min_overlap_bp": {
+                    "type": "integer",
+                    "description": "Minimum overlap in base pairs for two regions to connect. Default: 1."
+                },
+                "export_dir": {
+                    "type": "string",
+                    "description": "Optional directory where shared/sample-specific BED exports should be written."
+                },
+                "work_dir": {
+                    "type": "string",
+                    "description": "Optional base directory for resolving relative paths."
+                },
+                "run_uuid": {
+                    "type": "string",
+                    "description": "Legacy analyzer run UUID. Only used to resolve work_dir when needed."
+                }
+            },
+            "required": []
+        }
+    },
+    "parse_xgenepy_outputs": {
+        "description": "Parse canonical XgenePy output artifacts (JSON/TSV plus plots directory).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "output_dir": {
+                    "type": "string",
+                    "description": "Relative path from work_dir to XgenePy run output directory"
+                },
+                "work_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the workflow/project directory (preferred)"
+                },
+                "run_uuid": {
+                    "type": "string",
+                    "description": "Job UUID (legacy fallback — prefer work_dir)"
+                },
+                "max_rows": {
+                    "type": "integer",
+                    "description": "Maximum rows to return for assignments/proportion previews (default: 200)"
+                }
+            },
+            "required": ["output_dir"]
         }
     },
     "get_analysis_summary": {
@@ -641,5 +958,185 @@ TOOL_SCHEMAS = {
             },
             "required": []
         }
-    }
+    },
+    # Gene annotation tools (moved from edgePython)
+    "translate_gene_ids": {
+        "description": "Translate Ensembl gene or transcript IDs to gene symbols.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gene_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of Ensembl gene IDs (e.g. ['ENSG00000141510'])"
+                },
+                "transcript_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of Ensembl transcript IDs (e.g. ['ENST00000378418'])"
+                },
+                "organism": {
+                    "type": "string",
+                    "description": "Optional organism label. Auto-detected from ID prefix if not provided."
+                },
+            },
+            "required": []
+        }
+    },
+    "build_gene_cache": {
+        "description": "Build colocated gene/transcript cache TSVs for a specific GTF file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gtf_path": {
+                    "type": "string",
+                    "description": "Path to a GTF or GTF.GZ file. Cache TSVs are written alongside it."
+                },
+                "organism": {
+                    "type": "string",
+                    "description": "Optional organism label for custom GTFs."
+                }
+            },
+            "required": ["gtf_path"]
+        }
+    },
+    "lookup_gene": {
+        "description": "Look up genes or transcripts by symbol or Ensembl ID.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gene_symbols": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gene symbols (e.g. ['TP53', 'BRCA1'])"
+                },
+                "gene_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ensembl gene IDs (e.g. ['ENSG00000141510'])"
+                },
+                "transcript_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ensembl transcript IDs (e.g. ['ENST00000378418'])"
+                },
+                "organism": {
+                    "type": "string",
+                    "description": "Optional organism label. Auto-detected if not provided."
+                },
+            },
+            "required": []
+        }
+    },
+    # Enrichment tools (moved from edgePython)
+    "run_go_enrichment": {
+        "description": "Run Gene Ontology enrichment analysis on a gene list.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gene_list": {
+                    "type": "string",
+                    "description": "Comma-separated gene IDs or symbols (e.g. 'TP53,BRCA1,MDM2')"
+                },
+                "species": {
+                    "type": "string",
+                    "description": "'auto', 'human', or 'mouse'. Default: auto-detect."
+                },
+                "sources": {
+                    "type": "string",
+                    "description": "GO sources, comma-separated. Default: 'GO:BP,GO:MF,GO:CC'."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Label for this enrichment result."
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Conversation/session identifier for state management."
+                },
+            },
+            "required": ["gene_list"]
+        }
+    },
+    "run_pathway_enrichment": {
+        "description": "Run pathway enrichment analysis (KEGG or Reactome) on a gene list.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "gene_list": {
+                    "type": "string",
+                    "description": "Comma-separated gene IDs or symbols"
+                },
+                "species": {
+                    "type": "string",
+                    "description": "'auto', 'human', or 'mouse'. Default: auto-detect."
+                },
+                "database": {
+                    "type": "string",
+                    "description": "'KEGG' or 'REAC' (Reactome). Default: 'KEGG'."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Label for this enrichment result."
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Conversation/session identifier for state management."
+                },
+            },
+            "required": ["gene_list"]
+        }
+    },
+    "get_enrichment_results": {
+        "description": "Retrieve stored enrichment results with optional filtering.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Enrichment result name. Default: most recent."
+                },
+                "max_terms": {
+                    "type": "integer",
+                    "description": "Maximum terms to return. Default: 30."
+                },
+                "pvalue_threshold": {
+                    "type": "number",
+                    "description": "Filter terms by p-value. Default: 0.05."
+                },
+                "source_filter": {
+                    "type": "string",
+                    "description": "Filter by source (e.g. 'GO:BP', 'KEGG')."
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Conversation/session identifier for state management."
+                },
+            },
+            "required": []
+        }
+    },
+    "get_term_genes": {
+        "description": "Show genes contributing to a specific GO term or pathway.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "term_id": {
+                    "type": "string",
+                    "description": "Term identifier (e.g. 'GO:0006915' or 'KEGG:04110')"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Enrichment result name. Default: most recent."
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Conversation/session identifier for state management."
+                },
+            },
+            "required": ["term_id"]
+        }
+    },
 }
+
+TOOL_SCHEMAS.update(EDGEPYTHON_PROXY_TOOL_SCHEMAS)

@@ -9,9 +9,11 @@ AGOUTIC is a general-purpose agent for analyzing and interpreting long-read geno
 
 The system is composed of:
 - **Cortex**: Agent Engine - AI-powered orchestration and user interaction
-- **Atlas**: ENCODE Integration - Public data retrieval via ENCODELIB
-- **Launchpad**: Execution Engine - Dogme/Nextflow pipeline management
+- **Atlas**: Consortium Data Integration - Registry-driven ENCODE and IGVF retrieval via MCP
+- **Launchpad**: Execution Engine - Dogme/Nextflow pipeline management (local + remote SLURM)
 - **Analyzer**: Analysis Engine - Results analysis and QC reporting
+- **edgePython**: Differential Expression — Bulk/single-cell RNA-seq DE via edgePython
+- **XgenePy MCP**: Cis/trans regulatory modeling — local XgenePy execution with canonical artifacts
 - **UI**: Web interface for monitoring and control
 
 Current status: database infrastructure centralized in `common/database.py`
@@ -174,6 +176,7 @@ The analysis layer returns:
 
 See [`docs/remote_execution_architecture.md`](docs/remote_execution_architecture.md)
 for remote execution constraints and staging/copy-back behavior.
+
 ## 🔒 Security & Multi-User Isolation
 
 AGOUTIC enforces access control at every layer:
@@ -181,11 +184,10 @@ AGOUTIC enforces access control at every layer:
 - **Authentication**: Google OAuth 2.0 with session cookies (`httponly`, `samesite=lax`, `secure` in production)
 - **Authorization**: Role-based access (owner / editor / viewer) checked on every endpoint via `require_project_access()`. Admins bypass all project-level checks; public projects allow viewer access.
 - **Job ownership**: Each job records the submitting `user_id`. `require_run_uuid_access()` verifies ownership before exposing debug info or analysis results.
-- **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{user_id}/{project_id}/`) with input sanitization and jail-escape guards.
+- **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{username}/{project-slug}/`) with input sanitization and jail-escape guards; legacy `{user_id}/{project_id}` paths are still supported for backward compatibility.
 - **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
 - **Project management**: Full dashboard for browsing projects, viewing stats/files/jobs, renaming, archiving, and permanent deletion with cascading cleanup.
-- **Migration**: Run `python cortex/migrate_hardening.py` to add hardening columns. Run `python cortex/migrate_token_tracking.py` to add token tracking columns. Run `python cortex/migrate_usernames.py` to add the `username` column, then `python cortex/set_usernames.py auto` to derive usernames from email addresses. All scripts respect `$AGOUTIC_DATA` and are safe to re-run.
-- **Username paths**: User-jailed filesystem paths use `$AGOUTIC_DATA/users/{username}/{project-slug}/` instead of raw IDs, giving human-readable directory trees.
+- **Bootstrap & admin scripts**: Run `python scripts/cortex/init_db.py` for a fresh database bootstrap, `python scripts/cortex/set_usernames.py auto` to derive usernames from email addresses on an existing instance, and `python scripts/cortex/bootstrap_project_tasks.py` to seed persistent project tasks from existing workflow history.
 
 ## 🚀 Quick Start
 
@@ -200,20 +202,31 @@ conda activate agoutic_core
 ### Run the System
 
 ```bash
-# Terminal 1: Start Launchpad (Job Execution Engine)
-uvicorn launchpad.app:app --host 0.0.0.0 --port 8001 --reload
+# Recommended: start the full backend stack
+./agoutic_servers.sh --start
 
-# Terminal 2: Start Cortex (Agent Engine)
+# Then start the UI separately
+streamlit run ui/appUI.py --server.address 0.0.0.0 --server.port 8501
+```
+
+For local development, you can still run services manually:
+
+```bash
+# Terminal 1: Start Launchpad REST
+uvicorn launchpad.app:app --host 0.0.0.0 --port 8003 --reload
+
+# Terminal 2: Start Launchpad MCP
+python -m launchpad.mcp_server --host 0.0.0.0 --port 8002
+
+# Terminal 3: Start Cortex
 uvicorn cortex.app:app --host 0.0.0.0 --port 8000 --reload
 
-# Terminal 3: Start UI
-cd ui && python app.py
-
-# Optional: Atlas & 4 start automatically when needed
-# But can be started manually for testing:
-# cd /Users/eli/code/ENCODELIB && python encode_server.py  # Atlas
-# cd analyzer && uvicorn app:app --port 8002                # Analyzer
+# Terminal 4: Start UI
+cd ui && streamlit run appUI.py
 ```
+
+Note: running `python ui/appUI.py` directly will not work correctly because the UI
+auth flow depends on Streamlit request context and browser cookies.
 
 ### Verify Installation
 
@@ -222,7 +235,7 @@ cd ui && python app.py
 curl http://localhost:8000/health
 
 # Check Launchpad health
-curl http://localhost:8001/health
+curl http://localhost:8003/health
 
 # Test Atlas connection
 python cortex/atlas_mcp_client.py
@@ -230,11 +243,31 @@ python cortex/atlas_mcp_client.py
 # Expected: Connection success and K562 search results
 ```
 
+## Task System
+
+AGOUTIC now maintains a persistent project task list instead of relying on a
+hard-coded checklist in the UI.
+
+- Tasks are projected from durable workflow records, mainly `ProjectBlock`
+  state plus job progress payloads.
+- The chat page groups tasks into pending, running, follow-up, and completed
+  sections.
+- Parent tasks can include child tasks for workflow stages, per-file download
+  progress, analysis completion, and result review.
+- Existing history can be backfilled safely with:
+
+```bash
+python scripts/cortex/bootstrap_project_tasks.py
+
+# Optional: seed only one project
+python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
+```
+
 ## 📋 Architecture Overview
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                       AGOUTIC System v2.5                    │
+│                   AGOUTIC System v3.3.2                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -269,54 +302,96 @@ python cortex/atlas_mcp_client.py
 - **Tech:** FastAPI + OpenAI-compatible LLM
 - **Features:**
   - Chat interface with skill-based workflows
-  - Coordinates Atlas, 3, and 4
+  - Coordinates Atlas, Launchpad, and Analyzer
   - Block-based project timeline
-  - Background job monitoring
+  - Persistent project task list with child-task projection for downloads,
+    workflow stages, analysis, and follow-up review
+  - Background job monitoring with **stop/cancel** buttons
+  - **Download cancel button** — "🛑 Cancel Download" on running downloads with partial-file cleanup
+  - **"List my data" command** — chat-based central data folder listing (DB + disk fallback)
+  - **Post-cancel workflow management** — Delete / Resubmit buttons on cancelled jobs; chat-based deletion via natural language
   - User authentication
   - Role-based authorization gates on all endpoints
   - Server-side project CRUD (`POST/GET/PATCH /projects`)
-  - `[[PLOT:...]]` tag parsing → `AGENT_PLOT` blocks for inline Plotly charts (histogram, scatter, bar, box, heatmap, pie)
+  - `[[PLOT:...]]` tag parsing → `AGENT_PLOT` blocks for inline Plotly charts (histogram, scatter, line, area, bar, box, violin, strip, heatmap, pie, venn, upset)
   - **Per-message and per-conversation token tracking** — every LLM response records `prompt_tokens`, `completion_tokens`, `total_tokens`, and `model_name` in the database; exposed via `GET /user/token-usage` (own data) and `GET /admin/token-usage` (all users)
   - **`find_file` echo recovery** — when a weak model emits a `find_file` JSON result verbatim instead of a `[[DATA_CALL:...]]` tag, the pipeline intercepts the response, auto-chains to `parse_csv_file`/`parse_bed_file`/`read_file_content`, and strips the bad block from conversation history to prevent looping
-  - **ENCODE tool routing guards** — structural checks prevent LLM misrouting (e.g. cell-line names sent to `get_experiment`); assay-only queries are routed to `search_by_assay`
+  - **ENCODE tool routing guards** — structural checks prevent LLM misrouting (e.g. cell-line names sent to `get_experiment`); assay-only queries are routed to `search_by_assay`; assay name aliases (e.g. `RNA-seq` → `total RNA-seq`, `ChIP-seq` → `TF ChIP-seq`) are resolved before MCP dispatch
+  - **IGVF dispatch guards** — malformed IGVF calls now backfill missing required `sample_term`/`assay_title` values from the user message when possible, and schema validation drops still-invalid calls before they hit MCP
   - **Tool Schema Contracts** — machine-readable JSON Schema for every MCP tool, fetched at startup from `/tools/schema` endpoints on all servers. Injected into the system prompt as a compact reference and used for pre-call param validation (strip unknown params, check required fields, normalise enums).
   - **Structured Conversation State** — typed `ConversationState` JSON (skill, project, sample, experiment, dataframes, workflows) built each turn and injected as `[STATE]...[/STATE]` so the LLM always sees current context
   - **Error-Handling Playbook** — deterministic failure rules in the system prompt + structured `[TOOL_ERROR]` blocks + single-retry for transient failures
   - **Output Contract Validator** — post-LLM validation catches malformed `DATA_CALL` tags, duplicate `APPROVAL_NEEDED`, unknown tools, and mixed sources
   - **Provenance Tags** — `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers on every tool result for auditability; persisted in AGENT_PLAN blocks
+  - **Plan-Execute-Observe-Replan** — structured multi-step planning layer that now runs through manifest-first classification and composition for core deterministic flows. `SkillManifest` metadata supplies planner triggers, expected inputs, required services, runtime hints, and MCP tool chains; `plan_composer.py` builds DE, enrichment, and XgenePy plans from that metadata; legacy templates remain as deterministic fallback for unmigrated flows; and CHECK_EXISTING guards still skip expensive operations when results already exist.
+  - **Deterministic skill-management commands** — `/skills`, `/skill <skill_key>`, and `/use-skill <skill_key>` expose the live skill catalog, describe individual skills, and persist manual skill switching across turns without relying on a freeform model response.
+  - **Gene Annotation & ID Translation** — offline Ensembl gene ID ↔ symbol translation (human + mouse) via pre-built lookup tables. Auto-annotates gene symbols when DE data is loaded; all downstream outputs (top genes, heatmaps, summaries) automatically use readable symbols instead of raw Ensembl IDs. Bidirectional `lookup_gene` tool answers "what is the Ensembl ID for TP53?" style queries. Pre-LLM auto-skill detection routes gene questions to the correct skill from any context (including Welcome). MCP tools: `annotate_genes` (edgePython, DE-stateful), `translate_gene_ids` and `lookup_gene` (Analyzer).
+  - **Robust DATA_CALL tag parsing** — bracket-aware parameter parser handles JSON arrays inside DATA_CALL tags (e.g. `gene_symbols=["TP53", "BRCA1"]`). Mistral-native `[TOOL_CALLS]DATA_CALL:` format is auto-normalized to standard `[[DATA_CALL:...]]` tags.
+  - **Skill-defined plan chains** — skill authors can declare multi-step workflows in skill Markdown files under a `## Plan Chains` section. A single message like "get K562 experiments and make a plot by assay type" is detected at classify-time and produces both a data search and a visualization. Trigger phrases support multi-phrasing (AND/OR keyword groups) for flexible matching. See `SKILLS.md` for the full authoring guide.
+  - **Skills system documentation** — new top-level `SKILLS.md` documents the complete skills framework: skill file structure, routing patterns, `[[DATA_CALL:...]]` / `[[PLOT:...]]` tag system, plan chains format, and a step-by-step guide for creating new skills.
+  - **Inline Plotly visualizations with deduplication** — `[[PLOT:...]]` tags produce interactive bar, scatter, line, area, violin, strip, pie, histogram, heatmap, venn, and upset charts rendered directly in chat. A three-layer pipeline guarantees chart generation: chain context injection → second-pass PLOT tag instructions → post-DataFrame fallback. Deduplication and prompt-intent selection prevent duplicate/overlapping traces and stale style leakage across turns. Supports explicit colors (`color=green`), grouped or stacked bar modes, and boolean-column overlap plots for presentation-friendly set comparisons.
+  - **DF inspection quick commands** — `list dfs` lists all dataframes in the conversation with their metadata; `head df1` (or `head df3 5`) shows the first N rows as a markdown table. Both bypass the LLM entirely — zero token cost.
+  - **In-memory dataframe actions** — filter, subset, select columns, rename, sort, melt, aggregate, join, and pivot existing conversation dataframes without going through analyzer file calls. Saved transforms can also appear as block-specific `PENDING_ACTION` controls in the UI.
 
-### Atlas: ENCODELIB (Port 8080)
-- **Role:** ENCODE Portal data retrieval
-- **Tech:** fastmcp + ENCODE API, extended via `atlas/mcp_server.py`
+### Atlas: Consortium Data MCPs (ENCODE 8006 / IGVF 8009)
+- **Role:** Registry-driven public consortium data retrieval
+- **Tech:** fastmcp + Atlas registry/configuration with ENCODE and IGVF MCP servers under `atlas/`
 - **Features:**
-  - Search experiments by biosample/organism/target
-  - **`search_by_assay`** — assay-first search (e.g. *"how many RNA-seq experiments"*) across both organisms, returning combined counts and per-organism lists
-  - Download experiment files
-  - Metadata caching
-  - 15+ MCP tools for data access
-  - Agent routing guards in Cortex prevent structural misrouting (e.g. cell-line names sent to `get_experiment`)
-- **Extension pattern:** `atlas/mcp_server.py` imports ENCODELIB's FastMCP `server` instance and registers additional tools on it. `launch_encode.py` imports from this module so extensions are available without modifying ENCODELIB.
-- **Tool schemas:** `atlas/tool_schemas.py` defines JSON Schema contracts for all 16 ENCODE tools, served via `/tools/schema` GET endpoint.
+  - Search ENCODE experiments by biosample/organism/target
+  - **`search_by_assay`** — assay-first ENCODE search (e.g. *"how many RNA-seq experiments"*) across both organisms, returning combined counts and per-organism lists
+  - Search IGVF measurement sets, analysis sets, prediction sets, files, genes, and samples
+  - Download and file-metadata helpers for both consortium integrations
+  - Metadata caching, result formatting, and tool/parameter alias repair
+  - 30+ MCP tools across the current consortium integrations
+  - Agent routing guards in Cortex prevent structural misrouting and block invalid required-param calls before MCP execution
+- **Extension pattern:** `atlas/mcp_server.py` extends ENCODELIB's FastMCP server, while `atlas/igvf_mcp_server.py` and `atlas/launch_igvf.py` provide the parallel IGVF HTTP MCP server path.
+- **Tool schemas:** `atlas/tool_schemas.py` and `atlas/igvf_tool_schemas.py` define JSON Schema contracts for the ENCODE and IGVF tools, served via `/tools/schema` GET endpoints.
 - **Docs:** [ATLAS_IMPLEMENTATION.md](ATLAS_IMPLEMENTATION.md)
 
-### Launchpad: Execution Engine (Port 8001)
+### Launchpad: Execution Engine (Ports 8003 REST / 8002 MCP)
 - **Role:** Nextflow pipeline execution
 - **Tech:** FastAPI + Nextflow + Dogme
 - **Features:**
   - Submit Dogme DNA/RNA/cDNA pipelines
+  - Shared OpenChromatin GPU container defaults for SLURM DNA runs with task-scoped runtime injection for OpenChromatin work
   - Real-time job monitoring
   - Log streaming
   - User-jailed working directories
+  - **Job cancellation** — SIGTERM-based cancel with cooperative `.nextflow_cancelled` marker; properly displays CANCELLED (not FAILED) in UI
+  - **Workflow folder deletion** — DELETE endpoint removes work directory and sets status to DELETED; block status updated immediately so UI reflects deletion
+  - **Job resume** — resubmit cancelled/failed jobs with Nextflow `-resume` flag to reuse cached task results in the same workflow directory instead of starting fresh
+  - **Stage-only transfer lifecycle controls** — refresh, cancel, resume, and failed-stage cleanup actions are available in both the workflow UI and Task Center
+  - **Live staging telemetry** — running transfers surface current file, transferred bytes, total size, and faster refresh cadence during brokered or direct rsync activity
+  - **`delete_job_data` MCP tool** — enables chat-based deletion ("delete workflow1")
 - **Docs:** [launchpad/README.md](launchpad/README.md)
 
-### Analyzer: Analysis Engine (Port 8002)
-- **Role:** Results analysis, QC reporting, and workflow file browsing
-- **Tech:** fastmcp + Python analysis tools
+### edgePython: Differential Expression (Port 8007)
+- **Role:** Bulk and single-cell RNA-seq differential expression analysis
+- **Tech:** FastMCP + edgePython
+- **Features:**
+  - Full DE pipeline: load → filter → normalize → design → dispersion → fit → test → results → plots
+  - Gene list filtering from DE results by FDR, logFC, and direction (up/down/all)
+  - Gene annotation (annotate_genes) on DE results in-place
+  - Workflow-local `reconciled.gtf` preference for annotation when available, with shared reference caches as fallback
+  - Stateful pipeline — each step builds on previous results within a session
+  - Volcano, MDS, MA, BCV, heatmap plot generation
+  - TSV/CSV/JSON result export
+  - JSON Schema tool contracts via `/tools/schema`
+- **Docs:** [edgepython_mcp/](edgepython_mcp/)
+
+### Analyzer: Analysis Engine (Ports 8004 REST / 8005 MCP)
+- **Role:** Results analysis, QC reporting, gene annotation, and GO/pathway enrichment
+- **Tech:** fastmcp + Python analysis tools + g:Profiler
 - **Features:**
   - Parse pipeline outputs (CSV, TSV, BED files)
   - Generate QC reports and analysis summaries
   - File discovery and content reading
   - Workflow folder browsing via `list_job_files`
+  - Gene ID translation (`translate_gene_ids`) and bidirectional lookup (`lookup_gene`) via Ensembl reference tables
+  - GTF-backed gene and transcript annotation with colocated caches for shared references, workflow-local outputs, or custom user-provided GTFs
+  - GO enrichment (BP/MF/CC) and pathway enrichment (KEGG/Reactome) via g:Profiler
+  - Per-conversation enrichment state management
+  - Species auto-detection from gene ID prefixes (ENSG → human, ENSMUSG → mouse)
 - **Workflow Directory Layout:**
   ```
   $AGOUTIC_DATA/users/{username}/{project-slug}/
@@ -330,6 +405,7 @@ python cortex/atlas_mcp_client.py
   └── workflow2/         # Second job's output
   ```
 - **Agent Commands** (handled automatically by Cortex's safety net):
+  - `list my data` / `list my files` — lists all files in your central data folder
   - `list workflows` — lists all workflow folders in the project
   - `list files` / `list files in workflow2/annot` — lists files in a workflow or subfolder
   - `parse annot/File.csv` — finds and parses a file by relative path
@@ -342,8 +418,8 @@ python cortex/atlas_mcp_client.py
 agoutic/
 ├── README.md                     # This file
 ├── environment.yml               # Conda environment specification
+├── alembic.ini                  # Alembic migration configuration
 ├── CONFIGURATION.md              # Path configuration guide
-├── ARCHITECTURE_UPDATE.md        # System architecture (all servers)
 ├── ATLAS_IMPLEMENTATION.md     # Atlas integration guide
 ├── ATLAS_QUICKSTART.md         # Atlas quick reference
 │
@@ -351,6 +427,12 @@ agoutic/
 │   ├── README.md                # Cortex documentation
 │   ├── app.py                   # FastAPI application
 │   ├── agent_engine.py          # AI agent orchestration
+│   ├── skill_manifest.py        # Skill capability registry for routing + planning
+│   ├── plan_classifier.py       # Manifest-first request classification
+│   ├── plan_composer.py         # Manifest-driven deterministic plan builder
+│   ├── planner.py               # Planner orchestration + fallback selection
+│   ├── plan_executor.py         # Deterministic step execution engine
+│   ├── plan_replanner.py        # Failure recovery + plan adjustment
 │   ├── dependencies.py          # Auth gates (require_project_access, require_run_uuid_access)
 │   ├── user_jail.py             # Path traversal guards & file isolation
 │   ├── auth.py                  # Google OAuth 2.0 + cookie hardening
@@ -358,12 +440,8 @@ agoutic/
 │   ├── schemas.py               # Request/response schemas
 │   ├── config.py                # Configuration
 │   ├── db.py                    # Database connection
-│   ├── init_db.py               # Full schema creation (fresh install)
-│   ├── migrate_hardening.py     # Migration for hardening sprint columns
-│   ├── migrate_token_tracking.py # Migration for token tracking columns
-│   ├── migrate_usernames.py     # Migration for username column
-│   ├── set_usernames.py         # CLI: derive/assign usernames and slugify projects
-│   └── test_chat.py             # Tests
+│   ├── prompt_templates/        # LLM system prompts (first-pass, planning, second-pass)
+│   └── routes/                  # Extracted REST route modules
 │
 ├── launchpad/                      # Execution Engine
 │   ├── README.md                # Launchpad documentation
@@ -375,12 +453,19 @@ agoutic/
 │   ├── schemas.py              # Request/response schemas
 │   ├── config.py               # Configuration
 │   ├── db.py                   # Database connection
-│   ├── demo_launchpad.py         # Demo script
 │   ├── quickstart.sh           # Quick start setup
-│   ├── test_launchpad.py         # Tests
-│   ├── test_integration.py     # Integration tests
 │   ├── DUAL_INTERFACE.md       # REST + MCP architecture
 │   └── IMPLEMENTATION_SUMMARY.md # Implementation details
+│
+├── scripts/                     # Manual admin and operational utilities
+│   ├── cortex/
+│   │   ├── init_db.py           # Fresh database bootstrap utility
+│   │   ├── set_usernames.py     # Username/slug admin CLI
+│   │   └── bootstrap_project_tasks.py # Backfill persistent project tasks
+│   ├── launchpad/
+│   │   ├── debug_job.py         # Job inspection helper
+│   │   └── submit_real_job.py   # Manual job submission helper
+│   └── build_gene_reference.py  # One-time Gencode GTF → TSV builder
 │
 ├── ui/                          # Web Interface
 │   ├── README.md               # UI documentation
@@ -397,17 +482,43 @@ agoutic/
 │   ├── config.py               # Atlas configuration
 │   └── result_formatter.py     # Result formatting helpers
 │
+├── edgepython_mcp/              # edgePython DE Server
+│   ├── edgepython_server.py    # FastMCP tool definitions (DE + filtering)
+│   ├── mcp_server.py           # Server wrapper + /tools/schema endpoint
+│   ├── launch_edgepython.py    # HTTP launcher
+│   ├── tool_schemas.py         # JSON Schema contracts for DE tools
+│   └── config.py               # Configuration
+│
+├── common/                      # Shared Utilities
+│   ├── database.py            # Centralized DB infrastructure (Base, engines, sessions)
+│   ├── gene_annotation.py      # Ensembl gene ID ↔ symbol translation (bidirectional)
+│   ├── mcp_client.py           # Shared MCP HTTP client
+│   ├── logging_config.py       # Structured logging setup
+│   └── logging_middleware.py   # Request logging middleware
+│
 ├── skills/                      # Workflow Definitions
-│   ├── Dogme_DNA.md            # DNA pipeline definition
-│   ├── Dogme_RNA.md            # RNA pipeline definition
-│   ├── Dogme_cDNA.md           # cDNA pipeline definition
-│   ├── ENCODE_LongRead.md      # ENCODE pipeline definition
-│   ├── ENCODE_Search.md        # ENCODE search skill + routing rules
-│   ├── Local_Sample_Intake.md  # Sample intake workflow
+│   ├── welcome/SKILL.md                 # New-user onboarding
+│   ├── ENCODE_Search/SKILL.md           # ENCODE search skill + routing rules
+│   ├── ENCODE_LongRead/SKILL.md         # ENCODE pipeline definition
+│   ├── run_dogme_dna/SKILL.md           # DNA pipeline definition
+│   ├── run_dogme_rna/SKILL.md           # RNA pipeline definition
+│   ├── run_dogme_cdna/SKILL.md          # cDNA pipeline definition
+│   ├── analyze_local_sample/SKILL.md    # Sample intake workflow
+│   ├── analyze_job_results/SKILL.md     # Post-pipeline results analysis
+│   ├── download_files/SKILL.md          # File download workflow
+│   ├── differential_expression/SKILL.md # edgePython DE skill
+│   ├── enrichment_analysis/SKILL.md     # GO & pathway enrichment skill
+│   ├── remote_execution/SKILL.md        # Remote SLURM workflow
+│   └── shared/
+│       ├── SKILL_ROUTING_PATTERN.md     # Shared skill routing reference
+│       └── DOGME_QUICK_WORKFLOW_GUIDE.md # Shared workflow parsing guide
 │
 └── data/                        # Data & Database (created at runtime)
     ├── database/
     │   └── agoutic_v24.sqlite
+    ├── reference/               # Gene annotation reference files
+    │   ├── human_genes.tsv
+    │   └── mouse_genes.tsv
     ├── launchpad_work/            # Job execution directories
     ├── launchpad_logs/            # Server logs
     └── users/                   # Per-user jailed project dirs
@@ -487,7 +598,7 @@ export AGOUTIC_CODE=/path/to/agoutic
 export AGOUTIC_DATA=/path/to/storage
 ```
 
-**No environment variables needed!** Defaults work automatically. See [CONFIGURATION.md](CONFIGURATION.md) for detailed configuration options.
+**No required environment variables for default local setup.** Defaults work automatically, but `AGOUTIC_CODE` and `AGOUTIC_DATA` can be overridden if needed. See [CONFIGURATION.md](CONFIGURATION.md) for detailed configuration options.
 
 ### Path Resolution
 
@@ -576,15 +687,28 @@ When servers are started or restarted via `agoutic_servers.sh`, existing log fil
 ### Development Mode
 
 ```bash
+# Recommended for a full local stack
+./agoutic_servers.sh --start
+
+# Start the UI separately
+streamlit run ui/appUI.py --server.port 8501
+```
+
+If you need manual development startup:
+
+```bash
 # Terminal 1: Start Launchpad
 cd /path/to/agoutic
-uvicorn launchpad.app:app --port 8001 --reload
+uvicorn launchpad.app:app --port 8003 --reload
 
-# Terminal 2: Start Cortex
+# Terminal 2: Start Launchpad MCP
+python -m launchpad.mcp_server --host 0.0.0.0 --port 8002
+
+# Terminal 3: Start Cortex
 uvicorn cortex.app:app --port 8000 --reload
 
-# Terminal 3: Start UI (if using Streamlit)
-cd ui && streamlit run app.py
+# Terminal 4: Start UI (if using Streamlit)
+cd ui && streamlit run appUI.py
 ```
 
 ### Using MCP Interface
@@ -612,7 +736,7 @@ status = await client.check_nextflow_status(job["run_uuid"])
 
 ```bash
 # Submit job
-curl -X POST http://localhost:8001/jobs/submit \
+curl -X POST http://localhost:8003/jobs/submit \
   -H "Content-Type: application/json" \
   -d '{
     "project_id": "proj_001",
@@ -622,10 +746,10 @@ curl -X POST http://localhost:8001/jobs/submit \
   }'
 
 # Check status
-curl http://localhost:8001/jobs/{run_uuid}/status
+curl http://localhost:8003/jobs/{run_uuid}/status
 
 # Get results
-curl http://localhost:8001/jobs/{run_uuid}
+curl http://localhost:8003/jobs/{run_uuid}
 ```
 
 ## 📚 Documentation
@@ -638,8 +762,10 @@ curl http://localhost:8001/jobs/{run_uuid}
 ### Configuration & Setup
 - [CONFIGURATION.md](CONFIGURATION.md) - Full configuration guide
 - [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - Path configuration quick start
+- [docs/DATAFRAMES.md](docs/DATAFRAMES.md) - Dataframe commands, transforms, plotting, and memory guide
 
 ### Architecture & Details
+- [docs/DATAFRAMES.md](docs/DATAFRAMES.md) - Dataframe commands, transforms, plotting, and memory guide
 - [launchpad/DUAL_INTERFACE.md](launchpad/DUAL_INTERFACE.md) - REST + MCP architecture
 - [launchpad/IMPLEMENTATION_SUMMARY.md](launchpad/IMPLEMENTATION_SUMMARY.md) - Implementation details
 
@@ -647,16 +773,50 @@ curl http://localhost:8001/jobs/{run_uuid}
 
 ### Run All Tests
 
+The project has **1068 tests** providing comprehensive coverage.
+
 ```bash
-# Launchpad tests
-pytest launchpad/test_launchpad.py -v
+# Run the full test suite (1068 tests)
+pytest tests/ -q
 
-# Cortex tests
-pytest cortex/test_chat.py -v
+# Cortex tests only
+pytest tests/cortex/ -q
 
-# Integration tests
-pytest launchpad/test_integration.py -v
+# With coverage report
+pytest tests/cortex/ --cov=cortex/app --cov-report=term-missing
+
+# Other components
+pytest tests/atlas/ tests/common/ tests/analyzer/ tests/launchpad/ tests/ui/ -q
+
+# Single test file
+pytest tests/cortex/test_chat_data_calls.py -x -q
+
+# Focused task lifecycle and hierarchy coverage
+pytest tests/cortex/test_project_endpoints.py -q
 ```
+
+### Test Architecture
+
+- **In-memory SQLite** with `StaticPool` for fast, isolated tests
+- **Mocked LLM** via `AgentEngine` patches (no real model calls)
+- **Mocked MCP** via `MCPHttpClient` patches (no real service connections)
+- **37 cortex test files** covering: chat endpoint, approval gates, background tasks, project management, block endpoints, conversations, auth, admin, downloads, uploads, pure helpers, tool routing, skill detection, validation, planning
+- **Task coverage** includes persistent task projection, task actions,
+  download-file children, and workflow-stage children in
+  `tests/cortex/test_project_endpoints.py`
+- **Shared fixtures** in `tests/conftest.py` for DB engine, sessions, mock users
+
+### Bootstrap Existing History
+
+If you deploy this release onto a server that already has projects and stored
+workflow blocks, run the task bootstrap once after the application starts:
+
+```bash
+python scripts/cortex/bootstrap_project_tasks.py
+```
+
+The script is idempotent: it reconciles the current workflow state and is safe
+to re-run.
 
 ### Run Demo
 
@@ -668,14 +828,14 @@ python launchpad/demo_launchpad.py
 ## 🐛 Troubleshooting
 
 ### Server Won't Start
-- Check port availability: `lsof -i :8001` (Launchpad) or `lsof -i :8000` (Cortex)
+- Check port availability: `lsof -i :8003` (Launchpad REST), `lsof -i :8002` (Launchpad MCP), or `lsof -i :8000` (Cortex)
 - Check database connectivity: `python -c "from launchpad.db import SessionLocal; SessionLocal()"`
 - Check Python version: `python --version` (requires 3.12+)
 
 ### Job Stuck in RUNNING
 - Check Nextflow process: `ps aux | grep nextflow`
 - Check logs: `tail -f $AGOUTIC_DATA/launchpad_logs/*.log`
-- Cancel job: `curl -X POST http://localhost:8001/jobs/{run_uuid}/cancel`
+- Cancel job: `curl -X POST http://localhost:8003/jobs/{run_uuid}/cancel`
 
 ### Configuration Issues
 - Verify configuration: `python -c "from launchpad.config import *; print(f'Code: {AGOUTIC_CODE}')"` 
@@ -688,10 +848,10 @@ python launchpad/demo_launchpad.py
 Control the number of simultaneous GPU tasks (dorado basecalling, openChromatin) within a single pipeline run. Configurable in the approval form or via environment variable:
 
 ```bash
-export DEFAULT_MAX_GPU_TASKS=1  # Default: 1 (safe for single-GPU). Range: 1-8
+export DEFAULT_MAX_GPU_TASKS=8  # Optional explicit limit. Leave unset for no maximum. Range: 1-16
 ```
 
-Users can also override per-job in the approval form dropdown or via chat ("limit dorado to 3 concurrent tasks").
+If `DEFAULT_MAX_GPU_TASKS` is unset, Launchpad omits Nextflow `maxForks` for GPU-bound Dogme processes and lets Nextflow manage concurrency. Users can also override per-job in the approval form dropdown or via chat ("limit dorado to 3 concurrent tasks").
 
 ### Concurrent Jobs
 
@@ -703,23 +863,31 @@ export MAX_CONCURRENT_JOBS=2  # Adjust based on server capacity
 
 ### Database Selection
 
-- **Development**: SQLite (default, no setup required)
-- **Production**: PostgreSQL or MySQL for concurrent access
+- **Development**: SQLite (default, no setup required — `create_all()` at startup)
+- **Production**: PostgreSQL with Alembic migrations (`alembic upgrade head`)
 
 ```python
-# launchpad/config.py
-DATABASE_URL = "postgresql+asyncpg://user:pass@localhost/agoutic"
+# Set via environment variable
+DATABASE_URL = "postgresql://user:pass@localhost/agoutic"
 ```
 
 ## 📝 Workflow Skills
 
 Pre-defined bioinformatics workflows are available in `skills/`:
 
-- **Dogme_DNA.md** - Genomic DNA analysis workflow
-- **Dogme_RNA.md** - Direct RNA-seq workflow
-- **Dogme_cDNA.md** - cDNA isoform workflow
-- **ENCODE_LongRead.md** - ENCODE consortium workflow
-- **Local_Sample_Intake.md** - Sample intake and validation
+- **welcome/SKILL.md** - New-user onboarding
+- **ENCODE_Search/SKILL.md** - ENCODE search and data discovery
+- **ENCODE_LongRead/SKILL.md** - ENCODE consortium workflow
+- **run_dogme_dna/SKILL.md** - Genomic DNA analysis workflow
+- **run_dogme_rna/SKILL.md** - Direct RNA-seq workflow
+- **run_dogme_cdna/SKILL.md** - cDNA isoform workflow
+- **analyze_local_sample/SKILL.md** - Sample intake and validation
+- **analyze_job_results/SKILL.md** - Post-pipeline results analysis
+- **download_files/SKILL.md** - File download orchestration
+- **differential_expression/SKILL.md** - edgePython DE pipeline (with gene annotation)
+- **enrichment_analysis/SKILL.md** - GO & pathway enrichment analysis
+- **remote_execution/SKILL.md** - Remote execution workflow
+- **shared/SKILL_ROUTING_PATTERN.md** and **shared/DOGME_QUICK_WORKFLOW_GUIDE.md** - Shared reference docs
 
 ## 🤝 Contributing
 
@@ -733,11 +901,11 @@ Pre-defined bioinformatics workflows are available in `skills/`:
 ### Testing Requirements
 
 ```bash
-# Run full test suite
-pytest --cov=cortex --cov=launchpad --cov-report=html
+# Run full test suite (1040+ tests)
+pytest tests/ -q
 
-# Check code quality
-pylint cortex launchpad
+# With coverage
+pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 ```
 
 ## 📞 Support
@@ -757,8 +925,10 @@ pylint cortex launchpad
 
 ## 🗓️ Development Timeline
 
-- complete: Core infrastructure and basic API
-- current: Complete (Current) - Dual interface, MCP integration
-- next: Integration with Cortex approval gates
-- future: Web UI job monitoring dashboard
-- future: Performance optimization & deployment
+- complete: Core infrastructure, dual interface, MCP integration
+- complete: Web UI job monitoring, approval gates, project management
+- complete: Plan-execute-observe-replan, gene annotation, expanded templates
+- complete: Centralized DB, Alembic migrations, enrichment tools in Analyzer
+- complete: Cortex modularisation and DE adapter integration
+- current: Manifest-driven planning, workflow-local annotation, overlap workflows, and remote execution hardening
+- next: Production deployment preparation

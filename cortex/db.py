@@ -1,28 +1,22 @@
+"""
+Database connection and utilities for Cortex.
+
+Delegates to common.database for engine/session creation.
+Retains Cortex-specific helper functions.
+"""
 import json
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import create_engine, select, func
-from sqlalchemy.orm import sessionmaker, Session
-from .config import DATABASE_URL
-from .models import Base, ProjectBlock
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
-# Async engine (for future async endpoints)
-async_engine = create_async_engine(DATABASE_URL, echo=False)
-AsyncSessionLocal = async_sessionmaker(async_engine, expire_on_commit=False, class_=AsyncSession)
+from common.database import (
+    SessionLocal,
+    AsyncSessionLocal,
+    init_db_sync,
+    init_db_async as init_db,
+)
+from cortex.models import ProjectBlock
 
-# Sync engine (for compatibility with existing code)
-# Convert async URL to sync URL
-sync_url = DATABASE_URL.replace("sqlite+aiosqlite://", "sqlite://")
-sync_engine = create_engine(sync_url, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
-
-def init_db_sync() -> None:
-    """Initialize database using sync engine"""
-    Base.metadata.create_all(bind=sync_engine)
-
-async def init_db() -> None:
-    """Initialize database using async engine"""
-    async with async_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
 async def next_seq(session: AsyncSession, project_id: str) -> int:
     q = select(func.coalesce(func.max(ProjectBlock.seq), 0)).where(ProjectBlock.project_id == project_id)

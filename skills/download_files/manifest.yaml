@@ -1,0 +1,16 @@
+display_name: File Download
+description: Download files from ENCODE or arbitrary URLs.
+category: data_retrieval
+source:
+  type: consortium
+  key: encode
+required_services:
+  - encode
+expected_inputs:
+  - accession
+  - url
+output_types:
+  - file
+sample_types:
+  - any
+estimated_runtime: variable

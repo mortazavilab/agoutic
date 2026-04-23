@@ -94,15 +94,16 @@ Analyzer follows the **dual-interface pattern** established by Launchpad:
 
 ## MCP Tools
 
-Analyzer exposes 7 MCP tools for AI agents:
+Analyzer exposes 8 MCP tools for AI agents:
 
 1. **`list_job_files`** - List all files in a workflow directory (or subfolder) with optional extension filtering
 2. **`find_file`** - Find a specific file by name (exact or partial, case-insensitive) — skips `work/` intermediates
 3. **`read_file_content`** - Read file content with preview limits
 4. **`parse_csv_file`** - Parse CSV/TSV files with column stats
 5. **`parse_bed_file`** - Parse BED format files
-6. **`get_analysis_summary`** - Get comprehensive job summary
-7. **`categorize_job_files`** - Categorize files by type
+6. **`parse_xgenepy_outputs`** - Parse canonical XgenePy outputs (`fit_summary.json`, `assignments.tsv`, `proportion_cis.tsv`, `model_metadata.json`, `run_manifest.json`, `plots/`)
+7. **`get_analysis_summary`** - Get comprehensive job summary
+8. **`categorize_job_files`** - Categorize files by type
 
 All tools accept `work_dir` (preferred, absolute path to workflow folder) or `run_uuid` (legacy fallback).
 
@@ -166,6 +167,7 @@ data = await client.parse_csv_file(
 ### Parsing
 - `GET /analysis/files/parse/csv` - Parse CSV/TSV
 - `GET /analysis/files/parse/bed` - Parse BED
+- `GET /analysis/files/parse/xgenepy` - Parse canonical XgenePy outputs
 
 ### Summary
 - `GET /analysis/summary/{run_uuid}` - Analysis summary

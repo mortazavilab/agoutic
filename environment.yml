@@ -22,12 +22,16 @@ dependencies:
     # --- The Logic & MCP ---
     - mcp                      # Model Context Protocol SDK
     - pydantic>=2.0            # Data validation
+    - pyyaml                   # YAML skill manifests
     - requests
     - httpx                    # Async HTTP client
     
     # --- The Database ---
     - sqlalchemy>=2.0
     - aiosqlite                # Async SQLite driver
+    - alembic>=1.13            # Database migrations
+    - asyncpg                  # Async PostgreSQL driver
+    - psycopg2-binary          # Sync PostgreSQL driver (needed by Alembic)
     
     # --- Observability ---
     - structlog                # Structured logging (JSON lines)
@@ -38,8 +42,23 @@ dependencies:
     
     # --- Visualization ---
     - plotly>=5.18.0           # Interactive charts (st.plotly_chart)
+    - kaleido                  # Static Plotly export backend for PNG/SVG/PDF downloads
+    - adjustText               # Collision-aware matplotlib label placement for publication plots
+
+    # --- Enrichment Analysis ---
+    - gprofiler-official        # GO & pathway enrichment (g:Profiler)
+
+    # --- Differential Expression ---
+    - edgepython[all]          # edgeR-style DE analysis (bulk + single-cell)
+
+    # --- Reconcile BAMs ---
+    - pysam                    # Required by skills/reconcile_bams/scripts/reconcileBams.py
 
     # --- Testing ---
     - pytest>=7.0
     - pytest-asyncio>=0.21.0   # Async test support
-    - aiohttp>=3.8.0      # Async HTTP client for tests
+    - pytest-cov>=4.0          # Coverage reporting
+    - pytest-mock>=3.12        # Cleaner mocking with mocker fixture
+    - respx>=0.21              # httpx request mocking
+    - factory-boy>=3.3         # Test data factories
+    - aiohttp>=3.8.0           # Async HTTP client for tests

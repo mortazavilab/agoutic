@@ -6,12 +6,12 @@
 
 ## Overview
 
-Cortex is the **orchestration and reasoning engine** for AGOUTIC. It provides an AI agent interface for interpreting user requests, planning workflows, and submitting analysis jobs to Launchpad.
+Cortex is the **orchestration and reasoning engine** for AGOUTIC. It provides an AI agent interface for interpreting user requests, planning workflows, and submitting analysis jobs to Launchpad. Multi-step planning is now manifest-first for the core deterministic analysis flows: skill manifests drive request classification, runtime/input warnings, MCP tool-chain selection, and service gating, while older templates remain fallback for unmigrated paths.
 
 ### Key Responsibilities
 
 - 🧠 **AI Reasoning**: LLM-based interpretation of user intent
-- 📋 **Workflow Planning**: Convert requests into executable pipelines
+- 📋 **Workflow Planning**: Classify requests, compose manifest-driven deterministic plans, and fall back safely when a flow is not yet migrated
 - 🎯 **Skill Management**: Load and apply bioinformatics skill definitions
 - 🔗 **Job Submission**: Orchestrate job submission to Launchpad
 - 📊 **Project Tracking**: Maintain project and analysis history
@@ -30,7 +30,10 @@ Cortex is the **orchestration and reasoning engine** for AGOUTIC. It provides an
 User Request (REST/Chat)
         ↓
 Cortex Agent Engine
-  ├─ Load skill definitions (Dogme_DNA.md, Dogme_RNA.md, etc.)
+  ├─ Load skill definitions (skills/*/SKILL.md)
+  ├─ Load skill manifests (skills/*/manifest.yaml via cortex/skill_manifest.py)
+  ├─ Classify requests (plan_classifier.py)
+  ├─ Compose manifest-driven plans when supported (plan_composer.py)
   ├─ Create system prompt with skill context
   ├─ Call LLM for reasoning
   ├─ (Optional) Request approval from user
@@ -64,9 +67,17 @@ Results & Tracking
 │  │  Agent Engine (agent_engine.py)     │    │
 │  │  - Skill loading                    │    │
 │  │  - LLM chat interface               │    │
-│  │  - Workflow planning                │    │
+│  │  - Manifest-first workflow planning │    │
 │  │  - Tool contract injection          │    │
 │  │  - Error-handling playbook          │    │
+│  └─────────────────────────────────────┘    │
+│            ↓                                  │
+│  ┌─────────────────────────────────────┐    │
+│  │  Planner Stack                      │    │
+│  │  - plan_classifier.py               │    │
+│  │  - plan_composer.py                 │    │
+│  │  - planner.py                       │    │
+│  │  - skill_manifest.py                │    │
 │  └─────────────────────────────────────┘    │
 │            ↓                                  │
 │  ┌─────────────────────────────────────┐    │
@@ -254,21 +265,30 @@ from cortex.agent_engine import AgentEngine
 # Initialize agent with a specific model
 agent = AgentEngine(model_key="default")
 
-# Load skill and create system prompt
-skill_prompt = agent.construct_system_prompt("Dogme_DNA")
+# Load skill and create the rendered first-pass system prompt
+skill_prompt = agent.construct_system_prompt("run_dogme_dna")
 
-# Chat with agent
-response = agent.chat(
-    user_message="Analyze DNA sample",
-    system_prompt=skill_prompt,
-    conversation_history=[...]
+# Inspect the currently rendered prompt without calling the LLM
+prompt_preview = agent.render_system_prompt("run_dogme_dna", "first_pass")
+
+# Run the first-pass planning call
+response, usage = agent.think(
+  user_message="Analyze DNA sample",
+  skill_key="run_dogme_dna",
+  conversation_history=[...]
 )
 ```
 
 **Key Methods:**
-- `construct_system_prompt(skill_key)` - Build system prompt from skill; now includes tool parameter contracts and error-handling playbook
-- `chat(message, system_prompt, history)` - LLM interaction
+- `construct_system_prompt(skill_key)` - Render the first-pass planning prompt from Markdown templates plus dynamic skill/tool sections
+- `construct_analysis_prompt()` - Render the second-pass analysis prompt from its Markdown template
+- `render_system_prompt(skill_key, prompt_type)` - Return the exact rendered first-pass or second-pass prompt for inspection
+- `think(message, skill_key, history)` - First-pass LLM interaction
 - `_load_skill_text(skill_key)` - Load skill definition
+
+**Prompt templates:**
+- `cortex/prompt_templates/first_pass_system_prompt.md` - First-pass planning prompt template
+- `cortex/prompt_templates/second_pass_system_prompt.md` - Second-pass analysis prompt template
 
 ### 2. Tool Contracts (`tool_contracts.py`)
 
@@ -334,28 +354,22 @@ CREATE TABLE project_blocks (
 
 ## Skills System
 
-Skills are Markdown files in `skills/` that define workflows:
+Skills are Markdown files in `skills/<skill_key>/SKILL.md` that define workflows:
 
-- **Dogme_DNA.md** - Genomic DNA analysis workflow
-- **Dogme_RNA.md** - Direct RNA-seq workflow
-- **Dogme_cDNA.md** - cDNA isoform workflow
-- **ENCODE_LongRead.md** - ENCODE consortium workflow
-- **Local_Sample_Intake.md** - Sample intake workflow
+- **skills/run_dogme_dna/SKILL.md** - Genomic DNA analysis workflow
+- **skills/run_dogme_rna/SKILL.md** - Direct RNA-seq workflow
+- **skills/run_dogme_cdna/SKILL.md** - cDNA isoform workflow
+- **skills/ENCODE_LongRead/SKILL.md** - ENCODE consortium workflow
+- **skills/analyze_local_sample/SKILL.md** - Sample intake workflow
 
 ### Loading Skills
 
 ```python
-# Auto-registered in config.py
-SKILLS_REGISTRY = {
-    "Dogme_DNA": "Dogme_DNA.md",
-    "Dogme_RNA": "Dogme_RNA.md",
-    "Dogme_cDNA": "Dogme_cDNA.md",
-    "ENCODE_LongRead": "ENCODE_LongRead.md",
-    "Local_Sample_Intake": "Local_Sample_Intake.md",
-}
+# Auto-discovered from skills/<skill_key>/manifest.yaml
+# and re-exported as SKILLS_REGISTRY for backward compatibility.
 
 # Agent loads via:
-skill_text = agent._load_skill_text("Dogme_DNA")
+skill_text = agent._load_skill_text("run_dogme_dna")
 ```
 
 ## Configuration Examples
@@ -391,7 +405,7 @@ uvicorn cortex.app:app --port 8000
 ### Run Tests
 
 ```bash
-pytest cortex/test_chat.py -v
+pytest tests/cortex -q
 ```
 
 ### Manual Testing
@@ -544,7 +558,7 @@ The LLM instructs Cortex to create a chart by embedding a structured tag in its 
 [[PLOT: type=bar df=DF1 x=assay_title agg=count title=Experiment Types]]
 ```
 
-Supported chart types: `histogram`, `scatter`, `bar`, `box`, `heatmap`, `pie`
+Supported chart types: `histogram`, `scatter`, `line`, `area`, `bar`, `box`, `violin`, `strip`, `heatmap`, `pie`, `venn`, `upset`
 
 Cortex parses these tags, looks up the referenced DataFrame from the conversation history, and creates an `AGENT_PLOT` block that the UI renders via `st.plotly_chart()`.
 
@@ -568,9 +582,9 @@ Error: Skill 'Dogme_DNA' not found in Registry
 ```
 
 **Solution:**
-- Verify skill file exists: `ls skills/Dogme_DNA.md`
-- Check SKILLS_REGISTRY in config.py
-- Verify file path in registry matches actual file
+- Verify skill file exists: `ls skills/run_dogme_dna/SKILL.md`
+- Verify `skills/run_dogme_dna/manifest.yaml` exists and is valid YAML
+- Verify the skill folder name matches the intended skill key
 
 ### Database Locked
 
@@ -625,7 +639,7 @@ DATABASE_URL = "postgresql+asyncpg://user:pass@localhost/agoutic"
 
 ### Adding a New Skill
 
-1. Create markdown file in `skills/`:
+1. Create markdown file in `skills/<skill_key>/SKILL.md`:
    ```markdown
    # My Analysis Skill
    

@@ -1,0 +1,18 @@
+display_name: RNA Results Interpretation
+description: Interpret completed Dogme direct-RNA workflow results.
+category: analysis
+source:
+  type: service
+  key: analyzer
+required_services:
+  - analyzer
+expected_inputs:
+  - job_uuid
+  - work_dir
+output_types:
+  - report
+  - dataframe
+sample_types:
+  - RNA
+estimated_runtime: medium
+analysis_only: true

@@ -100,7 +100,7 @@ python3 -m analyzer.app
 python3 -m analyzer.mcp_server
 
 # Run tests
-python3 analyzer/test_analysis.py
+python3 -m pytest tests/analyzer -q
 ```
 
 ### Option 3: Using Uvicorn (Production)

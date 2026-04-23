@@ -1,0 +1,1354 @@
+"""
+Auto-generate DATA_CALL dicts — extracted from cortex/app.py (Tier 2).
+
+Safety net: when the LLM fails to emit DATA_CALL tags, this function
+detects obvious patterns in the user's message and auto-generates the
+appropriate tool calls for ENCODE, Dogme, and browsing commands.
+"""
+
+import os
+import re
+from pathlib import Path
+
+from cortex.conversation_state import _extract_job_context_from_history
+from cortex.dataframe_actions import build_auto_dataframe_call
+from cortex.edgepython_plot_params import normalize_generate_plot_params
+from cortex.encode_helpers import (
+    _ENCODE_ASSAY_ALIASES,
+    _extract_encode_search_term,
+    _find_experiment_for_file,
+    _looks_like_assay,
+)
+from cortex.path_helpers import (
+    _pick_file_tool,
+    _resolve_file_path,
+    _resolve_workflow_path,
+)
+from common.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+_PROJECT_WORKFLOW_REF_RE = re.compile(
+    r'\b(?P<project>[a-z0-9][a-z0-9_-]*)\s*:\s*(?P<workflow>workflow\d+)\b',
+    re.IGNORECASE,
+)
+
+
+def _project_owner_root(project_dir: str, default_work_dir: str = "") -> str:
+    candidate = (project_dir or "").strip() or (default_work_dir or "").strip()
+    if not candidate:
+        return ""
+    candidate = candidate.rstrip("/")
+    if re.search(r'/workflow\d+$', candidate, re.IGNORECASE):
+        candidate = candidate.rsplit("/", 1)[0]
+    path = Path(candidate)
+    parent = path.parent
+    if not str(parent) or str(parent) == ".":
+        return ""
+    return str(parent)
+
+
+def _resolve_project_workflow_ref(ref: str, project_dir: str, default_work_dir: str = "") -> str:
+    match = _PROJECT_WORKFLOW_REF_RE.fullmatch((ref or "").strip())
+    if not match:
+        return ref
+    owner_root = _project_owner_root(project_dir, default_work_dir)
+    if not owner_root:
+        return ref
+    project_slug = match.group("project")
+    workflow_name = match.group("workflow")
+    return f"{owner_root.rstrip('/')}/{project_slug}/{workflow_name}/openChromatin"
+
+
+def _extract_region_overlap_refs(user_message: str) -> list[str]:
+    return [match.group(0) for match in _PROJECT_WORKFLOW_REF_RE.finditer(user_message or "")]
+
+
+def _wants_region_overlap_plot(user_message: str) -> bool:
+    msg = (user_message or "").lower()
+    has_plot = any(token in msg for token in ("venn", "upset", "diagram"))
+    has_region_term = any(token in msg for token in ("region", "regions", "open chromatin", "chromatin"))
+    return has_plot and has_region_term
+
+
+def _is_script_source_dir(path_value: str) -> bool:
+    return bool(path_value and "/skills/" in path_value and "/scripts" in path_value)
+
+
+def _latest_workflow_dir(project_dir: str) -> str:
+    """Return the highest-numbered workflow directory under a project root."""
+    if not project_dir or not os.path.isdir(project_dir):
+        return ""
+
+    latest_num = -1
+    latest_dir = ""
+    try:
+        for entry in os.listdir(project_dir):
+            match = re.fullmatch(r"workflow(\d+)", entry, re.IGNORECASE)
+            if not match:
+                continue
+            candidate = os.path.join(project_dir, entry)
+            if not os.path.isdir(candidate):
+                continue
+            number = int(match.group(1))
+            if number > latest_num:
+                latest_num = number
+                latest_dir = candidate
+    except OSError:
+        return ""
+
+    return latest_dir
+
+
+def _default_file_work_dir(work_dir: str, project_dir: str) -> str:
+    """Prefer a real workflow directory over a stale script source directory."""
+    if work_dir and not _is_script_source_dir(work_dir):
+        return work_dir
+    if project_dir:
+        return _latest_workflow_dir(project_dir) or project_dir
+    return work_dir
+
+_BED_COUNT_INTENT_RE = re.compile(
+    r'\b(count|counts|summarize|summarise|tally|show)\b.*\bbed\b.*\b(chromosome|chromosomes|chr)\b'
+    r'|\b(chromosome|chromosomes|chr)\b.*\bbed\b',
+    re.IGNORECASE,
+)
+
+_MODIFICATION_COUNT_INTENT_RE = re.compile(
+    r'\b(?:count|counts|summarize|summarise|tally|show|plot|graph|chart)\b.*?\b(?P<mod>[A-Za-z0-9_+\-]+)\b\s+modifications?\b.*?\b(chromosome|chromosomes|chr)\b'
+    r'|\b(?P<mod2>[A-Za-z0-9_+\-]+)\b\s+modifications?\b.*?\b(chromosome|chromosomes|chr)\b',
+    re.IGNORECASE,
+)
+
+_BAM_DETAILS_INTENT_RE = re.compile(
+    r'\b(?:bam\s*(?:details?|info|information|stats|statistics|summary)|alignment\s+summary|mapped\s*/\s*unmapped)\b',
+    re.IGNORECASE,
+)
+
+
+def _extract_modification_name(user_message: str) -> str | None:
+    match = _MODIFICATION_COUNT_INTENT_RE.search(user_message)
+    if not match:
+        return None
+    return (match.group("mod") or match.group("mod2") or "").lower() or None
+
+
+# ---------------------------------------------------------------------------
+# _auto_generate_data_calls
+# ---------------------------------------------------------------------------
+
+def _auto_generate_data_calls(user_message: str, skill_key: str,
+                              conversation_history: list | None = None,
+                              history_blocks: list | None = None,
+                              project_dir: str = "",
+                              project_id: str = "") -> list[dict]:
+    """
+    Safety net: if the LLM failed to generate DATA_CALL tags, detect obvious
+    patterns in the user's message and auto-generate the appropriate tool calls.
+
+    Also resolves conversational references ("them", "each of them", "these")
+    by scanning recent conversation history for accessions or biosample terms.
+
+    Returns a list of dicts: [{"source_type": str, "source_key": str, "tool": str, "params": dict}]
+    """
+    calls = []
+    msg_lower = user_message.lower()
+    accession_matches = re.findall(r'(ENC[A-Z]{2}\d{3}[A-Z]{3})', user_message, re.IGNORECASE)
+    accessions = [a.upper() for a in accession_matches]
+    _VIZ_KEYWORDS = ("plot", "chart", "graph", "histogram", "scatter",
+                     "visualize", "visualise", "heatmap", "pie chart",
+                     "bar chart", "box plot", "distribution")
+    _has_viz_intent = any(kw in msg_lower for kw in _VIZ_KEYWORDS)
+    _encode_search_patterns = [
+        r'how\s+many\s+\S+.*experiments?',
+        r'search\s+(?:encode\s+)?for\s+\S+',
+        r'does\s+encode\s+have\s+\S+',
+        r'\S+\s+experiments?\s+(?:in|on|from)\s+encode',
+        r'(?:find|list|show|get|plot|chart|visuali[sz]e|graph|make)\s+(?:all\s+)?\S+\s+experiments?',
+    ]
+    _extracted_search_term = None
+    _compound_encode_viz_search = False
+    if skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+        _extracted_search_term = _extract_encode_search_term(user_message)
+        _compound_encode_viz_search = bool(
+            accessions
+            or any(re.search(p, msg_lower) for p in _encode_search_patterns)
+            or (
+                _extracted_search_term
+                and (
+                    "encode" in msg_lower
+                    or "experiment" in msg_lower
+                    or "experiments" in msg_lower
+                    or "biosample" in msg_lower
+                    or "assay" in msg_lower
+                )
+            )
+        )
+
+    # --- Explicit dataframe transforms on existing DFs ---
+    _df_action_call = build_auto_dataframe_call(user_message)
+    if _df_action_call is not None:
+        return [_df_action_call]
+
+    # --- Cross-project BED overlap requests must use the workflow planner ---
+    _region_overlap_refs = _extract_region_overlap_refs(user_message)
+    if len(_region_overlap_refs) >= 2 and _wants_region_overlap_plot(user_message):
+        return calls
+
+    # --- DF reference / visualization follow-up: never auto-call ---
+    # If the user references an existing DataFrame (DF1, DF2, ...) this is
+    # a follow-up on in-memory data — no new API call is needed.
+    if re.search(r'\bDF\s*\d+\b', user_message, re.IGNORECASE):
+        return calls
+    # Pure visualization intent (no new data request)
+    if _has_viz_intent and not _compound_encode_viz_search:
+        return calls
+
+    # --- Remote execution defaults/profile safety net ---
+    # If the remote skill is active and the LLM emitted no DATA_CALL tags,
+    # proactively fetch SSH profiles and SLURM defaults so the assistant can
+    # present saved account/partition values instead of saying they are missing.
+    if skill_key == "remote_execution":
+        _remote_hint_patterns = [
+            r'\bslurm\b',
+            r'\bssh\s+profiles?\b',
+            r'\bremote\s+profiles?\b',
+            r'\bdefaults?\b',
+            r'\baccount\b',
+            r'\bpartition\b',
+            r'\bhpc\d+\b',
+        ]
+        _wants_remote_defaults = any(re.search(p, msg_lower) for p in _remote_hint_patterns)
+        if _wants_remote_defaults:
+            _profile_nickname = None
+            _invalid_nick_tokens = {
+                "default", "defaults", "profile", "profiles", "slurm", "ssh", "remote",
+                "account", "partition", "cpu", "gpu", "for", "use", "using",
+            }
+            _nickname_match = re.search(r'\bnickname\s+([a-zA-Z0-9._-]+)\b', user_message, re.IGNORECASE)
+            if _nickname_match:
+                _cand = _nickname_match.group(1).strip()
+                if _cand.lower() not in _invalid_nick_tokens:
+                    _profile_nickname = _cand
+            else:
+                _profile_match = re.search(r'\bprofile\s+([a-zA-Z0-9._-]+)\b', user_message, re.IGNORECASE)
+                if _profile_match:
+                    _cand = _profile_match.group(1).strip()
+                    if _cand.lower() not in _invalid_nick_tokens:
+                        _profile_nickname = _cand
+
+            if not _profile_nickname:
+                _hpc_match = re.search(r'\b(hpc\d+)\b', user_message, re.IGNORECASE)
+                if _hpc_match:
+                    _profile_nickname = _hpc_match.group(1)
+
+            calls.append({
+                "source_type": "service",
+                "source_key": "launchpad",
+                "tool": "list_ssh_profiles",
+                "params": {"user_id": "<user_id>"},
+            })
+
+            _defaults_params = {"user_id": "<user_id>"}
+            if _profile_nickname:
+                _defaults_params["profile_nickname"] = _profile_nickname
+
+            calls.append({
+                "source_type": "service",
+                "source_key": "launchpad",
+                "tool": "get_slurm_defaults",
+                "params": _defaults_params,
+            })
+            return calls
+
+    # --- Browsing commands (highest priority, skill-independent) ---
+    # "list workflows", "list files" etc. always route to analyzer when there
+    # is a project directory, regardless of the active skill.  Must run before
+    # any skill-specific logic (e.g. ENCODE catch-all) to avoid mis-routing.
+    job_context = _extract_job_context_from_history(
+        conversation_history, history_blocks=history_blocks)
+    work_dir = job_context.get("work_dir", "")
+    run_uuid = job_context.get("run_uuid", "")
+    workflows = job_context.get("workflows", [])
+
+    # --- "sync results back to local" command ---
+    # Supports natural-language retries when SLURM copy-back missed files.
+    _sync_results_intent = bool(
+        re.search(
+            r"\b(?:sync|re\s*sync|resync|copy|retry)\b.*\b(?:results?|outputs?)\b.*\b(?:back|local|download)\b",
+            msg_lower,
+        )
+    )
+    if not _sync_results_intent:
+        _sync_results_intent = bool(
+            re.search(r"\b(?:sync|re\s*sync|resync)\b.*\b(?:workflow\d+|run\b|job\b)\b", msg_lower)
+        )
+
+    if _sync_results_intent:
+        _force_sync = bool(re.search(r"\b(force|retry|again|re\s*try)\b", msg_lower))
+        _requested_uuid_match = re.search(
+            r"\b([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b",
+            user_message,
+            re.IGNORECASE,
+        )
+        _requested_run_uuid = _requested_uuid_match.group(1) if _requested_uuid_match else ""
+
+        _requested_workflow_match = re.search(r"\b(workflow\d+)\b", user_message, re.IGNORECASE)
+        _requested_workflow = _requested_workflow_match.group(1).lower() if _requested_workflow_match else ""
+
+        _target_run_uuid = _requested_run_uuid or ""
+        _matched_requested_workflow_uuid = False
+        if not _target_run_uuid and _requested_workflow and workflows:
+            for _wf in reversed(workflows):
+                _wf_dir = (_wf.get("work_dir") or "").rstrip("/").lower()
+                _wf_uuid = _wf.get("run_uuid") or ""
+                if _wf_uuid and _wf_dir.endswith(f"/{_requested_workflow}"):
+                    _target_run_uuid = _wf_uuid
+                    _matched_requested_workflow_uuid = True
+                    break
+
+        if not _target_run_uuid:
+            _target_run_uuid = run_uuid
+
+        # Build params: prefer server-side resolution via project_id +
+        # workflow_label when the UUID came from a fallback (not matched to
+        # the specific workflow the user named).  This avoids syncing the
+        # wrong job when conversation history is stale.
+        _params: dict = {}
+        if _target_run_uuid and (
+            _target_run_uuid == _requested_run_uuid
+            or not _requested_workflow
+            or _matched_requested_workflow_uuid
+        ):
+            # UUID was explicitly provided, no specific workflow was named,
+            # or we matched the named workflow exactly from history.
+            _params["run_uuid"] = _target_run_uuid
+        elif _requested_workflow and project_id:
+            # Let the server resolve the correct UUID from the DB
+            _params["project_id"] = project_id
+            _params["workflow_label"] = _requested_workflow
+        elif _target_run_uuid:
+            _params["run_uuid"] = _target_run_uuid
+
+        if _params:
+            if _force_sync:
+                _params["force"] = True
+            calls.append(
+                {
+                    "source_type": "service",
+                    "source_key": "launchpad",
+                    "tool": "sync_job_results",
+                    "params": _params,
+                }
+            )
+        return calls
+
+    # Derive the project directory — prefer the explicitly-passed project_dir
+    # (from the chat endpoint / DB) because the job-history work_dir may
+    # point to an unrelated skill scripts directory.  Fall back to
+    # parent-of-work_dir only when project_dir is unavailable.
+    _project_dir = ""
+    if project_dir:
+        _project_dir = project_dir
+    elif work_dir:
+        if "/skills/" in work_dir and "/scripts" in work_dir:
+            _project_dir = ""
+        elif re.search(r'/workflow\d+/?$', work_dir):
+            _project_dir = work_dir.rstrip("/").rsplit("/", 1)[0]
+        else:
+            _project_dir = work_dir
+
+    # --- "list workflows" command ---
+    if (
+        re.search(r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b', msg_lower)
+        and not _BAM_DETAILS_INTENT_RE.search(user_message)
+    ):
+        if _project_dir:
+            calls.append({
+                "source_type": "service", "source_key": "analyzer",
+                "tool": "list_job_files",
+                "params": {"work_dir": _project_dir, "max_depth": 1, "name_pattern": "workflow*"},
+            })
+        return calls
+
+    # --- "list project files [in <path>]" — explicitly target project root ---
+    _list_proj_m = re.search(
+        r'\b(?:list|show)\s+project\s+files?\b'
+        r'(?:\s+(?:in|under|at|of)\s+(.+?))?\s*$',
+        user_message, re.IGNORECASE,
+    )
+    if _list_proj_m and _project_dir:
+        _subpath = (_list_proj_m.group(1) or "").strip().strip('"\'')
+        _target_wd = _resolve_workflow_path(
+            _subpath, _project_dir, workflows,
+        ) if _subpath else _project_dir
+        _params: dict = {"work_dir": _target_wd, "max_depth": 1}
+        calls.append({
+            "source_type": "service", "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": _params,
+        })
+        return calls
+
+    # --- "list files" / "list files in <path>" command ---
+    _list_files_m = re.search(
+        r'\b(?:list|show|what)\s+(?:the\s+)?files?\b'
+        r'(?:\s+(?:in|under|at|of)\s+(.+?))?\s*$',
+        user_message, re.IGNORECASE,
+    )
+    if _list_files_m:
+        _subpath = (_list_files_m.group(1) or "").strip().strip('"\'')
+        if _subpath:
+            # Try work_dir/<subpath> first; fall back to project_dir/<subpath>
+            _target_wd = ""
+            _wd_candidate = _resolve_workflow_path(
+                _subpath, work_dir, workflows,
+            ) if work_dir else ""
+            if _wd_candidate and os.path.isdir(_wd_candidate):
+                _target_wd = _wd_candidate
+            elif _project_dir and _project_dir != work_dir:
+                _proj_candidate = _resolve_workflow_path(
+                    _subpath, _project_dir, workflows,
+                )
+                if _proj_candidate and os.path.isdir(_proj_candidate):
+                    _target_wd = _proj_candidate
+            # Last resort: use whichever candidate we have, let the server
+            # report "not found" if neither exists.
+            if not _target_wd:
+                _target_wd = _wd_candidate or (
+                    f"{_project_dir.rstrip('/')}/{_subpath}" if _project_dir else ""
+                )
+        else:
+            # No subpath → list current workflow dir.
+            # Guard: for script runs the history work_dir may point to the
+            # skills/scripts source directory instead of the project output;
+            # prefer project_dir when that signature is detected.
+            _effective_wd = work_dir
+            if _effective_wd and _project_dir and _is_script_source_dir(_effective_wd):
+                _effective_wd = _latest_workflow_dir(_project_dir) or _project_dir
+            _target_wd = _effective_wd or _project_dir or ""
+
+        if _target_wd:
+            _params_f: dict = {"work_dir": _target_wd}
+            if _subpath:
+                _params_f["max_depth"] = 1
+            calls.append({
+                "source_type": "service", "source_key": "analyzer",
+                "tool": "list_job_files",
+                "params": _params_f,
+            })
+        # If no resolvable path, return empty calls — the browsing error
+        # handler in the results pipeline will show helpful suggestions.
+        return calls
+
+    # Organism lookup for KNOWN biosamples.  This is NOT exhaustive — it
+    # exists only so we can add an organism= hint when we recognise the term.
+    # Unknown terms still get sent to the API (see catch-all at the bottom).
+    _KNOWN_ORGANISMS: dict[str, str] = {
+        # Human
+        "k562": "Homo sapiens", "gm12878": "Homo sapiens",
+        "hela": "Homo sapiens", "hepg2": "Homo sapiens",
+        "hek293": "Homo sapiens", "a549": "Homo sapiens",
+        "mcf-7": "Homo sapiens", "mcf7": "Homo sapiens",
+        "jurkat": "Homo sapiens", "imr-90": "Homo sapiens",
+        "imr90": "Homo sapiens", "u2os": "Homo sapiens",
+        "hff": "Homo sapiens", "wtc-11": "Homo sapiens",
+        "lncap": "Homo sapiens", "panc-1": "Homo sapiens",
+        "sk-n-sh": "Homo sapiens", "h1": "Homo sapiens",
+        "h9": "Homo sapiens", "caco-2": "Homo sapiens",
+        "sh-sy5y": "Homo sapiens",
+        # Mouse
+        "c2c12": "Mus musculus", "nih3t3": "Mus musculus",
+        "mef": "Mus musculus", "mel": "Mus musculus",
+        "es-e14": "Mus musculus", "mesc": "Mus musculus",
+        "g1e": "Mus musculus", "ch12": "Mus musculus",
+        "v6.5": "Mus musculus",
+    }
+
+    # --- ENCODE patterns ---
+    # Detect ENCODE accession numbers (ENCSR, ENCFF, ENCLB, etc.)
+    # --- Download intent detection ---
+    # "download ENCFF921XAH" should resolve the file URL and start a download,
+    # not trigger a get_files_by_type search.
+    _download_intent = any(w in msg_lower for w in (
+        "download", "grab", "fetch", "save", "get me",
+    ))
+    _encff_accessions = [a for a in accessions if a.startswith("ENCFF")]
+
+    if _download_intent and _encff_accessions:
+        # Find the parent experiment — check current message first, then history
+        _encsr_in_msg = [a for a in accessions if a.startswith("ENCSR")]
+        for _encff in _encff_accessions:
+            _parent_exp = _encsr_in_msg[0] if _encsr_in_msg else \
+                _find_experiment_for_file(_encff, conversation_history)
+            if _parent_exp:
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_file_metadata",
+                    "params": {"accession": _parent_exp, "file_accession": _encff},
+                    "_chain": "download",  # signal to auto-download after metadata resolves
+                })
+            else:
+                # No parent experiment — try to get metadata with just the ENCFF
+                # (the _correct_tool_routing code will handle this)
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_file_metadata",
+                    "params": {"file_accession": _encff},
+                    "_chain": "download",
+                })
+        return calls
+
+    # If no accession in the message, check for conversational references
+    # ("them", "these", "each", "all of them", "for those", etc.)
+    referential_words = ["them", "these", "those", "each", "all of them",
+                         "each of them", "for those", "the experiments",
+                         "the accessions", "same", "list"]
+    _has_referential = any(w in msg_lower for w in referential_words)
+
+    if not accessions and _has_referential:
+        # Scan recent conversation history (last 4 messages) for accessions.
+        # IMPORTANT: Strip <details>...</details> blocks first so we only
+        # pick up accessions from the clean summary, not from raw query dumps
+        # which may contain unrelated experiments from broader searches.
+        if conversation_history:
+            recent = conversation_history[-4:]
+            for msg in recent:
+                content = msg.get("content", "")
+                # Remove raw data sections that may contain extra accessions
+                content = re.sub(r'<details>.*?</details>', '', content, flags=re.DOTALL)
+                found = re.findall(r'(ENC[A-Z]{2}\d{3}[A-Z]{3})', content, re.IGNORECASE)
+                for acc in found:
+                    acc_upper = acc.upper()
+                    # Only use experiment-level accessions (ENCSR), not file accessions
+                    if acc_upper.startswith("ENCSR") and acc_upper not in accessions:
+                        accessions.append(acc_upper)
+
+    if accessions and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+        # Determine which tool based on what the user is asking
+        file_keywords = ["bam", "fastq", "file", "files", "pod5", "tar", "bigwig",
+                         "download", "available", "accessions", "alignments"]
+        # Note: "methylated" removed from file_keywords — it's a follow-up filter
+        # handled by _inject_job_context, not a new fetch trigger.
+        summary_keywords = ["summary", "how many files", "file size"]
+        metadata_keywords = ["detail", "metadata", "info", "what is", "tell me about",
+                            "describe", "experiment"]
+
+        for accession in accessions:
+            if any(kw in msg_lower for kw in file_keywords):
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_files_by_type", "params": {"accession": accession},
+                })
+            elif any(kw in msg_lower for kw in summary_keywords):
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_files_by_type", "params": {"accession": accession},
+                })
+            elif any(kw in msg_lower for kw in metadata_keywords):
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_experiment", "params": {"accession": accession},
+                })
+            else:
+                # Default: get experiment details for an accession
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "get_experiment", "params": {"accession": accession},
+                })
+
+    # Detect biosample searches (no accession but mentions cell lines/tissues)
+    elif skill_key in ("ENCODE_Search", "ENCODE_LongRead") and not accessions:
+        # Detect assay-type filter in user message using the module-level map.
+        detected_assay: str | None = None
+        for alias, canonical in _ENCODE_ASSAY_ALIASES.items():
+            if alias in msg_lower:
+                detected_assay = canonical
+                break
+
+        # --- Strategy: try specific detections first, then catch-all ---
+        # 1. Known biosample (organism hint available)
+        # 2. Referential follow-up from conversation history
+        # 3. Assay-only query
+        # 4. Known target protein / histone mark
+        # 5. CATCH-ALL: extract unknown term and send to search_by_biosample
+
+        # 1. Check for a known biosample (lets us add organism= hint)
+        for keyword, organism in _KNOWN_ORGANISMS.items():
+            if keyword in msg_lower:
+                # Grab the original-case version from the user message
+                _orig_m = re.search(rf'\b({re.escape(keyword)})\b', user_message, re.IGNORECASE)
+                _search_term = _orig_m.group(1) if _orig_m else keyword.upper()
+                params: dict[str, str] = {"search_term": _search_term}
+                # Only add organism if user explicitly mentioned species
+                if "mouse" in msg_lower or "mus musculus" in msg_lower:
+                    params["organism"] = "Mus musculus"
+                elif "human" in msg_lower or "homo sapiens" in msg_lower:
+                    params["organism"] = "Homo sapiens"
+                if detected_assay:
+                    params["assay_title"] = detected_assay
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "search_by_biosample", "params": params,
+                })
+                break
+
+        # 2. Referential follow-up — scan history for previous biosample term
+        if not calls and (_has_referential or detected_assay) and conversation_history:
+            for hist_msg in reversed(conversation_history[-6:]):
+                content_lower = hist_msg.get("content", "").lower()
+                for keyword, organism in _KNOWN_ORGANISMS.items():
+                    if keyword in content_lower:
+                        _orig_m = re.search(rf'\b({re.escape(keyword)})\b',
+                                            hist_msg.get("content", ""), re.IGNORECASE)
+                        _search_term = _orig_m.group(1) if _orig_m else keyword.upper()
+                        params = {"search_term": _search_term}
+                        if detected_assay:
+                            params["assay_title"] = detected_assay
+                        calls.append({
+                            "source_type": "consortium", "source_key": "encode",
+                            "tool": "search_by_biosample", "params": params,
+                        })
+                        break
+                if calls:
+                    break
+
+        # Assay-only query: assay detected but no biosample found in message or history.
+        # e.g. "how many RNA-seq experiments are in ENCODE?"
+        if not calls and detected_assay and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+            calls.append({
+                "source_type": "consortium", "source_key": "encode",
+                "tool": "search_by_assay",
+                "params": {"assay_title": detected_assay},
+            })
+
+        # 4. Target-based query: no biosample, no assay, but a known target protein
+        # e.g. "search ENCODE for CTCF" or "H3K27ac experiments"
+        if not calls and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+            _known_targets = {
+                "ctcf", "polr2a", "ep300", "max", "myc", "jun", "fos",
+                "rest", "yy1", "tcf7l2", "gata1", "gata2", "spi1",
+                "cebpb", "stat1", "stat3", "irf1", "nrf1", "rad21",
+                "smc3", "nipbl", "znf143", "brd4", "mediator",
+                "h3k27ac", "h3k4me3", "h3k4me1", "h3k36me3",
+                "h3k27me3", "h3k9me3", "h3k79me2", "h2afz", "h4k20me1",
+            }
+            # Check if user mentions a known target (word-boundary match)
+            for _tgt in _known_targets:
+                if re.search(rf'\b{re.escape(_tgt)}\b', msg_lower):
+                    # Use original case from user message for the target value
+                    _tgt_match = re.search(rf'\b({re.escape(_tgt)})\b', user_message, re.IGNORECASE)
+                    _tgt_val = _tgt_match.group(1) if _tgt_match else _tgt.upper()
+                    calls.append({
+                        "source_type": "consortium", "source_key": "encode",
+                        "tool": "search_by_target",
+                        "params": {"target": _tgt_val},
+                    })
+                    break
+
+        # 5. CATCH-ALL: nothing matched above but we're on an ENCODE skill.
+        #    Extract the most likely search term from the user's message and
+        #    send it to search_by_biosample.  Let the ENCODE API decide if
+        #    the term is valid — we can't enumerate every cell line / tissue.
+        if not calls and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+            _extracted = _extracted_search_term or _extract_encode_search_term(user_message)
+            if _extracted:
+                params = {"search_term": _extracted}
+                # Infer organism from context words
+                if "mouse" in msg_lower or "mus musculus" in msg_lower:
+                    params["organism"] = "Mus musculus"
+                elif "human" in msg_lower or "homo sapiens" in msg_lower:
+                    params["organism"] = "Homo sapiens"
+                if detected_assay:
+                    params["assay_title"] = detected_assay
+                calls.append({
+                    "source_type": "consortium", "source_key": "encode",
+                    "tool": "search_by_biosample", "params": params,
+                })
+                logger.info("Catch-all: extracted unknown search term for ENCODE",
+                           search_term=_extracted)
+
+    # --- Enrichment analysis patterns ---
+    enrichment_skills = {"enrichment_analysis"}
+    if not calls and skill_key in enrichment_skills:
+        _enrich_kws = ["go enrichment", "gene ontology", "pathway enrichment",
+                        "pathway analysis", "kegg", "reactome", "go analysis",
+                        "enrichment analysis", "enriched terms", "enriched pathways"]
+        if any(kw in msg_lower for kw in _enrich_kws):
+            direction = "all"
+            if "up" in msg_lower and "down" not in msg_lower:
+                direction = "up"
+            elif "down" in msg_lower and "up" not in msg_lower:
+                direction = "down"
+            if "kegg" in msg_lower:
+                calls.append({
+                    "source_type": "service", "source_key": "edgepython",
+                    "tool": "run_pathway_enrichment",
+                    "params": {"direction": direction, "database": "KEGG"},
+                })
+            elif "reactome" in msg_lower:
+                calls.append({
+                    "source_type": "service", "source_key": "edgepython",
+                    "tool": "run_pathway_enrichment",
+                    "params": {"direction": direction, "database": "REAC"},
+                })
+            else:
+                calls.append({
+                    "source_type": "service", "source_key": "edgepython",
+                    "tool": "run_go_enrichment",
+                    "params": {"direction": direction},
+                })
+
+    # --- Dogme / Analyzer file-parsing patterns ---
+    # When in a Dogme analysis skill and user asks to parse/show a file,
+    # auto-generate find_file + parse/read calls so the LLM gets real data.
+    dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
+                    "analyze_job_results"}
+    if not calls and skill_key in dogme_skills:
+        # job_context, work_dir, run_uuid, workflows already extracted above
+        # (browsing block at the top of this function).
+
+        # --- "set workflow" / "use workflow" command ---
+        # Handled conversationally — the LLM picks up which workflow to use.
+        # We just inject context (done by _inject_job_context).
+
+        # --- File-parse / read patterns ---
+        parse_keywords = ["parse", "show me", "read", "open", "display",
+                          "view", "get", "what's in", "contents of"]
+        if any(kw in msg_lower for kw in parse_keywords):
+            # Extract filename / relative path from user message.
+            # Handles: "parse annot/File.csv", "parse workflow2/annot/File.csv",
+            #          "parse File.csv", "show me the file File.csv",
+            #          "parse File.csv in workflow10", "parse File.csv from workflow10"
+            file_pattern = (
+                r'(?:parse|show\s+me|read|open|display|view|get)'
+                r'\s+(?:the\s+)?(?:file\s+)?'
+                r'(\S+\.(?:csv|tsv|bed|txt|log|html))'
+            )
+            # Secondary pattern: "parse FILE in/from workflowN"
+            _workflow_suffix_pattern = (
+                r'(?:parse|show\s+me|read|open|display|view|get)'
+                r'\s+(?:the\s+)?(?:file\s+)?'
+                r'(\S+\.(?:csv|tsv|bed|txt|log|html))'
+                r'\s+(?:in|from|under)\s+(workflow\d+)'
+            )
+            file_match = re.search(file_pattern, msg_lower)
+            _wf_suffix_match = re.search(_workflow_suffix_pattern, msg_lower)
+            if file_match:
+                filename = file_match.group(1)
+                # Grab the original-case version from the raw message
+                file_match_orig = re.search(file_pattern, user_message, re.IGNORECASE)
+                if file_match_orig:
+                    filename = file_match_orig.group(1)
+
+                # If user said "... in workflow10" / "... from workflow10",
+                # prepend the workflow prefix so path resolution picks it up.
+                if _wf_suffix_match:
+                    _wf_suffix_orig = re.search(_workflow_suffix_pattern, user_message, re.IGNORECASE)
+                    _wf_name = (_wf_suffix_orig.group(2) if _wf_suffix_orig else _wf_suffix_match.group(2))
+                    if not re.match(r'^workflow\d+(?:/|\\)', filename, re.IGNORECASE):
+                        filename = f"{_wf_name}/{filename}"
+
+                # Resolve the path: could be just a filename, a subpath
+                # (annot/File.csv), or workflow-prefixed (workflow2/annot/File.csv).
+                _base_wd = _default_file_work_dir(work_dir, _project_dir)
+                if re.match(r'^workflow\d+(?:/|\\)', filename, re.IGNORECASE):
+                    _base_wd = _project_dir or _base_wd
+                _resolved_wd, _resolved_file = _resolve_file_path(
+                    filename, _base_wd, workflows,
+                )
+                if not _resolved_wd and _base_wd:
+                    _resolved_wd = _base_wd
+                if not _resolved_wd and run_uuid:
+                    _resolved_wd = None  # will use run_uuid fallback
+
+                if _resolved_wd or run_uuid:
+                    _params: dict = {"file_name": _resolved_file}
+                    if _resolved_wd:
+                        _params["work_dir"] = _resolved_wd
+                    else:
+                        _params["run_uuid"] = run_uuid
+                    calls.append({
+                        "source_type": "service", "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": _params,
+                        "_chain": _pick_file_tool(_resolved_file),
+                    })
+
+        # --- Catch-all for analyze_job_results: if the LLM narrated steps
+        # instead of emitting a DATA_CALL, auto-generate get_analysis_summary
+        # so the analysis actually executes. ---
+        if not calls and skill_key == "analyze_job_results" and (work_dir or run_uuid):
+            _bed_count_intent = bool(_BED_COUNT_INTENT_RE.search(msg_lower))
+            _modification_name = _extract_modification_name(user_message)
+            _bam_details_intent = bool(_BAM_DETAILS_INTENT_RE.search(user_message)) or \
+                bool(re.search(r'\b\S+\.bam\b', user_message, re.IGNORECASE))
+
+            # BAM details fallback: list files first, then downstream logic can
+            # pick nearby summaries using supported analyzer tools only.
+            if _bam_details_intent:
+                _bam_match = re.search(r'(\S+\.bam)\b', user_message, re.IGNORECASE)
+                _bam_ref = _bam_match.group(1).rstrip('.,;:!?') if _bam_match else None
+
+                _workflow_entries = [
+                    wf for wf in workflows
+                    if (wf.get("work_dir") or "") and re.search(r'/workflow\d+/?$', wf.get("work_dir") or "")
+                ]
+                _requested_wf_m = re.search(r'\b(workflow\d+)\b', user_message, re.IGNORECASE)
+                _requested_wf = _requested_wf_m.group(1) if _requested_wf_m else ""
+
+                # Prefer explicit workflow requests from the user.
+                if _requested_wf:
+                    _base = work_dir or _project_dir
+                    _target_wd = _resolve_workflow_path(_requested_wf, _base, workflows) if _base else ""
+                    if _target_wd:
+                        calls.append({
+                            "source_type": "service", "source_key": "analyzer",
+                            "tool": "list_job_files",
+                            "params": {"work_dir": _target_wd},
+                        })
+                        if _bam_ref:
+                            calls.append({
+                                "source_type": "service", "source_key": "analyzer",
+                                "tool": "find_file",
+                                "params": {"file_name": _bam_ref, "work_dir": _target_wd},
+                            })
+                        logger.warning(
+                            "Auto-generated BAM-detail calls for explicit workflow",
+                            workflow=_requested_wf,
+                            work_dir=_target_wd,
+                        )
+                        return calls
+
+                # If one workflow is known, use it directly via work_dir (not run_uuid).
+                if len(_workflow_entries) == 1:
+                    _target_wd = _workflow_entries[0].get("work_dir")
+                    calls.append({
+                        "source_type": "service", "source_key": "analyzer",
+                        "tool": "list_job_files",
+                        "params": {"work_dir": _target_wd},
+                    })
+                    if _bam_ref:
+                        calls.append({
+                            "source_type": "service", "source_key": "analyzer",
+                            "tool": "find_file",
+                            "params": {"file_name": _bam_ref, "work_dir": _target_wd},
+                        })
+                    logger.warning(
+                        "Auto-generated BAM-detail calls using single resolved workflow",
+                        work_dir=_target_wd,
+                    )
+                    return calls
+
+                # If multiple or unknown workflows, list workflows first.
+                if _project_dir:
+                    calls.append({
+                        "source_type": "service", "source_key": "analyzer",
+                        "tool": "list_job_files",
+                        "params": {"work_dir": _project_dir, "max_depth": 1, "name_pattern": "workflow*"},
+                    })
+                    logger.warning(
+                        "Auto-generated list workflows before BAM-detail inspection",
+                        project_dir=_project_dir,
+                    )
+                    return calls
+
+                logger.warning(
+                    "Unable to resolve workflow/project context for BAM-detail request",
+                )
+                return calls
+
+            if _bed_count_intent:
+                _bed_match = re.search(r'(\S+\.bed)\b', user_message, re.IGNORECASE)
+                if _bed_match:
+                    _bed_ref = _bed_match.group(1).rstrip('.,;:!?')
+                    _base_wd = _default_file_work_dir(work_dir, _project_dir)
+                    if re.match(r'^workflow\d+(?:/|\\)', _bed_ref, re.IGNORECASE):
+                        _base_wd = _project_dir or _base_wd
+                    _resolved_wd, _resolved_file = _resolve_file_path(
+                        _bed_ref, _base_wd, workflows,
+                    )
+                    if not _resolved_wd and _base_wd:
+                        _resolved_wd = _base_wd
+                    _params: dict = {"file_name": _resolved_file}
+                    if _resolved_wd:
+                        _params["work_dir"] = _resolved_wd
+                    elif run_uuid:
+                        _params["run_uuid"] = run_uuid
+                    calls.append({
+                        "source_type": "service", "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": _params,
+                    })
+                    logger.warning(
+                        "Auto-generated find_file for analyze_job_results BED chromosome-count request",
+                        work_dir=_resolved_wd or work_dir,
+                        run_uuid=run_uuid,
+                        bed_ref=_bed_ref,
+                    )
+                    return calls
+
+            if _modification_name:
+                _params: dict = {
+                    "extensions": ".bed",
+                    "max_depth": 1,
+                }
+                if work_dir:
+                    _params["work_dir"] = _resolve_workflow_path("bedMethyl", work_dir, workflows)
+                elif run_uuid:
+                    _params["run_uuid"] = run_uuid
+                calls.append({
+                    "source_type": "service", "source_key": "analyzer",
+                    "tool": "list_job_files",
+                    "params": _params,
+                })
+                logger.warning(
+                    "Auto-generated list_job_files for analyze_job_results modification chromosome-count request",
+                    work_dir=_params.get("work_dir"),
+                    run_uuid=run_uuid,
+                    modification=_modification_name,
+                )
+                return calls
+
+            _summary_params: dict = {}
+            if work_dir:
+                _summary_params["work_dir"] = work_dir
+            if run_uuid:
+                _summary_params["run_uuid"] = run_uuid
+            calls.append({
+                "source_type": "service", "source_key": "analyzer",
+                "tool": "get_analysis_summary",
+                "params": _summary_params,
+            })
+            logger.warning("Auto-generated get_analysis_summary for analyze_job_results skill",
+                          work_dir=work_dir, run_uuid=run_uuid)
+
+    return calls
+
+
+# ---------------------------------------------------------------------------
+# _validate_analyzer_params
+# ---------------------------------------------------------------------------
+
+def _validate_analyzer_params(
+    tool: str, params: dict, user_message: str,
+    conversation_history: list | None = None,
+    history_blocks: list | None = None,
+    project_dir: str = "",
+) -> dict:
+    """
+    Always force *work_dir* from conversation context and strip unknown params.
+
+    The LLM cannot be trusted to produce the correct work_dir — it may
+    emit a placeholder (``/work_dir``, ``{work_dir}``), an invented path,
+    or the project-level dir instead of a workflow dir.  We therefore
+    always resolve the real work_dir from history and override whatever
+    the LLM supplied.
+
+    Also strips parameters that the Analyzer MCP tool doesn't accept
+    (e.g. ``sample=Jamshid``) to prevent Pydantic validation errors.
+    """
+    params = dict(params)  # shallow copy
+
+    def _normalize_overlap_folder_ref(value: str, *, current_project_dir: str, current_default_wd: str) -> str:
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return stripped
+        return _resolve_project_workflow_ref(stripped, current_project_dir, current_default_wd)
+
+    # --- Strip unknown params for each tool ---
+    _KNOWN_PARAMS: dict[str, set[str]] = {
+        "list_job_files": {"work_dir", "run_uuid", "extensions", "compact", "max_depth"},
+        "find_file": {"file_name", "work_dir", "run_uuid"},
+        "read_file_content": {"file_path", "work_dir", "run_uuid", "preview_lines"},
+        "parse_csv_file": {"file_path", "work_dir", "run_uuid", "max_rows"},
+        "parse_bed_file": {"file_path", "work_dir", "run_uuid", "max_records"},
+        "compare_bed_region_overlaps": {
+            "bed_a_path", "bed_b_path", "folder_a", "folder_b",
+            "pattern_a", "pattern_b", "sample_a_label", "sample_b_label",
+            "min_overlap_bp", "export_dir", "work_dir", "run_uuid",
+        },
+        "get_analysis_summary": {"run_uuid", "work_dir"},
+        "categorize_job_files": {"work_dir", "run_uuid"},
+    }
+    allowed = _KNOWN_PARAMS.get(tool)
+
+    # --- Rescue subfolder hints before stripping unknown params ---
+    # The LLM may pass invented params like subfolder=annot, path=annot,
+    # directory=annot etc.  Capture these before they're stripped.
+    _subfolder_hint = ""
+    for _sf_key in ("subfolder", "subpath", "path", "directory", "folder", "subdir"):
+        if _sf_key in params and (not allowed or _sf_key not in allowed):
+            _subfolder_hint = params[_sf_key]
+            break
+
+    if allowed:
+        _extra = set(params) - allowed
+        if _extra:
+            logger.warning("Stripping unknown Analyzer params",
+                          tool=tool, extra_params=sorted(_extra))
+            params = {k: v for k, v in params.items() if k in allowed}
+
+    # --- Force work_dir from context ---
+    ctx = _extract_job_context_from_history(
+        conversation_history, history_blocks=history_blocks
+    )
+    real_wd = ctx.get("work_dir", "")
+    ctx_run_uuid = ctx.get("run_uuid", "")
+    _is_bam_detail_list = bool(
+        tool == "list_job_files"
+        and re.search(
+            r'\b(?:bam\s*(?:details?|info|information|stats|statistics|summary)|alignment\s+summary|mapped\s*/\s*unmapped|\S+\.bam)\b',
+            user_message,
+            re.IGNORECASE,
+        )
+    )
+
+    if _is_bam_detail_list:
+        # Allow explicit safe discovery/listing calls that do not rely on run_uuid.
+        # This supports the BAM fallback flow: list workflows first, then choose
+        # the workflow that actually contains the BAM.
+        _param_wd = (params.get("work_dir") or "").strip()
+        if _param_wd:
+            _is_workflow_discovery = params.get("name_pattern") == "workflow*" or params.get("max_depth") == 1
+            _is_workflow_path = bool(re.search(r'/workflow\d+/?$', _param_wd))
+            if _is_workflow_discovery or _is_workflow_path:
+                params.pop("run_uuid", None)
+                return params
+
+        # Only treat workflow-like directories as analyzable runs; avoid
+        # project-root/job-block UUID confusion.
+        _workflow_entries = []
+        for wf in (ctx.get("workflows") or []):
+            _wd = (wf.get("work_dir") or "").strip()
+            _rid = (wf.get("run_uuid") or "").strip()
+            if _wd and re.search(r'/workflow\d+/?$', _wd):
+                _workflow_entries.append({"work_dir": _wd, "run_uuid": _rid})
+
+        _requested_run_uuid = (params.get("run_uuid") or "").strip()
+        if _requested_run_uuid:
+            _matches_requested = [
+                wf for wf in _workflow_entries if wf.get("run_uuid") == _requested_run_uuid
+            ]
+            if _matches_requested:
+                params.pop("work_dir", None)
+                params["run_uuid"] = _requested_run_uuid
+                return params
+
+            # If the requested UUID is not tied to a workflow entry, do not
+            # dispatch blindly. Prefer a resolvable workflow run from context.
+            _workflow_with_uuid = [wf for wf in _workflow_entries if wf.get("run_uuid")]
+            if _workflow_with_uuid:
+                params.pop("work_dir", None)
+                params["run_uuid"] = _workflow_with_uuid[-1]["run_uuid"]
+                return params
+            if _workflow_entries:
+                params.pop("run_uuid", None)
+                params["work_dir"] = _workflow_entries[-1]["work_dir"]
+                return params
+
+            params.pop("work_dir", None)
+            params["__routing_error__"] = (
+                "I could not resolve a completed run for this project. "
+                "Here are the available runs/jobs to choose from."
+            )
+            return params
+
+        # No run_uuid provided: resolve from workflow entries if available.
+        _workflow_with_uuid = [wf for wf in _workflow_entries if wf.get("run_uuid")]
+        if _workflow_with_uuid:
+            params.pop("work_dir", None)
+            params["run_uuid"] = _workflow_with_uuid[-1]["run_uuid"]
+            return params
+        if _workflow_entries:
+            params["work_dir"] = _workflow_entries[-1]["work_dir"]
+            return params
+
+        params["__routing_error__"] = (
+            "I could not resolve a completed run for this project. "
+            "Here are the available runs/jobs to choose from."
+        )
+        return params
+
+    # If multiple workflows, pick the matching one by filename/sample
+    if not real_wd and ctx.get("workflows"):
+        real_wd = ctx["workflows"][-1].get("work_dir", "")
+    # Fallback: use the project directory if no workflow-level work_dir
+    if not real_wd and project_dir:
+        real_wd = project_dir
+
+    if tool == "compare_bed_region_overlaps":
+        for overlap_key in ("folder_a", "folder_b", "bed_a_path", "bed_b_path"):
+            if overlap_key in params:
+                params[overlap_key] = _normalize_overlap_folder_ref(
+                    params.get(overlap_key),
+                    current_project_dir=project_dir,
+                    current_default_wd=real_wd,
+                )
+        params.setdefault("pattern_a", "*.m6Aopen.bed")
+        params.setdefault("pattern_b", "*.m6Aopen.bed")
+        params.setdefault("min_overlap_bp", 1)
+    if real_wd and project_dir and _is_script_source_dir(real_wd):
+        real_wd = _latest_workflow_dir(project_dir) or project_dir
+    workflows = ctx.get("workflows", [])
+    if len(workflows) > 1:
+        _fname = params.get("file_name", "").lower()
+        for wf in workflows:
+            sn = wf.get("sample_name", "").lower()
+            if sn and (_fname and sn in _fname):
+                real_wd = wf["work_dir"]
+                break
+
+    llm_wd = params.get("work_dir", "")
+    if real_wd:
+        if (
+            llm_wd
+            and os.path.isabs(llm_wd)
+            and _is_script_source_dir(real_wd)
+            and not _is_script_source_dir(llm_wd)
+            and re.search(r'/workflow\d+(?:/|$)', llm_wd)
+        ):
+            real_wd = llm_wd
+
+        _workflow_listing_request = bool(
+            tool == "list_job_files"
+            and re.search(
+                r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',
+                user_message,
+                re.IGNORECASE,
+            )
+        )
+        _file_listing_request = bool(
+            tool == "list_job_files"
+            and re.search(
+                r'\b(?:list|show|what)\s+(?:the\s+)?files?\b',
+                user_message,
+                re.IGNORECASE,
+            )
+        )
+        _explicit_workflow_file_request = bool(
+            llm_wd
+            and os.path.isabs(llm_wd)
+            and not _is_script_source_dir(llm_wd)
+            and re.search(r'/workflow\d+(?:/|$)', llm_wd)
+            and tool in {"find_file", "read_file_content", "parse_csv_file", "parse_bed_file"}
+        )
+        if (
+            ctx_run_uuid
+            and os.path.isabs(real_wd)
+            and not os.path.exists(real_wd)
+            and not _workflow_listing_request
+            and not _file_listing_request
+            and not _explicit_workflow_file_request
+        ):
+            logger.warning(
+                "Context work_dir is missing locally; falling back to run_uuid for Analyzer resolution",
+                tool=tool,
+                work_dir=real_wd,
+                run_uuid=ctx_run_uuid,
+            )
+            params.pop("work_dir", None)
+            params["run_uuid"] = ctx_run_uuid
+            return params
+        # "list workflows" needs the *project* dir, not a workflow dir.
+        if tool == "list_job_files" and re.search(
+            r'\b(?:list|show|what)\s+(?:the\s+)?(?:available\s+)?workflows?\b',
+            user_message, re.IGNORECASE,
+        ):
+            # Prefer the explicitly-passed project_dir (from the DB) —
+            # the history work_dir may point to an unrelated skill
+            # scripts directory instead of the actual project root.
+            if project_dir:
+                real_wd = project_dir
+            elif re.search(r'/workflow\d+/?$', real_wd):
+                real_wd = real_wd.rstrip("/").rsplit("/", 1)[0]
+            params["max_depth"] = 1  # only top-level dirs
+            params["name_pattern"] = "workflow*"  # filter to workflow dirs only
+
+        # "list files in <subpath>" — append subfolder to work_dir.
+        # Source 1 (preferred): parse from user message — preserves
+        #   workflow prefix (e.g. "workflow1/annot") that the LLM may strip.
+        # Source 2 (fallback): subfolder hint from LLM's invented param.
+        if tool == "list_job_files":
+            _sub = ""
+            _sub_m = re.search(
+                r'\b(?:list|show)\s+(?:the\s+)?files?\s+'
+                r'(?:in|under|at|of)\s+(.+)',
+                user_message, re.IGNORECASE,
+            )
+            if _sub_m:
+                _sub = _sub_m.group(1).strip().strip('"\'')
+            if not _sub:
+                _sub = _subfolder_hint
+            if _sub:
+                _base_wd = real_wd
+                if re.match(r'^workflow\d+(?:/|$)', _sub, re.IGNORECASE):
+                    if project_dir:
+                        _base_wd = project_dir
+                    elif re.search(r'/workflow\d+/?$', real_wd):
+                        _base_wd = real_wd.rstrip("/").rsplit("/", 1)[0]
+                real_wd = _resolve_workflow_path(_sub, _base_wd, workflows)
+                # Show only immediate contents of the subfolder, not deep recursion
+                params["max_depth"] = 1
+
+        # If the incoming work_dir is already a valid subdirectory of the
+        # resolved context dir OR the project dir, keep it — auto-generated
+        # calls (from _auto_generate_data_calls) already resolved the correct
+        # path and overriding would lose the subfolder.
+        # Derive project dir from real_wd (strip /workflowN suffix).
+        _proj_wd = (
+            real_wd.rstrip("/").rsplit("/", 1)[0]
+            if re.search(r'/workflow\d+/?$', real_wd)
+            else real_wd
+        )
+        _is_valid_sub = llm_wd and (
+            llm_wd.startswith(real_wd.rstrip("/") + "/")
+            or llm_wd.startswith(_proj_wd.rstrip("/") + "/")
+            or llm_wd == _proj_wd  # exact match on project dir
+        )
+        if _is_valid_sub:
+            logger.info(
+                "Keeping incoming work_dir (valid subdirectory of context/project)",
+                incoming=llm_wd, context_wd=real_wd, project_wd=_proj_wd, tool=tool,
+            )
+            params["work_dir"] = llm_wd
+        else:
+            if real_wd != llm_wd:
+                logger.warning(
+                    "Overriding LLM work_dir with context value",
+                    llm_value=llm_wd, resolved=real_wd, tool=tool,
+                )
+            params["work_dir"] = real_wd
+    elif not llm_wd:
+        logger.warning(
+            "No work_dir in context or LLM params", tool=tool,
+        )
+
+    return params
+
+
+# ---------------------------------------------------------------------------
+# _validate_edgepython_params
+# ---------------------------------------------------------------------------
+
+def _validate_edgepython_params(
+    tool: str,
+    params: dict,
+    user_message: str,
+    conversation_history: list | None = None,
+) -> dict:
+    """
+    Fill in missing edgePython tool parameters from the user's message.
+
+    The LLM (especially smaller models) often emits DATA_CALL tags for
+    edgepython with empty or incomplete parameters.  This function
+    extracts file paths, group columns, and contrasts from the user's
+    message and conversation history, injecting them when missing.
+    """
+    params = dict(params)  # shallow copy
+    original_params = dict(params)
+
+    # Gather full text context: current message + recent user messages
+    text_pool = user_message
+    if conversation_history:
+        for msg in reversed(conversation_history[-10:]):
+            if msg.get("role") == "user":
+                text_pool = msg["content"] + "\n" + text_pool
+
+    if tool == "load_data":
+        # --- counts_path: look for a .csv/.tsv/.txt file path ---
+        if not params.get("counts_path"):
+            # Match paths containing "count" in the filename
+            count_paths = re.findall(
+                r'(/[\w/._-]+(?:count|counts|matrix)[\w._-]*\.(?:csv|tsv|txt))',
+                text_pool, re.IGNORECASE,
+            )
+            if count_paths:
+                params["counts_path"] = count_paths[0]
+            else:
+                # Fallback: any absolute path to csv/tsv
+                all_paths = re.findall(
+                    r'(/[\w/._-]+\.(?:csv|tsv|txt))',
+                    text_pool, re.IGNORECASE,
+                )
+                if all_paths:
+                    params["counts_path"] = all_paths[0]
+
+        # --- sample_info_path: look for metadata/sample_info file ---
+        if not params.get("sample_info_path"):
+            info_paths = re.findall(
+                r'(/[\w/._-]+(?:info|metadata|meta|coldata|pheno)[\w._-]*\.(?:csv|tsv|txt))',
+                text_pool, re.IGNORECASE,
+            )
+            # Exclude any path already used as counts_path
+            _used_counts = params.get("counts_path", "")
+            info_paths = [p for p in info_paths if p != _used_counts]
+            if info_paths:
+                params["sample_info_path"] = info_paths[0]
+            else:
+                # Look for "metadata:" or "sample info:" followed by a path
+                meta_match = re.search(
+                    r'(?:metadata|sample[_ ]?info|coldata)\s*[=:]\s*(/[\w/._-]+\.(?:csv|tsv|txt))',
+                    text_pool, re.IGNORECASE,
+                )
+                if meta_match:
+                    params["sample_info_path"] = meta_match.group(1)
+
+        # --- group_column ---
+        if not params.get("group_column"):
+            gc_match = re.search(
+                r'(?:group\s*(?:column|col|factor)|group_column)\s*[=:]\s*(\w+)',
+                text_pool, re.IGNORECASE,
+            )
+            if gc_match:
+                params["group_column"] = gc_match.group(1)
+
+    elif tool == "test_contrast":
+        # --- contrast: e.g. "treated - control" ---
+        if not params.get("contrast"):
+            ct_match = re.search(
+                r'(?:contrast)\s*[=:]\s*([\w][\w\s]*-\s*[\w]+)',
+                text_pool, re.IGNORECASE,
+            )
+            if ct_match:
+                params["contrast"] = ct_match.group(1).strip()
+
+    elif tool == "set_design":
+        # --- formula: look for R-style formula ---
+        if not params.get("formula"):
+            fm_match = re.search(
+                r'(?:formula|design)\s*[=:]\s*(~[^,\]]+)',
+                text_pool, re.IGNORECASE,
+            )
+            if fm_match:
+                params["formula"] = fm_match.group(1).strip()
+            else:
+                # Default formula when group_column is known
+                params.setdefault("formula", "~ 0 + group")
+
+    elif tool == "exact_test":
+        if not params.get("pair"):
+            ct_match = re.search(
+                r'(?:contrast|compare|pair)\s*[=:]\s*([\w]+)\s*(?:vs?\.?|-)\s*([\w]+)',
+                text_pool, re.IGNORECASE,
+            )
+            if ct_match:
+                params["pair"] = [ct_match.group(1).strip(), ct_match.group(2).strip()]
+
+    elif tool == "generate_plot":
+        params = normalize_generate_plot_params(params, text_pool=text_pool)
+
+    elif tool in ("run_go_enrichment", "run_pathway_enrichment", "filter_de_genes"):
+        # Auto-detect direction from user message
+        if not params.get("direction"):
+            if "up" in text_pool.lower() and "down" not in text_pool.lower():
+                params["direction"] = "up"
+            elif "down" in text_pool.lower() and "up" not in text_pool.lower():
+                params["direction"] = "down"
+
+    if params != original_params:
+        logger.info("edgepython param extraction filled missing params",
+                    tool=tool, original=original_params, filled=params)
+    return params

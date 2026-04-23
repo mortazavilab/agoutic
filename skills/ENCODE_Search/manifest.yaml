@@ -1,0 +1,17 @@
+display_name: ENCODE Search
+description: Search the ENCODE portal for experiments, biosamples, and files.
+category: data_retrieval
+source:
+  type: consortium
+  key: encode
+required_services:
+  - encode
+expected_inputs:
+  - biosample
+  - assay_type
+  - accession
+  - search_term
+output_types:
+  - dataframe
+sample_types:
+  - any

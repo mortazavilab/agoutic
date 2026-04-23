@@ -18,6 +18,7 @@ from analyzer.analysis_engine import (
     read_file_content,
     parse_csv_file,
     parse_bed_file,
+    parse_xgenepy_outputs,
     generate_analysis_summary,
     get_job_work_dir
 )
@@ -27,6 +28,7 @@ from analyzer.schemas import (
     FileContentResponse,
     ParsedTableData,
     ParsedBedData,
+    ParsedXgenePyOutputs,
     JobFileSummary,
     AnalysisSummary,
     ErrorResponse
@@ -214,7 +216,7 @@ async def download_file(
 async def parse_csv_endpoint(
     run_uuid: str = Query(..., description="Job UUID"),
     file_path: str = Query(..., description="Relative file path to CSV/TSV"),
-    max_rows: Optional[int] = Query(100, description="Maximum rows to return")
+    max_rows: Optional[int] = Query(100, description="Maximum rows to return (default: 100). Use null to load the full file.")
 ):
     """
     Parse a CSV/TSV file.
@@ -222,7 +224,7 @@ async def parse_csv_endpoint(
     Args:
         run_uuid: Job UUID
         file_path: Relative path to CSV/TSV file
-        max_rows: Maximum rows to return
+        max_rows: Maximum rows to return (default: 100). Use null to load the full file.
     
     Returns:
         ParsedTableData with structured data
@@ -271,6 +273,32 @@ async def parse_bed_endpoint(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error parsing BED: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analysis/files/parse/xgenepy", response_model=ParsedXgenePyOutputs)
+async def parse_xgenepy_endpoint(
+    run_uuid: Optional[str] = Query(None, description="Job UUID (legacy fallback)"),
+    work_dir: Optional[str] = Query(None, description="Absolute workflow/project directory (preferred)"),
+    output_dir: str = Query(..., description="Relative output directory containing XgenePy artifacts"),
+    max_rows: Optional[int] = Query(200, description="Maximum rows to return for preview tables"),
+):
+    """Parse canonical XgenePy output artifacts (JSON/TSV and plots directory)."""
+    try:
+        return parse_xgenepy_outputs(
+            run_uuid=run_uuid,
+            output_dir=output_dir,
+            max_rows=max_rows,
+            work_dir_path=work_dir,
+        )
+    except FileNotFoundError as e:
+        logger.error(f"XgenePy output directory not found: {output_dir}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        logger.error(f"Invalid XgenePy output path: {output_dir}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error parsing XgenePy outputs: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

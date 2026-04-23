@@ -4,12 +4,13 @@ Authentication middleware for AGOUTIC.
 Validates session cookies on every request and attaches the user to request.state.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import select
 
+from cortex.config import SESSION_EXPIRES_HOURS
 from cortex.db import SessionLocal
 from cortex.models import User, Session as SessionModel
 from common.logging_config import get_logger
@@ -31,6 +32,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/auth/login",
         "/auth/callback",
         "/auth/logout",
+        "/auth/heartbeat",
         "/health",
         "/docs",
         "/openapi.json",
@@ -114,6 +116,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
             
             # Attach user to request state
             request.state.user = user
+
+            # Sliding session extension: when the session is past its
+            # halfway point, automatically push the expiry forward so
+            # active users are never logged out mid-work.
+            _half_life = timedelta(hours=SESSION_EXPIRES_HOURS) / 2
+            _remaining = expires_at - datetime.utcnow()
+            if _remaining < _half_life:
+                session_obj.expires_at = datetime.utcnow() + timedelta(hours=SESSION_EXPIRES_HOURS)
+                session.commit()
             
             # Continue with request
             response = await call_next(request)

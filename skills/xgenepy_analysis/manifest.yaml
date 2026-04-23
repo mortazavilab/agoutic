@@ -1,0 +1,28 @@
+display_name: Cis/Trans Analysis
+description: Run XgenePy cis/trans regulatory modeling.
+category: analysis
+source:
+  type: service
+  key: xgenepy
+required_services:
+  - xgenepy
+expected_inputs:
+  - counts_table
+  - sample_metadata
+  - strain_column
+output_types:
+  - dataframe
+  - plot
+  - report
+sample_types:
+  - any
+estimated_runtime: medium
+plan_type: run_xgenepy_analysis
+trigger_patterns:
+  - '(?:run|do|perform)\s+(?:xgenepy|xgeneopy)\s+(?:analysis)?'
+  - '(?:xgenepy|xgeneopy)\s+(?:cis|trans|assignment|model)'
+  - '(?:cis/trans|cis\s+trans|allele[-\s]?specific)\s+(?:analysis|model|assignment)'
+mcp_tool_chain:
+  - source_key: xgenepy
+    tool: run_xgenepy_analysis
+classification_priority: 22

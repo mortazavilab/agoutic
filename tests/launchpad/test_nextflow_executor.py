@@ -1,0 +1,479 @@
+"""Tests for launchpad/nextflow_executor.py."""
+
+from pathlib import Path
+
+import launchpad.nextflow_executor as nextflow_module
+from launchpad.config import (
+    REFERENCE_GENOMES,
+    DOGME_DNA_MODKITBASE,
+    DOGME_DNA_MODKITMODEL,
+    DOGME_DNA_OPENCHROM_BINARY_DIR,
+    DOGME_DNA_OPENCHROM_LIBTORCH,
+    DOGME_DNA_OPENCHROM_MODEL,
+    DOGME_DNA_OPENCHROM_MODKITBASE,
+    DOGME_DNA_SLURM_CONTAINER,
+)
+from launchpad.nextflow_executor import (
+    NextflowConfig,
+    NextflowExecutor,
+    resolve_dogme_profile_content,
+    resolve_dogme_profile_task_runtime_exports,
+)
+
+
+class TestGenerateConfig:
+    def test_dna_mode_uses_defaults_for_string_reference(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-a",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome="GRCh38",
+        )
+
+        assert "sample = 'sample-a'" in config
+        assert "readType = 'DNA'" in config
+        assert "modifications = '5mCG_5hmCG,6mA'" in config
+        assert "minCov = 3" in config
+        assert "perMod = 5" in config
+        assert "[name: 'GRCh38'" in config
+        assert f"genome: '{REFERENCE_GENOMES['GRCh38']['fasta']}'" in config
+        assert f"annot: '{REFERENCE_GENOMES['GRCh38']['gtf']}'" in config
+
+    def test_multi_genome_config_renders_all_requested_genomes(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-b",
+            mode="RNA",
+            input_dir="/tmp/input",
+            reference_genome=["GRCh38", "mm39"],
+        )
+
+        assert "[name: 'GRCh38'" in config
+        assert "[name: 'mm39'" in config
+        assert f"kallistoIndex = '{REFERENCE_GENOMES['GRCh38']['kallisto_index']}'" in config
+        assert f"t2g = '{REFERENCE_GENOMES['GRCh38']['kallisto_t2g']}'" in config
+        assert "modifications = 'inosine_m6A_2OmeA,pseU_2OmeU,m5C_2OmeC,2OmeG'" in config
+        assert "minCov = 3" in config
+
+    def test_grch38_config_uses_human_kallisto_sidecars(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-grch38",
+            mode="RNA",
+            input_dir="/tmp/input",
+            reference_genome=["GRCh38"],
+        )
+
+        assert f"kallistoIndex = '{REFERENCE_GENOMES['GRCh38']['kallisto_index']}'" in config
+        assert f"t2g = '{REFERENCE_GENOMES['GRCh38']['kallisto_t2g']}'" in config
+
+    def test_mm39_config_uses_reference_folder_for_kallisto_sidecars(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-mm39",
+            mode="RNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+        )
+
+        assert f"kallistoIndex = '{REFERENCE_GENOMES['mm39']['kallisto_index']}'" in config
+        assert f"t2g = '{REFERENCE_GENOMES['mm39']['kallisto_t2g']}'" in config
+
+    def test_explicit_modifications_override_mode_defaults(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-c",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome="GRCh38",
+            modifications="custom_mods",
+            min_cov=7,
+            accuracy="hac",
+            max_gpu_tasks=3,
+        )
+
+        assert "modifications = 'custom_mods'" in config
+        assert "minCov = 7" in config
+        assert 'accuracy = "hac"' in config
+        assert "maxForks = 3  // Limit concurrent GPU tasks" in config
+
+    def test_default_gpu_concurrency_omits_maxforks(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-unbounded",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome="GRCh38",
+        )
+
+        assert "maxForks =" not in config
+
+    def test_cdna_mode_disables_modifications(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-d",
+            mode="CDNA",
+            input_dir="/tmp/input",
+            reference_genome="mm39",
+        )
+
+        assert "readType = 'CDNA'" in config
+        assert "// No modifications for CDNA mode" in config
+        assert "modifications = ''" in config
+        assert "minCov = 3" in config
+
+    def test_unknown_genome_falls_back_to_mm39_reference_paths(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-e",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["unknown-genome"],
+        )
+
+        assert "[name: 'unknown-genome'" in config
+        assert f"genome: '{REFERENCE_GENOMES['mm39']['fasta']}'" in config
+        assert f"annot: '{REFERENCE_GENOMES['mm39']['gtf']}'" in config
+
+    def test_local_execution_keeps_docker_runtime(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-local",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="local",
+        )
+
+        assert "executor = 'local'" in config
+        assert "docker {" in config
+        assert "singularity {" not in config
+        assert "apptainer {" not in config
+        assert "clusterOptions = \"--account=${cpuAccount}\"" not in config
+
+    def test_slurm_execution_uses_accounts_partitions_and_singularity(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-slurm",
+            mode="RNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_cpu_partition="cpu-part",
+            slurm_gpu_partition="gpu-part",
+            slurm_cpu_account="cpu-acct",
+            slurm_gpu_account="gpu-acct",
+            slurm_cpus=4,
+            slurm_memory_gb=16,
+            slurm_walltime="48:00:00",
+            slurm_bind_paths=["/share/crsp/lab/seyedam/share/agoutic/seyedam/testslurm1"],
+            apptainer_cache_dir="/share/crsp/lab/seyedam/share/agoutic/seyedam/.nxf-apptainer-cache",
+            max_gpu_tasks=2,
+        )
+
+        assert "executor = 'slurm'" in config
+        assert "container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'" in config
+        assert "cpuPartition = 'cpu-part'" in config
+        assert "gpuPartition = 'gpu-part'" in config
+        assert "cpuAccount = 'cpu-acct'" in config
+        assert "gpuAccount = 'gpu-acct'" in config
+        assert "    cpus = 4" in config
+        assert "    memory = '16 GB'" in config
+        assert "    time = '48:00:00'" in config
+        assert "clusterOptions = \"--account=${cpuAccount}\"" in config
+        assert "queue = \"${cpuPartition}\"" in config
+        assert "clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"" in config
+        assert "queue = \"${gpuPartition}\"" in config
+        assert f"--bind {REFERENCE_GENOMES['mm39']['fasta']}" not in config
+        assert "containerOptions = '--no-mount hostfs --bind /share/crsp/lab/seyedam/share/agoutic/seyedam/testslurm1'" in config
+        assert "containerOptions = '--nv --no-mount hostfs --bind /share/crsp/lab/seyedam/share/agoutic/seyedam/testslurm1'" in config
+        assert "apptainer {" in config
+        assert "autoMounts = false" in config
+
+    def test_slurm_execution_keeps_cpu_defaults_separate_from_gpu_task_overrides(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-slurm-split",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_cpu_partition="standard",
+            slurm_gpu_partition="gpu",
+            slurm_cpu_account="SEYEDAM_LAB",
+            slurm_gpu_account="BIOD132_CLASS_GPU",
+            slurm_cpus=4,
+            slurm_memory_gb=16,
+            slurm_walltime="48:00:00",
+            apptainer_cache_dir="/share/crsp/lab/seyedam/share/agoutic/seyedam/.nxf-apptainer-cache",
+        )
+
+        assert "cpuPartition = 'standard'" in config
+        assert "gpuPartition = 'gpu'" in config
+        assert "cpuAccount = 'SEYEDAM_LAB'" in config
+        assert "gpuAccount = 'BIOD132_CLASS_GPU'" in config
+        assert "    cpus = 4" in config
+        assert "    memory = '16 GB'" in config
+        assert "    time = '48:00:00'" in config
+        assert "    clusterOptions = \"--account=${cpuAccount}\"" in config
+        assert "    queue = \"${cpuPartition}\"" in config
+        assert "withName: 'doradoTask' {\n        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"\n        queue = \"${gpuPartition}\"" in config
+        assert 'cacheDir = "/share/crsp/lab/seyedam/share/agoutic/seyedam/.nxf-apptainer-cache"' in config
+        assert "singularity {" not in config
+        assert "docker {" not in config
+
+    def test_slurm_execution_defaults_cpu_resources_to_12_cpus_and_64_gb(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-slurm-defaults",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_cpu_partition="standard",
+            slurm_gpu_partition="gpu",
+            slurm_cpu_account="SEYEDAM_LAB",
+            slurm_gpu_account="BIOD132_CLASS_GPU",
+        )
+
+        assert "    cpus = 12" in config
+        assert "    memory = '64 GB'" in config
+        assert "    time = '8:00:00'" in config
+        assert "withName: 'minimapTask' {\n        cpus = 16\n        memory = '96 GB'" in config
+
+    def test_slurm_execution_preserves_higher_explicit_minimap_resources(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-slurm-minimap-high",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_cpu_partition="standard",
+            slurm_gpu_partition="gpu",
+            slurm_cpu_account="SEYEDAM_LAB",
+            slurm_gpu_account="BIOD132_CLASS_GPU",
+            slurm_cpus=64,
+            slurm_memory_gb=192,
+        )
+
+        assert "withName: 'minimapTask' {\n        cpus = 64\n        memory = '192 GB'" in config
+
+    def test_slurm_dna_defaults_scope_container_gpu_modkit_to_openchromatin_tasks(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-dna-container-openchrom",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_bind_paths=["/remote/workflow4", "/remote/ref/mm39"],
+        )
+
+        assert f"container = '{DOGME_DNA_SLURM_CONTAINER}'" in config
+        assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
+        assert config.count("containerOptions = '--nv --no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39 --env \\\'MODKITBASE=") == 2
+        assert f"LIBTORCH={DOGME_DNA_OPENCHROM_LIBTORCH}" in config
+        assert f"LD_LIBRARY_PATH=/opt/conda/lib:{DOGME_DNA_OPENCHROM_LIBTORCH}/lib:\\\\$LD_LIBRARY_PATH" in config
+        assert f"DYLD_LIBRARY_PATH={DOGME_DNA_OPENCHROM_LIBTORCH}/lib:\\\\$DYLD_LIBRARY_PATH" in config
+
+    def test_slurm_reference_overrides_replace_kallisto_sidecars(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-remote",
+            mode="RNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            reference_overrides={
+                "mm39": {
+                    "fasta": "/remote/ref/mm39/IGVFFI9282QLXO.fasta",
+                    "gtf": "/remote/ref/mm39/IGVFFI4777RDZK.gtf",
+                    "kallisto_index": "/remote/ref/mm39/mm39.idx",
+                    "kallisto_t2g": "/remote/ref/mm39/mm39.t2g",
+                }
+            },
+            execution_mode="slurm",
+        )
+
+        assert "kallistoIndex = '/remote/ref/mm39/mm39.idx'" in config
+        assert "t2g = '/remote/ref/mm39/mm39.t2g'" in config
+
+    def test_slurm_custom_modkit_bind_paths_are_scoped_to_openchromatin_tasks(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-modkit",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_bind_paths=["/remote/workflow4", "/remote/ref/mm39"],
+            slurm_modkit_bind_paths=[
+                "/remote/workflow4",
+                "/remote/ref/mm39",
+                "/cluster/modkit",
+                "/lib64/libgomp.so.1",
+                "/lib64/libstdc++.so.6",
+                "/lib64/libgcc_s.so.1",
+            ],
+        )
+
+        assert "containerOptions = '--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
+        assert "containerOptions = '--nv --no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
+        assert "withName: 'modkitTask' {" in config
+        assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
+        assert "withName: 'openChromatinTaskBg' {" in config
+        assert "withName: 'openChromatinTaskBed' {" in config
+        assert config.count("containerOptions = '--nv --no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39,/cluster/modkit,/lib64/libgomp.so.1,/lib64/libstdc++.so.6,/lib64/libgcc_s.so.1 --env \\\'MODKITBASE=") == 2
+        assert f"LD_LIBRARY_PATH=/lib64:/opt/conda/lib:{DOGME_DNA_OPENCHROM_LIBTORCH}/lib:\\\\$LD_LIBRARY_PATH" in config
+        assert f"DYLD_LIBRARY_PATH={DOGME_DNA_OPENCHROM_LIBTORCH}/lib:\\\\$DYLD_LIBRARY_PATH" in config
+
+    def test_slurm_openchromatin_runtime_exports_are_scoped_away_from_dorado_and_modkit_tasks(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-runtime",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+            slurm_modkit_bind_paths=[
+                "/cluster/modkit",
+                "/lib64/libgomp.so.1",
+                "/lib64/libstdc++.so.6",
+                "/lib64/libgcc_s.so.1",
+            ],
+            modkit_task_runtime_exports=[
+                "export MODKITBASE=/cluster/modkit",
+                "export PATH=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch:${PATH}",
+                "export MODKITMODEL=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0",
+                "export LIBTORCH=/cluster/modkit/libtorch",
+                "export LD_LIBRARY_PATH=${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}",
+                "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}",
+            ],
+        )
+
+        assert f"process {{\n    // <-- Container Settings --->\n    container = '{DOGME_DNA_SLURM_CONTAINER}'\n    // Remote SLURM runs bind only workflow-specific remote paths.\n    containerOptions = '--no-mount hostfs'\n    beforeScript = 'export PATH=/opt/conda/bin:$PATH'" in config
+        assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs'" in config
+        assert "beforeScript = 'export PATH=/opt/conda/bin:$PATH; export LIBTORCH=/cluster/modkit/libtorch" not in config
+        assert config.count("--bind /cluster/modkit,/lib64/libgomp.so.1,/lib64/libstdc++.so.6,/lib64/libgcc_s.so.1 --env \\\'MODKITBASE=/cluster/modkit,PREPEND_PATH=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch,MODKITMODEL=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0,LIBTORCH=/cluster/modkit/libtorch,LD_LIBRARY_PATH=/lib64:/cluster/modkit/libtorch/lib:\\\\$LD_LIBRARY_PATH,DYLD_LIBRARY_PATH=/cluster/modkit/libtorch/lib:\\\\$DYLD_LIBRARY_PATH\\\'") == 2
+        assert "containerOptions = '--nv --no-mount hostfs --bind /cluster/modkit,/lib64/libgomp.so.1,/lib64/libstdc++.so.6,/lib64/libgcc_s.so.1 --env \\\'MODKITBASE=/cluster/modkit,PREPEND_PATH=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch,MODKITMODEL=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0,LIBTORCH=/cluster/modkit/libtorch,LD_LIBRARY_PATH=/lib64:/cluster/modkit/libtorch/lib:\\\\$LD_LIBRARY_PATH,DYLD_LIBRARY_PATH=/cluster/modkit/libtorch/lib:\\\\$DYLD_LIBRARY_PATH\\\''" in config
+        assert "withName: 'openChromatinTaskBg' {" in config
+        assert "withName: 'openChromatinTaskBed' {" in config
+
+
+class TestResolveDogmeProfileContent:
+    def test_dna_mode_uses_container_modkit_paths(self):
+        profile = resolve_dogme_profile_content("DNA")
+
+        assert f"export MODKITBASE=${{MODKITBASE:-{DOGME_DNA_MODKITBASE}}}" in profile
+        assert f"export MODKITMODEL=${{MODKITMODEL:-${{MODKITBASE}}/models/{DOGME_DNA_MODKITMODEL.name}}}" in profile
+        assert "LIBTORCH" not in profile
+        assert "DYLD_LIBRARY_PATH" not in profile
+        assert "LD_LIBRARY_PATH" not in profile
+
+    def test_dna_mode_defaults_openchromatin_to_container_gpu_runtime(self):
+        runtime_exports = resolve_dogme_profile_task_runtime_exports("DNA")
+
+        assert runtime_exports == [
+            f"export MODKITBASE={DOGME_DNA_OPENCHROM_MODKITBASE}",
+            f"export PATH={DOGME_DNA_OPENCHROM_BINARY_DIR}:${{PATH}}",
+            f"export MODKITMODEL={DOGME_DNA_OPENCHROM_MODEL}",
+            f"export LIBTORCH={DOGME_DNA_OPENCHROM_LIBTORCH}",
+            "export LD_LIBRARY_PATH=/opt/conda/lib:${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}",
+            "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}",
+        ]
+
+    def test_custom_profile_keeps_staged_dna_profile_container_safe(self):
+        profile = resolve_dogme_profile_content("DNA", custom_profile="export MODKITBASE=/remote/modkit")
+
+        assert profile == (
+            "# Dogme environment profile\n"
+            "# DNA mode modkit paths inside the dogme container image\n"
+            f"export MODKITBASE=${{MODKITBASE:-{DOGME_DNA_MODKITBASE}}}\n"
+            f"export MODKITMODEL=${{MODKITMODEL:-${{MODKITBASE}}/models/{DOGME_DNA_MODKITMODEL.name}}}\n"
+        )
+
+    def test_custom_profile_runtime_exports_are_removed_from_global_profile(self):
+        profile = resolve_dogme_profile_content(
+            "DNA",
+            custom_profile=(
+                "export MODKITBASE=/remote/modkit\n"
+                "export PATH=${MODKITBASE}:${PATH}\n"
+                "export LIBTORCH=${MODKITBASE}/libtorch\n"
+                "export LD_LIBRARY_PATH=${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}\n"
+                "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}\n"
+            ),
+        )
+
+        assert profile == (
+            "# Dogme environment profile\n"
+            "# DNA mode modkit paths inside the dogme container image\n"
+            f"export MODKITBASE=${{MODKITBASE:-{DOGME_DNA_MODKITBASE}}}\n"
+            f"export MODKITMODEL=${{MODKITMODEL:-${{MODKITBASE}}/models/{DOGME_DNA_MODKITMODEL.name}}}\n"
+        )
+
+    def test_custom_profile_runtime_exports_are_available_for_openchromatin_tasks(self):
+        runtime_exports = resolve_dogme_profile_task_runtime_exports(
+            "DNA",
+            custom_profile=(
+                "export MODKITBASE=/remote/modkit\n"
+                "export PATH=${MODKITBASE}:${PATH}\n"
+                "export MODKITMODEL=${MODKITBASE}/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0\n"
+                "export LIBTORCH=${MODKITBASE}/libtorch\n"
+                "export LD_LIBRARY_PATH=${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}\n"
+                "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}\n"
+            ),
+        )
+
+        assert runtime_exports == [
+            "export MODKITBASE=/remote/modkit",
+            "export PATH=/remote/modkit:${PATH}",
+            "export MODKITMODEL=/remote/modkit/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0",
+            "export LIBTORCH=/remote/modkit/libtorch",
+            "export LD_LIBRARY_PATH=/remote/modkit/libtorch/lib:${LD_LIBRARY_PATH:-}",
+            "export DYLD_LIBRARY_PATH=/remote/modkit/libtorch/lib:${DYLD_LIBRARY_PATH:-}",
+        ]
+
+    def test_non_dna_ignores_custom_profile_override(self, monkeypatch, tmp_path):
+        dogme_repo = tmp_path / "dogme"
+        dogme_repo.mkdir()
+        (dogme_repo / "dogme.profile").write_text("export EXISTING_PROFILE=1\n")
+
+        monkeypatch.setattr(nextflow_module, "DOGME_REPO", dogme_repo)
+
+        assert (
+            resolve_dogme_profile_content("RNA", custom_profile="export MODKITBASE=/remote/modkit")
+            == "export EXISTING_PROFILE=1\n"
+        )
+
+    def test_non_dna_mode_uses_repo_profile_when_present(self, monkeypatch, tmp_path):
+        dogme_repo = tmp_path / "dogme"
+        dogme_repo.mkdir()
+        (dogme_repo / "dogme.profile").write_text("export EXISTING_PROFILE=1\n")
+
+        monkeypatch.setattr(nextflow_module, "DOGME_REPO", dogme_repo)
+
+        assert resolve_dogme_profile_content("RNA") == "export EXISTING_PROFILE=1\n"
+
+    def test_non_dna_mode_falls_back_to_minimal_profile_when_missing(self, monkeypatch, tmp_path):
+        dogme_repo = tmp_path / "dogme"
+        dogme_repo.mkdir()
+
+        monkeypatch.setattr(nextflow_module, "DOGME_REPO", dogme_repo)
+
+        assert resolve_dogme_profile_content("CDNA") == (
+            "# Dogme environment profile\n"
+            "# Add environment variables here if needed\n"
+        )
+
+
+class TestWriteConfigFile:
+    def test_write_config_file_creates_parent_directories(self, tmp_path):
+        output_path = tmp_path / "nested" / "workflow" / "nextflow.config"
+
+        written = NextflowConfig.write_config_file("params {\n}\n", output_path)
+
+        assert written == output_path
+        assert output_path.exists()
+        assert output_path.read_text() == "params {\n}\n"
+
+
+class TestNextWorkflowNumber:
+    def test_missing_project_dir_starts_at_one(self, tmp_path):
+        project_dir = tmp_path / "missing-project"
+
+        assert NextflowExecutor._next_workflow_number(project_dir) == 1
+
+    def test_ignores_non_matching_and_invalid_workflow_directories(self, tmp_path):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        (project_dir / "workflow1").mkdir()
+        (project_dir / "workflow09").mkdir()
+        (project_dir / "workflowx").mkdir()
+        (project_dir / "notes").mkdir()
+        (project_dir / "workflow3.txt").write_text("not a dir")
+
+        assert NextflowExecutor._next_workflow_number(project_dir) == 10

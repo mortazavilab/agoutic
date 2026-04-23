@@ -1,0 +1,59 @@
+display_name: Differential Expression
+description: Run edgePython differential expression analysis.
+category: analysis
+source:
+  type: service
+  key: edgepython
+required_services:
+  - edgepython
+expected_inputs:
+  - counts_matrix
+  - sample_metadata
+  - design_formula
+  - contrast
+output_types:
+  - dataframe
+  - plot
+  - report
+sample_types:
+  - Bulk-RNA
+  - scRNA
+  - cDNA
+estimated_runtime: medium
+plan_type: run_de_pipeline
+trigger_patterns:
+  - 'compare\s+(?:the\s+)?[a-zA-Z0-9_.-]+\s+samples?\s+.+?\s+(?:to|vs?\.?|versus|against)\s+(?:the\s+)?[a-zA-Z0-9_.-]+\s+samples?\s+.+'
+  - 'compare\s+.+?\s+(?:to|vs?\.?|versus|against)\s+.+?\s+(?:from|using|on)\s+(?:df\s*\d+|\S*(?:abundance|counts?|matrix)\S*\.(?:csv|tsv|txt))'
+  - '(?:run|do|perform)\s+(?:a\s+)?(?:differential\s+expression|DE\s+analysis)'
+  - '(?:differential\s+expression|DE)\s+(?:on|for|analysis)'
+  - 'edger?\s+(?:analysis|pipeline)'
+slash_commands:
+  - /de
+mcp_tool_chain:
+  - source_key: edgepython
+    tool: load_data
+  - source_key: edgepython
+    tool: filter_genes
+  - source_key: edgepython
+    tool: normalize
+  - source_key: edgepython
+    tool: estimate_dispersion
+  - source_key: edgepython
+    tool: exact_test
+  - source_key: edgepython
+    tool: set_design
+  - source_key: edgepython
+    tool: fit_model
+  - source_key: edgepython
+    tool: test_contrast
+  - source_key: edgepython
+    tool: get_top_genes
+  - source_key: edgepython
+    tool: save_results
+  - source_key: edgepython
+    tool: annotate_genes
+  - source_key: edgepython
+    tool: generate_plot
+feeds_into:
+  - enrichment_analysis
+classification_priority: 10

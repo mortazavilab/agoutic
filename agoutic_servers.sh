@@ -35,6 +35,9 @@ LAUNCHPAD_MCP_PORT="${LAUNCHPAD_MCP_PORT:-8002}"
 ANALYZER_PORT="${ANALYZER_PORT:-8004}"
 ANALYZER_MCP_PORT="${ANALYZER_MCP_PORT:-8005}"
 ENCODE_MCP_PORT="${ENCODE_MCP_PORT:-8006}"
+EDGEPYTHON_MCP_PORT="${EDGEPYTHON_MCP_PORT:-8007}"
+XGENEPY_MCP_PORT="${XGENEPY_MCP_PORT:-8008}"
+IGVF_MCP_PORT="${IGVF_MCP_PORT:-8009}"
 UI_PORT="${UI_PORT:-8501}"
 
 # Map service names to ports
@@ -44,6 +47,9 @@ declare -A PORT_MAP=(
     ["analyzer-rest"]=$ANALYZER_PORT
     ["analyzer-mcp"]=$ANALYZER_MCP_PORT
     ["encode-mcp"]=$ENCODE_MCP_PORT
+    ["edgepython-mcp"]=$EDGEPYTHON_MCP_PORT
+    ["xgenepy-mcp"]=$XGENEPY_MCP_PORT
+    ["igvf-mcp"]=$IGVF_MCP_PORT
     ["cortex"]=$CORTEX_PORT
 )
 
@@ -58,6 +64,14 @@ NC='\033[0m' # No color
 
 ensure_dirs() {
     mkdir -p "$PIDS_DIR" "$LOGS_DIR"
+}
+
+ensure_gene_caches() {
+    log "Checking shared gene annotation caches..."
+    if ! python -m common.gtf_parser --ensure-caches; then
+        error "Failed to build shared gene annotation caches"
+        return 1
+    fi
 }
 
 log() {
@@ -114,6 +128,47 @@ rotate_logs() {
 
     if [ "$rotated" -gt 0 ]; then
         log "Rotated $rotated log file(s) with timestamp $timestamp"
+    fi
+
+    # Archive rotated logs older than 30 days into monthly folders
+    # e.g. logs/logs_202603/ for March 2026
+    local archived=0
+    for logfile in "$LOGS_DIR"/*.jsonl "$LOGS_DIR"/*.log; do
+        [ -e "$logfile" ] || continue
+
+        # Only consider already-rotated files (contain a dot-separated timestamp)
+        local base
+        base=$(basename "$logfile")
+        local ext="${base##*.}"
+        local name="${base%.*}"
+        # Rotated files have at least one dot in the name portion, e.g. "cortex.20260213_082438"
+        [[ "$name" == *.* ]] || continue
+
+        # Check if file is older than 30 days
+        if [[ "$(uname)" == "Darwin" ]]; then
+            local age_days
+            age_days=$(( ( $(date +%s) - $(stat -f %m "$logfile") ) / 86400 ))
+        else
+            local age_days
+            age_days=$(( ( $(date +%s) - $(stat -c %Y "$logfile") ) / 86400 ))
+        fi
+        [ "$age_days" -ge 30 ] || continue
+
+        # Determine the month folder from the file's modification time
+        local month_stamp
+        if [[ "$(uname)" == "Darwin" ]]; then
+            month_stamp=$(date -r "$(stat -f %m "$logfile")" +%Y%m)
+        else
+            month_stamp=$(date -d "@$(stat -c %Y "$logfile")" +%Y%m)
+        fi
+        local archive_dir="$LOGS_DIR/logs_${month_stamp}"
+        mkdir -p "$archive_dir"
+        mv "$logfile" "$archive_dir/"
+        archived=$((archived + 1))
+    done
+
+    if [ "$archived" -gt 0 ]; then
+        log "Archived $archived old log file(s) into monthly folders"
     fi
 }
 
@@ -260,6 +315,27 @@ start_process() {
     fi
 }
 
+run_db_migrations() {
+    local migration_log="$LOGS_DIR/migrations.log"
+    local alembic_ini="$AGOUTIC_CODE/alembic.ini"
+
+    log "Applying database migrations..."
+    cd "$AGOUTIC_CODE"
+    if python - "$alembic_ini" upgrade head >> "$migration_log" 2>&1 <<'PY'
+from alembic.config import main
+import sys
+
+raise SystemExit(main(argv=["-c", sys.argv[1], *sys.argv[2:]]))
+PY
+    then
+        success "Database migrations are up to date"
+        return 0
+    fi
+
+    error "Database migrations failed. Check: $migration_log"
+    return 1
+}
+
 stop_process() {
     local name="$1"
     local pid_file="$PIDS_DIR/${name}.pid"
@@ -321,8 +397,16 @@ stop_process() {
 cmd_start() {
     ensure_dirs
     rotate_logs
-    log "Starting AGOUTIC servers (v${AGOUTIC_VERSION})..."
+    log "Starting AGOUTIC servers (${AGOUTIC_VERSION})..."
     echo ""
+
+    if ! run_db_migrations; then
+        return 1
+    fi
+
+    if ! ensure_gene_caches; then
+        return 1
+    fi
 
     # Launchpad - REST API (Nextflow/Dogme job execution)
     start_process "launchpad-rest" \
@@ -344,6 +428,18 @@ cmd_start() {
     start_process "encode-mcp" \
         "python -m atlas.launch_encode --host 0.0.0.0 --port $ENCODE_MCP_PORT"
 
+    # edgePython MCP Server (differential expression)
+    start_process "edgepython-mcp" \
+        "python -m edgepython_mcp.launch_edgepython --host 0.0.0.0 --port $EDGEPYTHON_MCP_PORT"
+
+    # XgenePy MCP Server (cis/trans analysis)
+    start_process "xgenepy-mcp" \
+        "python -m xgenepy_mcp.launch_xgenepy --host 0.0.0.0 --port $XGENEPY_MCP_PORT"
+
+    # IGVF MCP Server (consortium)
+    start_process "igvf-mcp" \
+        "python -m atlas.launch_igvf --host 0.0.0.0 --port $IGVF_MCP_PORT"
+
     # Cortex - Main orchestrator (start last)
     start_process "cortex" \
         "python -m uvicorn cortex.app:app --host 0.0.0.0 --port $CORTEX_PORT"
@@ -356,10 +452,13 @@ cmd_start() {
     echo "  Analyzer (Analysis REST):  http://localhost:$ANALYZER_PORT"
     echo "  Analyzer (Analysis MCP):   http://localhost:$ANALYZER_MCP_PORT"
     echo "  ENCODE (Consortium MCP):   http://localhost:$ENCODE_MCP_PORT"
+    echo "  IGVF (Consortium MCP):     http://localhost:$IGVF_MCP_PORT"
+    echo "  edgePython (DE MCP):       http://localhost:$EDGEPYTHON_MCP_PORT"
+    echo "  XgenePy (Cis/Trans MCP):   http://localhost:$XGENEPY_MCP_PORT"
     echo ""
     log "Structured logs:  $LOGS_DIR/*.jsonl"
     log "Unified log:      $LOGS_DIR/agoutic.jsonl"
-    log "Start the UI separately:  streamlit run ui/app.py --server.port $UI_PORT"
+    log "Start the UI separately:  streamlit run ui/appUI.py --server.port $UI_PORT"
 }
 
 cmd_stop() {
@@ -367,6 +466,9 @@ cmd_stop() {
     echo ""
 
     stop_process "cortex"
+    stop_process "xgenepy-mcp"
+    stop_process "edgepython-mcp"
+    stop_process "igvf-mcp"
     stop_process "encode-mcp"
     stop_process "analyzer-mcp"
     stop_process "analyzer-rest"
@@ -381,8 +483,8 @@ cmd_status() {
     log "AGOUTIC server status:"
     echo ""
 
-    local services=("launchpad-rest" "launchpad-mcp" "analyzer-rest" "analyzer-mcp" "encode-mcp" "cortex")
-    local labels=("Launchpad REST" "Launchpad MCP" "Analyzer REST" "Analyzer MCP" "ENCODE MCP" "Cortex")
+    local services=("launchpad-rest" "launchpad-mcp" "analyzer-rest" "analyzer-mcp" "encode-mcp" "igvf-mcp" "edgepython-mcp" "xgenepy-mcp" "cortex")
+    local labels=("Launchpad REST" "Launchpad MCP" "Analyzer REST" "Analyzer MCP" "ENCODE MCP" "IGVF MCP" "edgePython MCP" "XgenePy MCP" "Cortex")
 
     for i in "${!services[@]}"; do
         local name="${services[$i]}"

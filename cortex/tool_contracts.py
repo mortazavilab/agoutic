@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import httpx
 from common.logging_config import get_logger
+from cortex.dataframe_actions import get_local_tool_schemas
 
 logger = get_logger(__name__)
 
@@ -54,7 +55,13 @@ async def fetch_all_tool_schemas(
             logger.warning("Could not fetch tool schemas (server may not be running)",
                           source=source_key, error=str(e))
 
-    _CACHE_LOADED = True
+    # Only mark as loaded if we actually got at least one source's schemas.
+    # If all servers were unreachable, leave _CACHE_LOADED=False so the
+    # next call retries instead of permanently serving an empty cache.
+    if _SCHEMA_CACHE:
+        _CACHE_LOADED = True
+    else:
+        logger.warning("No tool schemas fetched from any server — will retry on next call")
     return _SCHEMA_CACHE
 
 
@@ -76,7 +83,7 @@ def format_tool_contract(source_key: str, source_type: str) -> str:
           OPTIONAL: file_type (bam|bigwig|bed|fastq)
           NEVER: pass ENCFF file accessions here — use get_file_metadata
     """
-    schemas = _SCHEMA_CACHE.get(source_key, {})
+    schemas = get_local_tool_schemas(source_key) or _SCHEMA_CACHE.get(source_key, {})
     if not schemas:
         return ""
 
@@ -157,7 +164,7 @@ def validate_against_schema(
         - Validates enum values (case-insensitive match)
     """
     violations: list[str] = []
-    schemas = _SCHEMA_CACHE.get(source_key, {})
+    schemas = get_local_tool_schemas(source_key) or _SCHEMA_CACHE.get(source_key, {})
     schema = schemas.get(tool_name)
 
     if not schema:

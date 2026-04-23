@@ -9,12 +9,13 @@ import pandas as pd
 import sys
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import require_auth, make_authenticated_request
+from components.cards import section_header, stat_tile, empty_state, status_chip
 
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 
@@ -23,7 +24,69 @@ st.set_page_config(page_title="Projects", page_icon="📁", layout="wide")
 # Require authentication
 user = require_auth(API_URL)
 
-st.title("📁 Projects Dashboard")
+section_header("Projects Dashboard", "Project state, activity, jobs, and storage at a glance", icon="📁")
+
+
+def _set_active_project(project_id: str, project_name: str, *, open_chat: bool = False) -> None:
+    """Persist the selected project as the active chat context."""
+    st.session_state["_project_switch_loading_for"] = project_id
+    st.session_state["active_project_id"] = project_id
+    st.session_state["_project_id_input"] = project_id
+    st.session_state["blocks"] = []
+    st.session_state["_last_rendered_project"] = project_id
+    st.session_state.pop("_welcome_sent_for", None)
+
+    try:
+        make_authenticated_request(
+            "PUT",
+            f"{API_URL}/user/last-project",
+            json={"project_id": project_id},
+            timeout=3,
+        )
+    except Exception:
+        pass
+
+    st.toast(f"Active project set: {project_name}")
+    if open_chat:
+        st.switch_page("appUI.py")
+    st.rerun()
+
+
+def _format_timestamp(raw_value: str | None) -> str:
+    if not raw_value:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(raw_value)[:16] or "—"
+
+
+def _format_duration(duration_seconds: int | None) -> str:
+    if duration_seconds is None:
+        return "—"
+    total = max(int(duration_seconds), 0)
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _status_badge(status: str) -> str:
+    normalized = (status or "UNKNOWN").upper()
+    return {
+        "COMPLETED": "✅ Succeeded",
+        "FAILED": "❌ Failed",
+        "RUNNING": "⏳ Running",
+        "PENDING": "⏳ Pending",
+        "CANCELLED": "🛑 Cancelled",
+        "DELETED": "🗑️ Deleted",
+    }.get(normalized, f"❓ {normalized.title()}")
 
 # ── Disk Usage Summary ───────────────────────────────────────────────
 try:
@@ -67,7 +130,7 @@ except Exception as e:
     st.stop()
 
 if not all_projects:
-    st.info("No projects yet. Create one from the main chat page.")
+    empty_state("No projects yet", "Create one from the main chat page to get started.", icon="📁")
     st.stop()
 
 # Filter controls
@@ -83,6 +146,30 @@ if search:
     filtered = [p for p in filtered if _s in (p.get("name") or "").lower()]
 if not show_archived:
     filtered = [p for p in filtered if not p.get("is_archived")]
+
+_visible_count = len(filtered)
+_active_count = sum(1 for p in filtered if not p.get("is_archived"))
+_archived_count = sum(1 for p in filtered if p.get("is_archived"))
+_job_total = sum(int(p.get("job_count") or 0) for p in filtered)
+
+section_header("Overview", "Filtered project footprint and status", icon="📌")
+ov1, ov2, ov3, ov4 = st.columns(4)
+with ov1:
+    stat_tile("Visible Projects", _visible_count, icon="📁")
+with ov2:
+    stat_tile("Active", _active_count, icon="✅")
+with ov3:
+    stat_tile("Archived", _archived_count, icon="🗄️")
+with ov4:
+    stat_tile("Jobs in View", _job_total, icon="🧪")
+
+sc1, sc2 = st.columns(2)
+with sc1:
+    status_chip("info", label=f"Search: {'On' if bool(search) else 'Off'}", icon="🔍")
+with sc2:
+    status_chip("warning" if show_archived else "success", label=f"Archived Visible: {'Yes' if show_archived else 'No'}", icon="🧭")
+
+st.divider()
 
 # Build enriched table — fetch per-project stats for disk, messages, files
 rows = []
@@ -221,7 +308,7 @@ if rows:
 st.divider()
 
 # ── Project Detail ───────────────────────────────────────────────────
-st.subheader("Project Details")
+section_header("Project Details", "Inspect project stats, jobs, files, and conversations", icon="🔎")
 
 # Choose which project to inspect
 proj_options = {p.get("name", p.get("id", "?")): p.get("id") for p in filtered}
@@ -231,6 +318,23 @@ if not proj_options:
 
 selected_name = st.selectbox("Select project", list(proj_options.keys()))
 selected_id = proj_options[selected_name]
+_current_active_project = st.session_state.get("active_project_id")
+
+if _current_active_project == selected_id:
+    st.info(f"Active chat project: {selected_name}")
+else:
+    st.caption(
+        "Selected project is not the current chat project. "
+        "Use the actions below to switch safely without opening appUI first."
+    )
+
+switch_col, chat_col = st.columns(2)
+with switch_col:
+    if st.button("📌 Set Active Project", width="stretch"):
+        _set_active_project(selected_id, selected_name)
+with chat_col:
+    if st.button("💬 Open This Project In Chat", width="stretch"):
+        _set_active_project(selected_id, selected_name, open_chat=True)
 
 # Quick actions row
 act1, act2 = st.columns(2)
@@ -245,10 +349,31 @@ with act1:
                 timeout=5,
             )
             if r.status_code == 200:
-                st.toast(f"Renamed → {new_name}")
+                result = r.json() or {}
+                renamed = result.get("name") or new_name
+                new_slug = result.get("slug", "")
+                toast_msg = f"Renamed -> {renamed}"
+                if new_slug:
+                    toast_msg += f" (folder: {new_slug})"
+                st.toast(toast_msg)
                 st.rerun()
+            elif r.status_code == 409:
+                detail = "Name already exists"
+                try:
+                    detail = (r.json() or {}).get("detail") or detail
+                except Exception:
+                    pass
+                st.error(f"Rename failed: {detail}")
+            elif r.status_code == 403:
+                st.error("Rename failed: owner access required")
             else:
-                st.error(f"Rename failed: {r.status_code}")
+                detail = ""
+                try:
+                    detail = (r.json() or {}).get("detail") or ""
+                except Exception:
+                    pass
+                suffix = f" ({detail})" if detail else ""
+                st.error(f"Rename failed: {r.status_code}{suffix}")
         except Exception as e:
             st.error(str(e))
 with act2:
@@ -295,13 +420,15 @@ with tab_jobs:
                 job_rows = []
                 for j in jobs:
                     status = j.get("status", "UNKNOWN")
-                    emoji = {"COMPLETED": "✅", "RUNNING": "⏳", "FAILED": "❌"}.get(status, "❓")
                     job_rows.append({
-                        "Status": f"{emoji} {status}",
+                        "Status": _status_badge(status),
                         "Sample": j.get("sample_name", "—"),
+                        "Workflow": j.get("workflow_label", "—") or "—",
                         "Mode": j.get("mode", "—"),
                         "UUID": j.get("run_uuid", "—"),
-                        "Created": (j.get("created_at") or "")[:16],
+                        "Submitted": _format_timestamp(j.get("submitted_at")),
+                        "Started": _format_timestamp(j.get("started_at")),
+                        "Duration": _format_duration(j.get("duration_seconds")),
                     })
                 st.dataframe(
                     pd.DataFrame(job_rows),
@@ -312,10 +439,92 @@ with tab_jobs:
                 # Quick-view: select a job to analyze
                 job_uuids = [j.get("run_uuid") for j in jobs if j.get("run_uuid")]
                 if job_uuids:
-                    sel_uuid = st.selectbox("Analyze a job", job_uuids, key="job_sel")
+                    job_options = {}
+                    for j in jobs:
+                        run_uuid = j.get("run_uuid")
+                        if not run_uuid:
+                            continue
+                        workflow_label = j.get("workflow_label") or "workflow?"
+                        label = (
+                            f"{_status_badge(j.get('status', 'UNKNOWN'))} · "
+                            f"{j.get('sample_name', 'Unknown')} · {workflow_label} · "
+                            f"{_format_timestamp(j.get('started_at') or j.get('submitted_at'))} · "
+                            f"{run_uuid[:8]}…"
+                        )
+                        job_options[label] = run_uuid
+
+                    sel_label = st.selectbox("Analyze a job", list(job_options.keys()), key="job_sel")
+                    sel_uuid = job_options[sel_label]
                     if st.button("📊 View Results"):
-                        # Open results page with pre-filled UUID via query params
+                        # Persist selected UUID so Results pre-fills consistently.
+                        st.session_state["selected_job_run_uuid"] = sel_uuid
                         st.switch_page("pages/results.py")
+
+                # Cancel button for RUNNING jobs
+                running_jobs = [j for j in jobs if j.get("status") in ("RUNNING", "PENDING")]
+                if running_jobs:
+                    st.divider()
+                    st.subheader("🛑 Cancel a Running Job")
+                    cancel_options = {
+                        f"⏳ {j.get('sample_name', 'Unknown')} ({j.get('run_uuid', '')[:8]}…)": j.get("run_uuid")
+                        for j in running_jobs
+                    }
+                    cancel_label = st.selectbox("Select job to cancel", list(cancel_options.keys()), key="cancel_sel")
+                    cancel_uuid = cancel_options[cancel_label]
+                    if st.button("🛑 Cancel Job", type="primary", key="cancel_btn"):
+                        try:
+                            _resp = make_authenticated_request(
+                                "POST", f"{API_URL}/jobs/{cancel_uuid}/cancel", timeout=15
+                            )
+                            if _resp.status_code == 200:
+                                _data = _resp.json()
+                                st.success(_data.get("message", "Job cancelled successfully."))
+                                st.rerun()
+                            else:
+                                st.error(f"Cancel failed: {_resp.status_code} — {_resp.text[:200]}")
+                        except Exception as _e:
+                            st.error(f"Error cancelling job: {_e}")
+
+                failed_jobs = [j for j in jobs if j.get("status") == "FAILED" and j.get("run_uuid")]
+                if failed_jobs:
+                    st.divider()
+                    st.subheader("🗑️ Delete a Failed Run")
+                    failed_options = {
+                        (
+                            f"❌ {j.get('sample_name', 'Unknown')} · "
+                            f"{j.get('workflow_label') or 'workflow?'} · "
+                            f"{_format_timestamp(j.get('started_at') or j.get('submitted_at'))} · "
+                            f"{j.get('run_uuid', '')[:8]}…"
+                        ): j.get("run_uuid")
+                        for j in failed_jobs
+                    }
+                    failed_label = st.selectbox("Select failed run to delete", list(failed_options.keys()), key="failed_sel")
+                    failed_uuid = failed_options[failed_label]
+                    confirm_key = f"delete_failed_confirm_{failed_uuid}"
+                    if st.session_state.get(confirm_key):
+                        st.warning("This deletes the failed run's workflow folder and archives the job record.")
+                        col_yes, col_no = st.columns(2)
+                        with col_yes:
+                            if st.button("🗑️ Confirm Delete", key=f"failed_del_yes_{failed_uuid}", type="primary"):
+                                try:
+                                    _resp = make_authenticated_request(
+                                        "DELETE", f"{API_URL}/jobs/{failed_uuid}", timeout=30
+                                    )
+                                    if _resp.status_code == 200:
+                                        st.session_state.pop(confirm_key, None)
+                                        st.success(_resp.json().get("message", "Failed run deleted."))
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Delete failed: {_resp.status_code} — {_resp.text[:200]}")
+                                except Exception as _e:
+                                    st.error(f"Error deleting failed run: {_e}")
+                        with col_no:
+                            if st.button("Keep Run", key=f"failed_del_no_{failed_uuid}"):
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                    elif st.button("🗑️ Delete Failed Run", key=f"failed_del_btn_{failed_uuid}"):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
             else:
                 st.info("No jobs in this project yet.")
         else:

@@ -1,0 +1,774 @@
+"""Planner tests for local and remote staging workflow plan steps."""
+
+from cortex.schemas import ConversationState
+from cortex.plan_params import build_de_group_clarification
+from cortex.planner import (
+    _detect_plan_type,
+    _extract_plan_params,
+    _template_compare_region_overlaps,
+    _template_run_de_pipeline,
+    _template_reconcile_bams,
+    _template_remote_stage_workflow,
+    _template_run_workflow,
+    classify_request,
+    compose_plan_fragments,
+    generate_plan,
+)
+
+
+def test_run_workflow_includes_cache_preflight_before_approval():
+    plan = _template_run_workflow({"sample_name": "sampleA"})
+    kinds = [step["kind"] for step in plan["steps"]]
+
+    assert "FIND_REFERENCE_CACHE" in kinds
+    assert "FIND_DATA_CACHE" in kinds
+
+    ref_idx = kinds.index("FIND_REFERENCE_CACHE")
+    data_idx = kinds.index("FIND_DATA_CACHE")
+    approve_idx = kinds.index("REQUEST_APPROVAL")
+
+    assert ref_idx < data_idx < approve_idx
+
+
+def test_remote_stage_workflow_has_remote_stage_steps():
+    plan = _template_remote_stage_workflow({"sample_name": "Jamshid", "input_directory": "/data/pod5"})
+    kinds = [step["kind"] for step in plan["steps"]]
+
+    assert plan["plan_type"] == "remote_stage_workflow"
+    assert plan["workflow_type"] == "remote_sample_intake"
+    assert kinds == [
+        "LOCATE_DATA",
+        "VALIDATE_INPUTS",
+        "check_remote_stage",
+        "CHECK_REMOTE_PROFILE_AUTH",
+        "REQUEST_APPROVAL",
+        "remote_stage",
+        "complete_stage_only",
+    ]
+    assert plan["steps"][0]["id"] == "locate_data"
+    assert plan["steps"][2]["id"] == "check_remote_stage"
+    assert plan["steps"][5]["id"] == "stage_input"
+    assert plan["steps"][5]["requires_approval"] is False
+
+
+def test_detect_plan_type_matches_remote_stage_request():
+    assert _detect_plan_type("Stage the mouse cDNA sample called Jamshid at /data/pod5 on hpc3") == "remote_stage_workflow"
+
+
+def test_detect_plan_type_matches_remote_stage_request_for_arbitrary_profile_nickname():
+    assert _detect_plan_type("Stage the mouse cDNA sample called Jamshid at /data/pod5 on mycluster") == "remote_stage_workflow"
+
+
+def test_detect_plan_type_matches_reconcile_bams_request():
+    assert _detect_plan_type("Reconcile annotated BAM files across workflows") == "reconcile_bams"
+
+
+def test_detect_plan_type_matches_reconcile_the_bams_request():
+    assert _detect_plan_type("I want to reconcile the bams of C2C12r1 and C2C12r3") == "reconcile_bams"
+
+
+def test_detect_plan_type_matches_region_overlap_request():
+    assert (
+        _detect_plan_type(
+            "make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4"
+        )
+        == "compare_region_overlaps"
+    )
+
+
+def test_generate_plan_uses_deterministic_region_overlap_template():
+    class _Engine:
+        def plan(self, *_args, **_kwargs):
+            raise AssertionError("deterministic overlap plans should not fall through to engine.plan")
+
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/users/ali-mortazavi/testvenn2/workflow1",
+    )
+
+    plan = generate_plan(
+        "make a venn diagram of the regions in testslopenchrom:workflow2 and testslopenchrom2:workflow3",
+        "analyze_job_results",
+        state,
+        _Engine(),
+        project_dir="/tmp/users/ali-mortazavi/testvenn2",
+    )
+
+    assert plan is not None
+    assert plan["plan_type"] == "compare_region_overlaps"
+    assert [step["kind"] for step in plan["steps"]] == [
+        "LOCATE_DATA",
+        "REQUEST_APPROVAL",
+        "RUN_SCRIPT",
+        "PARSE_OUTPUT_FILE",
+        "GENERATE_PLOT",
+    ]
+
+
+def test_detect_plan_type_matches_grouped_de_compare_request():
+    assert (
+        _detect_plan_type(
+            "compare the AD samples exc and jbh to the control samples gko and lwf"
+        )
+        == "run_de_pipeline"
+    )
+
+
+def test_reconcile_bams_template_orders_preflight_before_approval_and_run():
+    plan = _template_reconcile_bams({"work_dir": "/tmp/project", "output_prefix": "merged"})
+    kinds = [step["kind"] for step in plan["steps"]]
+
+    assert plan["plan_type"] == "reconcile_bams"
+    assert kinds == [
+        "LOCATE_DATA",
+        "CHECK_EXISTING",
+        "REQUEST_APPROVAL",
+        "RUN_SCRIPT",
+        "LOCATE_DATA",
+        "PARSE_OUTPUT_FILE",
+        "WRITE_SUMMARY",
+    ]
+
+    preflight_idx = kinds.index("CHECK_EXISTING")
+    approve_idx = kinds.index("REQUEST_APPROVAL")
+    run_idx = kinds.index("RUN_SCRIPT")
+    assert preflight_idx < approve_idx < run_idx
+
+    preflight_step = plan["steps"][preflight_idx]
+    assert preflight_step["tool_calls"][0]["params"]["script_id"] == "reconcile_bams/reconcile_bams"
+    preflight_args = preflight_step["tool_calls"][0]["params"]["script_args"]
+    assert "--preflight-only" in preflight_args
+
+    run_step = plan["steps"][run_idx]
+    assert run_step["requires_approval"] is True
+    assert run_step["tool_calls"][0]["params"]["script_id"] == "reconcile_bams/reconcile_bams"
+    assert "--json" in run_step["tool_calls"][0]["params"]["script_args"]
+
+
+def test_reconcile_bams_template_locate_step_uses_workflow_annot_dirs():
+    plan = _template_reconcile_bams(
+        {
+            "workflow_dirs": ["/tmp/workflow2", "/tmp/workflow3"],
+            "output_prefix": "merged",
+        }
+    )
+
+    locate_step = plan["steps"][0]
+    assert locate_step["kind"] == "LOCATE_DATA"
+    assert locate_step["tool_calls"] == [
+        {
+            "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": {
+                "work_dir": "/tmp/workflow2/annot",
+                "extensions": ".bam",
+                "max_depth": 1,
+                "allow_missing": True,
+            },
+        },
+        {
+            "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": {
+                "work_dir": "/tmp/workflow3/annot",
+                "extensions": ".bam",
+                "max_depth": 1,
+                "allow_missing": True,
+            },
+        },
+    ]
+
+
+def test_extract_plan_params_region_overlap_uses_project_workflow_refs_and_new_workflow_dir(tmp_path):
+    project_dir = tmp_path / "active-project"
+    (project_dir / "workflow1").mkdir(parents=True)
+    (project_dir / "workflow3").mkdir()
+
+    params = _extract_plan_params(
+        "make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4",
+        ConversationState(active_skill="analyze_job_results", active_project="proj-1", work_dir=str(project_dir / "workflow3")),
+        "compare_region_overlaps",
+        str(project_dir),
+    )
+
+    assert params["folder_a"].endswith("/testslopenchrom/workflow2/openChromatin")
+    assert params["folder_b"].endswith("/testopenchrom2/workflow4/openChromatin")
+    assert params["pattern_a"] == "*.m6Aopen.bed"
+    assert params["pattern_b"] == "*.m6Aopen.bed"
+    assert params["output_directory"] == str(project_dir / "workflow4")
+    assert "script_working_directory" not in params
+
+
+def test_extract_plan_params_region_overlap_accepts_explicit_sample_labels(tmp_path):
+    project_dir = tmp_path / "active-project"
+    (project_dir / "workflow2").mkdir(parents=True)
+
+    params = _extract_plan_params(
+        "make a venn diagram of the regions in testslopenchrom:workflow2 and testopenchrom2:workflow4 with sample A named Control peaks and sample B named Treatment peaks",
+        ConversationState(active_skill="analyze_job_results", active_project="proj-1", work_dir=str(project_dir / "workflow2")),
+        "compare_region_overlaps",
+        str(project_dir),
+    )
+
+    assert params["sample_a_label"] == "Control peaks"
+    assert params["sample_b_label"] == "Treatment peaks"
+
+
+def test_extract_plan_params_region_overlap_stops_sample_b_before_title_clause(tmp_path):
+    project_dir = tmp_path / "active-project"
+    (project_dir / "workflow2").mkdir(parents=True)
+
+    params = _extract_plan_params(
+        "make a venn diagram of the regions in testslopenchrom:workflow2 and testslopenchrom2:workflow3 with sample A named IGVFFI6571ANCX and sample B named IGVFFI1476XCPC and title it IGVF open chromatin overlap.",
+        ConversationState(active_skill="analyze_job_results", active_project="proj-1", work_dir=str(project_dir / "workflow2")),
+        "compare_region_overlaps",
+        str(project_dir),
+    )
+
+    assert params["sample_a_label"] == "IGVFFI6571ANCX"
+    assert params["sample_b_label"] == "IGVFFI1476XCPC"
+    assert params["plot_title"] == "IGVF open chromatin overlap"
+
+
+def test_compare_region_overlaps_template_uses_four_steps_plus_approval():
+    plan = _template_compare_region_overlaps(
+        {
+            "folder_a": "/data/user/testslopenchrom/workflow2/openChromatin",
+            "folder_b": "/data/user/testopenchrom2/workflow4/openChromatin",
+            "pattern_a": "*.m6Aopen.bed",
+            "pattern_b": "*.m6Aopen.bed",
+            "sample_a_label": "testslopenchrom:workflow2",
+            "sample_b_label": "testopenchrom2:workflow4",
+            "output_directory": "/projects/current/workflow7",
+            "input_directory": "/projects/current",
+            "plot_type": "venn",
+        }
+    )
+
+    kinds = [step["kind"] for step in plan["steps"]]
+    assert kinds == ["LOCATE_DATA", "REQUEST_APPROVAL", "RUN_SCRIPT", "PARSE_OUTPUT_FILE", "GENERATE_PLOT"]
+    assert plan["output_directory"] == "/projects/current/workflow7"
+    run_step = next(step for step in plan["steps"] if step["kind"] == "RUN_SCRIPT")
+    assert run_step["tool_calls"][0]["params"]["script_id"] == "analyze_job_results/compare_bed_region_overlaps"
+    assert "--output-dir" in run_step["tool_calls"][0]["params"]["script_args"]
+    assert "script_working_directory" not in run_step["tool_calls"][0]["params"]
+
+
+def test_compare_region_overlaps_template_carries_plot_title_to_generate_step():
+    plan = _template_compare_region_overlaps(
+        {
+            "folder_a": "/data/user/testslopenchrom/workflow2/openChromatin",
+            "folder_b": "/data/user/testopenchrom2/workflow4/openChromatin",
+            "sample_a_label": "IGVFFI6571ANCX",
+            "sample_b_label": "IGVFFI1476XCPC",
+            "output_directory": "/projects/current/workflow7",
+            "input_directory": "/projects/current",
+            "plot_type": "venn",
+            "plot_title": "IGVF open chromatin overlap",
+        }
+    )
+
+    plot_step = next(step for step in plan["steps"] if step["kind"] == "GENERATE_PLOT")
+    assert plot_step["plot_title"] == "IGVF open chromatin overlap"
+    assert plan["plot_title"] == "IGVF open chromatin overlap"
+
+
+def test_reconcile_bams_template_defaults_output_directory_to_common_workflow_parent():
+    plan = _template_reconcile_bams(
+        {
+            "workflow_dirs": ["/tmp/project/workflow2", "/tmp/project/workflow3"],
+            "output_prefix": "merged",
+        }
+    )
+
+    assert plan["output_directory"] == "/tmp/project"
+    preflight_args = plan["steps"][1]["tool_calls"][0]["params"]["script_args"]
+    run_args = plan["steps"][3]["tool_calls"][0]["params"]["script_args"]
+    assert ["--output-dir", "/tmp/project"] == preflight_args[preflight_args.index("--output-dir"):preflight_args.index("--output-dir") + 2]
+    assert ["--output-dir", "/tmp/project"] == run_args[run_args.index("--output-dir"):run_args.index("--output-dir") + 2]
+
+
+def test_reconcile_bams_template_has_parse_step_before_summary():
+    """WRITE_SUMMARY should depend on PARSE_OUTPUT_FILE, which depends on a post-run LOCATE_DATA."""
+    plan = _template_reconcile_bams({
+        "work_dir": "/tmp/project",
+        "output_prefix": "reconciled",
+        "output_directory": "/tmp/project/workflow10",
+    })
+    kinds = [step["kind"] for step in plan["steps"]]
+
+    # The last three steps should be LOCATE_DATA → PARSE_OUTPUT_FILE → WRITE_SUMMARY
+    assert kinds[-3:] == ["LOCATE_DATA", "PARSE_OUTPUT_FILE", "WRITE_SUMMARY"]
+
+    locate_out = plan["steps"][-3]
+    parse_step = plan["steps"][-2]
+    summary_step = plan["steps"][-1]
+
+    # Post-run LOCATE_DATA lists the top-level workflow output directory only
+    assert locate_out["tool_calls"][0]["tool"] == "list_job_files"
+    assert locate_out["tool_calls"][0]["params"]["work_dir"] == "/tmp/project/workflow10"
+    assert locate_out["tool_calls"][0]["params"]["max_depth"] == 1
+    assert "extensions" not in locate_out["tool_calls"][0]["params"]
+
+    # PARSE_OUTPUT_FILE depends on the post-run LOCATE_DATA
+    assert locate_out["id"] in parse_step["depends_on"]
+
+    # WRITE_SUMMARY depends on PARSE_OUTPUT_FILE
+    assert parse_step["id"] in summary_step["depends_on"]
+
+    # Post-run LOCATE_DATA depends on RUN_SCRIPT
+    run_step = next(s for s in plan["steps"] if s["kind"] == "RUN_SCRIPT")
+    assert run_step["id"] in locate_out["depends_on"]
+
+
+def test_classify_request_marks_remote_stage_as_multistep():
+    class _State:
+        pass
+
+    assert classify_request(
+        "Stage the mouse cDNA sample called Jamshid at /data/pod5 on hpc3",
+        "remote_execution",
+        _State(),
+    ) == "MULTI_STEP"
+
+
+def test_classify_request_marks_remote_stage_on_arbitrary_profile_as_multistep():
+    class _State:
+        pass
+
+    assert classify_request(
+        "Stage the mouse cDNA sample called Jamshid at /data/pod5 on mycluster",
+        "remote_execution",
+        _State(),
+    ) == "MULTI_STEP"
+
+
+def test_classify_request_marks_summarize_results_as_multistep():
+    class _State:
+        pass
+
+    assert classify_request(
+        "Summarize the results for the current project and tell me what I should look at next",
+        "welcome",
+        _State(),
+    ) == "MULTI_STEP"
+
+
+def test_classify_request_marks_reconcile_the_bams_as_multistep():
+    class _State:
+        pass
+
+    assert classify_request(
+        "I want to reconcile the bams of C2C12r1 and C2C12r3",
+        "run_dogme_rna",
+        _State(),
+    ) == "MULTI_STEP"
+
+
+def test_classify_request_marks_grouped_de_compare_as_multistep():
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    assert classify_request(
+        "compare the AD samples exc and jbh to the control samples gko and lwf2",
+        "analyze_job_results",
+        state,
+    ) == "MULTI_STEP"
+
+
+def test_extract_plan_params_keeps_remote_stage_sample_name_and_path():
+    params = _extract_plan_params(
+        "Stage the mouse cDNA sample called Jamshid at /data/pod5 on hpc3",
+        ConversationState(active_skill="remote_execution", active_project="proj-1"),
+        "remote_stage_workflow",
+    )
+
+    assert params["sample_name"] == "Jamshid"
+    assert params["input_directory"] == "/data/pod5"
+
+
+def test_extract_plan_params_keeps_remote_stage_sample_name_and_path_for_arbitrary_profile_nickname():
+    params = _extract_plan_params(
+        "Stage the mouse cDNA sample called Jamshid at /data/pod5 on mycluster",
+        ConversationState(active_skill="remote_execution", active_project="proj-1"),
+        "remote_stage_workflow",
+    )
+
+    assert params["sample_name"] == "Jamshid"
+    assert params["input_directory"] == "/data/pod5"
+
+
+def test_extract_plan_params_reconcile_annotation_gtf():
+    params = _extract_plan_params(
+        "Reconcile annotated BAMs using annotation gtf /tmp/manual.GRCh38.annotation.gtf into /tmp/out",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+    )
+
+    assert params["annotation_gtf"] == "/tmp/manual.GRCh38.annotation.gtf"
+
+
+def test_extract_plan_params_grouped_de_from_active_workflow():
+    params = _extract_plan_params(
+        "compare the AD samples exc and jbh to the control samples gko and lwf",
+        ConversationState(
+            active_skill="analyze_job_results",
+            active_project="proj-1",
+            work_dir="/tmp/project/workflow10",
+        ),
+        "run_de_pipeline",
+        project_dir="/tmp/project",
+    )
+
+    assert params["group_a_label"] == "AD"
+    assert params["group_a_samples"] == ["exc", "jbh"]
+    assert params["group_b_label"] == "control"
+    assert params["group_b_samples"] == ["gko", "lwf"]
+    assert params["contrast"] == "AD - control"
+    assert params["method"] == "exact_test"
+    assert params["level"] == "gene"
+    assert params["work_dir"] == "/tmp/project/workflow10"
+    assert params["prep_output_dir"] == "/tmp/project/workflow10/de_inputs"
+
+
+def test_extract_plan_params_grouped_de_from_dataframe_transcript_level():
+    params = _extract_plan_params(
+        "compare exc and jbh to gko and lwf from DF1 at transcript level",
+        ConversationState(
+            active_skill="differential_expression",
+            active_project="proj-1",
+            latest_dataframe="DF1",
+        ),
+        "run_de_pipeline",
+    )
+
+    assert params["df_id"] == 1
+    assert params["group_a_samples"] == ["exc", "jbh"]
+    assert params["group_b_samples"] == ["gko", "lwf"]
+    assert params["level"] == "transcript"
+
+
+def test_extract_plan_params_grouped_de_with_explicit_pvalue_threshold():
+    params = _extract_plan_params(
+        "compare the AD samples exc and jbh to the control samples gko and lwf2 with p-value of 0.01",
+        ConversationState(
+            active_skill="differential_expression",
+            active_project="proj-1",
+            work_dir="/tmp/project/workflow10",
+        ),
+        "run_de_pipeline",
+        project_dir="/tmp/project",
+    )
+
+    assert params["significance_metric"] == "pvalue"
+    assert params["significance_threshold"] == 0.01
+    assert params["significance_explicit"] is True
+
+
+def test_build_de_group_clarification_when_groups_are_missing():
+    state = ConversationState(
+        active_skill="differential_expression",
+        active_project="proj-1",
+        latest_dataframe="DF1",
+        work_dir="/tmp/project/workflow10",
+    )
+    params = _extract_plan_params(
+        "run differential expression on the current workflow abundance table",
+        state,
+        "run_de_pipeline",
+        project_dir="/tmp/project",
+    )
+
+    clarification = build_de_group_clarification(
+        "run differential expression on the current workflow abundance table",
+        state,
+        params,
+    )
+
+    assert clarification is not None
+    assert "need the two sample groups" in clarification
+    assert "AD samples exc and jbh" in clarification
+
+
+def test_run_de_pipeline_template_adds_prepare_and_save_steps_for_grouped_abundance_de():
+    plan = _template_run_de_pipeline(
+        {
+            "goal": "compare grouped samples",
+            "work_dir": "/tmp/project/workflow10",
+            "group_a_label": "AD",
+            "group_a_samples": ["exc", "jbh"],
+            "group_b_label": "control",
+            "group_b_samples": ["gko", "lwf"],
+            "level": "gene",
+            "prep_output_dir": "/tmp/project/de_inputs",
+        }
+    )
+
+    kinds = [step["kind"] for step in plan["steps"]]
+    assert kinds == [
+        "CHECK_EXISTING",
+        "PREPARE_DE_INPUT",
+        "RUN_DE_PIPELINE",
+        "SAVE_RESULTS",
+        "ANNOTATE_RESULTS",
+        "GENERATE_DE_PLOT",
+        "INTERPRET_RESULTS",
+        "WRITE_SUMMARY",
+    ]
+
+    run_step = plan["steps"][2]
+    tool_names = [tool_call["tool"] for tool_call in run_step["tool_calls"]]
+    assert run_step["requires_approval"] is False
+    assert "exact_test" in tool_names
+    assert "get_top_genes" in tool_names
+    assert "test_contrast" not in tool_names
+    assert plan["work_dir"] == "/tmp/project/workflow10"
+    assert plan["steps"][0]["tool_calls"][0]["params"]["work_dir"] == "/tmp/project/workflow10"
+    exact_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "exact_test")
+    top_genes_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "get_top_genes")
+    plot_step = next(step for step in plan["steps"] if step["kind"] == "GENERATE_DE_PLOT")
+    plot_call = plot_step["tool_calls"][0]
+    assert exact_call["params"]["significance_metric"] == "pvalue"
+    assert exact_call["params"]["significance_threshold"] == 0.05
+    assert top_genes_call["params"]["significance_metric"] == "pvalue"
+    assert top_genes_call["params"]["significance_threshold"] == 0.05
+    assert "use_fdr_y" not in plot_call["params"]
+    assert "fdr_cutoff" not in plot_call["params"]
+
+
+def test_run_de_pipeline_template_threads_explicit_pvalue_threshold_to_tools():
+    plan = _template_run_de_pipeline(
+        {
+            "goal": "compare grouped samples",
+            "work_dir": "/tmp/project/workflow10",
+            "group_a_label": "AD",
+            "group_a_samples": ["exc", "jbh"],
+            "group_b_label": "control",
+            "group_b_samples": ["gko", "lwf"],
+            "level": "gene",
+            "prep_output_dir": "/tmp/project/de_inputs",
+            "significance_metric": "pvalue",
+            "significance_threshold": 0.01,
+            "significance_explicit": True,
+        }
+    )
+
+    run_step = plan["steps"][2]
+    exact_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "exact_test")
+    top_genes_call = next(tool for tool in run_step["tool_calls"] if tool["tool"] == "get_top_genes")
+    plot_step = next(step for step in plan["steps"] if step["kind"] == "GENERATE_DE_PLOT")
+    plot_call = plot_step["tool_calls"][0]
+
+    assert exact_call["params"]["significance_metric"] == "pvalue"
+    assert exact_call["params"]["significance_threshold"] == 0.01
+    assert top_genes_call["params"]["significance_metric"] == "pvalue"
+    assert top_genes_call["params"]["significance_threshold"] == 0.01
+    assert plot_call["params"]["use_fdr_y"] is False
+    assert plot_call["params"]["pvalue_cutoff"] == 0.01
+
+
+def test_extract_plan_params_reconcile_named_workflows_from_state():
+    params = _extract_plan_params(
+        "I want to reconcile the bams of C2C12r1 and C2C12r3",
+        ConversationState(
+            active_skill="run_dogme_rna",
+            active_project="proj-1",
+            workflows=[
+                {"sample_name": "C2C12r1", "work_dir": "/tmp/C2C12r1"},
+                {"sample_name": "C2C12r2", "work_dir": "/tmp/C2C12r2"},
+                {"sample_name": "C2C12r3", "work_dir": "/tmp/C2C12r3"},
+            ],
+        ),
+        "reconcile_bams",
+    )
+
+    assert params["workflow_dirs"] == ["/tmp/C2C12r1", "/tmp/C2C12r3"]
+
+
+def test_extract_plan_params_reconcile_workflow_qualified_names_from_state():
+    params = _extract_plan_params(
+        "I want to reconcile the bams of C2C12r1 in workflow2 and C2C12r3 in workflow3",
+        ConversationState(
+            active_skill="run_dogme_rna",
+            active_project="proj-1",
+            workflows=[
+                {"sample_name": "C2C12r1", "work_dir": "/tmp/workflow2"},
+                {"sample_name": "C2C12r2", "work_dir": "/tmp/workflow9"},
+                {"sample_name": "C2C12r3", "work_dir": "/tmp/workflow3"},
+            ],
+        ),
+        "reconcile_bams",
+    )
+
+    assert params["workflow_dirs"] == ["/tmp/workflow2", "/tmp/workflow3"]
+
+
+def test_extract_plan_params_reconcile_does_not_treat_to_reconcile_as_output_dir():
+    params = _extract_plan_params(
+        "I want to reconcile the bams of C2C12r1 in workflow2 and C2C12r3 in workflow3",
+        ConversationState(active_skill="run_dogme_rna", active_project="proj-1"),
+        "reconcile_bams",
+    )
+
+    assert "output_directory" not in params
+
+
+def test_extract_plan_params_reconcile_cross_project_workflow_refs_resolve_from_known_base():
+    params = _extract_plan_params(
+        (
+            "reconcile bams from C2C12r1 in project-2026-03-27:workflow1, "
+            "C2C12r2 in project-2026-03-27-1:workflow1 and "
+            "C2C12r3 in project-2026-03-27-2:workflow1"
+        ),
+        ConversationState(
+            active_skill="reconcile_bams",
+            active_project="proj-1",
+            workflows=[
+                {
+                    "sample_name": "anchor",
+                    "work_dir": "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-30/workflow1",
+                }
+            ],
+        ),
+        "reconcile_bams",
+    )
+
+    assert params["workflow_dirs"] == [
+        "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-27/workflow1",
+        "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-27-1/workflow1",
+        "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-27-2/workflow1",
+    ]
+
+
+def test_extract_plan_params_reconcile_cross_project_workflow_refs_keep_relative_without_base():
+    params = _extract_plan_params(
+        "reconcile bams from A in projectX:workflow2 and B in projectY:workflow7",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+    )
+
+    assert params["workflow_dirs"] == [
+        "projectX/workflow2",
+        "projectY/workflow7",
+    ]
+
+
+def test_extract_plan_params_reconcile_bare_workflow_names_resolve_against_project_dir():
+    """Bare workflow folder names like 'workflow5' should be resolved to absolute
+    paths using project_dir when conv_state has no matching workflows."""
+    params = _extract_plan_params(
+        "reconcile the annotated bams from workflow5, workflow6, workflow7, and workflow8",
+        ConversationState(active_skill="reconcile_bams", active_project="ad-samples"),
+        "reconcile_bams",
+        project_dir="/media/backup_disk/agoutic_root/users/elnaz-a/ad-samples",
+    )
+
+    assert params["workflow_dirs"] == [
+        "/media/backup_disk/agoutic_root/users/elnaz-a/ad-samples/workflow5",
+        "/media/backup_disk/agoutic_root/users/elnaz-a/ad-samples/workflow6",
+        "/media/backup_disk/agoutic_root/users/elnaz-a/ad-samples/workflow7",
+        "/media/backup_disk/agoutic_root/users/elnaz-a/ad-samples/workflow8",
+    ]
+
+
+def test_compose_plan_fragments_remaps_ids_and_dependencies():
+    plan = compose_plan_fragments(
+        [
+            {
+                "fragment_alias": "ingest",
+                "steps": [
+                    {
+                        "id": "locate",
+                        "kind": "LOCATE_DATA",
+                        "title": "Locate",
+                        "depends_on": [],
+                    },
+                    {
+                        "id": "validate",
+                        "kind": "VALIDATE_INPUTS",
+                        "title": "Validate",
+                        "depends_on": ["locate"],
+                    },
+                ],
+            },
+            {
+                "fragment_alias": "analysis",
+                "steps": [
+                    {
+                        "id": "summary",
+                        "kind": "WRITE_SUMMARY",
+                        "title": "Summarize",
+                        "depends_on": ["ingest__validate"],
+                    }
+                ],
+            },
+        ],
+        title="Hybrid plan",
+        goal="Compose from fragments",
+        project_id="proj-1",
+    )
+
+    ids = [step["id"] for step in plan["steps"]]
+    assert ids == ["ingest__locate", "ingest__validate", "analysis__summary"]
+    assert plan["steps"][1]["depends_on"] == ["ingest__locate"]
+    assert plan["steps"][2]["depends_on"] == ["ingest__validate"]
+    assert plan["project_id"] == "proj-1"
+    assert isinstance(plan.get("plan_instance_id"), str)
+    assert plan["steps"][0]["provenance"]["fragment_id"] == "ingest"
+
+
+def test_compose_plan_fragments_rejects_dangling_cross_fragment_dependency():
+    try:
+        compose_plan_fragments(
+            [
+                {
+                    "fragment_alias": "frag1",
+                    "steps": [
+                        {
+                            "id": "step1",
+                            "kind": "LOCATE_DATA",
+                            "title": "Locate",
+                            "depends_on": ["frag2__missing"],
+                        }
+                    ],
+                }
+            ],
+            title="Broken plan",
+            goal="Should fail",
+            project_id="proj-1",
+        )
+    except ValueError as exc:
+        assert "unknown step id" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for dangling cross-fragment dependency")
+
+
+def test_generate_plan_composes_llm_fragments_when_provided():
+    class _Engine:
+        @staticmethod
+        def plan(_message, _state_json, _history):
+            payload = (
+                '[[PLAN:{"plan_type":"custom","title":"Hybrid","goal":"merge",'
+                '"fragments":[{"fragment_alias":"fragA","steps":[{"id":"a1","kind":"LOCATE_DATA",'
+                '"title":"Locate","depends_on":[]}]},{"fragment_alias":"fragB","steps":[{"id":"b1",'
+                '"kind":"WRITE_SUMMARY","title":"Summarize","depends_on":["fragA__a1"]}]}]}]]'
+            )
+            return payload, {}
+
+    plan = generate_plan(
+        "do a complex hybrid flow",
+        "welcome",
+        ConversationState(active_skill="welcome", active_project="proj-1"),
+        _Engine(),
+        conversation_history=[],
+    )
+
+    assert plan is not None
+    assert plan["project_id"] == "proj-1"
+    assert isinstance(plan.get("plan_instance_id"), str)
+    assert [step["id"] for step in plan["steps"]] == ["fragA__a1", "fragB__b1"]
+    assert plan["steps"][1]["depends_on"] == ["fragA__a1"]

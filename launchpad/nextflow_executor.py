@@ -4,15 +4,24 @@ Handles job submission, monitoring, and result parsing.
 """
 import asyncio
 import json
+import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from datetime import datetime
 from typing import Optional
 import uuid
 
 from common.logging_config import get_logger
+from common.workflow_paths import next_workflow_number, workflow_dir_name
 from launchpad.config import (
     DOGME_REPO,
+    DOGME_DNA_MODKITBASE,
+    DOGME_DNA_MODKITMODEL,
+    DOGME_DNA_OPENCHROM_BINARY_DIR,
+    DOGME_DNA_OPENCHROM_LIBTORCH,
+    DOGME_DNA_OPENCHROM_MODEL,
+    DOGME_DNA_OPENCHROM_MODKITBASE,
+    DOGME_DNA_SLURM_CONTAINER,
     NEXTFLOW_BIN,
     LAUNCHPAD_WORK_DIR,
     LAUNCHPAD_LOGS_DIR,
@@ -26,6 +35,296 @@ from launchpad.config import (
 
 logger = get_logger(__name__)
 
+_MINIMAL_DOGME_PROFILE = "# Dogme environment profile\n# Add environment variables here if needed\n"
+_DEFAULT_PROCESS_BEFORE_SCRIPT = "export PATH=/opt/conda/bin:$PATH"
+_PROFILE_EXPORT_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_EXPORT_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_OPENCHROMATIN_LIBRARY_DIR_CANDIDATES = (
+    "/lib64",
+    "/usr/lib64",
+    "/lib/x86_64-linux-gnu",
+    "/usr/lib/x86_64-linux-gnu",
+)
+_OPENCHROMATIN_LIBRARY_FILE_SUFFIXES = (
+    "libgomp.so.1",
+    "libstdc++.so.6",
+    "libgcc_s.so.1",
+)
+
+
+def _ensure_trailing_newline(content: str) -> str:
+    if content.endswith("\n"):
+        return content
+    return f"{content}\n"
+
+
+def _default_dna_dogme_profile_content() -> str:
+    return (
+        "# Dogme environment profile\n"
+        "# DNA mode modkit paths inside the dogme container image\n"
+        f"export MODKITBASE=${{MODKITBASE:-{DOGME_DNA_MODKITBASE}}}\n"
+        "export MODKITMODEL=${MODKITMODEL:-${MODKITBASE}/models/"
+        f"{DOGME_DNA_MODKITMODEL.name}}}\n"
+    )
+
+
+def _default_dna_openchromatin_runtime_exports() -> list[str]:
+    return [
+        f"export MODKITBASE={DOGME_DNA_OPENCHROM_MODKITBASE}",
+        f"export PATH={DOGME_DNA_OPENCHROM_BINARY_DIR}:${{PATH}}",
+        f"export MODKITMODEL={DOGME_DNA_OPENCHROM_MODEL}",
+        f"export LIBTORCH={DOGME_DNA_OPENCHROM_LIBTORCH}",
+        "export LD_LIBRARY_PATH=/opt/conda/lib:${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}",
+        "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}",
+    ]
+
+
+def _resolve_task_scoped_dogme_exports(profile_content: str) -> list[str]:
+    task_scoped_exports: list[str] = []
+    known_exports: dict[str, str] = {}
+
+    for line in _ensure_trailing_newline(profile_content).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("export "):
+            export_name, has_equals, raw_value = stripped[len("export ") :].partition("=")
+            if has_equals:
+                resolved_value = _PROFILE_EXPORT_REFERENCE_RE.sub(
+                    lambda match: known_exports.get(match.group(1), match.group(0)),
+                    raw_value.strip(),
+                )
+                export_name = export_name.strip()
+                known_exports[export_name] = resolved_value
+                task_scoped_exports.append(f"export {export_name}={resolved_value}")
+
+    return task_scoped_exports
+
+
+def resolve_dogme_profile_parts(mode: str, custom_profile: str | None = None) -> tuple[str, list[str]]:
+    """Return the staged dogme.profile content plus OpenChromatin-only runtime exports."""
+    normalized_mode = str(mode or "").strip().upper()
+    if normalized_mode == DogmeMode.DNA.value and str(custom_profile or "").strip():
+        return _default_dna_dogme_profile_content(), _resolve_task_scoped_dogme_exports(str(custom_profile))
+
+    if normalized_mode == DogmeMode.DNA.value:
+        return (_default_dna_dogme_profile_content(), _default_dna_openchromatin_runtime_exports())
+
+    dogme_profile_src = DOGME_REPO / "dogme.profile"
+    if dogme_profile_src.exists():
+        return _ensure_trailing_newline(dogme_profile_src.read_text()), []
+
+    return _MINIMAL_DOGME_PROFILE, []
+
+
+def _quote_nextflow_single_quoted(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _render_before_script(commands: list[str]) -> str:
+    normalized: list[str] = []
+    for command in commands:
+        cleaned = str(command or "").strip()
+        if cleaned and cleaned not in normalized:
+            normalized.append(cleaned)
+    return _quote_nextflow_single_quoted("; ".join(normalized))
+
+
+def _parse_export_statement(command: str) -> tuple[str, str] | None:
+    cleaned = str(command or "").strip()
+    if not cleaned.startswith("export "):
+        return None
+    name, has_equals, value = cleaned[len("export ") :].partition("=")
+    variable_name = name.strip()
+    if not has_equals or not variable_name:
+        return None
+    return variable_name, value.strip()
+
+
+def _dedupe_paths(paths: list[str] | tuple[str, ...] | None) -> list[str]:
+    normalized: list[str] = []
+    for path in paths or []:
+        cleaned = str(path or "").strip()
+        if cleaned and cleaned not in normalized:
+            normalized.append(cleaned)
+    return normalized
+
+
+def _extract_bind_target(bind_path: str) -> str:
+    cleaned = str(bind_path or "").strip()
+    if not cleaned or ":" not in cleaned:
+        return cleaned
+    parts = cleaned.split(":")
+    if len(parts) >= 2 and parts[0].startswith("/") and parts[1].startswith("/"):
+        return parts[1]
+    return cleaned
+
+
+def _extract_openchromatin_library_dirs(bind_paths: list[str] | None) -> list[str]:
+    library_dirs: list[str] = []
+    for bind_path in bind_paths or []:
+        target = _extract_bind_target(bind_path)
+        if not target:
+            continue
+        if any(target.endswith(f"/{filename}") for filename in _OPENCHROMATIN_LIBRARY_FILE_SUFFIXES):
+            parent = str(PurePosixPath(target).parent).strip()
+            if parent and parent not in library_dirs:
+                library_dirs.append(parent)
+            continue
+        if target in _OPENCHROMATIN_LIBRARY_DIR_CANDIDATES and target not in library_dirs:
+            library_dirs.append(target)
+    return library_dirs
+
+
+def _render_library_path_assignment(
+    *,
+    variable_name: str,
+    value: str,
+    prefix_paths: list[str] | None = None,
+) -> str:
+    normalized_prefixes = _dedupe_paths(prefix_paths)
+    default_suffix = f":${{{variable_name}:-}}"
+    plain_suffix = f":${variable_name}"
+    if value.endswith(default_suffix):
+        base_value = value[:-len(default_suffix)]
+        segments = normalized_prefixes + ([base_value] if base_value else [])
+        if segments:
+            return f"{':'.join(segments)}:\\${variable_name}"
+        return f"\\${variable_name}"
+    if value.endswith(plain_suffix):
+        base_value = value[:-len(plain_suffix)]
+        segments = normalized_prefixes + ([base_value] if base_value else [])
+        if segments:
+            return f"{':'.join(segments)}:\\${variable_name}"
+        return f"\\${variable_name}"
+    if normalized_prefixes:
+        return ":".join(normalized_prefixes + [value])
+    return value.replace('$', r'\\$')
+
+
+def _resolve_known_export_references(
+    value: str,
+    known_values: dict[str, str],
+    *,
+    skip_names: set[str] | None = None,
+) -> str:
+    ignored = skip_names or set()
+
+    def _replace(match: re.Match[str]) -> str:
+        variable_name = match.group(1)
+        if variable_name in ignored:
+            return match.group(0)
+        return known_values.get(variable_name, match.group(0))
+
+    return _EXPORT_REFERENCE_RE.sub(_replace, value)
+
+
+def _render_apptainer_env_options(
+    exports: list[str],
+    *,
+    prepend_paths: list[str] | tuple[str, ...] | None = None,
+    library_path_prefixes: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    assignments: list[tuple[str, str]] = []
+    resolved_values: dict[str, str] = {}
+    normalized_prepend_paths = _dedupe_paths(prepend_paths)
+    normalized_library_prefixes = _dedupe_paths(library_path_prefixes)
+
+    def set_assignment(name: str, value: str, *, resolved_value: str | None = None) -> None:
+        for index, (existing_name, _existing_value) in enumerate(assignments):
+            if existing_name == name:
+                assignments[index] = (name, value)
+                resolved_values[name] = resolved_value if resolved_value is not None else value
+                return
+        assignments.append((name, value))
+        resolved_values[name] = resolved_value if resolved_value is not None else value
+
+    for command in exports:
+        parsed = _parse_export_statement(command)
+        if not parsed:
+            continue
+        variable_name, value = parsed
+        if variable_name == "PATH":
+            resolved_path_value = _resolve_known_export_references(
+                value,
+                resolved_values,
+                skip_names={"PATH"},
+            )
+            if value.endswith(":${PATH}"):
+                normalized_prepend_paths = _dedupe_paths(
+                    resolved_path_value[:-len(":${PATH}")].split(":") + normalized_prepend_paths
+                )
+                set_assignment(
+                    "PREPEND_PATH",
+                    ":".join(normalized_prepend_paths),
+                    resolved_value=":".join(normalized_prepend_paths),
+                )
+            elif value.endswith(":$PATH"):
+                normalized_prepend_paths = _dedupe_paths(
+                    resolved_path_value[:-len(":$PATH")].split(":") + normalized_prepend_paths
+                )
+                set_assignment(
+                    "PREPEND_PATH",
+                    ":".join(normalized_prepend_paths),
+                    resolved_value=":".join(normalized_prepend_paths),
+                )
+            else:
+                set_assignment(
+                    "PATH",
+                    resolved_path_value.replace('$', r'\\$'),
+                    resolved_value=resolved_path_value,
+                )
+            continue
+        if variable_name in {"LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"}:
+            prefix_paths = normalized_library_prefixes if variable_name == "LD_LIBRARY_PATH" else []
+            resolved_library_value = _resolve_known_export_references(
+                value,
+                resolved_values,
+                skip_names={variable_name},
+            )
+            rendered_library_value = _render_library_path_assignment(
+                variable_name=variable_name,
+                value=resolved_library_value,
+                prefix_paths=prefix_paths,
+            )
+            set_assignment(
+                variable_name,
+                rendered_library_value,
+                resolved_value=rendered_library_value,
+            )
+            continue
+        resolved_value = _resolve_known_export_references(
+            value,
+            resolved_values,
+            skip_names={variable_name},
+        )
+        set_assignment(
+            variable_name,
+            resolved_value.replace('$', r'\\$'),
+            resolved_value=resolved_value,
+        )
+    if normalized_prepend_paths and not any(name == "PREPEND_PATH" for name, _ in assignments):
+        resolved_prepend_path = ":".join(normalized_prepend_paths)
+        set_assignment("PREPEND_PATH", resolved_prepend_path, resolved_value=resolved_prepend_path)
+    if normalized_library_prefixes and not any(name == "LD_LIBRARY_PATH" for name, _ in assignments):
+        rendered_library_prefix = f"{':'.join(normalized_library_prefixes)}:\\$LD_LIBRARY_PATH"
+        set_assignment(
+            "LD_LIBRARY_PATH",
+            rendered_library_prefix,
+            resolved_value=rendered_library_prefix,
+        )
+    if not assignments:
+        return ""
+    return "--env '" + ",".join(f"{name}={value}" for name, value in assignments).replace("'", "'\\''") + "'"
+
+
+def resolve_dogme_profile_content(mode: str, custom_profile: str | None = None) -> str:
+    """Return the staged dogme.profile content for a workflow mode."""
+    return resolve_dogme_profile_parts(mode, custom_profile=custom_profile)[0]
+
+
+def resolve_dogme_profile_task_runtime_exports(mode: str, custom_profile: str | None = None) -> list[str]:
+    """Return exports that should only apply to OpenChromatin tasks."""
+    return resolve_dogme_profile_parts(mode, custom_profile=custom_profile)[1]
+
 class NextflowConfig:
     """Generates Nextflow configuration for Dogme pipeline."""
     
@@ -35,12 +334,25 @@ class NextflowConfig:
         mode: str,  # "DNA", "RNA", "CDNA"
         input_dir: str,
         reference_genome: list,  # Now a list of genome names
+        reference_overrides: Optional[dict[str, dict[str, str]]] = None,
         modifications: Optional[str] = None,
         modkit_filter_threshold: float = 0.9,
         min_cov: Optional[int] = None,
         per_mod: int = 5,
         accuracy: str = "sup",
-        max_gpu_tasks: int = 1,
+        max_gpu_tasks: Optional[int] = None,
+        execution_mode: str = "local",
+        slurm_cpu_partition: str | None = None,
+        slurm_gpu_partition: str | None = None,
+        slurm_cpu_account: str | None = None,
+        slurm_gpu_account: str | None = None,
+        slurm_cpus: int | None = None,
+        slurm_memory_gb: int | None = None,
+        slurm_walltime: str | None = None,
+        slurm_bind_paths: Optional[list[str]] = None,
+        slurm_modkit_bind_paths: Optional[list[str]] = None,
+        modkit_task_runtime_exports: Optional[list[str]] = None,
+        apptainer_cache_dir: Optional[str] = None,
     ) -> str:
         """
         Generate a Nextflow configuration string for Dogme pipeline.
@@ -63,13 +375,21 @@ class NextflowConfig:
         genome_refs_lines = []
         for genome_name in reference_genome:
             genome_config = REFERENCE_GENOMES.get(genome_name, REFERENCE_GENOMES["mm39"])
-            fasta = genome_config.get("fasta", "/home/seyedam/genRefs/IGVFFI9282QLXO.fasta")
-            gtf = genome_config.get("gtf", "/home/seyedam/genRefs/IGVFFI4777RDZK.gtf")
+            override = (reference_overrides or {}).get(genome_name, {})
+            fasta = override.get("fasta") or genome_config.get("fasta", "/home/seyedam/genRefs/IGVFFI9282QLXO.fasta")
+            gtf = override.get("gtf") or genome_config.get("gtf", "/home/seyedam/genRefs/IGVFFI4777RDZK.gtf")
+            logger.debug(
+                f"Config paths for {genome_name}",
+                has_override=bool(override),
+                using_fasta=fasta,
+                using_gtf=gtf,
+            )
             genome_refs_lines.append(f"        [name: '{genome_name}', genome: '{fasta}', annot: '{gtf}']")
         
         # Use first genome for kallisto index (TODO: support per-genome kallisto)
         primary_genome = reference_genome[0]
         primary_config = REFERENCE_GENOMES.get(primary_genome, REFERENCE_GENOMES["mm39"])
+        primary_override = (reference_overrides or {}).get(primary_genome, {})
         
         # Determine modifications based on mode
         if modifications:
@@ -81,10 +401,62 @@ class NextflowConfig:
         else:  # CDNA
             mods = ""  # Empty string for CDNA (no modifications)
         
-        # Determine minCov based on mode if not explicitly provided
+        # filterbedTask thresholds should never drop below 3 reads unless explicitly overridden.
         if min_cov is None:
-            min_cov = 1 if mode == "DNA" else 3
+            min_cov = 3
+
+        if str(mode or "").strip().upper() == DogmeMode.DNA.value and modkit_task_runtime_exports is None:
+            modkit_task_runtime_exports = _default_dna_openchromatin_runtime_exports()
+
+        is_slurm = (execution_mode or "local").strip().lower() == "slurm"
+        cpu_partition = (slurm_cpu_partition or "standard").strip() or "standard"
+        gpu_partition = (slurm_gpu_partition or cpu_partition).strip() or cpu_partition
+        cpu_account = (slurm_cpu_account or "default").strip() or "default"
+        gpu_account = (slurm_gpu_account or cpu_account).strip() or cpu_account
+        cpu_cpus = int(slurm_cpus) if slurm_cpus is not None else 12
+        cpu_memory_gb = int(slurm_memory_gb) if slurm_memory_gb is not None else 64
+        minimap_cpus = max(cpu_cpus, 16)
+        minimap_memory_gb = max(cpu_memory_gb, 96)
+        cpu_walltime = str(slurm_walltime or "8:00:00").strip() or "8:00:00"
+        normalized_bind_paths: list[str] = []
+        for bind_path in slurm_bind_paths or []:
+            cleaned = str(bind_path or "").strip()
+            if cleaned and cleaned not in normalized_bind_paths:
+                normalized_bind_paths.append(cleaned)
+        normalized_modkit_bind_paths: list[str] = []
+        for bind_path in (slurm_modkit_bind_paths or normalized_bind_paths):
+            cleaned = str(bind_path or "").strip()
+            if cleaned and cleaned not in normalized_modkit_bind_paths:
+                normalized_modkit_bind_paths.append(cleaned)
+        slurm_bind_args = ""
+        if normalized_bind_paths:
+            slurm_bind_args = f"--bind {','.join(normalized_bind_paths)}"
+        slurm_modkit_bind_args = ""
+        if normalized_modkit_bind_paths:
+            slurm_modkit_bind_args = f"--bind {','.join(normalized_modkit_bind_paths)}"
+        openchromatin_library_dirs = _extract_openchromatin_library_dirs(normalized_modkit_bind_paths)
+        slurm_container_base_options = "--no-mount hostfs"
+        if slurm_bind_args:
+            slurm_container_base_options = f"{slurm_container_base_options} {slurm_bind_args}"
+        slurm_openchromatin_container_base_options = "--no-mount hostfs"
+        if slurm_modkit_bind_args:
+            slurm_openchromatin_container_base_options = f"{slurm_openchromatin_container_base_options} {slurm_modkit_bind_args}"
+        resolved_apptainer_cache_dir = str(apptainer_cache_dir or "").strip() or "${launchDir}/.nxf-apptainer-cache"
+        base_before_script = _render_before_script([_DEFAULT_PROCESS_BEFORE_SCRIPT])
+        has_openchromatin_task_runtime_exports = bool(modkit_task_runtime_exports)
+        openchromatin_env_options = _render_apptainer_env_options(
+            modkit_task_runtime_exports or [],
+            library_path_prefixes=openchromatin_library_dirs,
+        )
+        if openchromatin_env_options:
+            slurm_openchromatin_container_base_options = (
+                f"{slurm_openchromatin_container_base_options} {openchromatin_env_options}"
+            )
         
+        container_image = "ghcr.io/mortazavilab/dogme-pipeline:latest"
+        if is_slurm and str(mode or "").strip().upper() == DogmeMode.DNA.value:
+            container_image = DOGME_DNA_SLURM_CONTAINER
+
         # Build config string matching example format
         config_lines = []
         config_lines.append("params {")
@@ -104,7 +476,7 @@ class NextflowConfig:
             config_lines.append(f"    modifications = ''")
         
         config_lines.append(f"    //change setting if necessary")
-        config_lines.append(f"    //minCov = 3 by default, but changed to 1 for microtest" if mode == "DNA" else f"    //change setting if necessary")
+        config_lines.append(f"    //filterbedTask defaults to a 3-read minimum")
         config_lines.append(f"    minCov = {min_cov}")
         config_lines.append(f"    perMod = {per_mod}")
         config_lines.append(f"    // change if the launch directory is not where the pod5 and output directories should go")
@@ -116,47 +488,66 @@ class NextflowConfig:
         config_lines.append(f"    genome_annot_refs = [")
         # Add all genome references
         config_lines.extend(genome_refs_lines)
-        config_lines.append(f"    ]")
-        config_lines.append(f"    ")
+        config_lines.append("    ]")
+        config_lines.append("")
         # Use primary genome for kallisto
-        kallisto_index = primary_config.get("kallisto_index", "/home/seyedam/genRefs/mm39GencM36_k63.idx")
-        kallisto_t2g = primary_config.get("kallisto_t2g", "/home/seyedam/genRefs/mm39GencM36_k63.t2g")
+        kallisto_index = primary_override.get("kallisto_index") or primary_config.get("kallisto_index", "/home/seyedam/genRefs/mm39GencM36_k63.idx")
+        kallisto_t2g = primary_override.get("kallisto_t2g") or primary_config.get("kallisto_t2g", "/home/seyedam/genRefs/mm39GencM36_k63.t2g")
         config_lines.append(f"    kallistoIndex = '{kallisto_index}'")
         config_lines.append(f"    t2g = '{kallisto_t2g}'")
-        config_lines.append(f"")
-        config_lines.append(f"    //default accuracy is sup")
+        config_lines.append("")
+        config_lines.append("    //default accuracy is sup")
         config_lines.append(f"    accuracy = \"{accuracy}\"")
-        config_lines.append(f"    // change this value if 0.9 is too strict")
-        config_lines.append(f"    // if set to null or '' then modkit will determine its threshold by sampling reads.")
-        config_lines.append(f"    modkitFilterThreshold = {modkit_filter_threshold} ")
-        config_lines.append(f"")
-        config_lines.append(f"")
-        config_lines.append(f"    // these paths are all based on the topDir and sample name")
-        config_lines.append(f"    // dogme will populate all of these folders with its output")
-        config_lines.append(f'    modDir = "${{topDir}}/dorModels"')
-        config_lines.append(f'    dorDir = "${{topDir}}/dor12-${{sample}}"')
-        config_lines.append(f'    podDir = "${{topDir}}/pod5"')
-        config_lines.append(f'    bamDir = "${{topDir}}/bams"')
-        config_lines.append(f'    annotDir = "${{topDir}}/annot"')
-        config_lines.append(f'    bedDir = "${{topDir}}/bedMethyl"')
-        config_lines.append(f'    fastqDir = "${{topDir}}/fastqs"')
-        config_lines.append(f'    kallistoDir = "${{topDir}}/kallisto"')
-        config_lines.append(f"    tmpDir = '/tmp'  // Temporary directory for disk-based sorting")
+        config_lines.append("    // change this value if 0.9 is too strict")
+        config_lines.append("    // if set to null or '' then modkit will determine its threshold by sampling reads.")
+        config_lines.append(f"    modkitFilterThreshold = {modkit_filter_threshold}")
+        config_lines.append("")
+        config_lines.append("    // these paths are all based on the topDir and sample name")
+        config_lines.append("    // dogme will populate all of these folders with its output")
+        config_lines.append('    modDir = "${topDir}/dorModels"')
+        config_lines.append('    dorDir = "${topDir}/dor12-${sample}"')
+        config_lines.append('    podDir = "${topDir}/pod5"')
+        config_lines.append('    bamDir = "${topDir}/bams"')
+        config_lines.append('    annotDir = "${topDir}/annot"')
+        config_lines.append('    bedDir = "${topDir}/bedMethyl"')
+        config_lines.append('    fastqDir = "${topDir}/fastqs"')
+        config_lines.append('    kallistoDir = "${topDir}/kallisto"')
+        config_lines.append("    tmpDir = '/tmp'  // Temporary directory for disk-based sorting")
         config_lines.append("}")
         config_lines.append("")
         config_lines.append("process {")
         config_lines.append("    // <-- Container Settings --->")
-        config_lines.append("    container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'")
-        config_lines.append(f"    containerOptions = \"-v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
-        config_lines.append("    beforeScript = 'export PATH=/opt/conda/bin:$PATH'")
+        config_lines.append(f"    container = '{container_image}'")
+        if is_slurm:
+            config_lines.append("    // Remote SLURM runs bind only workflow-specific remote paths.")
+            config_lines.append(
+                f"    containerOptions = {_quote_nextflow_single_quoted(slurm_container_base_options)}"
+            )
+        else:
+            config_lines.append(f"    containerOptions = \"-v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
+        config_lines.append(f"    beforeScript = {base_before_script}")
         config_lines.append("")
-        config_lines.append("")
-        config_lines.append("    executor='local'")
-        config_lines.append("")
-        config_lines.append("    // General default settings - adjust as necessary")
-        config_lines.append("    cpus = 1")
-        config_lines.append("    memory = '32 GB'")
-        config_lines.append("    time = '8:00:00'")
+        if is_slurm:
+            config_lines.append("    // --- Slurm Executor ---")
+            config_lines.append("    executor = 'slurm'")
+            config_lines.append(f"    cpuPartition = '{cpu_partition}'")
+            config_lines.append(f"    gpuPartition = '{gpu_partition}'")
+            config_lines.append(f"    cpuAccount = '{cpu_account}'")
+            config_lines.append(f"    gpuAccount = '{gpu_account}'")
+            config_lines.append("")
+            config_lines.append("    // General default settings - adjust as necessary")
+            config_lines.append(f"    cpus = {cpu_cpus}")
+            config_lines.append(f"    memory = '{cpu_memory_gb} GB'")
+            config_lines.append(f"    time = '{cpu_walltime}'")
+            config_lines.append("    clusterOptions = \"--account=${cpuAccount}\"")
+            config_lines.append("    queue = \"${cpuPartition}\"")
+        else:
+            config_lines.append("    executor = 'local'")
+            config_lines.append("")
+            config_lines.append("    // General default settings - adjust as necessary")
+            config_lines.append("    cpus = 1")
+            config_lines.append("    memory = '32 GB'")
+            config_lines.append("    time = '8:00:00'")
         config_lines.append("")
         config_lines.append("    withName: 'extractfastqTask' {")
         config_lines.append("        // Matches the script's thread count and gives safe memory buffer")
@@ -166,35 +557,83 @@ class NextflowConfig:
         config_lines.append("    }")
         config_lines.append("")
         config_lines.append("    withName: 'doradoTask' {")
+        if is_slurm:
+            config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
+            config_lines.append("        queue = \"${gpuPartition}\"")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
-        config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
-        config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
+        config_lines.append("        time = '12:00:00'")
+        if max_gpu_tasks is not None:
+            config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
+        if is_slurm:
+            gpu_container_options = f"--nv {slurm_container_base_options}"
+            config_lines.append(
+                f"        containerOptions = {_quote_nextflow_single_quoted(gpu_container_options)}"
+            )
+        else:
+            config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
+        config_lines.append("    }")
+        config_lines.append("    ")
+        config_lines.append("    withName: 'modkitTask' {")
+        config_lines.append("        memory = '64 GB'")
+        config_lines.append("        cpus = 12")
+        if is_slurm:
+            config_lines.append(
+                f"        containerOptions = {_quote_nextflow_single_quoted(slurm_container_base_options)}"
+            )
         config_lines.append("    }")
         config_lines.append("    ")
         config_lines.append("    withName: 'openChromatinTaskBg' {")
+        if is_slurm:
+            config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
+            config_lines.append("        queue = \"${gpuPartition}\"")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
-        config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
-        config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
+        if max_gpu_tasks is not None:
+            config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
+        if is_slurm:
+            gpu_container_options = f"--nv {slurm_openchromatin_container_base_options}"
+            config_lines.append(
+                f"        containerOptions = {_quote_nextflow_single_quoted(gpu_container_options)}"
+            )
+        else:
+            config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("")
         config_lines.append("    withName: 'openChromatinTaskBed' {")
+        if is_slurm:
+            config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
+            config_lines.append("        queue = \"${gpuPartition}\"")
         config_lines.append("        memory = '9 GB'  // Increase if necessary")
         config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
-        config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
-        config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
+        if max_gpu_tasks is not None:
+            config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
+        if is_slurm:
+            gpu_container_options = f"--nv {slurm_openchromatin_container_base_options}"
+            config_lines.append(
+                f"        containerOptions = {_quote_nextflow_single_quoted(gpu_container_options)}"
+            )
+        else:
+            config_lines.append(f"        containerOptions = \"--gpus all -v /home/seyedam:/home/seyedam -v {AGOUTIC_DATA}:{AGOUTIC_DATA} -v {AGOUTIC_CODE}:{AGOUTIC_CODE} \"")
         config_lines.append("    }")
         config_lines.append("")
         config_lines.append("    withName: 'minimapTask' {")
-        config_lines.append("        memory = '64 GB'  // Increase memory for minimap2")
+        config_lines.append(f"        cpus = {minimap_cpus}")
+        config_lines.append(f"        memory = '{minimap_memory_gb} GB'  // Increase memory for minimap2 remap/sort")
         config_lines.append("    }")
         config_lines.append("}")
         config_lines.append("")
-        config_lines.append("docker {")
-        config_lines.append("    enabled = true")
-        config_lines.append("    runOptions = '-u $(id -u):$(id -g)'")
-        config_lines.append("}")
+        if is_slurm:
+            config_lines.append("apptainer {")
+            config_lines.append("    enabled = true")
+            config_lines.append("    autoMounts = false")
+            config_lines.append(f"    cacheDir = \"{resolved_apptainer_cache_dir}\"")
+            config_lines.append("}")
+        else:
+            config_lines.append("docker {")
+            config_lines.append("    enabled = true")
+            config_lines.append("    runOptions = '-u $(id -u):$(id -g)'")
+            config_lines.append("}")
         config_lines.append("")
         config_lines.append("timeline {")
         config_lines.append("    enabled = true")
@@ -240,16 +679,65 @@ class NextflowExecutor:
     @staticmethod
     def _next_workflow_number(project_dir: Path) -> int:
         """Compute the next workflow number by scanning existing workflow* dirs."""
-        max_n = 0
-        if project_dir.exists():
-            for child in project_dir.iterdir():
-                if child.is_dir() and child.name.startswith("workflow"):
-                    try:
-                        n = int(child.name[len("workflow"):])
-                        max_n = max(max_n, n)
-                    except ValueError:
-                        continue
-        return max_n + 1
+        return next_workflow_number(project_dir)
+
+    @staticmethod
+    def workflow_dir_name(workflow_index: int) -> str:
+        return workflow_dir_name(workflow_index)
+
+    @staticmethod
+    def prepare_rerun_directory(work_dir: Path, sample_names: list[str] | None = None) -> dict[str, str]:
+        """Archive prior summary artifacts and clear stale Nextflow markers."""
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        archived: dict[str, str] = {}
+        candidate_names = ["report.html"]
+        for sample_name in sample_names or []:
+            cleaned = str(sample_name or "").strip()
+            if not cleaned:
+                continue
+            candidate_names.extend(
+                [
+                    f"{cleaned}_report.html",
+                    f"{cleaned}_timeline.html",
+                    f"{cleaned}_trace.txt",
+                ]
+            )
+
+        seen: set[str] = set()
+        for file_name in candidate_names:
+            if file_name in seen:
+                continue
+            seen.add(file_name)
+            source_path = work_dir / file_name
+            if not source_path.exists():
+                continue
+
+            suffix = source_path.suffix
+            stem = source_path.name[:-len(suffix)] if suffix else source_path.name
+            archived_name = f"{stem}.rerun_{timestamp}{suffix}"
+            target_path = work_dir / archived_name
+            counter = 1
+            while target_path.exists():
+                archived_name = f"{stem}.rerun_{timestamp}_{counter}{suffix}"
+                target_path = work_dir / archived_name
+                counter += 1
+            source_path.rename(target_path)
+            archived[file_name] = archived_name
+
+        for marker_name in (
+            ".nextflow_success",
+            ".nextflow_failed",
+            ".nextflow_cancelled",
+            ".nextflow_running",
+            ".nextflow_error",
+            ".launch_error",
+            ".nextflow_pid",
+        ):
+            marker_path = work_dir / marker_name
+            if marker_path.exists():
+                marker_path.unlink()
+
+        return archived
     
     async def submit_job(
         self,
@@ -265,11 +753,16 @@ class NextflowExecutor:
         min_cov: Optional[int] = None,
         per_mod: int = 5,
         accuracy: str = "sup",
-        max_gpu_tasks: int = 1,
+        max_gpu_tasks: Optional[int] = None,
+        custom_dogme_profile: str | None = None,
+        workflow_index: Optional[int] = None,
+        rerun_in_place: bool = False,
+        archive_sample_names: Optional[list[str]] = None,
         user_id: Optional[str] = None,
         project_id: Optional[str] = None,
         username: Optional[str] = None,
         project_slug: Optional[str] = None,
+        resume_from_dir: Optional[str] = None,
     ) -> tuple[str, Path]:
         """
         Submit a Dogme/Nextflow job.
@@ -290,26 +783,54 @@ class NextflowExecutor:
             Tuple of (run_uuid, work_directory)
         """
         # Determine work directory:
+        #   Resume: reuse the previous workflow directory (with -resume flag)
         #   New: AGOUTIC_DATA/users/{username}/{project_slug}/workflow{N}/
         #   Fallback (legacy): AGOUTIC_DATA/users/{user_id}/{project_id}/{run_uuid}/
         #   Fallback (flat):   LAUNCHPAD_WORK_DIR/{run_uuid}/
-        if username and project_slug:
-            # Human-readable path — compute next workflow number
-            project_dir = AGOUTIC_DATA / "users" / username / project_slug
-            project_dir.mkdir(parents=True, exist_ok=True)
-            next_n = self._next_workflow_number(project_dir)
-            work_dir = project_dir / f"workflow{next_n}"
-            work_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Using workflow directory", work_dir=str(work_dir),
-                       username=username, project_slug=project_slug, workflow_n=next_n)
-        elif user_id and project_id:
-            work_dir = AGOUTIC_DATA / "users" / user_id / project_id / run_uuid
-            work_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Using jailed work directory (legacy UUID)", work_dir=str(work_dir),
-                       user_id=user_id, project_id=project_id)
-        else:
-            work_dir = self.work_dir / run_uuid
-            work_dir.mkdir(parents=True, exist_ok=True)
+        is_resume = False
+        if resume_from_dir:
+            resume_path = Path(resume_from_dir)
+            if resume_path.exists() and resume_path.is_dir():
+                work_dir = resume_path
+                is_resume = True
+                if rerun_in_place:
+                    archived = self.prepare_rerun_directory(work_dir, archive_sample_names or [sample_name])
+                    logger.info(
+                        "Preparing rerun in existing workflow directory",
+                        work_dir=str(work_dir),
+                        run_uuid=run_uuid,
+                        archived=list(archived.items()),
+                    )
+                else:
+                    # Clean up old cancellation/failure markers so the run starts fresh
+                    for marker in (".nextflow_cancelled", ".nextflow_failed", ".nextflow_running"):
+                        marker_file = work_dir / marker
+                        if marker_file.exists():
+                            marker_file.unlink()
+                logger.info("Resuming in existing workflow directory",
+                           work_dir=str(work_dir), run_uuid=run_uuid)
+            else:
+                logger.warning("resume_from_dir does not exist, creating new workflow dir",
+                              resume_from_dir=resume_from_dir)
+
+        if not is_resume:
+            if username and project_slug:
+                # Human-readable path — compute next workflow number
+                project_dir = AGOUTIC_DATA / "users" / username / project_slug
+                project_dir.mkdir(parents=True, exist_ok=True)
+                next_n = workflow_index or self._next_workflow_number(project_dir)
+                work_dir = project_dir / self.workflow_dir_name(next_n)
+                work_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Using workflow directory", work_dir=str(work_dir),
+                           username=username, project_slug=project_slug, workflow_n=next_n)
+            elif user_id and project_id:
+                work_dir = AGOUTIC_DATA / "users" / user_id / project_id / run_uuid
+                work_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Using jailed work directory (legacy UUID)", work_dir=str(work_dir),
+                           user_id=user_id, project_id=project_id)
+            else:
+                work_dir = self.work_dir / run_uuid
+                work_dir.mkdir(parents=True, exist_ok=True)
         
         # Setup input files based on entry point and input type
         if entry_point == "basecall":
@@ -457,19 +978,13 @@ class NextflowExecutor:
             except Exception as e:
                 raise RuntimeError(f"Failed to create pod5 symlink: {e}")
         
-        # Copy or create dogme.profile
-        dogme_profile_src = DOGME_REPO / "dogme.profile"
+        dogme_profile_content, modkit_task_runtime_exports = resolve_dogme_profile_parts(
+            mode,
+            custom_profile=custom_dogme_profile,
+        )
         dogme_profile_dst = work_dir / "dogme.profile"
-        
-        if dogme_profile_src.exists():
-            # Copy from repo
-            import shutil
-            shutil.copy2(dogme_profile_src, dogme_profile_dst)
-            logger.debug("Copied dogme.profile", source=str(dogme_profile_src))
-        else:
-            # Create a minimal one
-            dogme_profile_dst.write_text("# Dogme environment profile\n# Add environment variables here if needed\n")
-            logger.debug("Created minimal dogme.profile")
+        dogme_profile_dst.write_text(dogme_profile_content)
+        logger.debug("Staged dogme.profile", mode=mode, path=str(dogme_profile_dst))
         
         # Generate configuration
         config_string = NextflowConfig.generate_config(
@@ -483,6 +998,7 @@ class NextflowExecutor:
             per_mod=per_mod,
             accuracy=accuracy,
             max_gpu_tasks=max_gpu_tasks,
+            modkit_task_runtime_exports=modkit_task_runtime_exports,
         )
         
         config_path = work_dir / "nextflow.config"
@@ -521,6 +1037,12 @@ class NextflowExecutor:
             "-with-timeline", str(work_dir / f"{sample_name}_timeline.html"),
             "-with-trace", str(work_dir / f"{sample_name}_trace.txt"),
         ])
+        
+        # Add rerun/resume flag when reusing an existing workflow directory
+        if is_resume:
+            rerun_flag = "-rerun" if rerun_in_place else "-resume"
+            cmd.append(rerun_flag)
+            logger.info("Adding workflow reuse flag", flag=rerun_flag, work_dir=str(work_dir))
         
         # Validate prerequisites before attempting launch
         if not self.nextflow_bin.exists():
@@ -593,6 +1115,10 @@ class NextflowExecutor:
                 success_marker = work_dir / ".nextflow_success"
                 success_marker.write_text(f"Completed at {datetime.utcnow().isoformat()}\n")
                 logger.info("Job completed successfully", run_uuid=run_uuid)
+            elif (work_dir / ".nextflow_cancelled").exists():
+                # Job was cancelled via the API — don't overwrite with FAILED
+                logger.info("Job was cancelled (SIGTERM), skipping failed marker",
+                            run_uuid=run_uuid, returncode=returncode)
             else:
                 failed_marker = work_dir / ".nextflow_failed"
                 error_file = work_dir / ".nextflow_error"
@@ -629,14 +1155,40 @@ class NextflowExecutor:
         
         Returns dict with keys: status, progress_percent, message, tasks (optional)
         """
+        # If work directory was deleted (e.g. by delete-job API), report as DELETED
+        if not work_dir.exists():
+            return {
+                "status": JobStatus.DELETED,
+                "progress_percent": 0,
+                "message": "Workflow folder has been deleted.",
+                "tasks": {},
+            }
+
         # Check for completion markers
         success_marker = work_dir / ".nextflow_success"
         failed_marker = work_dir / ".nextflow_failed"
         running_marker = work_dir / ".nextflow_running"
         pid_file = work_dir / ".nextflow_pid"
         
+        cancelled_marker = work_dir / ".nextflow_cancelled"
+
         # Check completion markers first
-        if success_marker.exists():
+        if cancelled_marker.exists():
+            _cancel_detail = ""
+            try:
+                _cancel_detail = cancelled_marker.read_text().strip()
+            except OSError:
+                pass
+            # Second line of the marker contains the kill message
+            _cancel_lines = _cancel_detail.splitlines()
+            _cancel_msg = _cancel_lines[1] if len(_cancel_lines) > 1 else "Job was cancelled by user."
+            return {
+                "status": JobStatus.CANCELLED,
+                "progress_percent": 0,
+                "message": _cancel_msg,
+                "tasks": {},
+            }
+        elif success_marker.exists():
             # Parse final task summary from trace file
             completed_tasks = []
             total = 0
@@ -856,8 +1408,7 @@ class NextflowExecutor:
                     content = f.read()
                     lines = content.split('\n')
                     
-                    # Track task hashes we've seen
-                    seen_hashes = set()
+                    task_events_by_hash = {}
                     
                     for line in lines:
                         # Look for executor count to get total submitted
@@ -892,16 +1443,16 @@ class NextflowExecutor:
                             if not task_name:
                                 continue
                             
-                            # Check if completed (has ✔)
-                            is_completed = '✔' in line
-                            
-                            # Only add to running if not completed AND not already in completed_tasks
-                            if not is_completed and task_name not in completed_tasks:
-                                # Use hash to deduplicate
-                                if hash_part not in seen_hashes:
-                                    seen_hashes.add(hash_part)
-                                    if task_name not in running_tasks:
-                                        running_tasks.append(task_name)
+                            is_terminal_stdout_event = '✔' in line or 'FAILED' in line.upper()
+                            task_events_by_hash[hash_part] = (task_name, is_terminal_stdout_event)
+
+                    for task_name, is_terminal_stdout_event in task_events_by_hash.values():
+                        if is_terminal_stdout_event:
+                            continue
+                        if task_name in completed_tasks or task_name in failed_tasks:
+                            continue
+                        if task_name not in running_tasks:
+                            running_tasks.append(task_name)
                             
             except Exception as e:
                 pass

@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import require_auth, make_authenticated_request
+from components.cards import section_header, empty_state, stat_tile
 import os
 
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
@@ -25,7 +26,7 @@ if user.get('role') != 'admin':
     st.error("🚫 Admin access required")
     st.stop()
 
-st.title("🔑 Admin - User Management")
+section_header("Admin - User Management", "Approvals, active users, and token controls", icon="🔑")
 
 # Fetch all users
 try:
@@ -33,7 +34,7 @@ try:
     if resp.status_code == 200:
         users = resp.json()
         
-        st.metric("Total Users", len(users))
+        stat_tile("Total Users", len(users), icon="👥")
         
         # Filter users
         tab1, tab2, tab3, tab4 = st.tabs(["Pending Approval", "Active Users", "All Users", "🪙 Token Usage"])
@@ -43,7 +44,7 @@ try:
             pending_users = [u for u in users if not u['is_active']]
             
             if not pending_users:
-                st.info("No users pending approval")
+                empty_state("No users pending approval", "New registrations will appear here.", icon="✅")
             else:
                 for u in pending_users:
                     with st.container():

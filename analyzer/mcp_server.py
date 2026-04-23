@@ -34,9 +34,9 @@ async def _tools_schema_endpoint(request):
 # ==================== Register tools from TOOL_REGISTRY ====================
 
 @mcp.tool()
-async def list_job_files(work_dir: str | None = None, run_uuid: str | None = None, extensions: str | None = None, max_depth: int | None = None, name_pattern: str | None = None) -> Dict[str, Any]:
+async def list_job_files(work_dir: str | None = None, run_uuid: str | None = None, extensions: str | None = None, max_depth: int | None = None, name_pattern: str | None = None, allow_missing: bool = False) -> Dict[str, Any]:
     """List all files in a workflow directory with optional extension filtering."""
-    return await TOOL_REGISTRY["list_job_files"](work_dir=work_dir, run_uuid=run_uuid, extensions=extensions, max_depth=max_depth, name_pattern=name_pattern)
+    return await TOOL_REGISTRY["list_job_files"](work_dir=work_dir, run_uuid=run_uuid, extensions=extensions, max_depth=max_depth, name_pattern=name_pattern, allow_missing=allow_missing)
 
 @mcp.tool()
 async def find_file(file_name: str, work_dir: str | None = None, run_uuid: str | None = None) -> Dict[str, Any]:
@@ -59,6 +59,42 @@ async def parse_bed_file(file_path: str, work_dir: str | None = None, run_uuid: 
     return await TOOL_REGISTRY["parse_bed_file"](file_path=file_path, work_dir=work_dir, run_uuid=run_uuid, max_records=max_records)
 
 @mcp.tool()
+async def compare_bed_region_overlaps(
+    bed_a_path: str | None = None,
+    bed_b_path: str | None = None,
+    folder_a: str | None = None,
+    folder_b: str | None = None,
+    pattern_a: str | None = None,
+    pattern_b: str | None = None,
+    sample_a_label: str | None = None,
+    sample_b_label: str | None = None,
+    min_overlap_bp: int = 1,
+    export_dir: str | None = None,
+    work_dir: str | None = None,
+    run_uuid: str | None = None,
+) -> Dict[str, Any]:
+    """Compare two BED sources and build overlap dataframes plus BED exports."""
+    return await TOOL_REGISTRY["compare_bed_region_overlaps"](
+        bed_a_path=bed_a_path,
+        bed_b_path=bed_b_path,
+        folder_a=folder_a,
+        folder_b=folder_b,
+        pattern_a=pattern_a,
+        pattern_b=pattern_b,
+        sample_a_label=sample_a_label,
+        sample_b_label=sample_b_label,
+        min_overlap_bp=min_overlap_bp,
+        export_dir=export_dir,
+        work_dir=work_dir,
+        run_uuid=run_uuid,
+    )
+
+@mcp.tool()
+async def parse_xgenepy_outputs(output_dir: str, work_dir: str | None = None, run_uuid: str | None = None, max_rows: int | None = 200) -> Dict[str, Any]:
+    """Parse canonical XgenePy output artifacts and return structured result payloads."""
+    return await TOOL_REGISTRY["parse_xgenepy_outputs"](output_dir=output_dir, work_dir=work_dir, run_uuid=run_uuid, max_rows=max_rows)
+
+@mcp.tool()
 async def get_analysis_summary(run_uuid: str | None = None, work_dir: str | None = None) -> Dict[str, Any]:
     """Get comprehensive analysis summary for a completed job including file categorization and parsed reports."""
     return await TOOL_REGISTRY["get_analysis_summary"](run_uuid=run_uuid, work_dir=work_dir)
@@ -67,6 +103,47 @@ async def get_analysis_summary(run_uuid: str | None = None, work_dir: str | None
 async def categorize_job_files(work_dir: str | None = None, run_uuid: str | None = None) -> Dict[str, Any]:
     """Categorize all files in a workflow directory by type (txt, csv, bed, other)."""
     return await TOOL_REGISTRY["categorize_job_files"](work_dir=work_dir, run_uuid=run_uuid)
+
+
+# ==================== Gene Annotation Tools ====================
+
+@mcp.tool()
+def translate_gene_ids(gene_ids: list | None = None, transcript_ids: list | None = None, organism: str | None = None) -> str:
+    """Translate Ensembl gene or transcript IDs to gene symbols."""
+    return TOOL_REGISTRY["translate_gene_ids"](gene_ids=gene_ids, transcript_ids=transcript_ids, organism=organism)
+
+@mcp.tool()
+def build_gene_cache(gtf_path: str, organism: str | None = None) -> str:
+    """Build colocated gene/transcript cache TSVs for a specific GTF."""
+    return TOOL_REGISTRY["build_gene_cache"](gtf_path=gtf_path, organism=organism)
+
+@mcp.tool()
+def lookup_gene(gene_symbols: list | None = None, gene_ids: list | None = None, transcript_ids: list | None = None, organism: str | None = None) -> str:
+    """Look up genes or transcripts by symbol or Ensembl ID."""
+    return TOOL_REGISTRY["lookup_gene"](gene_symbols=gene_symbols, gene_ids=gene_ids, transcript_ids=transcript_ids, organism=organism)
+
+
+# ==================== Enrichment Analysis Tools ====================
+
+@mcp.tool()
+def run_go_enrichment(gene_list: str, species: str = "auto", sources: str = "GO:BP,GO:MF,GO:CC", name: str | None = None, conversation_id: str = "default") -> str:
+    """Run Gene Ontology enrichment analysis on a gene list."""
+    return TOOL_REGISTRY["run_go_enrichment"](gene_list=gene_list, species=species, sources=sources, name=name, conversation_id=conversation_id)
+
+@mcp.tool()
+def run_pathway_enrichment(gene_list: str, species: str = "auto", database: str = "KEGG", name: str | None = None, conversation_id: str = "default") -> str:
+    """Run pathway enrichment analysis (KEGG or Reactome) on a gene list."""
+    return TOOL_REGISTRY["run_pathway_enrichment"](gene_list=gene_list, species=species, database=database, name=name, conversation_id=conversation_id)
+
+@mcp.tool()
+def get_enrichment_results(name: str | None = None, max_terms: int = 30, pvalue_threshold: float = 0.05, source_filter: str | None = None, conversation_id: str = "default") -> str:
+    """Retrieve stored enrichment results with optional filtering."""
+    return TOOL_REGISTRY["get_enrichment_results"](name=name, max_terms=max_terms, pvalue_threshold=pvalue_threshold, source_filter=source_filter, conversation_id=conversation_id)
+
+@mcp.tool()
+def get_term_genes(term_id: str, name: str | None = None, conversation_id: str = "default") -> str:
+    """Show genes contributing to a specific GO term or pathway."""
+    return TOOL_REGISTRY["get_term_genes"](term_id=term_id, name=name, conversation_id=conversation_id)
 
 
 # ==================== Server Entry Points ====================

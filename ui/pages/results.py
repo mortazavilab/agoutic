@@ -9,11 +9,13 @@ import pandas as pd
 import sys
 import os
 from pathlib import Path
+from datetime import datetime, timezone
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import require_auth, make_authenticated_request
+from components.cards import section_header, stat_tile, empty_state, status_chip, metadata_row
 
 # Cortex API URL (the only server the UI talks to)
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
@@ -23,15 +25,58 @@ st.set_page_config(page_title="Job Results", page_icon="📊", layout="wide")
 # Require authentication
 user = require_auth(API_URL)
 
-st.title("📊 Job Results Analysis")
-st.markdown("Analyze completed Dogme job results")
+section_header("Job Results Analysis", "Analyze completed Dogme workflow outputs", icon="📊")
+
+
+def _format_timestamp(raw_value: str | None) -> str:
+    if not raw_value:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(raw_value)[:16] or "—"
+
+
+def _status_badge(status: str) -> str:
+    normalized = (status or "UNKNOWN").upper()
+    return {
+        "COMPLETED": "✅ Succeeded",
+        "FAILED": "❌ Failed",
+        "RUNNING": "⏳ Running",
+        "PENDING": "⏳ Pending",
+        "CANCELLED": "🛑 Cancelled",
+        "DELETED": "🗑️ Deleted",
+    }.get(normalized, f"❓ {normalized.title()}")
+
+
+def _render_results_action_tray(current_run_uuid: str | None) -> None:
+    """Render a compact action row for common results-page workflows."""
+    col_refresh, col_clear, col_chat = st.columns(3)
+    with col_refresh:
+        if st.button("🔄 Refresh", key="results_action_refresh", width="stretch"):
+            st.rerun()
+    with col_clear:
+        if st.button("🧹 Clear Selection", key="results_action_clear", width="stretch"):
+            st.session_state.pop("selected_job_run_uuid", None)
+            st.session_state.pop("job_pick", None)
+            st.rerun()
+    with col_chat:
+        if st.button("💬 Open Chat", key="results_action_chat", width="stretch"):
+            if current_run_uuid:
+                st.session_state["selected_job_run_uuid"] = current_run_uuid
+            st.switch_page("appUI.py")
 
 # Main interface
-st.header("Select Job")
+section_header("Select Job", "Pick a job from the active project or enter a UUID", icon="🧪")
 
 # Auto-list jobs from the user's active project (if available)
 run_uuid = None
 _active_pid = st.session_state.get("active_project_id")
+_selected_task_run_uuid = st.session_state.get("selected_job_run_uuid")
+_selected_job_meta = None
 
 try:
     if _active_pid:
@@ -45,16 +90,33 @@ try:
                 for j in _jobs:
                     _uuid = j.get("run_uuid", "")
                     _status = j.get("status", "?")
-                    _emoji = {"COMPLETED": "✅", "RUNNING": "⏳", "FAILED": "❌"}.get(_status, "❓")
                     _sample = j.get("sample_name", "Unknown")
-                    _label = f"{_emoji} {_sample} — {_status} ({_uuid[:8]}…)"
+                    _workflow = j.get("workflow_label") or "workflow?"
+                    _started = _format_timestamp(j.get("started_at") or j.get("submitted_at"))
+                    _label = f"{_status_badge(_status)} · {_sample} · {_workflow} · {_started} · ({_uuid[:8]}…)"
                     _options[_label] = _uuid
                 if _options:
                     st.caption(f"Jobs in current project ({len(_options)})")
                     _sel = st.selectbox("Pick a job", list(_options.keys()), key="job_pick")
                     run_uuid = _options[_sel]
+                    _selected_job_meta = next((job for job in _jobs if job.get("run_uuid") == run_uuid), None)
 except Exception:
     pass
+
+if not run_uuid and _selected_task_run_uuid:
+    run_uuid = _selected_task_run_uuid
+    try:
+        if _active_pid and _selected_job_meta is None:
+            _stats = make_authenticated_request(
+                "GET", f"{API_URL}/projects/{_active_pid}/stats", timeout=5
+            )
+            if _stats.status_code == 200:
+                _selected_job_meta = next(
+                    (job for job in _stats.json().get("jobs", []) if job.get("run_uuid") == run_uuid),
+                    None,
+                )
+    except Exception:
+        pass
 
 # Fallback: manual UUID input
 manual_uuid = st.text_input(
@@ -65,6 +127,8 @@ manual_uuid = st.text_input(
 )
 if manual_uuid:
     run_uuid = manual_uuid
+
+_render_results_action_tray(run_uuid)
 
 if run_uuid:
     try:
@@ -83,17 +147,34 @@ if run_uuid:
                 st.error(f"Analysis error: {summary.get('error', 'Unknown')} — {summary.get('detail', '')}")
                 st.stop()
             
-            # Job metrics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Sample", summary.get("sample_name", "N/A"))
-            with col2:
-                st.metric("Workflow", summary.get("mode", "N/A"))
-            with col3:
-                st.metric("Status", summary.get("status", "N/A"))
-            with col4:
-                total_files = summary.get("key_results", {}).get("total_files", 0)
-                st.metric("Total Files", total_files)
+            section_header("Run Overview", "Core metadata and result availability", icon="🧬")
+            _status = str(summary.get("status", "N/A") or "N/A")
+            _status_key = _status.lower()
+            if _status_key in {"completed", "done", "success"}:
+                _status_key = "success"
+            elif _status_key in {"failed", "error", "cancelled", "canceled"}:
+                _status_key = "error"
+            elif _status_key in {"running", "in_progress", "queued", "pending"}:
+                _status_key = "warning"
+            status_chip(_status_key, label=f"Run Status: {_status}", icon="🧭")
+            metadata_row(
+                {
+                    "Sample": summary.get("sample_name", "N/A"),
+                    "Workflow": summary.get("mode", "N/A"),
+                    "Run UUID": run_uuid,
+                }
+            )
+            if _selected_job_meta:
+                metadata_row(
+                    {
+                        "Run Outcome": _status_badge(_selected_job_meta.get("status", "UNKNOWN")),
+                        "Workflow Label": _selected_job_meta.get("workflow_label", "—") or "—",
+                        "Started": _format_timestamp(_selected_job_meta.get("started_at") or _selected_job_meta.get("submitted_at")),
+                        "Completed": _format_timestamp(_selected_job_meta.get("completed_at")),
+                    }
+                )
+            total_files = summary.get("key_results", {}).get("total_files", 0)
+            stat_tile("Total Files", total_files, icon="📁")
             
             st.divider()
 
@@ -331,7 +412,7 @@ if run_uuid:
         st.error(f"Cannot connect to AGOUTIC API at {API_URL}. Make sure the servers are running.\n\nError: {e}")
 
 else:
-    st.info("👆 Select a job above or enter a UUID to view results")
+    empty_state("Select a job to begin", "Choose a recent job above or paste a run UUID.", icon="👆")
 
 # Footer
 st.divider()

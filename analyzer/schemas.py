@@ -100,6 +100,22 @@ class AnalysisSummary(BaseModel):
     parsed_reports: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ParsedXgenePyOutputs(BaseModel):
+    """Structured parse result for canonical XgenePy output artifacts."""
+
+    run_uuid: str = ""
+    output_dir: str
+    required_outputs_present: bool
+    missing_outputs: List[str] = Field(default_factory=list)
+    fit_summary: Dict[str, Any] = Field(default_factory=dict)
+    model_metadata: Dict[str, Any] = Field(default_factory=dict)
+    run_manifest: Dict[str, Any] = Field(default_factory=dict)
+    assignments: List[Dict[str, Any]] = Field(default_factory=list)
+    proportion_cis: List[Dict[str, Any]] = Field(default_factory=list)
+    plots: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 # Error schemas
 class ErrorResponse(BaseModel):
     """Error response."""

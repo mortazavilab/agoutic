@@ -1,0 +1,4 @@
+display_name: Welcome
+description: Entry point that greets the user and routes to the right skill.
+category: routing
+switchable: false

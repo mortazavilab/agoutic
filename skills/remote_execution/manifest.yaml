@@ -1,0 +1,26 @@
+display_name: Remote SLURM Execution
+description: Submit pipeline jobs to a remote SLURM cluster via SSH.
+category: execution
+source:
+  type: service
+  key: launchpad
+required_services:
+  - launchpad
+expected_inputs:
+  - ssh_profile
+  - slurm_resources
+  - sample_name
+  - reference_genome
+  - mode
+output_types:
+  - job
+sample_types:
+  - DNA
+  - RNA
+  - cDNA
+  - Fiber-seq
+estimated_runtime: slow
+plan_type: remote_stage_workflow
+trigger_patterns:
+  - 'stage(?:\s+only)?\s+(?:the\s+)?(?:sample\s+)?(?:.+?)\s+(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)[a-zA-Z0-9_-]+(?:\s+profile)?(?:[?.!,]|$)|on\s+slurm|using\s+slurm|remotely|on\s+the\s+cluster|(?:using|via)\s+(?:the\s+)?[a-zA-Z0-9_-]+\s+profile)'
+classification_priority: 30
