@@ -484,6 +484,32 @@ class TestRemoteExecutionDetection:
         assert result["remote_base_path"] == "/remote/u1/agoutic"
 
     @pytest.mark.asyncio
+    async def test_does_not_reuse_previous_slurm_memory_override_on_next_cycle(self):
+        _add_block(
+            self.sf,
+            "APPROVAL_GATE",
+            {
+                "edited_params": {
+                    "sample_name": "OldSample",
+                    "execution_mode": "slurm",
+                    "ssh_profile_nickname": "hpc3",
+                    "slurm_memory_gb": 16,
+                }
+            },
+            seq=1,
+            status="APPROVED",
+        )
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Analyze sample name is NewSample with mouse DNA data"}, seq=2)
+
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["execution_mode"] == "slurm"
+        assert result["slurm_memory_gb"] is None
+
+    @pytest.mark.asyncio
     async def test_explicit_local_request_overrides_previous_slurm_seed(self):
         _add_block(
             self.sf,

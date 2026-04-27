@@ -10,10 +10,13 @@ def _load_part1_namespace() -> dict:
     source = PART1_PATH.read_text()
     tree = ast.parse(source, filename=str(PART1_PATH))
     include_names = {
+        "_LEGACY_SLURM_DEFAULT_CPU_MEMORY_GB",
         "_DEFAULT_CLUSTER_MODKIT_BINARY_DIR",
         "_DEFAULT_CLUSTER_MODKIT_MODEL_NAME",
         "_DEFAULT_CLUSTER_MODKIT_PROFILE",
         "_DEFAULT_CLUSTER_MODKIT_BIND_PATHS",
+        "_pending_gate_slurm_default_refresh_payload",
+        "_prime_post_approval_refresh_state",
         "_split_cluster_modkit_paths",
         "_default_cluster_modkit_bind_paths",
         "_build_cluster_modkit_profile",
@@ -33,7 +36,7 @@ def _load_part1_namespace() -> dict:
                     selected_nodes.append(node)
                     break
 
-    namespace: dict = {"os": os}
+    namespace: dict = {"os": os, "SLURM_DEFAULT_CPU_MEMORY_GB": 64}
     module = ast.Module(body=selected_nodes, type_ignores=[])
     exec(compile(module, filename=str(PART1_PATH), mode="exec"), namespace)
     return namespace
@@ -180,3 +183,65 @@ def test_resolve_custom_cluster_modkit_values_respects_manual_overrides():
         "export MODKITBASE=/manual/override\n"
         "export PATH=${MODKITBASE}:${PATH}\n"
     )
+
+
+def test_pending_gate_slurm_default_refresh_payload_updates_legacy_pending_memory():
+    namespace = _load_part1_namespace()
+
+    refreshed = namespace["_pending_gate_slurm_default_refresh_payload"](
+        status="PENDING",
+        content={
+            "extracted_params": {
+                "execution_mode": "slurm",
+                "slurm_memory_gb": 16,
+            }
+        },
+    )
+
+    assert refreshed is not None
+    assert refreshed["extracted_params"]["slurm_memory_gb"] == 64
+
+
+def test_pending_gate_slurm_default_refresh_payload_skips_nonlegacy_or_edited_values():
+    namespace = _load_part1_namespace()
+
+    assert namespace["_pending_gate_slurm_default_refresh_payload"](
+        status="PENDING",
+        content={
+            "extracted_params": {
+                "execution_mode": "slurm",
+                "slurm_memory_gb": 32,
+            }
+        },
+    ) is None
+
+    assert namespace["_pending_gate_slurm_default_refresh_payload"](
+        status="PENDING",
+        content={
+            "edited_params": {"slurm_memory_gb": 16},
+            "extracted_params": {
+                "execution_mode": "slurm",
+                "slurm_memory_gb": 16,
+            },
+        },
+    ) is None
+
+
+def test_prime_post_approval_refresh_state_marks_background_work_active():
+    class _FakeStreamlit:
+        def __init__(self):
+            self.session_state = {
+                "_job_finished_at": 123.0,
+                "_suppress_auto_refresh_until": 999.0,
+            }
+
+    fake_st = _FakeStreamlit()
+    namespace = _load_part1_namespace()
+    namespace["st"] = fake_st
+
+    namespace["_prime_post_approval_refresh_state"]()
+
+    assert fake_st.session_state["_has_running_job"] is True
+    assert fake_st.session_state["_has_full_refresh_job"] is True
+    assert "_job_finished_at" not in fake_st.session_state
+    assert fake_st.session_state["_suppress_auto_refresh_until"] == 0.0

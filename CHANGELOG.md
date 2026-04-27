@@ -2,6 +2,8 @@
 
 ### Bug Fixes
 
+- **Approval gates now default SLURM CPU memory to 64 GB while still allowing lower explicit overrides**
+
 - **Gate-approved GPU account and partition overrides are now respected in generated `nextflow.config`**
 
 - **Nextflow live monitoring no longer freezes completed-task counts when stdout shifts to composite `executor > slurm (...)` summary lines**

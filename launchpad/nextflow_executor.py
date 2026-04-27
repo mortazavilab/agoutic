@@ -31,6 +31,7 @@ from launchpad.config import (
     JobStatus,
     REFERENCE_GENOMES,
     JOB_POLL_INTERVAL,
+    SLURM_DEFAULT_CPU_MEMORY_GB,
 )
 
 logger = get_logger(__name__)
@@ -50,6 +51,13 @@ _OPENCHROMATIN_LIBRARY_FILE_SUFFIXES = (
     "libstdc++.so.6",
     "libgcc_s.so.1",
 )
+
+
+def resolve_slurm_cpu_memory_gb(memory_gb: int | None) -> int:
+    """Return the SLURM CPU-memory request, defaulting when unspecified."""
+    if memory_gb is None:
+        return SLURM_DEFAULT_CPU_MEMORY_GB
+    return int(memory_gb)
 
 
 def _ensure_trailing_newline(content: str) -> str:
@@ -414,7 +422,7 @@ class NextflowConfig:
         cpu_account = (slurm_cpu_account or "default").strip() or "default"
         gpu_account = (slurm_gpu_account or cpu_account).strip() or cpu_account
         cpu_cpus = int(slurm_cpus) if slurm_cpus is not None else 12
-        cpu_memory_gb = int(slurm_memory_gb) if slurm_memory_gb is not None else 64
+        cpu_memory_gb = resolve_slurm_cpu_memory_gb(slurm_memory_gb)
         minimap_cpus = max(cpu_cpus, 16)
         minimap_memory_gb = max(cpu_memory_gb, 96)
         cpu_walltime = str(slurm_walltime or "8:00:00").strip() or "8:00:00"

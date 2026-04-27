@@ -28,6 +28,7 @@ from launchpad.nextflow_executor import (
     NextflowConfig,
     resolve_dogme_profile_content,
     resolve_dogme_profile_task_runtime_exports,
+    resolve_slurm_cpu_memory_gb,
 )
 
 logger = get_logger(__name__)
@@ -463,7 +464,7 @@ class SlurmBackend:
                 account=controller_account,
                 partition=controller_partition,
                 cpus=params.slurm_cpus or 12,
-                memory_gb=params.slurm_memory_gb or 64,
+                memory_gb=resolve_slurm_cpu_memory_gb(params.slurm_memory_gb),
                 walltime=params.slurm_walltime or "48:00:00",
                 gpus=0,
                 gpu_type=None,
@@ -542,7 +543,7 @@ class SlurmBackend:
                 account=controller_account,
                 partition=controller_partition,
                 cpus=params.slurm_cpus or 12,
-                memory_gb=params.slurm_memory_gb or 64,
+                memory_gb=resolve_slurm_cpu_memory_gb(params.slurm_memory_gb),
                 walltime=params.slurm_walltime or "48:00:00",
                 gpus=0,
                 gpu_type=None,

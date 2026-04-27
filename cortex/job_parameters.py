@@ -130,7 +130,6 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
                 "slurm_gpu_account": seed_params.get("slurm_gpu_account"),
                 "slurm_gpu_partition": seed_params.get("slurm_gpu_partition"),
                 "slurm_cpus": seed_params.get("slurm_cpus"),
-                "slurm_memory_gb": seed_params.get("slurm_memory_gb"),
                 "slurm_walltime": seed_params.get("slurm_walltime"),
                 "slurm_gpus": seed_params.get("slurm_gpus"),
                 "slurm_gpu_type": seed_params.get("slurm_gpu_type"),

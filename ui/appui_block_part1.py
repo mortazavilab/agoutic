@@ -1,8 +1,12 @@
 import os
 
 import streamlit as st
+from appui_config import SLURM_DEFAULT_CPU_MEMORY_GB
 from components.cards import info_callout, metadata_row, section_header, status_chip
 from components.forms import grouped_section, review_panel
+
+
+_LEGACY_SLURM_DEFAULT_CPU_MEMORY_GB = 16
 
 
 _DEFAULT_CLUSTER_MODKIT_BINARY_DIR = "/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_tch"
@@ -144,6 +148,38 @@ def _text_to_paths(value: str) -> list[str]:
         if cleaned and cleaned not in normalized:
             normalized.append(cleaned)
     return normalized
+
+
+def _pending_gate_slurm_default_refresh_payload(*, status, content: dict | None) -> dict | None:
+    if str(status or "").strip().upper() != "PENDING":
+        return None
+    if not isinstance(content, dict):
+        return None
+    if isinstance(content.get("edited_params"), dict):
+        return None
+
+    extracted_params = content.get("extracted_params")
+    if not isinstance(extracted_params, dict):
+        return None
+    if (extracted_params.get("execution_mode") or "local") != "slurm":
+        return None
+
+    current_memory_gb = extracted_params.get("slurm_memory_gb")
+    if current_memory_gb not in {None, "", _LEGACY_SLURM_DEFAULT_CPU_MEMORY_GB}:
+        return None
+
+    refreshed_content = dict(content)
+    refreshed_params = dict(extracted_params)
+    refreshed_params["slurm_memory_gb"] = SLURM_DEFAULT_CPU_MEMORY_GB
+    refreshed_content["extracted_params"] = refreshed_params
+    return refreshed_content
+
+
+def _prime_post_approval_refresh_state() -> None:
+    st.session_state["_has_running_job"] = True
+    st.session_state["_has_full_refresh_job"] = True
+    st.session_state.pop("_job_finished_at", None)
+    st.session_state["_suppress_auto_refresh_until"] = 0.0
 
 
 def render_block_part1(
@@ -304,6 +340,19 @@ def render_block_part1(
     elif btype == "APPROVAL_GATE":
         handled = True
         with st.chat_message("assistant", avatar="🚦"):
+            refreshed_content = _pending_gate_slurm_default_refresh_payload(status=status, content=content)
+            if refreshed_content is not None:
+                try:
+                    resp = make_authenticated_request(
+                        "PATCH",
+                        f"{API_URL}/block/{block_id}",
+                        json={"payload": refreshed_content},
+                    )
+                    if getattr(resp, "status_code", None) == 200:
+                        content = refreshed_content
+                except Exception:
+                    pass
+
             # Get extracted parameters and metadata
             extracted_params = content.get("extracted_params", {})
             approved_params = content.get("edited_params") or extracted_params
@@ -417,6 +466,7 @@ def render_block_part1(
                             f"{API_URL}/block/{block_id}",
                             json={"status": "APPROVED", "payload": payload_update}
                         )
+                        _prime_post_approval_refresh_state()
                         st.rerun()
                     if col2.button("♻️ Replace With Fresh Copy", key=f"replace_stage_{block_id}"):
                         payload_update = dict(content)
@@ -450,6 +500,7 @@ def render_block_part1(
                             f"{API_URL}/block/{block_id}",
                             json={"status": "APPROVED", "payload": payload_update}
                         )
+                        _prime_post_approval_refresh_state()
                         st.rerun()
                     if col2.button("❌ Cancel", key=f"dl_reject_{block_id}"):
                         payload_update = dict(content)
@@ -634,6 +685,7 @@ def render_block_part1(
                                 json={"status": "APPROVED", "payload": payload_update}
                             )
                             if resp.status_code == 200:
+                                _prime_post_approval_refresh_state()
                                 st.rerun()
                             else:
                                 try:
@@ -761,6 +813,7 @@ def render_block_part1(
                                 json={"status": "APPROVED", "payload": payload_update}
                             )
                             if resp.status_code == 200:
+                                _prime_post_approval_refresh_state()
                                 st.rerun()
                             else:
                                 try:
@@ -885,6 +938,7 @@ def render_block_part1(
                                 json={"status": "APPROVED", "payload": payload_update}
                             )
                             if resp.status_code == 200:
+                                _prime_post_approval_refresh_state()
                                 st.rerun()
                             else:
                                 try:
@@ -1006,7 +1060,7 @@ def render_block_part1(
                         slurm_gpu_account = extracted_params.get("slurm_gpu_account", "") or ""
                         slurm_gpu_partition = extracted_params.get("slurm_gpu_partition", "") or ""
                         slurm_cpus = int(extracted_params.get("slurm_cpus") or 4)
-                        slurm_memory_gb = int(extracted_params.get("slurm_memory_gb") or 16)
+                        slurm_memory_gb = int(extracted_params.get("slurm_memory_gb") or SLURM_DEFAULT_CPU_MEMORY_GB)
                         slurm_walltime = extracted_params.get("slurm_walltime", "48:00:00") or "48:00:00"
                         slurm_gpus = max(int(extracted_params.get("slurm_gpus") or 1), 1)
                         slurm_gpu_type = extracted_params.get("slurm_gpu_type", "") or ""
@@ -1126,7 +1180,13 @@ def render_block_part1(
                             with col_slurm_2:
                                 slurm_partition = st.text_input("SLURM Partition", value=slurm_partition)
                                 slurm_gpu_partition = st.text_input("GPU Partition Override", value=slurm_gpu_partition, help="Optional partition to use when GPUs are requested.")
-                                slurm_memory_gb = st.number_input("SLURM Memory (GB)", min_value=1, max_value=2048, value=slurm_memory_gb)
+                                slurm_memory_gb = st.number_input(
+                                    "SLURM Memory (GB)",
+                                    min_value=1,
+                                    max_value=2048,
+                                    value=slurm_memory_gb,
+                                    key=f"slurm_memory_gb_{block_id}",
+                                )
                                 slurm_gpus = st.number_input("SLURM GPUs", min_value=1, max_value=32, value=slurm_gpus)
 
                             slurm_gpu_type = st.text_input("GPU Type (optional)", value=slurm_gpu_type)
@@ -1347,6 +1407,7 @@ def render_block_part1(
                                 json={"status": "APPROVED", "payload": payload_update}
                             )
                             if resp.status_code == 200:
+                                _prime_post_approval_refresh_state()
                                 st.rerun()
                             else:
                                 try:
@@ -1425,6 +1486,7 @@ def render_block_part1(
                         json={"status": "APPROVED", "payload": dict(content)},
                     )
                     if resp.status_code == 200:
+                        _prime_post_approval_refresh_state()
                         st.rerun()
                     st.error(f"Action failed: {resp.text}")
                 if col2.button("❌ Dismiss", key=f"pending_reject_{block_id}"):

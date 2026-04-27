@@ -12,16 +12,23 @@ from launchpad.config import (
     DOGME_DNA_OPENCHROM_MODEL,
     DOGME_DNA_OPENCHROM_MODKITBASE,
     DOGME_DNA_SLURM_CONTAINER,
+    SLURM_DEFAULT_CPU_MEMORY_GB,
 )
 from launchpad.nextflow_executor import (
     NextflowConfig,
     NextflowExecutor,
     resolve_dogme_profile_content,
     resolve_dogme_profile_task_runtime_exports,
+    resolve_slurm_cpu_memory_gb,
 )
 
 
 class TestGenerateConfig:
+    def test_resolve_slurm_cpu_memory_gb_applies_default_only_when_missing(self):
+        assert resolve_slurm_cpu_memory_gb(None) == SLURM_DEFAULT_CPU_MEMORY_GB
+        assert resolve_slurm_cpu_memory_gb(16) == 16
+        assert resolve_slurm_cpu_memory_gb(192) == 192
+
     def test_dna_mode_uses_defaults_for_string_reference(self):
         config = NextflowConfig.generate_config(
             sample_name="sample-a",
