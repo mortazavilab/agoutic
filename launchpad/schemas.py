@@ -28,6 +28,8 @@ class SubmitJobRequest(BaseModel):
 
     # Remote execution (SLURM backend)
     execution_mode: Literal["local", "slurm"] = "local"
+    local_max_task_cpus: Optional[int] = None
+    local_max_task_memory_gb: Optional[int] = None
     ssh_profile_id: Optional[str] = None
     slurm_account: Optional[str] = None
     slurm_partition: Optional[str] = None
@@ -74,6 +76,24 @@ class SubmitJobRequest(BaseModel):
             return value
         if value < 1 or value > MAX_GPU_TASKS_LIMIT:
             raise ValueError(f"max_gpu_tasks must be between 1 and {MAX_GPU_TASKS_LIMIT}")
+        return value
+
+    @field_validator("local_max_task_cpus")
+    @classmethod
+    def validate_local_max_task_cpus(cls, value):
+        if value is None:
+            return value
+        if value < 1 or value > 256:
+            raise ValueError("local_max_task_cpus must be between 1 and 256")
+        return value
+
+    @field_validator("local_max_task_memory_gb")
+    @classmethod
+    def validate_local_max_task_memory_gb(cls, value):
+        if value is None:
+            return value
+        if value < 1 or value > 2048:
+            raise ValueError("local_max_task_memory_gb must be between 1 and 2048")
         return value
 
     @field_validator("custom_dogme_bind_paths", mode="before")

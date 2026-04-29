@@ -1,7 +1,7 @@
 import os
 
 import streamlit as st
-from appui_config import SLURM_DEFAULT_CPU_MEMORY_GB
+from appui_config import LOCAL_DEFAULT_MAX_TASK_MEMORY_GB, SLURM_DEFAULT_CPU_MEMORY_GB
 from components.cards import info_callout, metadata_row, section_header, status_chip
 from components.forms import grouped_section, review_panel
 
@@ -1060,6 +1060,8 @@ def render_block_part1(
                         slurm_gpu_account = extracted_params.get("slurm_gpu_account", "") or ""
                         slurm_gpu_partition = extracted_params.get("slurm_gpu_partition", "") or ""
                         slurm_cpus = int(extracted_params.get("slurm_cpus") or 4)
+                        local_max_task_cpus = int(extracted_params.get("local_max_task_cpus") or 12)
+                        local_max_task_memory_gb = int(extracted_params.get("local_max_task_memory_gb") or LOCAL_DEFAULT_MAX_TASK_MEMORY_GB)
                         slurm_memory_gb = int(extracted_params.get("slurm_memory_gb") or SLURM_DEFAULT_CPU_MEMORY_GB)
                         slurm_walltime = extracted_params.get("slurm_walltime", "48:00:00") or "48:00:00"
                         slurm_gpus = max(int(extracted_params.get("slurm_gpus") or 1), 1)
@@ -1277,6 +1279,21 @@ def render_block_part1(
                                 custom_dogme_profile_value = ""
                                 custom_dogme_bind_paths_text = ""
                         else:
+                            st.caption("Local execution uses these per-task CPU and memory ceilings to keep Dogme within the AGOUTIC host's available resources.")
+                            local_max_task_cpus = st.number_input(
+                                "Local Max Task CPUs",
+                                min_value=1,
+                                max_value=256,
+                                value=local_max_task_cpus,
+                                help="Maximum CPUs any single Dogme task may request when running locally. Lower this if the host has fewer cores than Dogme's default task sizes.",
+                            )
+                            local_max_task_memory_gb = st.number_input(
+                                "Local Max Task Memory (GB)",
+                                min_value=1,
+                                max_value=2048,
+                                value=local_max_task_memory_gb,
+                                help="Maximum memory any single Dogme task may request when running locally. Lower this if the host has less available RAM than Dogme's default local task sizes.",
+                            )
                             result_destination = None
                             custom_dogme_profile_value = ""
                             custom_dogme_bind_paths_text = ""
@@ -1361,6 +1378,8 @@ def render_block_part1(
                             }
                             if execution_mode == "slurm":
                                 edited_params.update({
+                                    "local_max_task_cpus": None,
+                                    "local_max_task_memory_gb": None,
                                     "ssh_profile_id": ssh_profile_id,
                                     "ssh_profile_nickname": ssh_profile_nickname or None,
                                     "local_workflow_directory": local_workflow_directory or None,
@@ -1378,6 +1397,8 @@ def render_block_part1(
                                 })
                             else:
                                 edited_params.update({
+                                    "local_max_task_cpus": int(local_max_task_cpus),
+                                    "local_max_task_memory_gb": int(local_max_task_memory_gb),
                                     "local_workflow_directory": None,
                                     "ssh_profile_id": None,
                                     "ssh_profile_nickname": None,

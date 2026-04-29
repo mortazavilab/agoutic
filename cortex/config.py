@@ -50,14 +50,15 @@ LLM_URL = os.getenv("LLM_URL", "http://localhost:11434/v1")
 # devstral supports 256k; we default to 131072 (128k) for safety.
 LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "32768"))
 
-# The available models on your local machine
-# Keys are the "nicknames" you use in code; Values are the exact Ollama tags.
+# The available models on your local machine.
+# Keys are the friendly aliases surfaced in the UI/API; values are the exact
+# Ollama tags used for inference.
 LLM_MODELS = {
-    "heavy": "devstral-2:latest",       # Your main high-IQ brain (74GB)
-    "default": "gemma4:31b",             # Default model (31B parameters, 20 GB RAM)
-    "previous": "devstral-small-2:latest",    # Faster, lighter checks (15GB)
+    "default": "gemma4:31b",              # Default model (31B parameters, 20 GB RAM)
+    "fast": "devstral-small-2:latest",    # Faster, lighter checks (15GB)
+    "smart": "devstral-2:latest",         # Main high-IQ brain (74GB)
     "coder": "qwen3-coder:latest",        # Specialized for writing code
-    "backup": "gpt-oss:120b",             # Alternative heavy model
+    "heavy": "gpt-oss:120b",              # Heaviest alternative model
 }
 
 # --- SERVER INTEGRATION CONFIGURATION ---

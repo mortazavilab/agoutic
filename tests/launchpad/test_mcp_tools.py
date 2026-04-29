@@ -159,6 +159,33 @@ class TestSubmitDogmeJob:
         assert "entry_point" not in kwargs["json"]
 
     @pytest.mark.asyncio
+    async def test_submit_dogme_job_includes_local_resource_caps_when_requested(self, monkeypatch):
+        fake_client = FakeAsyncClient(
+            post_response=FakeResponse(
+                json_data={"run_uuid": "run-local", "status": "PENDING"}
+            )
+        )
+        monkeypatch.setenv("INTERNAL_API_SECRET", "secret")
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            await tools.submit_dogme_job(
+                project_id="proj-local",
+                sample_name="sample-local",
+                mode="DNA",
+                input_directory="/data/input",
+                reference_genome=["mm39"],
+                execution_mode="local",
+                local_max_task_cpus=8,
+                local_max_task_memory_gb=48,
+            )
+
+        _, kwargs = fake_client.post_calls[0]
+        assert kwargs["json"]["execution_mode"] == "local"
+        assert kwargs["json"]["local_max_task_cpus"] == 8
+        assert kwargs["json"]["local_max_task_memory_gb"] == 48
+
+    @pytest.mark.asyncio
     async def test_submit_dogme_job_passes_script_fields_when_provided(self):
         fake_client = FakeAsyncClient(
             post_response=FakeResponse(

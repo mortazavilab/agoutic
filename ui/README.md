@@ -66,7 +66,7 @@ The UI follows a strict **single-gateway** pattern: every request goes through C
 - Approval gates for job submission parameters
 - Live Nextflow job progress with task-level detail
 - Project switching, conversation history
-- Model selection (default / fast / smart)
+- Model selection sourced from backend LLM aliases and cached once per UI runtime
 - `AGENT_PLOT` blocks: inline Plotly charts triggered by the agent using `[[PLOT:...]]` tags; supports histogram, scatter, line, area, bar, box, violin, strip, heatmap, pie, venn, and upset chart types
 - `PENDING_ACTION` blocks: block-specific Apply / Dismiss controls for saved dataframe transforms
 - Deterministic help shortcuts for grouped differential expression from reconcile abundance outputs or saved dataframes

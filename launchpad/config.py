@@ -141,12 +141,15 @@ DEFAULT_CDNA_MODS = ""  # cDNA does not call modifications
 # Default SLURM resource limits (override via environment)
 SLURM_MAX_CPUS = int(os.getenv("SLURM_MAX_CPUS", "128"))
 SLURM_DEFAULT_CPU_MEMORY_GB = int(os.getenv("SLURM_DEFAULT_CPU_MEMORY_GB", "64"))
+LOCAL_DEFAULT_MAX_TASK_MEMORY_GB = int(os.getenv("LOCAL_DEFAULT_MAX_TASK_MEMORY_GB", "64"))
 SLURM_MAX_MEMORY_GB = int(os.getenv("SLURM_MAX_MEMORY_GB", "1024"))
 SLURM_MIN_WALLTIME_MINUTES = int(os.getenv("SLURM_MIN_WALLTIME_MINUTES", "2880"))  # 48h
 SLURM_MAX_WALLTIME_MINUTES = int(os.getenv("SLURM_MAX_WALLTIME_MINUTES", "4320"))  # 72h
 SLURM_MAX_GPUS = int(os.getenv("SLURM_MAX_GPUS", "8"))
 if SLURM_DEFAULT_CPU_MEMORY_GB > SLURM_MAX_MEMORY_GB:
     raise ValueError("SLURM_DEFAULT_CPU_MEMORY_GB cannot exceed SLURM_MAX_MEMORY_GB")
+if LOCAL_DEFAULT_MAX_TASK_MEMORY_GB < 1:
+    raise ValueError("LOCAL_DEFAULT_MAX_TASK_MEMORY_GB must be at least 1")
 if SLURM_MIN_WALLTIME_MINUTES > SLURM_MAX_WALLTIME_MINUTES:
     raise ValueError("SLURM_MIN_WALLTIME_MINUTES cannot exceed SLURM_MAX_WALLTIME_MINUTES")
 # Comma-separated whitelist (empty = any allowed)

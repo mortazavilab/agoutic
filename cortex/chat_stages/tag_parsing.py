@@ -26,6 +26,35 @@ logger = get_logger(__name__)
 PRIORITY = 700
 
 
+def _looks_like_literal_plot_color(value: str | None) -> bool:
+    if not value:
+        return False
+    cleaned = str(value).strip().strip('"').strip("'")
+    if not cleaned:
+        return False
+    if re.fullmatch(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})", cleaned):
+        return True
+    if re.fullmatch(r"(?:rgb|rgba|hsl|hsla)\([^\)]*\)", cleaned, re.IGNORECASE):
+        return True
+    return cleaned.lower() in {
+        "red", "green", "blue", "yellow", "orange", "purple", "pink",
+        "brown", "black", "white", "gray", "grey", "teal", "cyan",
+        "magenta", "lime", "navy", "maroon", "olive", "gold", "silver",
+        "violet", "indigo", "turquoise", "salmon", "coral", "beige",
+    }
+
+
+def _apply_requested_plot_style(plot_specs: list[dict], user_message: str) -> None:
+    requested_palette = _extract_plot_style_params(user_message).get("palette")
+    if not requested_palette:
+        return
+
+    for spec in plot_specs:
+        spec["palette"] = requested_palette
+        if _looks_like_literal_plot_color(spec.get("color")):
+            spec["color"] = requested_palette
+
+
 class TagParsingStage:
     name = "tag_parsing"
     priority = PRIORITY
@@ -44,6 +73,7 @@ class TagParsingStage:
 
         # Plot tags
         ctx.plot_specs = parse_plot_tags(corrected_response)
+        _apply_requested_plot_style(ctx.plot_specs, ctx.message)
         ctx.pending_action_payloads = parse_pending_action_tags(corrected_response)
         override_hallucinated_df_refs(
             ctx.plot_specs, ctx.message,

@@ -6,6 +6,14 @@
 
 - **Gate-approved GPU account and partition overrides are now respected in generated `nextflow.config`**
 
+- **The sidebar Brain Model selector now uses the backend-defined LLM alias list and caches it on UI startup, keeping the UI aligned with the current `fast`/`heavy` model choices instead of a stale hard-coded menu**
+
+- **Local Dogme workflows now honor an approval-gate per-task CPU ceiling instead of hard-coding task CPU requests beyond the local host's available cores**
+
+- **Local Dogme workflows now honor an approval-gate per-task RAM ceiling and default local task memory to 64 GB instead of forcing the old 96 GB minimap requirement**
+
+- **Normal `[[PLOT:...]]` chart responses now preserve explicit literal color requests like `in red` instead of falling back to the default blue theme**
+
 - **Nextflow live monitoring no longer freezes completed-task counts when stdout shifts to composite `executor > slurm (...)` summary lines**
 
 - **Transient scheduler poll failures no longer pin execution cards to an old completed count indefinitely**

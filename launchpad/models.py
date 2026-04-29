@@ -72,6 +72,8 @@ class DogmeJob(Base):
     slurm_account: Mapped[str | None] = mapped_column(String, nullable=True)
     slurm_partition: Mapped[str | None] = mapped_column(String, nullable=True)
     slurm_cpus: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    local_max_task_cpus: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    local_max_task_memory_gb: Mapped[int | None] = mapped_column(Integer, nullable=True)
     slurm_memory_gb: Mapped[int | None] = mapped_column(Integer, nullable=True)
     slurm_walltime: Mapped[str | None] = mapped_column(String, nullable=True)
     slurm_gpus: Mapped[int | None] = mapped_column(Integer, nullable=True)

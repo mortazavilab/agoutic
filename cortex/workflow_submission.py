@@ -298,6 +298,8 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "per_mod": job_params.get("per_mod") or 5,
             "accuracy": job_params.get("accuracy") or "sup",
             "max_gpu_tasks": job_params.get("max_gpu_tasks") if "max_gpu_tasks" in job_params else None,
+            "local_max_task_cpus": job_params.get("local_max_task_cpus"),
+            "local_max_task_memory_gb": job_params.get("local_max_task_memory_gb"),
             "custom_dogme_profile": job_params.get("custom_dogme_profile"),
             "custom_dogme_bind_paths": job_params.get("custom_dogme_bind_paths") or [],
             "execution_mode": execution_mode,

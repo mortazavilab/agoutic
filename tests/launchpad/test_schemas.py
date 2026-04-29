@@ -104,6 +104,44 @@ class TestSubmitJobRequest:
                 max_gpu_tasks=17,
             )
 
+    def test_local_max_task_cpus_range_validation(self):
+        req = SubmitJobRequest(
+            project_id="p",
+            sample_name="s",
+            mode="DNA",
+            input_directory="/d",
+            local_max_task_cpus=8,
+        )
+        assert req.local_max_task_cpus == 8
+
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="s",
+                mode="DNA",
+                input_directory="/d",
+                local_max_task_cpus=0,
+            )
+
+    def test_local_max_task_memory_gb_range_validation(self):
+        req = SubmitJobRequest(
+            project_id="p",
+            sample_name="s",
+            mode="DNA",
+            input_directory="/d",
+            local_max_task_memory_gb=48,
+        )
+        assert req.local_max_task_memory_gb == 48
+
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="s",
+                mode="DNA",
+                input_directory="/d",
+                local_max_task_memory_gb=0,
+            )
+
     def test_slurm_requires_user_and_profile(self):
         with pytest.raises(ValidationError):
             SubmitJobRequest(

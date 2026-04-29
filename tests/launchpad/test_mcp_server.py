@@ -103,6 +103,8 @@ async def test_submit_dogme_job_forwards_cache_fields(monkeypatch):
         custom_dogme_bind_paths=None,
         resume_from_dir=None,
         execution_mode="slurm",
+        local_max_task_cpus=None,
+        local_max_task_memory_gb=None,
         ssh_profile_id="profile-1",
         slurm_account=None,
         slurm_partition=None,

@@ -908,6 +908,8 @@ async def submit_job(req: SubmitJobRequest):
         job.slurm_account = req.slurm_account
         job.slurm_partition = req.slurm_partition
         job.slurm_cpus = req.slurm_cpus
+        job.local_max_task_cpus = req.local_max_task_cpus
+        job.local_max_task_memory_gb = req.local_max_task_memory_gb
         job.slurm_memory_gb = req.slurm_memory_gb
         job.slurm_walltime = req.slurm_walltime
         job.slurm_gpus = req.slurm_gpus
@@ -1043,6 +1045,8 @@ async def submit_job(req: SubmitJobRequest):
                         per_mod=req.per_mod,
                         accuracy=req.accuracy,
                         max_gpu_tasks=max_gpu_tasks,
+                        local_max_task_cpus=req.local_max_task_cpus,
+                        local_max_task_memory_gb=req.local_max_task_memory_gb,
                         custom_dogme_profile=req.custom_dogme_profile,
                         custom_dogme_bind_paths=req.custom_dogme_bind_paths,
                         resume_from_dir=req.resume_from_dir,
@@ -1090,6 +1094,8 @@ async def submit_job(req: SubmitJobRequest):
                     per_mod=req.per_mod,
                     accuracy=req.accuracy,
                     max_gpu_tasks=max_gpu_tasks,
+                    local_max_task_cpus=req.local_max_task_cpus,
+                    local_max_task_memory_gb=req.local_max_task_memory_gb,
                     custom_dogme_profile=req.custom_dogme_profile,
                     workflow_index=workflow_index,
                     user_id=req.user_id,
@@ -1690,6 +1696,8 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         rerun_job.slurm_account = source_job.slurm_account
         rerun_job.slurm_partition = source_job.slurm_partition
         rerun_job.slurm_cpus = source_job.slurm_cpus
+        rerun_job.local_max_task_cpus = source_job.local_max_task_cpus
+        rerun_job.local_max_task_memory_gb = source_job.local_max_task_memory_gb
         rerun_job.slurm_memory_gb = source_job.slurm_memory_gb
         rerun_job.slurm_walltime = source_job.slurm_walltime
         rerun_job.slurm_gpus = source_job.slurm_gpus
@@ -1732,6 +1740,8 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                 slurm_account=source_job.slurm_account,
                 slurm_partition=source_job.slurm_partition,
                 slurm_cpus=source_job.slurm_cpus,
+                local_max_task_cpus=source_job.local_max_task_cpus,
+                local_max_task_memory_gb=source_job.local_max_task_memory_gb,
                 slurm_memory_gb=source_job.slurm_memory_gb,
                 slurm_walltime=source_job.slurm_walltime,
                 slurm_gpus=source_job.slurm_gpus,
@@ -1782,6 +1792,8 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             reference_genome=reference_genome,
             modifications=source_job.modifications,
             max_gpu_tasks=None,
+            local_max_task_cpus=source_job.local_max_task_cpus,
+            local_max_task_memory_gb=source_job.local_max_task_memory_gb,
             workflow_index=source_job.workflow_index,
             rerun_in_place=True,
             archive_sample_names=archive_sample_names,

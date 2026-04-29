@@ -20,7 +20,7 @@ from sqlalchemy.exc import OperationalError
 # ✅ Import from your package
 from cortex.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from cortex.agent_engine import AgentEngine
-from cortex.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES, AGOUTIC_DATA
+from cortex.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES, AGOUTIC_DATA, LLM_MODELS
 from cortex.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
 from cortex.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess, Project, UserFile
 from cortex.middleware import AuthMiddleware
@@ -390,6 +390,17 @@ from cortex.chat_sync_handler import (  # noqa: F401 — re-exported for backwar
 async def health_check():
     """Health check endpoint (no auth required)"""
     return {"status": "ok", "service": "cortex", "version": AGOUTIC_VERSION}
+
+
+@app.get("/config/llm-models")
+async def get_llm_models():
+    """Return the configured LLM aliases and their resolved model names."""
+    return {
+        "models": [
+            {"key": key, "model": model_name}
+            for key, model_name in LLM_MODELS.items()
+        ]
+    }
 
 @app.get("/skills")
 async def get_available_skills():
@@ -1483,6 +1494,8 @@ async def resubmit_job(run_uuid: str, request: Request):
             "input_directory": job.input_directory,
             "reference_genome": _ref_genome,
             "execution_mode": job.execution_mode or "local",
+            "local_max_task_cpus": getattr(job, "local_max_task_cpus", None),
+            "local_max_task_memory_gb": getattr(job, "local_max_task_memory_gb", None),
             "ssh_profile_id": job.ssh_profile_id,
             "slurm_account": job.slurm_account,
             "slurm_partition": job.slurm_partition,

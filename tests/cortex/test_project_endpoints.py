@@ -99,6 +99,18 @@ class TestHealthCheck:
         data = resp.json()
         assert data["status"] == "ok"
 
+    def test_llm_models(self, client):
+        resp = client.get("/config/llm-models")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["models"] == [
+            {"key": "default", "model": "gemma4:31b"},
+            {"key": "fast", "model": "devstral-small-2:latest"},
+            {"key": "smart", "model": "devstral-2:latest"},
+            {"key": "coder", "model": "qwen3-coder:latest"},
+            {"key": "heavy", "model": "gpt-oss:120b"},
+        ]
+
 
 # ---------------------------------------------------------------------------
 # POST /projects — create project

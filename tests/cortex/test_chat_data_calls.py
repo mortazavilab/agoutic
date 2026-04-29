@@ -1709,6 +1709,26 @@ class TestPlotTagParsing:
         assert charts[0].get("df_id") == 1
         assert charts[0].get("palette") == "green"
 
+    def test_valid_plot_tag_preserves_literal_color_request(self, SL, seed, tmp_path):
+        """Well-formed PLOT tags should still inherit explicit literal colors from the user prompt."""
+        def think(msg, skill, history):
+            return (
+                "Here is the chart.\n"
+                "[[PLOT: type=bar, df=DF1, x=assay, agg=count]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = next(_make_client(SL, seed, tmp_path, think))
+        resp = _chat(client, "plot DF1 by assay in red")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        charts = (plot_blocks[0].get("payload") or {}).get("charts", [])
+        assert charts
+        assert charts[0].get("df_id") == 1
+        assert charts[0].get("palette") == "red"
+
     def test_plot_command_override_suppresses_data_calls(self, SL, seed, tmp_path):
         """When user asks for plot and we have valid plot_specs,
         DATA_CALL tags should be suppressed."""

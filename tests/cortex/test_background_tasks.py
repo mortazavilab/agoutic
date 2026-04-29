@@ -1521,6 +1521,40 @@ class TestSubmitJobAfterApproval:
         assert submitted["max_gpu_tasks"] is None
 
     @pytest.mark.asyncio
+    async def test_local_submission_forwards_local_max_task_cpus(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "edited_params": {
+                "sample_name": "local-test",
+                "mode": "DNA",
+                "input_type": "pod5",
+                "input_directory": "/data/local-sample",
+                "reference_genome": ["mm39"],
+                "execution_mode": "local",
+                "local_max_task_cpus": 8,
+                "local_max_task_memory_gb": 48,
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "local-uuid", "work_directory": "/work/local",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock(side_effect=_close_scheduled_coroutine)
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.call_args.args[0] == "submit_dogme_job"
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["execution_mode"] == "local"
+        assert submitted["local_max_task_cpus"] == 8
+        assert submitted["local_max_task_memory_gb"] == 48
+        assert submitted["slurm_cpus"] is None
+
+    @pytest.mark.asyncio
     async def test_remote_submission_keeps_cpu_and_gpu_accounts_separate(self, session_factory, seed_data):
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
             "edited_params": {

@@ -3,6 +3,23 @@ import datetime
 import streamlit as st
 
 
+@st.cache_data(show_spinner=False)
+def _fetch_model_options(api_url: str, _request_fn) -> list[str]:
+    """Fetch model aliases once per UI runtime and reuse them across reruns."""
+    try:
+        resp = _request_fn("GET", f"{api_url}/config/llm-models", timeout=3)
+        if resp.status_code == 200:
+            payload = resp.json()
+            models = payload.get("models", []) if isinstance(payload, dict) else []
+            keys = [item.get("key", "") for item in models if isinstance(item, dict)]
+            keys = [key for key in keys if isinstance(key, str) and key.strip()]
+            if keys:
+                return keys
+    except Exception:
+        pass
+    return ["default"]
+
+
 def render_sidebar(
     *,
     user: dict,
@@ -14,6 +31,9 @@ def render_sidebar(
     slugify_project_name,
 ):
     """Render the sidebar and return runtime UI control values."""
+    model_options = _fetch_model_options(api_url, request_fn)
+    default_index = model_options.index("default") if "default" in model_options else 0
+
     with st.sidebar:
         st.title("🧬 AGOUTIC")
         st.caption(f"v{agoutic_version}")
@@ -355,7 +375,7 @@ def render_sidebar(
 
         st.divider()
 
-        model_choice = st.selectbox("Brain Model", ["default", "fast", "smart"], index=0)
+        model_choice = st.selectbox("Brain Model", model_options, index=default_index)
         auto_refresh = st.toggle("Live Stream", value=True)
         poll_seconds = st.slider("Poll interval (sec)", 1, 5, 2)
         st.caption("Live Stream controls automatic project-page monitoring. Turn it off if a figure-heavy page becomes unstable.")

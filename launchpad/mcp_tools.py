@@ -194,6 +194,8 @@ class LaunchpadMCPTools:
         project_slug: Optional[str] = None,
         resume_from_dir: Optional[str] = None,
         execution_mode: str = "local",
+        local_max_task_cpus: Optional[int] = None,
+        local_max_task_memory_gb: Optional[int] = None,
         ssh_profile_id: Optional[str] = None,
         slurm_account: Optional[str] = None,
         slurm_partition: Optional[str] = None,
@@ -238,6 +240,8 @@ class LaunchpadMCPTools:
             per_mod: Optional per-modification threshold
             accuracy: Optional basecalling accuracy level (e.g., "sup", "hac")
             max_gpu_tasks: Optional max concurrent GPU tasks (dorado/openChromatin) per run (default: no maximum, max: 16)
+            local_max_task_cpus: Optional local per-task CPU ceiling used only for local execution
+            local_max_task_memory_gb: Optional local per-task memory ceiling in GB used only for local execution
             custom_dogme_profile: Optional DNA host-modkit override; Launchpad keeps the staged workflow profile container-safe and applies the custom host exports only to the OpenChromatin tasks
             custom_dogme_bind_paths: Optional remote bind paths required by a custom dogme.profile when using SLURM
         
@@ -287,6 +291,10 @@ class LaunchpadMCPTools:
             payload["resume_from_dir"] = resume_from_dir
         if ssh_profile_id is not None:
             payload["ssh_profile_id"] = ssh_profile_id
+        if local_max_task_cpus is not None:
+            payload["local_max_task_cpus"] = local_max_task_cpus
+        if local_max_task_memory_gb is not None:
+            payload["local_max_task_memory_gb"] = local_max_task_memory_gb
         if slurm_account is not None:
             payload["slurm_account"] = slurm_account
         if slurm_partition is not None:
@@ -907,6 +915,8 @@ TOOL_REGISTRY = {
                 "modifications": {"type": "string", "description": "Modification motifs to call (optional)"},
                 "max_gpu_tasks": {"type": "integer", "description": "Max concurrent GPU tasks (dorado/openChromatin) per pipeline run. Omit for no explicit maximum; max allowed is 16."},
                 "execution_mode": {"type": "string", "enum": ["local", "slurm"], "description": "Execution backend to use (default: local)"},
+                "local_max_task_cpus": {"type": "integer", "description": "Maximum CPUs any one Dogme task may request during local execution. Ignored for SLURM runs."},
+                "local_max_task_memory_gb": {"type": "integer", "description": "Maximum memory in GB any one Dogme task may request during local execution. Ignored for SLURM runs."},
                 "ssh_profile_id": {"type": "string", "description": "Saved SSH profile to use for SLURM execution"},
                 "slurm_account": {"type": "string", "description": "SLURM account/allocation"},
                 "slurm_partition": {"type": "string", "description": "SLURM partition"},

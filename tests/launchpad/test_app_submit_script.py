@@ -306,6 +306,64 @@ async def test_submit_dogme_job_omitted_gpu_limit_uses_default(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_submit_dogme_job_forwards_local_resource_caps(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    fake_job = _fake_dogme_job()
+    executor_kwargs = {}
+
+    async def fake_create_job(*_args, **_kwargs):
+        return fake_job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_submit_job(**kwargs):
+        executor_kwargs.update(kwargs)
+        work_dir = tmp_path / "workflow1"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return ("run-dogme", work_dir)
+
+    async def fake_monitor_job(_run_uuid, _work_dir):
+        return None
+
+    async def fake_get_workflow_identity_for_path(*_args, **_kwargs):
+        return (None, None, None)
+
+    async def fake_get_next_workflow_index(*_args, **_kwargs):
+        return 1
+
+    def fake_create_task(coro):
+        coro.close()
+        return SimpleNamespace()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "create_job", fake_create_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "get_workflow_identity_for_path", fake_get_workflow_identity_for_path)
+    monkeypatch.setattr(launchpad_app, "get_next_workflow_index", fake_get_next_workflow_index)
+    monkeypatch.setattr(launchpad_app.executor, "submit_job", fake_submit_job)
+    monkeypatch.setattr(launchpad_app, "monitor_job", fake_monitor_job)
+    monkeypatch.setattr(launchpad_app.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(launchpad_app.uuid, "uuid4", lambda: "run-dogme")
+
+    req = SubmitJobRequest(
+        project_id="proj-1",
+        sample_name="sample-a",
+        mode="DNA",
+        input_directory=str(tmp_path / "input"),
+        execution_mode="local",
+        local_max_task_cpus=8,
+        local_max_task_memory_gb=48,
+    )
+
+    result = await launchpad_app.submit_job(req)
+
+    assert result["run_uuid"] == "run-dogme"
+    assert executor_kwargs["local_max_task_cpus"] == 8
+    assert executor_kwargs["local_max_task_memory_gb"] == 48
+
+
+@pytest.mark.asyncio
 async def test_submit_slurm_job_preserves_gpu_account_overrides(monkeypatch, tmp_path):
     fake_session = _FakeSession()
     fake_job = _fake_dogme_job()

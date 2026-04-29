@@ -73,6 +73,8 @@ async def test_rerun_job_local_reuses_workflow_identity_and_archives_previous_na
         slurm_account=None,
         slurm_partition=None,
         slurm_cpus=None,
+        local_max_task_cpus=8,
+        local_max_task_memory_gb=48,
         slurm_memory_gb=None,
         slurm_walltime=None,
         slurm_gpus=None,
@@ -139,6 +141,8 @@ async def test_rerun_job_local_reuses_workflow_identity_and_archives_previous_na
     assert executor_kwargs["archive_sample_names"] == ["tumor-original", "tumor-retry"]
     assert executor_kwargs["resume_from_dir"] == str(work_dir)
     assert executor_kwargs["workflow_index"] == 7
+    assert executor_kwargs["local_max_task_cpus"] == 8
+    assert executor_kwargs["local_max_task_memory_gb"] == 48
     assert rerun_job.status == launchpad_app.JobStatus.RUNNING
     assert rerun_job.nextflow_process_id == 9876
     assert result["run_uuid"] == "rerun-1"
@@ -184,6 +188,8 @@ async def test_rerun_job_slurm_uses_backend_rerun_existing(monkeypatch):
         slurm_account="acct",
         slurm_partition="gpu",
         slurm_cpus=12,
+        local_max_task_cpus=None,
+        local_max_task_memory_gb=None,
         slurm_memory_gb=64,
         slurm_walltime="48:00:00",
         slurm_gpus=1,

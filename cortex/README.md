@@ -132,9 +132,11 @@ Edit `cortex/config.py` to customize:
 LLM_URL = os.getenv("LLM_URL", "http://localhost:11434/v1")
 
 LLM_MODELS = {
-    "default": "mistral",      # Default model
-    "fast": "neural-chat",     # Fast inference
-    "smart": "neural-chat",    # Smart reasoning
+  "default": "gemma4:31b",              # Default model
+  "fast": "devstral-small-2:latest",    # Fast inference
+  "smart": "devstral-2:latest",         # Smart reasoning
+  "coder": "qwen3-coder:latest",        # Code-focused model
+  "heavy": "gpt-oss:120b",              # Heaviest alternative model
 }
 
 # Skills Directory
@@ -178,7 +180,7 @@ Request Body:
   "project_id": "proj_001",
   "message": "Analyze this liver DNA sample with 5mC modifications",
   "skill": "Dogme_DNA",          # Optional: Dogme_DNA, Dogme_RNA, Dogme_cDNA
-  "model": "default"              # Optional: default, fast, smart
+  "model": "default"             # Optional: default, fast, smart, coder, heavy
 }
 
 Response:
@@ -619,12 +621,13 @@ MAX_CONCURRENT_REQUESTS = 10  # Limit concurrent LLM calls
 
 ### LLM Model Selection
 
-```bash
-# Use faster model for quick responses
-export LLM_MODEL="neural-chat"  # Fast
-
-# Use smarter model for complex reasoning
-export LLM_MODEL="mistral"      # Smart
+```text
+Available request aliases:
+- default -> gemma4:31b
+- fast -> devstral-small-2:latest
+- smart -> devstral-2:latest
+- coder -> qwen3-coder:latest
+- heavy -> gpt-oss:120b
 ```
 
 ### Database Optimization

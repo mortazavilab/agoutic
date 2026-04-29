@@ -29,6 +29,8 @@ class SubmitParams:
     per_mod: int = 5
     accuracy: str = "sup"
     max_gpu_tasks: Optional[int] = None
+    local_max_task_cpus: int | None = None
+    local_max_task_memory_gb: int | None = None
     resume_from_dir: str | None = None
     rerun_in_place: bool = False
     parent_block_id: str | None = None

@@ -12,6 +12,7 @@ from launchpad.config import (
     DOGME_DNA_OPENCHROM_MODEL,
     DOGME_DNA_OPENCHROM_MODKITBASE,
     DOGME_DNA_SLURM_CONTAINER,
+    LOCAL_DEFAULT_MAX_TASK_MEMORY_GB,
     SLURM_DEFAULT_CPU_MEMORY_GB,
 )
 from launchpad.nextflow_executor import (
@@ -19,6 +20,8 @@ from launchpad.nextflow_executor import (
     NextflowExecutor,
     resolve_dogme_profile_content,
     resolve_dogme_profile_task_runtime_exports,
+    resolve_local_max_task_cpus,
+    resolve_local_max_task_memory_gb,
     resolve_slurm_cpu_memory_gb,
 )
 
@@ -28,6 +31,10 @@ class TestGenerateConfig:
         assert resolve_slurm_cpu_memory_gb(None) == SLURM_DEFAULT_CPU_MEMORY_GB
         assert resolve_slurm_cpu_memory_gb(16) == 16
         assert resolve_slurm_cpu_memory_gb(192) == 192
+
+    def test_resolve_local_max_task_memory_gb_applies_default_only_when_missing(self):
+        assert resolve_local_max_task_memory_gb(None) == LOCAL_DEFAULT_MAX_TASK_MEMORY_GB
+        assert resolve_local_max_task_memory_gb(48) == 48
 
     def test_dna_mode_uses_defaults_for_string_reference(self):
         config = NextflowConfig.generate_config(
@@ -149,6 +156,38 @@ class TestGenerateConfig:
         assert "singularity {" not in config
         assert "apptainer {" not in config
         assert "clusterOptions = \"--account=${cpuAccount}\"" not in config
+
+    def test_local_execution_defaults_max_task_memory_to_64_gb(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-local-default-memory",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="local",
+        )
+
+        assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12" in config
+        assert "withName: 'minimapTask' {\n        cpus = 12\n        memory = '64 GB'" in config
+
+    def test_local_execution_caps_task_cpu_and_memory_requests(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-local-capped",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="local",
+            local_max_task_cpus=8,
+            local_max_task_memory_gb=48,
+        )
+
+        assert "withName: 'extractfastqTask' {\n        // Matches the script's thread count and gives safe memory buffer\n        cpus = 6" in config
+        assert "withName: 'modkitTask' {\n        memory = '48 GB'\n        cpus = 8" in config
+        assert "withName: 'minimapTask' {\n        cpus = 8\n        memory = '48 GB'" in config
+
+    def test_resolve_local_max_task_cpus_clamps_to_host_availability(self, monkeypatch):
+        monkeypatch.setattr(nextflow_module.os, "cpu_count", lambda: 12)
+        assert resolve_local_max_task_cpus(20) == 12
+        assert resolve_local_max_task_cpus(6) == 6
 
     def test_slurm_execution_uses_accounts_partitions_and_singularity(self):
         config = NextflowConfig.generate_config(

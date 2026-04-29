@@ -4,6 +4,7 @@ Handles job submission, monitoring, and result parsing.
 """
 import asyncio
 import json
+import os
 import re
 import subprocess
 from pathlib import Path, PurePosixPath
@@ -31,12 +32,15 @@ from launchpad.config import (
     JobStatus,
     REFERENCE_GENOMES,
     JOB_POLL_INTERVAL,
+    LOCAL_DEFAULT_MAX_TASK_MEMORY_GB,
     SLURM_DEFAULT_CPU_MEMORY_GB,
 )
 
 logger = get_logger(__name__)
 
 _MINIMAL_DOGME_PROFILE = "# Dogme environment profile\n# Add environment variables here if needed\n"
+_DEFAULT_LOCAL_MAX_TASK_CPUS = 12
+_DEFAULT_LOCAL_MAX_TASK_MEMORY_GB = LOCAL_DEFAULT_MAX_TASK_MEMORY_GB
 _DEFAULT_PROCESS_BEFORE_SCRIPT = "export PATH=/opt/conda/bin:$PATH"
 _PROFILE_EXPORT_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _EXPORT_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -58,6 +62,23 @@ def resolve_slurm_cpu_memory_gb(memory_gb: int | None) -> int:
     if memory_gb is None:
         return SLURM_DEFAULT_CPU_MEMORY_GB
     return int(memory_gb)
+
+
+def resolve_local_max_task_cpus(max_task_cpus: int | None) -> int:
+    """Return the local per-task CPU ceiling, clamped to host availability."""
+    available_cpus = os.cpu_count() or _DEFAULT_LOCAL_MAX_TASK_CPUS
+    requested_cpus = int(max_task_cpus) if max_task_cpus is not None else _DEFAULT_LOCAL_MAX_TASK_CPUS
+    return max(1, min(requested_cpus, available_cpus))
+
+
+def resolve_local_max_task_memory_gb(max_task_memory_gb: int | None) -> int:
+    """Return the local per-task memory ceiling, defaulting when unspecified."""
+    requested_memory_gb = (
+        int(max_task_memory_gb)
+        if max_task_memory_gb is not None
+        else _DEFAULT_LOCAL_MAX_TASK_MEMORY_GB
+    )
+    return max(1, requested_memory_gb)
 
 
 def _ensure_trailing_newline(content: str) -> str:
@@ -349,6 +370,8 @@ class NextflowConfig:
         per_mod: int = 5,
         accuracy: str = "sup",
         max_gpu_tasks: Optional[int] = None,
+        local_max_task_cpus: int | None = None,
+        local_max_task_memory_gb: int | None = None,
         execution_mode: str = "local",
         slurm_cpu_partition: str | None = None,
         slurm_gpu_partition: str | None = None,
@@ -421,10 +444,12 @@ class NextflowConfig:
         gpu_partition = (slurm_gpu_partition or cpu_partition).strip() or cpu_partition
         cpu_account = (slurm_cpu_account or "default").strip() or "default"
         gpu_account = (slurm_gpu_account or cpu_account).strip() or cpu_account
+        local_task_cpu_cap = resolve_local_max_task_cpus(local_max_task_cpus)
+        local_task_memory_cap = resolve_local_max_task_memory_gb(local_max_task_memory_gb)
         cpu_cpus = int(slurm_cpus) if slurm_cpus is not None else 12
-        cpu_memory_gb = resolve_slurm_cpu_memory_gb(slurm_memory_gb)
-        minimap_cpus = max(cpu_cpus, 16)
-        minimap_memory_gb = max(cpu_memory_gb, 96)
+        slurm_cpu_memory_gb = resolve_slurm_cpu_memory_gb(slurm_memory_gb)
+        minimap_cpus = max(cpu_cpus, 16) if is_slurm else min(16, local_task_cpu_cap)
+        minimap_memory_gb = max(slurm_cpu_memory_gb, 96) if is_slurm else min(96, local_task_memory_cap)
         cpu_walltime = str(slurm_walltime or "8:00:00").strip() or "8:00:00"
         normalized_bind_paths: list[str] = []
         for bind_path in slurm_bind_paths or []:
@@ -545,7 +570,7 @@ class NextflowConfig:
             config_lines.append("")
             config_lines.append("    // General default settings - adjust as necessary")
             config_lines.append(f"    cpus = {cpu_cpus}")
-            config_lines.append(f"    memory = '{cpu_memory_gb} GB'")
+            config_lines.append(f"    memory = '{slurm_cpu_memory_gb} GB'")
             config_lines.append(f"    time = '{cpu_walltime}'")
             config_lines.append("    clusterOptions = \"--account=${cpuAccount}\"")
             config_lines.append("    queue = \"${cpuPartition}\"")
@@ -554,13 +579,13 @@ class NextflowConfig:
             config_lines.append("")
             config_lines.append("    // General default settings - adjust as necessary")
             config_lines.append("    cpus = 1")
-            config_lines.append("    memory = '32 GB'")
+            config_lines.append(f"    memory = '{min(32, local_task_memory_cap)} GB'")
             config_lines.append("    time = '8:00:00'")
         config_lines.append("")
         config_lines.append("    withName: 'extractfastqTask' {")
         config_lines.append("        // Matches the script's thread count and gives safe memory buffer")
-        config_lines.append("        cpus = 6")
-        config_lines.append("        memory = '24 GB'")
+        config_lines.append(f"        cpus = {6 if is_slurm else min(6, local_task_cpu_cap)}")
+        config_lines.append(f"        memory = '{24 if is_slurm else min(24, local_task_memory_cap)} GB'")
         config_lines.append("        time = '4 h'")
         config_lines.append("    }")
         config_lines.append("")
@@ -568,8 +593,8 @@ class NextflowConfig:
         if is_slurm:
             config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
             config_lines.append("        queue = \"${gpuPartition}\"")
-        config_lines.append("        memory = '9 GB'  // Increase if necessary")
-        config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
+        config_lines.append(f"        memory = '{9 if is_slurm else min(9, local_task_memory_cap)} GB'  // Increase if necessary")
+        config_lines.append(f"        cpus = {4 if is_slurm else min(4, local_task_cpu_cap)}         // dorado is more GPU intensive than CPU intensive")
         config_lines.append("        time = '12:00:00'")
         if max_gpu_tasks is not None:
             config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
@@ -583,8 +608,8 @@ class NextflowConfig:
         config_lines.append("    }")
         config_lines.append("    ")
         config_lines.append("    withName: 'modkitTask' {")
-        config_lines.append("        memory = '64 GB'")
-        config_lines.append("        cpus = 12")
+        config_lines.append(f"        memory = '{64 if is_slurm else min(64, local_task_memory_cap)} GB'")
+        config_lines.append(f"        cpus = {12 if is_slurm else min(12, local_task_cpu_cap)}")
         if is_slurm:
             config_lines.append(
                 f"        containerOptions = {_quote_nextflow_single_quoted(slurm_container_base_options)}"
@@ -595,8 +620,8 @@ class NextflowConfig:
         if is_slurm:
             config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
             config_lines.append("        queue = \"${gpuPartition}\"")
-        config_lines.append("        memory = '9 GB'  // Increase if necessary")
-        config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
+        config_lines.append(f"        memory = '{9 if is_slurm else min(9, local_task_memory_cap)} GB'  // Increase if necessary")
+        config_lines.append(f"        cpus = {4 if is_slurm else min(4, local_task_cpu_cap)}         // dorado is more GPU intensive than CPU intensive")
         if max_gpu_tasks is not None:
             config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
@@ -612,8 +637,8 @@ class NextflowConfig:
         if is_slurm:
             config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
             config_lines.append("        queue = \"${gpuPartition}\"")
-        config_lines.append("        memory = '9 GB'  // Increase if necessary")
-        config_lines.append("        cpus = 4         // dorado is more GPU intensive than CPU intensive")
+        config_lines.append(f"        memory = '{9 if is_slurm else min(9, local_task_memory_cap)} GB'  // Increase if necessary")
+        config_lines.append(f"        cpus = {4 if is_slurm else min(4, local_task_cpu_cap)}         // dorado is more GPU intensive than CPU intensive")
         if max_gpu_tasks is not None:
             config_lines.append(f"        maxForks = {max_gpu_tasks}  // Limit concurrent GPU tasks")
         if is_slurm:
@@ -762,6 +787,8 @@ class NextflowExecutor:
         per_mod: int = 5,
         accuracy: str = "sup",
         max_gpu_tasks: Optional[int] = None,
+        local_max_task_cpus: int | None = None,
+        local_max_task_memory_gb: int | None = None,
         custom_dogme_profile: str | None = None,
         workflow_index: Optional[int] = None,
         rerun_in_place: bool = False,
@@ -1006,6 +1033,8 @@ class NextflowExecutor:
             per_mod=per_mod,
             accuracy=accuracy,
             max_gpu_tasks=max_gpu_tasks,
+            local_max_task_cpus=local_max_task_cpus,
+            local_max_task_memory_gb=local_max_task_memory_gb,
             modkit_task_runtime_exports=modkit_task_runtime_exports,
         )
         
