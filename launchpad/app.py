@@ -35,8 +35,12 @@ from launchpad.db import (
     init_db,
     SessionLocal,
     create_job,
+    find_import_duplicate,
+    find_job_by_workflow_path,
+    get_default_ssh_profile_id,
     get_next_workflow_index,
     get_job,
+    get_ssh_profile,
     infer_workflow_index_from_path,
     get_workflow_identity_for_path,
     resolve_job_by_workflow_label,
@@ -51,6 +55,8 @@ from launchpad.db import (
 from launchpad.models import DogmeJob, SSHProfile
 from launchpad.nextflow_executor import NextflowExecutor
 from launchpad.schemas import (
+    ImportWorkflowRequest,
+    ImportWorkflowResponse,
     SubmitJobRequest,
     StageRemoteSampleRequest,
     StageRemoteSampleResponse,
@@ -76,7 +82,15 @@ from launchpad.schemas import (
 )
 from launchpad.backends import get_backend, SubmitParams
 from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
-from launchpad.backends.ssh_manager import SSHProfileData
+from launchpad.backends.ssh_manager import SSHConnectionManager, SSHProfileData
+from launchpad.import_workflows import (
+    copy_local_results_to_workflow,
+    import_warning_message,
+    infer_local_workflow_metadata,
+    infer_remote_workflow_metadata,
+    normalize_local_workflow_source,
+    normalize_remote_workflow_source,
+)
 from launchpad.script_execution import (
     normalize_script_args,
     resolve_allowlisted_script,
@@ -192,6 +206,477 @@ def _rename_local_workflow_artifacts(work_dir: Path, old_sample_names: list[str]
                     detail=f"Cannot rename workflow artifacts because {target_path.name} already exists",
                 )
             source_path.rename(target_path)
+
+
+def _resolve_project_workflow_root(
+    *,
+    user_id: str,
+    project_id: str,
+    username: str | None,
+    project_slug: str | None,
+) -> Path:
+    if username and project_slug:
+        return AGOUTIC_DATA / "users" / username / project_slug
+    return AGOUTIC_DATA / "users" / user_id / project_id
+
+
+def _allocate_import_workflow_directory(project_dir: Path, workflow_index: int) -> tuple[int, Path]:
+    current_index = max(1, int(workflow_index))
+    project_dir.mkdir(parents=True, exist_ok=True)
+    while True:
+        candidate = project_dir / f"workflow{current_index}"
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return current_index, candidate
+        except FileExistsError:
+            current_index += 1
+
+
+def _merge_import_metadata(
+    req: ImportWorkflowRequest,
+    *,
+    inferred_metadata,
+    source_job: DogmeJob | None,
+) -> tuple[str | None, str | None, list[str], str | None]:
+    inferred_sample = getattr(inferred_metadata, "sample_name", None)
+    inferred_mode = getattr(inferred_metadata, "mode", None)
+    inferred_reference = list(getattr(inferred_metadata, "reference_genome", []) or [])
+    inferred_modifications = getattr(inferred_metadata, "modifications", None)
+
+    source_job_reference = _normalize_reference_genome(getattr(source_job, "reference_genome", None)) if source_job else []
+
+    sample_name = (req.sample_name or inferred_sample or getattr(source_job, "sample_name", None) or "").strip() or None
+    mode = (req.mode or inferred_mode or getattr(source_job, "mode", None) or "").strip().upper() or None
+    reference_genome = list(req.reference_genome or inferred_reference or source_job_reference)
+
+    modifications = None
+    if "modifications" in req.model_fields_set:
+        modifications = req.modifications
+    elif inferred_modifications is not None:
+        modifications = inferred_modifications
+    elif source_job is not None:
+        modifications = source_job.modifications
+
+    if mode == "CDNA" and modifications is None:
+        modifications = ""
+
+    return sample_name, mode, reference_genome, modifications
+
+
+def _missing_import_fields(
+    *,
+    sample_name: str | None,
+    mode: str | None,
+    reference_genome: list[str],
+    modifications: str | None,
+) -> list[str]:
+    missing: list[str] = []
+    if not sample_name:
+        missing.append("sample_name")
+    if not mode:
+        missing.append("mode")
+    if not reference_genome:
+        missing.append("reference_genome")
+    if modifications is None:
+        missing.append("modifications")
+    return missing
+
+
+def _copied_config_path(destination_dir: Path, source_dir: Path, source_config_path: str | None) -> str | None:
+    if not source_config_path:
+        return None
+    source_path = Path(source_config_path)
+    try:
+        relative_path = source_path.relative_to(source_dir)
+    except ValueError:
+        relative_path = Path(source_path.name)
+    candidate = destination_dir / relative_path
+    if candidate.exists():
+        return str(candidate)
+    fallback = destination_dir / source_path.name
+    if fallback.exists():
+        return str(fallback)
+    return None
+
+
+def _import_status_payload(job) -> dict[str, object]:
+    imported_complete = getattr(job, "imported_source_complete", None)
+    return {
+        "imported_source_kind": getattr(job, "imported_source_kind", None),
+        "imported_source_path": getattr(job, "imported_source_path", None),
+        "imported_source_run_uuid": getattr(job, "imported_source_run_uuid", None),
+        "imported_copy_mode": getattr(job, "imported_copy_mode", None),
+        "imported_source_complete": imported_complete,
+        "import_warning_message": import_warning_message(imported_complete),
+    }
+
+
+async def _refresh_imported_source_state(job: DogmeJob) -> None:
+    imported_source_kind = str(getattr(job, "imported_source_kind", "") or "").strip().lower()
+    if imported_source_kind not in {"local", "slurm"}:
+        return
+
+    inferred_metadata = None
+    try:
+        if imported_source_kind == "local":
+            source_path = str(getattr(job, "imported_source_path", "") or "").strip()
+            if not source_path:
+                return
+            inferred_metadata = infer_local_workflow_metadata(Path(source_path))
+        else:
+            source_path = str(getattr(job, "imported_source_path", "") or "").strip()
+            ssh_profile_id = getattr(job, "ssh_profile_id", None)
+            user_id = getattr(job, "user_id", None)
+            if not source_path or not ssh_profile_id or not user_id:
+                return
+            ssh_profile = await get_ssh_profile(ssh_profile_id, user_id)
+            if ssh_profile is None:
+                return
+            ssh_manager = SSHConnectionManager()
+            conn = await ssh_manager.connect(ssh_profile)
+            try:
+                inferred_metadata = await infer_remote_workflow_metadata(conn, source_path)
+            finally:
+                await conn.close()
+    except Exception as exc:
+        logger.warning(
+            "Failed to refresh imported source metadata before sync",
+            run_uuid=getattr(job, "run_uuid", None),
+            error=_describe_exception(exc),
+        )
+        return
+
+    if inferred_metadata is None:
+        return
+
+    new_complete = getattr(inferred_metadata, "source_complete", None)
+    new_config_path = getattr(inferred_metadata, "config_path", None)
+    if (
+        new_complete != getattr(job, "imported_source_complete", None)
+        or (new_config_path and new_config_path != getattr(job, "imported_config_path", None))
+    ):
+        job.imported_source_complete = new_complete
+        if new_config_path:
+            job.imported_config_path = new_config_path
+        await sessionless_commit_job(job)
+
+
+async def _copy_imported_local_results(job: DogmeJob) -> dict[str, object]:
+    source_path = str(getattr(job, "imported_source_path", "") or "").strip()
+    destination_path = str(getattr(job, "nextflow_work_dir", "") or "").strip()
+    if not source_path or not destination_path:
+        raise ValueError("Imported local workflow is missing source or destination paths")
+
+    source_dir = Path(source_path)
+    destination_dir = Path(destination_path)
+    full_copy = str(getattr(job, "imported_copy_mode", "subset") or "subset").strip().lower() == "full"
+
+    job.transfer_state = "downloading_outputs"
+    await sessionless_commit_job(job)
+    copy_local_results_to_workflow(source_dir, destination_dir, full_copy=full_copy)
+    job.transfer_state = "outputs_downloaded"
+    job.status = JobStatus.COMPLETED
+    job.progress_percent = 100
+    job.completed_at = datetime.utcnow()
+    job.nextflow_config_path = _copied_config_path(destination_dir, source_dir, getattr(job, "imported_config_path", None))
+    await sessionless_commit_job(job)
+    return {
+        "success": True,
+        "status": "outputs_downloaded",
+        "message": "Workflow outputs synchronized into the project workflow directory.",
+        "run_uuid": job.run_uuid,
+        "remote_work_dir": getattr(job, "remote_work_dir", None),
+        "local_work_dir": destination_path,
+        "transfer_state": job.transfer_state,
+        "import_warning_message": import_warning_message(getattr(job, "imported_source_complete", None)),
+    }
+
+
+async def sessionless_commit_job(job: DogmeJob) -> None:
+    session = SessionLocal()
+    try:
+        current = await get_job(session, job.run_uuid)
+        if current is None:
+            raise ValueError(f"Job not found: {job.run_uuid}")
+        tracked_fields = (
+            "transfer_state",
+            "status",
+            "progress_percent",
+            "completed_at",
+            "error_message",
+            "nextflow_config_path",
+            "run_stage",
+        )
+        for field_name in tracked_fields:
+            setattr(current, field_name, getattr(job, field_name, None))
+        await session.commit()
+    finally:
+        await session.close()
+
+
+def _build_import_response(job: DogmeJob, *, message: str, transfer_state: str | None = None) -> ImportWorkflowResponse:
+    status = job.status.value if isinstance(job.status, JobStatus) else str(job.status)
+    return ImportWorkflowResponse(
+        run_uuid=job.run_uuid,
+        sample_name=job.sample_name,
+        mode=job.mode,
+        status=status,
+        work_directory=str(getattr(job, "nextflow_work_dir", "") or ""),
+        execution_mode=str(getattr(job, "execution_mode", "local") or "local"),
+        transfer_state=transfer_state or getattr(job, "transfer_state", None),
+        imported_source_kind=str(getattr(job, "imported_source_kind", "") or ""),
+        imported_source_complete=getattr(job, "imported_source_complete", None),
+        import_warning_message=import_warning_message(getattr(job, "imported_source_complete", None)),
+        message=message,
+    )
+
+
+async def _sync_imported_or_remote_job(job: DogmeJob, *, force: bool = False) -> dict[str, object]:
+    imported_source_kind = str(getattr(job, "imported_source_kind", "") or "").strip().lower()
+    if imported_source_kind in {"local", "slurm"}:
+        await _refresh_imported_source_state(job)
+
+    if imported_source_kind == "local":
+        try:
+            return await _copy_imported_local_results(job)
+        except Exception as exc:
+            job.transfer_state = "transfer_failed"
+            job.error_message = _describe_exception(exc)
+            await sessionless_commit_job(job)
+            return {
+                "success": False,
+                "status": "transfer_failed",
+                "message": _describe_exception(exc),
+                "run_uuid": job.run_uuid,
+                "remote_work_dir": getattr(job, "remote_work_dir", None),
+                "local_work_dir": getattr(job, "nextflow_work_dir", None),
+                "transfer_state": "transfer_failed",
+                "import_warning_message": import_warning_message(getattr(job, "imported_source_complete", None)),
+            }
+
+    if imported_source_kind == "slurm" or (getattr(job, "execution_mode", "local") or "local").strip().lower() == "slurm":
+        backend = get_backend("slurm")
+        result = await backend.sync_results_to_local(run_uuid=job.run_uuid, force=force)
+        result.setdefault(
+            "import_warning_message",
+            import_warning_message(getattr(job, "imported_source_complete", None)),
+        )
+        return result
+
+    return {
+        "success": False,
+        "status": "not_applicable",
+        "message": "This job does not have an import source available for explicit sync.",
+        "run_uuid": job.run_uuid,
+        "remote_work_dir": getattr(job, "remote_work_dir", None),
+        "local_work_dir": getattr(job, "nextflow_work_dir", None),
+        "transfer_state": getattr(job, "transfer_state", None),
+        "import_warning_message": import_warning_message(getattr(job, "imported_source_complete", None)),
+    }
+
+
+@app.post("/jobs/import", response_model=ImportWorkflowResponse)
+async def import_existing_workflow(req: ImportWorkflowRequest):
+    session = SessionLocal()
+
+    try:
+        source_kind = str(req.source_kind or "local").strip().lower()
+        if source_kind not in {"local", "slurm"}:
+            raise HTTPException(status_code=400, detail="source_kind must be 'local' or 'slurm'")
+
+        if source_kind == "local":
+            normalized_source_path = normalize_local_workflow_source(req.source_path)
+            source_dir = Path(normalized_source_path)
+            if not source_dir.exists() or not source_dir.is_dir():
+                raise HTTPException(status_code=400, detail=f"Local workflow directory not found: {normalized_source_path}")
+        else:
+            normalized_source_path = normalize_remote_workflow_source(req.source_path)
+
+        existing_source_job = await find_job_by_workflow_path(session, normalized_source_path)
+        if existing_source_job is not None and existing_source_job.project_id == req.project_id and str(existing_source_job.status or "").upper() != JobStatus.DELETED.value:
+            workflow_name = getattr(existing_source_job, "workflow_folder_name", None) or getattr(existing_source_job, "workflow_alias", None) or existing_source_job.run_uuid
+            raise HTTPException(
+                status_code=409,
+                detail=f"This workflow is already registered in the current project as {workflow_name}.",
+            )
+
+        duplicate = await find_import_duplicate(
+            session,
+            project_id=req.project_id,
+            source_kind=source_kind,
+            source_path=normalized_source_path,
+        )
+        if duplicate is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"This workflow was already imported into the current project as {duplicate.workflow_folder_name or duplicate.workflow_alias or duplicate.run_uuid}.",
+            )
+
+        ssh_profile = None
+        if source_kind == "local":
+            inferred_metadata = infer_local_workflow_metadata(source_dir)
+        else:
+            ssh_profile_id = req.ssh_profile_id or await get_default_ssh_profile_id(
+                session,
+                user_id=req.user_id,
+                project_id=req.project_id,
+            )
+            if not ssh_profile_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No default SSH profile is configured for this project. Save SLURM defaults or specify a profile first.",
+                )
+            ssh_profile = await get_ssh_profile(ssh_profile_id, req.user_id)
+            if ssh_profile is None:
+                raise HTTPException(status_code=404, detail=f"SSH profile not found: {ssh_profile_id}")
+
+            ssh_manager = SSHConnectionManager()
+            conn = await ssh_manager.connect(ssh_profile)
+            try:
+                if not await conn.path_exists(normalized_source_path):
+                    raise HTTPException(status_code=400, detail=f"Remote workflow directory not found: {normalized_source_path}")
+                inferred_metadata = await infer_remote_workflow_metadata(conn, normalized_source_path)
+            finally:
+                await conn.close()
+
+        sample_name, mode, reference_genome, modifications = _merge_import_metadata(
+            req,
+            inferred_metadata=inferred_metadata,
+            source_job=existing_source_job,
+        )
+        missing_fields = _missing_import_fields(
+            sample_name=sample_name,
+            mode=mode,
+            reference_genome=reference_genome,
+            modifications=modifications,
+        )
+        if missing_fields:
+            config_hint = getattr(inferred_metadata, "config_path", None)
+            config_suffix = f" Parsed config: {config_hint}." if config_hint else ""
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Import could not infer all required metadata. Missing: "
+                    f"{', '.join(missing_fields)}.{config_suffix}"
+                ),
+            )
+
+        next_workflow_index = await get_next_workflow_index(session, req.project_id)
+        project_dir = _resolve_project_workflow_root(
+            user_id=req.user_id,
+            project_id=req.project_id,
+            username=req.username,
+            project_slug=req.project_slug,
+        )
+        workflow_index, work_dir = _allocate_import_workflow_directory(project_dir, next_workflow_index)
+        workflow_alias = workflow_alias_for_index(workflow_index)
+
+        run_uuid = str(uuid.uuid4())
+        job = await create_job(
+            session,
+            run_uuid=run_uuid,
+            project_id=req.project_id,
+            workflow_index=workflow_index,
+            workflow_alias=workflow_alias,
+            workflow_folder_name=workflow_alias,
+            workflow_display_name=sample_name,
+            sample_name=sample_name,
+            mode=mode,
+            input_directory=getattr(inferred_metadata, "input_directory", None) or normalized_source_path,
+            reference_genome=reference_genome,
+            modifications=modifications,
+            user_id=req.user_id,
+        )
+        job.execution_mode = "slurm" if source_kind == "slurm" else "local"
+        job.nextflow_work_dir = str(work_dir)
+        job.result_destination = "local"
+        job.workflow_display_name = sample_name
+        job.imported_source_kind = source_kind
+        job.imported_source_path = normalized_source_path
+        job.imported_source_run_uuid = existing_source_job.run_uuid if existing_source_job is not None else None
+        job.imported_config_path = getattr(inferred_metadata, "config_path", None)
+        job.imported_copy_mode = "full" if req.full_copy else "subset"
+        job.imported_source_complete = getattr(inferred_metadata, "source_complete", None)
+        job.run_stage = "IMPORTING_RESULTS"
+        job.started_at = datetime.utcnow()
+
+        if source_kind == "slurm":
+            job.status = JobStatus.COMPLETED
+            job.progress_percent = 100
+            job.completed_at = datetime.utcnow()
+            job.remote_work_dir = normalized_source_path
+            job.remote_output_dir = str(PurePosixPath(normalized_source_path) / "output")
+            job.ssh_profile_id = ssh_profile.id if ssh_profile is not None else None
+            job.transfer_state = "pending_import"
+
+        await session.commit()
+
+        await add_log_entry(
+            session,
+            run_uuid,
+            "INFO",
+            f"Import registered from {source_kind} workflow source: {normalized_source_path}",
+            source="import",
+        )
+
+        warning = import_warning_message(getattr(job, "imported_source_complete", None))
+        if source_kind == "local":
+            try:
+                copy_local_results_to_workflow(source_dir, work_dir, full_copy=req.full_copy)
+                job.status = JobStatus.COMPLETED
+                job.progress_percent = 100
+                job.transfer_state = "outputs_downloaded"
+                job.completed_at = datetime.utcnow()
+                job.nextflow_config_path = _copied_config_path(work_dir, source_dir, getattr(inferred_metadata, "config_path", None))
+                await session.commit()
+                message = f"Imported workflow into {work_dir.name}."
+                if warning:
+                    message = f"{message} {warning}"
+                return _build_import_response(job, message=message)
+            except Exception as exc:
+                job.status = JobStatus.FAILED
+                job.transfer_state = "transfer_failed"
+                job.error_message = _describe_exception(exc)
+                await session.commit()
+                raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+
+        try:
+            backend_result = await _sync_imported_or_remote_job(job, force=True)
+        except Exception as exc:
+            job.status = JobStatus.FAILED
+            job.transfer_state = "transfer_failed"
+            job.error_message = _describe_exception(exc)
+            await session.commit()
+            raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+
+        if not backend_result.get("success"):
+            refreshed_job = await get_job(session, run_uuid)
+            if refreshed_job is not None:
+                refreshed_job.status = JobStatus.FAILED
+                refreshed_job.transfer_state = str(backend_result.get("transfer_state") or "transfer_failed")
+                refreshed_job.error_message = str(backend_result.get("message") or "Import sync failed")
+                await session.commit()
+            raise HTTPException(status_code=500, detail=str(backend_result.get("message") or "Import sync failed"))
+
+        message = f"Import started for {work_dir.name}."
+        if warning:
+            message = f"{message} {warning}"
+        return _build_import_response(
+            job,
+            message=message,
+            transfer_state=str(backend_result.get("transfer_state") or getattr(job, "transfer_state", None) or ""),
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_describe_exception(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+    except Exception as exc:
+        logger.exception("Workflow import failed", source_path=req.source_path, source_kind=req.source_kind)
+        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+    finally:
+        await session.close()
 
 # Internal API secret validation middleware
 class InternalSecretMiddleware(BaseHTTPMiddleware):
@@ -1259,17 +1744,20 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "transfer_detail": transfer_message,
                 "result_destination": job.result_destination,
                 "work_directory": _effective_job_work_directory(job),
+                **_import_status_payload(job),
                 **_job_timing_payload(job),
             }
         if job.status in terminal_statuses:
+            warning_message = import_warning_message(getattr(job, "imported_source_complete", None))
             work_directory = _effective_job_work_directory(job)
             base_payload = {
                 "run_uuid": run_uuid,
                 "status": job.status,
                 "progress_percent": 100 if job.status == JobStatus.COMPLETED else 0,
-                "message": job.error_message or f"Job {job.status.lower()}.",
+                "message": job.error_message or warning_message or f"Job {job.status.lower()}.",
                 "tasks": {},
                 "work_directory": work_directory,
+                **_import_status_payload(job),
                 **_job_timing_payload(job),
             }
             if job.execution_mode == "slurm":
@@ -1304,6 +1792,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "result_destination": status_data.result_destination,
                 "ssh_profile_nickname": status_data.ssh_profile_nickname,
                 "work_directory": status_data.work_directory,
+                **_import_status_payload(job),
                 **_job_timing_payload(job),
             }
 
@@ -1344,20 +1833,7 @@ async def sync_job_results_by_workflow_label(
                 status_code=404,
                 detail=f"No job found for project={project_id}, workflow={workflow_label}",
             )
-        run_uuid = job.run_uuid
-        if (job.execution_mode or "local").strip().lower() != "slurm":
-            return {
-                "success": False,
-                "status": "not_applicable",
-                "message": "Manual result sync is only available for SLURM jobs.",
-                "run_uuid": run_uuid,
-                "remote_work_dir": getattr(job, "remote_work_dir", None),
-                "local_work_dir": getattr(job, "nextflow_work_dir", None),
-                "transfer_state": getattr(job, "transfer_state", None),
-            }
-        backend = get_backend("slurm")
-        result = await backend.sync_results_to_local(run_uuid=run_uuid, force=force)
-        return result
+        return await _sync_imported_or_remote_job(job, force=force)
     except HTTPException:
         raise
     except ValueError as exc:
@@ -1377,27 +1853,13 @@ async def sync_job_results_to_local(
     run_uuid: str = FastAPIPath(..., min_length=1),
     force: bool = Query(False),
 ):
-    """Manually trigger remote->local copy-back for a SLURM run."""
+    """Manually trigger imported or remote result synchronization into the local workflow directory."""
     session = SessionLocal()
     try:
         job = await get_job(session, run_uuid)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
-
-        if (job.execution_mode or "local").strip().lower() != "slurm":
-            return {
-                "success": False,
-                "status": "not_applicable",
-                "message": "Manual result sync is only available for SLURM jobs.",
-                "run_uuid": run_uuid,
-                "remote_work_dir": getattr(job, "remote_work_dir", None),
-                "local_work_dir": getattr(job, "nextflow_work_dir", None),
-                "transfer_state": getattr(job, "transfer_state", None),
-            }
-
-        backend = get_backend("slurm")
-        result = await backend.sync_results_to_local(run_uuid=run_uuid, force=force)
-        return result
+        return await _sync_imported_or_remote_job(job, force=force)
     except HTTPException:
         raise
     except ValueError as exc:
@@ -1493,7 +1955,7 @@ async def list_jobs(
 # --- CANCEL JOB ---
 @app.post("/jobs/{run_uuid}/cancel")
 async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
-    """Cancel a running job."""
+    """Cancel a running job or an in-flight remote result sync."""
     import signal
     session = SessionLocal()
     
@@ -1501,6 +1963,21 @@ async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         job = await get_job(session, run_uuid)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
+        if job.execution_mode == "slurm":
+            backend = get_backend("slurm")
+            if getattr(backend, "is_result_sync_active", None) and backend.is_result_sync_active(run_uuid):
+                result = await backend.cancel_result_sync(run_uuid=run_uuid)
+                if not result.get("success"):
+                    raise HTTPException(status_code=409, detail=str(result.get("message") or "Cannot cancel result sync"))
+                await add_log_entry(
+                    session,
+                    run_uuid,
+                    "WARNING",
+                    str(result.get("message") or "Result synchronization cancelled."),
+                    source="api",
+                )
+                return result
         
         if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
             raise HTTPException(

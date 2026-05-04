@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 
 from common.logging_config import get_logger
-from launchpad.backends.base import ExecutionBackend, SubmitParams, JobStatus, LogEntry
+from launchpad.backends.base import ExecutionBackend, SubmitParams, JobStatus as BackendJobStatus, LogEntry
 from launchpad.backends.ssh_manager import SSHConnectionManager, SSHProfileData
 from launchpad.backends.sbatch_generator import generate_sbatch_script
 from launchpad.backends.slurm_states import map_slurm_state, explain_pending_reason, explain_failure
@@ -23,7 +23,8 @@ from launchpad.backends.stage_machine import RunStage
 from launchpad.backends.resource_validator import validate_resources
 from launchpad.backends.path_validator import validate_remote_paths, check_all_paths_ok
 from launchpad.backends.file_transfer import FileTransferManager
-from launchpad.config import REFERENCE_GENOMES, DogmeMode
+from launchpad.config import REFERENCE_GENOMES, DogmeMode, JobStatus as PersistedJobStatus
+from launchpad.import_workflows import RESULT_SYNC_DIRS, RESULT_SYNC_FILE_PATTERNS
 from launchpad.nextflow_executor import (
     NextflowConfig,
     resolve_dogme_profile_content,
@@ -39,9 +40,10 @@ class SlurmBackend:
 
     _result_sync_tasks: dict[str, asyncio.Task] = {}
     _transfer_progress: dict[str, dict] = {}
+    _ACTIVE_RESULT_SYNC_STATES = {"pending_import", "downloading_outputs"}
     _RSYNC_PARTIAL_DIR = ".rsync-partial"
-    _RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "kallisto", "openChromatin", "stats")
-    _RESULT_SYNC_FILE_PATTERNS = ("*.config", "*.html", "*.txt", "*.csv", "*.tsv")
+    _RESULT_SYNC_DIRS = RESULT_SYNC_DIRS
+    _RESULT_SYNC_FILE_PATTERNS = RESULT_SYNC_FILE_PATTERNS
     _OPENCHROMATIN_WRAPPER_DIRNAME = ".agoutic-openchrom-bin"
     _OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS = (
         (
@@ -96,6 +98,11 @@ class SlurmBackend:
     def __init__(self):
         self._ssh_manager = SSHConnectionManager()
         self._transfer_manager = FileTransferManager()
+
+    @classmethod
+    def is_result_sync_active(cls, run_uuid: str) -> bool:
+        task = cls._result_sync_tasks.get(run_uuid)
+        return bool(task and not task.done())
 
     @classmethod
     def _build_openchromatin_wrapper_runtime_exports(
@@ -599,15 +606,15 @@ class SlurmBackend:
         finally:
             await conn.close()
 
-    async def check_status(self, run_uuid: str) -> JobStatus:
+    async def check_status(self, run_uuid: str) -> BackendJobStatus:
         """Check SLURM job status via sacct/squeue."""
         from launchpad.db import get_job_by_uuid as get_job
         job = await get_job(run_uuid)
         if not job:
-            return JobStatus(run_uuid=run_uuid, status="UNKNOWN", message="Job not found")
+            return BackendJobStatus(run_uuid=run_uuid, status="UNKNOWN", message="Job not found")
 
         if not job.slurm_job_id:
-            return JobStatus(
+            return BackendJobStatus(
                 run_uuid=run_uuid,
                 status=job.status,
                 execution_mode="slurm",
@@ -704,7 +711,7 @@ class SlurmBackend:
                     error_message=message if agoutic_status in {"FAILED", "CANCELLED"} else None,
                 )
 
-                return JobStatus(
+                return BackendJobStatus(
                     run_uuid=run_uuid,
                     status=agoutic_status,
                     progress_percent=progress_percent,
@@ -725,7 +732,7 @@ class SlurmBackend:
 
         except Exception as e:
             logger.warning(f"Failed to poll SLURM status for {run_uuid}: {e}")
-            return JobStatus(
+            return BackendJobStatus(
                 run_uuid=run_uuid,
                 status=job.status,
                 progress_percent=getattr(job, "progress_percent", 0),
@@ -1065,6 +1072,8 @@ class SlurmBackend:
         transfer_state = (getattr(current_job, "transfer_state", "") or "").strip().lower()
         if transfer_state == "outputs_downloaded":
             return "COMPLETED", None
+        if transfer_state == "sync_cancelled":
+            return "CANCELLED", "Result synchronization cancelled. Run sync again to resume copying outputs."
         if transfer_state == "transfer_failed":
             return "FAILED", "Remote job completed, but copying results back to the local workflow failed."
 
@@ -1073,6 +1082,8 @@ class SlurmBackend:
             if task is not None:
                 try:
                     task.result()
+                except asyncio.CancelledError:
+                    logger.info("Background result sync task was cancelled", run_uuid=run_uuid)
                 except Exception as exc:  # pragma: no cover - defensive task cleanup
                     logger.warning("Background result sync task ended with error", run_uuid=run_uuid, error=str(exc))
             self._result_sync_tasks[run_uuid] = asyncio.create_task(
@@ -1115,6 +1126,7 @@ class SlurmBackend:
         local_work_dir = getattr(job, "nextflow_work_dir", None)
         remote_work_dir = getattr(job, "remote_work_dir", None)
         input_directory = getattr(job, "input_directory", None)
+        full_copy = str(getattr(job, "imported_copy_mode", "subset") or "subset").strip().lower() == "full"
         # Nextflow writes results to remote_output_dir (remote_work_dir/output).
         # Pre-migration jobs may have NULL remote_output_dir; derive from remote_work_dir.
         remote_output_dir = getattr(job, "remote_output_dir", None) or (
@@ -1132,6 +1144,54 @@ class SlurmBackend:
                 "done_folders": [],
                 "current_file": "",
             }
+
+            def _on_rsync_progress(info: dict) -> None:
+                current = self._transfer_progress.get(run_uuid, {})
+                if "current_file" in info:
+                    current["current_file"] = info["current_file"]
+                if "files_transferred" in info:
+                    current["files_transferred"] = info["files_transferred"]
+                    current["files_total"] = info.get("files_total", current.get("files_total"))
+                if "speed" in info:
+                    current["speed"] = info["speed"]
+                self._transfer_progress[run_uuid] = current
+
+            if full_copy:
+                self._transfer_progress[run_uuid] = {
+                    "current_folder": "full workflow",
+                    "folders_done": 0,
+                    "folders_total": 1,
+                    "done_folders": [],
+                    "current_file": "",
+                }
+                transfer = await self._transfer_manager.download_outputs(
+                    profile=profile,
+                    remote_path=remote_work_dir,
+                    local_path=local_work_dir,
+                    on_progress=_on_rsync_progress,
+                )
+                if not transfer.get("ok"):
+                    raise RuntimeError(transfer.get("message", "full workflow transfer failed"))
+                copied_directories = [
+                    child.name
+                    for child in Path(local_work_dir).iterdir()
+                    if child.is_dir() and child.name != self._RSYNC_PARTIAL_DIR
+                ]
+                self._resolve_local_symlinks(
+                    local_work_dir=local_work_dir,
+                    input_directory=input_directory,
+                    directories=copied_directories,
+                )
+                await self._update_job_transfer_state(run_uuid, "outputs_downloaded")
+                return {
+                    "success": True,
+                    "status": "outputs_downloaded",
+                    "message": "Remote workflow synchronized to local workflow directory.",
+                    "run_uuid": run_uuid,
+                    "remote_work_dir": remote_work_dir,
+                    "local_work_dir": local_work_dir,
+                }
+
             artifact_root = remote_output_dir
             artifacts = await self._discover_remote_result_artifacts(
                 profile=profile,
@@ -1182,17 +1242,6 @@ class SlurmBackend:
                 local_work_dir=local_work_dir,
                 remote_artifacts=artifacts,
             )
-
-            def _on_rsync_progress(info: dict) -> None:
-                current = self._transfer_progress.get(run_uuid, {})
-                if "current_file" in info:
-                    current["current_file"] = info["current_file"]
-                if "files_transferred" in info:
-                    current["files_transferred"] = info["files_transferred"]
-                    current["files_total"] = info.get("files_total", current.get("files_total"))
-                if "speed" in info:
-                    current["speed"] = info["speed"]
-                self._transfer_progress[run_uuid] = current
 
             total_bytes = 0
             errors: list[str] = []
@@ -1306,7 +1355,7 @@ class SlurmBackend:
 
     async def sync_results_to_local(self, *, run_uuid: str, force: bool = False) -> dict:
         """Manually trigger remote->local result synchronization for a SLURM run."""
-        from launchpad.db import get_job_by_uuid as get_job
+        from launchpad.db import get_job_by_uuid as get_job, update_job_fields
 
         job = await get_job(run_uuid)
         if not job:
@@ -1336,21 +1385,36 @@ class SlurmBackend:
             }
 
         running_task = self._result_sync_tasks.get(run_uuid)
-        if running_task and not running_task.done() and not force:
+        if running_task and not running_task.done():
+            message = "A result synchronization task is already in progress for this run."
+            if force:
+                message = (
+                    "A result synchronization task is already in progress for this run. "
+                    "Wait for the current copy to finish before retrying."
+                )
             return {
                 "success": False,
                 "status": "sync_in_progress",
-                "message": "A result synchronization task is already in progress for this run.",
+                "message": message,
                 "run_uuid": run_uuid,
                 "remote_work_dir": getattr(job, "remote_work_dir", None),
                 "local_work_dir": getattr(job, "nextflow_work_dir", None),
                 "transfer_state": transfer_state,
             }
 
-        if running_task and not running_task.done() and force:
-            running_task.cancel()
-
         profile = await self._load_profile(job.ssh_profile_id, job.user_id)
+
+        updated_fields = {
+            "transfer_state": "downloading_outputs",
+            "error_message": None,
+        }
+        if str(getattr(job, "status", "") or "").strip().upper() in {"CANCELLED", "FAILED"}:
+            updated_fields["status"] = PersistedJobStatus.COMPLETED
+        await update_job_fields(run_uuid, updated_fields)
+        if "status" in updated_fields:
+            job.status = PersistedJobStatus.COMPLETED
+        job.transfer_state = "downloading_outputs"
+        job.error_message = None
 
         # Fire the sync as a background task and return immediately.
         # Large result sets (e.g. BAM runs) can take many minutes; keeping
@@ -1369,6 +1433,61 @@ class SlurmBackend:
             "remote_work_dir": getattr(job, "remote_work_dir", None),
             "local_work_dir": getattr(job, "nextflow_work_dir", None),
             "transfer_state": "downloading_outputs",
+        }
+
+    async def cancel_result_sync(self, *, run_uuid: str) -> dict:
+        """Cancel an active remote->local result synchronization task."""
+        from launchpad.db import get_job_by_uuid as get_job, update_job_fields
+
+        job = await get_job(run_uuid)
+        if not job:
+            raise ValueError(f"Job not found: {run_uuid}")
+
+        task = self._result_sync_tasks.get(run_uuid)
+        if task is None or task.done():
+            if task is not None:
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:  # pragma: no cover - defensive cleanup
+                    logger.warning("Finished sync task raised during cancel cleanup", run_uuid=run_uuid, error=str(exc))
+            return {
+                "success": False,
+                "status": "not_syncing",
+                "message": "No result synchronization task is currently running for this run.",
+                "run_uuid": run_uuid,
+                "remote_work_dir": getattr(job, "remote_work_dir", None),
+                "local_work_dir": getattr(job, "nextflow_work_dir", None),
+                "transfer_state": getattr(job, "transfer_state", None),
+            }
+
+        cancel_message = "Result synchronization cancelled. Run sync again to resume copying outputs."
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # pragma: no cover - defensive cleanup
+            logger.warning("Result sync task raised during cancellation", run_uuid=run_uuid, error=str(exc))
+
+        await update_job_fields(
+            run_uuid,
+            {
+                "status": PersistedJobStatus.CANCELLED,
+                "transfer_state": "sync_cancelled",
+                "error_message": cancel_message,
+            },
+        )
+        logger.info("Cancelled remote result sync", run_uuid=run_uuid)
+        return {
+            "success": True,
+            "status": "sync_cancelled",
+            "message": cancel_message,
+            "run_uuid": run_uuid,
+            "remote_work_dir": getattr(job, "remote_work_dir", None),
+            "local_work_dir": getattr(job, "nextflow_work_dir", None),
+            "transfer_state": "sync_cancelled",
         }
 
     async def _discover_remote_result_artifacts(self, *, profile: SSHProfileData, remote_output_dir: str) -> dict[str, list[str]]:

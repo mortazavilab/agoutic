@@ -88,6 +88,12 @@ class DogmeJob(Base):
     data_cache_status: Mapped[str | None] = mapped_column(String, nullable=True)  # "reused","staged","skipped"
     reference_cache_path: Mapped[str | None] = mapped_column(String, nullable=True)
     data_cache_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    imported_source_kind: Mapped[str | None] = mapped_column(String, nullable=True)  # "local" or "slurm"
+    imported_source_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    imported_source_run_uuid: Mapped[str | None] = mapped_column(String, nullable=True)
+    imported_config_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    imported_copy_mode: Mapped[str | None] = mapped_column(String, nullable=True)  # "subset" or "full"
+    imported_source_complete: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 class JobLog(Base):
     """Stores streaming logs from Nextflow execution."""

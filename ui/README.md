@@ -15,6 +15,7 @@ The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUT
 - ⚙️ **Live job monitoring** with Nextflow-style task progress visualization
 - 📊 **Results analysis** page for browsing, parsing, and downloading job outputs
 - 📁 **Project management** with history, switching, and conversation recall
+- 🏷️ **Project-aware browser title** — the active project name appears in the browser tab alongside the AGOUTIC version
 - 🔑 **Admin panel** for user approval and role management
 - 📈 **Interactive Plotly charts** — the agent can generate histogram, scatter, line, area, bar, box, violin, strip, heatmap, pie, venn, and upset charts from any DataFrame in the conversation; rendered inline as `AGENT_PLOT` blocks
 - 🧮 **Pending dataframe actions** — saved in-memory dataframe transforms can be reviewed and applied or dismissed directly from chat via `PENDING_ACTION` blocks
@@ -66,10 +67,12 @@ The UI follows a strict **single-gateway** pattern: every request goes through C
 - Approval gates for job submission parameters
 - Live Nextflow job progress with task-level detail
 - Project switching, conversation history
+- Browser tab title synced to the active project name and AGOUTIC version
 - Model selection sourced from backend LLM aliases and cached once per UI runtime
 - `AGENT_PLOT` blocks: inline Plotly charts triggered by the agent using `[[PLOT:...]]` tags; supports histogram, scatter, line, area, bar, box, violin, strip, heatmap, pie, venn, and upset chart types
 - `PENDING_ACTION` blocks: block-specific Apply / Dismiss controls for saved dataframe transforms
 - Deterministic help shortcuts for grouped differential expression from reconcile abundance outputs or saved dataframes
+- Workflow command help includes `/import-workflow` and `/sync-workflow` alongside the existing workflow actions
 
 ### Results ([pages/results.py](pages/results.py))
 - Browse completed job files (CSV, BED, text)

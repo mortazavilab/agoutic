@@ -1,11 +1,14 @@
+import asyncio
+
 import pytest
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 from launchpad.backends.slurm_backend import SlurmBackend
-from launchpad.backends.base import SubmitParams
 from launchpad.backends.ssh_manager import SSHProfileData
+from launchpad.config import JobStatus
+from launchpad.backends.base import SubmitParams
 
 
 class _FakeConn:
@@ -1116,6 +1119,55 @@ async def test_copy_selected_results_falls_back_to_workflow_root_when_output_dir
 
 
 @pytest.mark.asyncio
+async def test_copy_selected_results_full_copy_uses_remote_workflow_root(tmp_path, monkeypatch):
+    backend = SlurmBackend()
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    local_work_dir = tmp_path / "workflow8"
+    local_work_dir.mkdir()
+    job = SimpleNamespace(
+        remote_work_dir="/remote/workflow8",
+        nextflow_work_dir=str(local_work_dir),
+        input_directory="/input/pod5",
+        imported_copy_mode="full",
+    )
+
+    download_calls = []
+
+    async def fake_download_outputs(**kwargs):
+        download_calls.append(kwargs["remote_path"])
+        (local_work_dir / "nextflow.config").write_text("ok\n", encoding="utf-8")
+        return {"ok": True, "message": "ok", "bytes_transferred": 123}
+
+    async def fake_update(*_args, **_kwargs):
+        return None
+
+    async def fail_discover(**_kwargs):
+        raise AssertionError("artifact discovery should not run for full-copy imports")
+
+    monkeypatch.setattr(backend._transfer_manager, "download_outputs", fake_download_outputs)
+    monkeypatch.setattr(backend, "_update_job_transfer_state", fake_update)
+    monkeypatch.setattr(backend, "_discover_remote_result_artifacts", fail_discover)
+    monkeypatch.setattr(backend, "_resolve_local_symlinks", lambda **_kwargs: None)
+
+    result = await backend._copy_selected_results_to_local(run_uuid="run-8", job=job, profile=profile)
+
+    assert result["success"] is True
+    assert download_calls == ["/remote/workflow8"]
+
+
+@pytest.mark.asyncio
 async def test_sync_results_to_local_returns_not_applicable_for_remote_only_destination(monkeypatch):
     backend = SlurmBackend()
     job = SimpleNamespace(
@@ -1171,6 +1223,10 @@ async def test_sync_results_to_local_retries_copy_when_force_enabled(monkeypatch
     async def fake_load_profile(_profile_id, _user_id):
         return profile
 
+    async def fake_update_job_fields(_run_uuid, fields):
+        for key, value in fields.items():
+            setattr(job, key, value)
+
     async def fake_copy(*, run_uuid, job, profile):
         return {
             "success": True,
@@ -1182,6 +1238,7 @@ async def test_sync_results_to_local_retries_copy_when_force_enabled(monkeypatch
         }
 
     monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr("launchpad.db.update_job_fields", fake_update_job_fields)
     monkeypatch.setattr(backend, "_load_profile", fake_load_profile)
     monkeypatch.setattr(backend, "_copy_selected_results_to_local", fake_copy)
 
@@ -1191,6 +1248,128 @@ async def test_sync_results_to_local_retries_copy_when_force_enabled(monkeypatch
     assert result["success"] is True
     assert result["status"] == "sync_started"
     assert result["transfer_state"] == "downloading_outputs"
+
+
+@pytest.mark.asyncio
+async def test_sync_results_to_local_does_not_restart_while_sync_is_active(monkeypatch):
+    backend = SlurmBackend()
+    job = SimpleNamespace(
+        result_destination="local",
+        remote_work_dir="/remote/workflow2",
+        nextflow_work_dir="/local/workflow2",
+        transfer_state="downloading_outputs",
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+    )
+
+    async def fake_get_job(_run_uuid):
+        return job
+
+    async def fake_load_profile(_profile_id, _user_id):
+        raise AssertionError("active sync should not load a new profile")
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr(backend, "_load_profile", fake_load_profile)
+
+    active_task = asyncio.create_task(asyncio.Event().wait())
+    backend._result_sync_tasks["run-2"] = active_task
+    try:
+        result = await backend.sync_results_to_local(run_uuid="run-2", force=True)
+    finally:
+        active_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active_task
+        backend._result_sync_tasks.pop("run-2", None)
+
+    assert result["success"] is False
+    assert result["status"] == "sync_in_progress"
+    assert "already in progress" in result["message"]
+    assert "Wait for the current copy to finish" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_result_sync_marks_run_cancelled(monkeypatch):
+    backend = SlurmBackend()
+    job = SimpleNamespace(
+        remote_work_dir="/remote/workflow3",
+        nextflow_work_dir="/local/workflow3",
+        transfer_state="downloading_outputs",
+    )
+    updates = []
+
+    async def fake_get_job(_run_uuid):
+        return job
+
+    async def fake_update_job_fields(_run_uuid, fields):
+        updates.append(fields)
+        for key, value in fields.items():
+            setattr(job, key, value)
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr("launchpad.db.update_job_fields", fake_update_job_fields)
+
+    active_task = asyncio.create_task(asyncio.Event().wait())
+    backend._result_sync_tasks["run-3"] = active_task
+
+    result = await backend.cancel_result_sync(run_uuid="run-3")
+
+    assert result["success"] is True
+    assert result["status"] == "sync_cancelled"
+    assert result["transfer_state"] == "sync_cancelled"
+    assert updates[-1]["status"] == JobStatus.CANCELLED
+    assert updates[-1]["transfer_state"] == "sync_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_sync_results_to_local_resets_cancelled_status_before_restart(monkeypatch):
+    backend = SlurmBackend()
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    job = SimpleNamespace(
+        result_destination="local",
+        remote_work_dir="/remote/workflow4",
+        nextflow_work_dir="/local/workflow4",
+        transfer_state="sync_cancelled",
+        status="CANCELLED",
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+        error_message="Result synchronization cancelled. Run sync again to resume copying outputs.",
+    )
+    updates = []
+
+    async def fake_get_job(_run_uuid):
+        return job
+
+    async def fake_load_profile(_profile_id, _user_id):
+        return profile
+
+    async def fake_update_job_fields(_run_uuid, fields):
+        updates.append(fields)
+        for key, value in fields.items():
+            setattr(job, key, value)
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr("launchpad.db.update_job_fields", fake_update_job_fields)
+    monkeypatch.setattr(backend, "_load_profile", fake_load_profile)
+    monkeypatch.setattr(backend, "_copy_selected_results_to_local", AsyncMock(return_value=None))
+
+    result = await backend.sync_results_to_local(run_uuid="run-4", force=False)
+
+    assert result["success"] is True
+    assert result["status"] == "sync_started"
+    assert updates[-1]["status"] == JobStatus.COMPLETED
+    assert updates[-1]["transfer_state"] == "downloading_outputs"
 
 
 @pytest.mark.asyncio

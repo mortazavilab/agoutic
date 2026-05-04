@@ -36,11 +36,26 @@ Remote execution features:
 - **Shared OpenChromatin GPU runtime defaults** — DNA SLURM runs now default to the shared Dogme OpenChromatin GPU container and task-scoped runtime wiring instead of the older custom host-mounted modkit path
 - **Remote base path model** — a single `remote_base_path` anchors `ref/`, `data/`, and per-workflow remote directories
 - **Remote browsing and stage-only intake** — browse saved-cluster paths and stage references/input data without submitting a job
+- **Completed-workflow import** — adopt an already-run local or remote Dogme workflow into the current project as the next `workflowN`, infer metadata from the workflow `.config`, and keep provenance for later explicit resync
 - **Stage transfer controls** — running stage-only transfers can be refreshed, cancelled, resumed, and failed staging cards can delete their reserved local workflow folders directly from the UI
 - **Result destination policy** — keep results remote-only, copy back locally, or both
 - **Staged approval prompts** — Cortex collects details progressively, presents summary before submission
 - **Run and staging status tracking** — dedicated staging tasks plus remote execution stage labels through `completed`, including byte-level transfer progress, current-file details, and faster live refresh while transfers are active
 - **Scheduler integration** — SLURM job ID tracking, state polling via sacct/squeue, cancellation via scancel
+
+### Import Completed Workflows From Chat
+
+In any existing project, you can import a workflow that Dogme already ran earlier:
+
+- Slash command: `/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote`
+- Natural language: `import remote workflow from /scratch/youruser/agoutic/project-alpha/workflow12`
+
+Optional flags:
+
+- `--full-copy` to copy the entire workflow directory instead of the normal result subset
+- `--sample-name`, `--mode`, `--reference`, and `--modifications` if you want to override metadata inferred from the workflow `.config`
+
+Imported workflows are assigned the next `workflowN` folder in the current project. If the source workflow is still incomplete, AGOUTIC keeps a warning on the execution card and you can continue the copy later with `/sync-workflow workflow12`.
 
 Phase 1 limitation: Analyzer operates on local-accessible files only. Remote results must be copied back before downstream analysis.
 

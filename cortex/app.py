@@ -9,7 +9,7 @@ import shutil
 import httpx
 from typing import Optional
 
-from fastapi import Body, FastAPI, HTTPException, Path as FastAPIPath, Request
+from fastapi import Body, FastAPI, HTTPException, Path as FastAPIPath, Query, Request
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool  # To run LLM without blocking
@@ -1390,6 +1390,83 @@ async def rerun_job_proxy(run_uuid: str, request: Request):
             asyncio.create_task(job_polling.poll_job_status(source_job.project_id, job_block.id, result["run_uuid"]))
 
         result["block_id"] = job_block.id
+        return result
+    finally:
+        session.close()
+
+
+@app.post("/jobs/{run_uuid}/sync-results")
+async def sync_job_results_proxy(
+    run_uuid: str,
+    request: Request,
+    force: bool = Query(False),
+):
+    """Trigger an explicit result sync and refresh matching EXECUTION_JOB blocks."""
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
+
+    from launchpad.models import DogmeJob as LaunchpadDogmeJob
+
+    session = SessionLocal()
+    try:
+        source_job = session.execute(
+            select(LaunchpadDogmeJob).where(LaunchpadDogmeJob.run_uuid == run_uuid)
+        ).scalar_one_or_none()
+        if not source_job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{_launchpad_rest_base_url()}/jobs/{run_uuid}/sync-results",
+                headers=_launchpad_internal_headers(),
+                params={"force": str(bool(force)).lower()},
+            )
+        if resp.status_code == 400:
+            raise HTTPException(status_code=400, detail=resp.json().get("detail", "Cannot sync job results"))
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Job not found")
+        resp.raise_for_status()
+        result = resp.json() or {}
+
+        transfer_state = str(result.get("transfer_state") or "").strip().lower()
+        message = str(result.get("message") or "").strip()
+        import_warning = result.get("import_warning_message")
+        matched_blocks: list[ProjectBlock] = []
+
+        blocks = session.query(ProjectBlock).filter(ProjectBlock.project_id == source_job.project_id).all()
+        for blk in blocks:
+            if blk.block_type != "EXECUTION_JOB":
+                continue
+            payload = get_block_payload(blk)
+            if payload.get("run_uuid") != run_uuid:
+                continue
+            job_status = payload.get("job_status") if isinstance(payload.get("job_status"), dict) else {}
+            if not isinstance(job_status, dict):
+                job_status = {}
+            if transfer_state:
+                job_status["transfer_state"] = transfer_state
+            if message:
+                job_status["message"] = message
+            if import_warning is not None:
+                job_status["import_warning_message"] = import_warning
+            payload["job_status"] = job_status
+
+            if transfer_state == "downloading_outputs":
+                blk.status = "RUNNING"
+            elif transfer_state == "transfer_failed":
+                blk.status = "FAILED"
+            else:
+                blk.status = "DONE"
+
+            blk.payload = json.dumps(payload) if isinstance(payload, dict) else payload
+            matched_blocks.append(blk)
+
+        session.commit()
+
+        if transfer_state == "downloading_outputs":
+            for blk in matched_blocks:
+                asyncio.create_task(job_polling.poll_job_status(source_job.project_id, blk.id, run_uuid))
+
         return result
     finally:
         session.close()

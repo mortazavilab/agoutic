@@ -7,6 +7,7 @@ from datetime import timedelta
 from pathlib import Path as _Path
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.express as px
 import plotly.graph_objects as go
 from auth import require_auth, logout_button, make_authenticated_request, get_session_cookie
@@ -60,6 +61,28 @@ _VERSION_FILE = _Path(__file__).resolve().parent.parent / "VERSION"
 _version_raw = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
 AGOUTIC_VERSION = _version_raw[1:] if _version_raw.lower().startswith("v") else _version_raw
 
+
+def _resolved_page_project_name() -> str:
+    cached_name = str(st.session_state.get("_page_project_name") or "").strip()
+    if cached_name:
+        return cached_name
+
+    active_id = str(st.session_state.get("active_project_id") or "").strip()
+    if not active_id:
+        return ""
+
+    for project in st.session_state.get("_cached_projects", []):
+        if project.get("id") == active_id:
+            return str(project.get("name") or "").strip()
+    return ""
+
+
+def _browser_page_title(project_name: str | None = None) -> str:
+    resolved_name = str(project_name if project_name is not None else _resolved_page_project_name()).strip()
+    if resolved_name:
+        return f"{resolved_name} | AGOUTIC v{AGOUTIC_VERSION}"
+    return f"AGOUTIC v{AGOUTIC_VERSION}"
+
 # --- CONFIG ---
 # Use environment variable or default to localhost
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
@@ -67,7 +90,7 @@ LAUNCHPAD_URL = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 LIVE_JOB_STATUS_TIMEOUT_SECONDS = float(os.getenv("LIVE_JOB_STATUS_TIMEOUT_SECONDS", "60"))
 
-st.set_page_config(page_title=f"AGOUTIC v{AGOUTIC_VERSION}", layout="wide")
+st.set_page_config(page_title=_browser_page_title(), layout="wide")
 inject_global_css()
 PLOTLY_TEMPLATE = get_plotly_template()
 
@@ -269,7 +292,9 @@ if st.session_state.get("_create_new_project", False):
     _new_proj = _create_project_server_side(name=_pending_name)
     new_id = _new_proj["id"] if isinstance(_new_proj, dict) else _new_proj
     _new_slug = _new_proj.get("slug", "") if isinstance(_new_proj, dict) else ""
+    _new_name = _new_proj.get("name", "") if isinstance(_new_proj, dict) else ""
     st.session_state.active_project_id = new_id
+    st.session_state["_page_project_name"] = _new_name or (_pending_name or "")
     st.session_state.blocks = []
     # Clear project-related data
     for key in ['loaded_conversation', 'selected_job', 'chat_history', 
@@ -584,11 +609,10 @@ def render_block(block, expected_project_id: str = ""):
 active_id = st.session_state.active_project_id
 
 # Show project name in title (fall back to truncated UUID)
-_active_project_name = active_id[:12] + "…"
-for _p in st.session_state.get("_cached_projects", []):
-    if _p.get("id") == active_id:
-        _active_project_name = _p.get("name", _active_project_name)
-        break
+_known_project_name = _resolved_page_project_name()
+if _known_project_name:
+    st.session_state["_page_project_name"] = _known_project_name
+_active_project_name = _known_project_name or (active_id[:12] + "…")
 
 # Determine whether the page is in a transient project-switch state.
 _auto_refresh_suppressed = _auto_refresh_is_suppressed()
@@ -748,6 +772,10 @@ def _render_chat():
                 )
 
 with st.container(key=_project_scope_mount_key("project_panel", active_id)):
+    components.html(
+        f"<script>window.parent.document.title = {json.dumps(_browser_page_title(_known_project_name))};</script>",
+        height=0,
+    )
     st.title(f"🧬 {_active_project_name}")
     project_loading_slot = st.empty()
     if _project_switch_loading:

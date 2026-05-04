@@ -163,6 +163,13 @@ class JobDetailsResponse(BaseModel):
     output_directory: Optional[str]
     error_message: Optional[str]
     report: Optional[Any]
+    imported_source_kind: Optional[str] = None
+    imported_source_path: Optional[str] = None
+    imported_source_run_uuid: Optional[str] = None
+    imported_config_path: Optional[str] = None
+    imported_copy_mode: Optional[str] = None
+    imported_source_complete: Optional[bool] = None
+    import_warning_message: Optional[str] = None
 
 class JobSubmitResponse(BaseModel):
     """Response from job submission."""
@@ -171,6 +178,54 @@ class JobSubmitResponse(BaseModel):
     status: str
     work_directory: str
     cache_actions: Optional[dict] = None
+
+
+class ImportWorkflowRequest(BaseModel):
+    """Request to import an already-run Dogme workflow into a project."""
+
+    project_id: str = Field(..., min_length=1)
+    user_id: str = Field(..., min_length=1)
+    username: Optional[str] = None
+    project_slug: Optional[str] = None
+    source_path: str = Field(..., min_length=1)
+    source_kind: Literal["local", "slurm"] = "local"
+    ssh_profile_id: Optional[str] = None
+    full_copy: bool = False
+    sample_name: Optional[str] = None
+    mode: Optional[str] = None
+    reference_genome: Optional[Union[str, List[str]]] = None
+    modifications: Optional[str] = None
+
+    @field_validator("reference_genome")
+    @classmethod
+    def normalize_import_genomes_to_list(cls, value):
+        if value is None:
+            return value
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @model_validator(mode="after")
+    def validate_import_request(self):
+        if self.source_kind == "slurm" and not self.user_id:
+            raise ValueError("user_id is required for remote workflow imports")
+        return self
+
+
+class ImportWorkflowResponse(BaseModel):
+    """Response from importing an existing workflow."""
+
+    run_uuid: str
+    sample_name: str
+    mode: str
+    status: str
+    work_directory: str
+    execution_mode: str
+    transfer_state: Optional[str] = None
+    imported_source_kind: str
+    imported_source_complete: Optional[bool] = None
+    import_warning_message: Optional[str] = None
+    message: str
 
 
 class WorkflowRenameRequest(BaseModel):
@@ -278,6 +333,7 @@ class JobResultSyncResponse(BaseModel):
     remote_work_dir: Optional[str] = None
     local_work_dir: Optional[str] = None
     transfer_state: Optional[str] = None
+    import_warning_message: Optional[str] = None
 
 class HealthCheckResponse(BaseModel):
     """Health check response."""
@@ -391,3 +447,9 @@ class JobStatusExtendedResponse(JobStatusResponse):
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     duration_seconds: Optional[int] = None
+    imported_source_kind: Optional[str] = None
+    imported_source_path: Optional[str] = None
+    imported_source_run_uuid: Optional[str] = None
+    imported_copy_mode: Optional[str] = None
+    imported_source_complete: Optional[bool] = None
+    import_warning_message: Optional[str] = None

@@ -69,7 +69,7 @@ class CapabilitiesStage:
             "genes from the IGVF portal\n\n"
             "Useful slash commands:\n"
             "- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`\n"
-            "- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`\n"
+            "- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`, `/import-workflow <path> [--remote] [--full-copy]`, `/sync-workflow <workflow>`\n"
             "- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`\n"
             "- Memory: `/remember <text>`, `/remember-global <text>`, `/remember-df DF5 as <name>`, `/memories`, `/pin #<id>`, `/unpin #<id>`, `/restore #<id>`, `/annotate <sample> key=value`, `/search-memories <query>`, `/upgrade-to-global #<id>`\n\n"
             "What would you like to do?\n"
@@ -300,6 +300,8 @@ class WorkflowCommandStage:
             ctx.session,
             workflow_cmd,
             project_id=ctx.project_id,
+            owner_id=ctx.user.id,
+            model=ctx.model or "default",
         )
         resp = await _create_prompt_response(
             ctx.session,
@@ -333,6 +335,8 @@ class WorkflowIntentStage:
             ctx.session,
             workflow_cmd,
             project_id=ctx.project_id,
+            owner_id=ctx.user.id,
+            model=ctx.model or "default",
         )
         resp = await _create_prompt_response(
             ctx.session,

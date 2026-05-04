@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+## [3.6.7] - 2026-05-04
+
+### Features
+
+- **Completed Dogme workflows can now be imported into the current project from chat, including remote SLURM workflow paths, `.config` metadata inference, next-`workflowN` allocation, and explicit resume-sync support**
+
+- **Workflow quick commands now include `/import-workflow`, `/sync-workflow`, and `/cancel-sync` for importing finished runs and controlling later copy-back**
+
+- **Remote result copy-back can now be cancelled from chat or the execution UI and resumed later without re-importing the workflow**
+
+- **The main Streamlit browser tab title now shows the active project name alongside the AGOUTIC version**
+
+### Documentation
+
+- **README, quick reference, tutorial, and UI docs now describe workflow import chat syntax, the new slash commands, and the project-aware page title**
+
 ### Bug Fixes
 
 - **Approval gates now default SLURM CPU memory to 64 GB while still allowing lower explicit overrides**
@@ -17,6 +33,12 @@
 - **Nextflow live monitoring no longer freezes completed-task counts when stdout shifts to composite `executor > slurm (...)` summary lines**
 
 - **Transient scheduler poll failures no longer pin execution cards to an old completed count indefinitely**
+
+- **Remote workflow import parsing now separates trailing SSH profile phrases like `on hpc3` from the actual source path before Launchpad validation**
+
+- **Imported and remote workflow result sync now starts asynchronously, avoids overlapping rsync copies for the same workflow, and supports clean cancellation of an active copy-back**
+
+- **Documentation and import-related user-facing messages now standardize the pipeline name capitalization as `Dogme`**
 
 ## [3.6.6] - 2026-04-22
 

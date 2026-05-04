@@ -3316,6 +3316,60 @@ def test_completed_job_results_ready_requires_outputs_downloaded_for_local_desti
     assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "remote", "transfer_state": "none"}) is True
 
 
+@pytest.mark.asyncio
+async def test_poll_job_status_stops_when_result_sync_is_cancelled(session_factory, seed_data):
+    sess = session_factory()
+    job_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "EXECUTION_JOB",
+        {
+            "run_uuid": "copyback-cancel-test",
+            "work_directory": "/work/copyback-cancel",
+            "sample_name": "sample-copy-cancel",
+            "mode": "DNA",
+            "model": "default",
+            "job_status": {"status": "PENDING"},
+            "logs": [],
+        },
+        status="RUNNING",
+        owner_id="u-bg",
+    )
+    sess.close()
+
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(side_effect=[
+        {
+            "status": "CANCELLED",
+            "progress_percent": 0,
+            "result_destination": "local",
+            "transfer_state": "sync_cancelled",
+            "message": "Result synchronization cancelled. Run sync again to resume copying outputs.",
+            "work_directory": "/local/work/copyback-cancel",
+        },
+        {"logs": []},
+    ])
+    mock_auto = AsyncMock()
+
+    with _patch_session(session_factory), \
+         patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+         patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+         patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+         patch("cortex.job_polling._auto_trigger_analysis", mock_auto):
+        mock_sleep.return_value = None
+        await poll_job_status("proj-bg", job_block.id, "copyback-cancel-test")
+
+    assert mock_auto.await_count == 0
+
+    sess = session_factory()
+    updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
+    payload = get_block_payload(updated)
+    assert updated.status == "CANCELLED"
+    assert payload["job_status"]["status"] == "CANCELLED"
+    assert payload["job_status"]["transfer_state"] == "sync_cancelled"
+    sess.close()
+
+
 def test_resolved_job_work_directory_prefers_status_data_over_existing_payload():
     assert _resolved_job_work_directory(
         "/remote/project/workflow1",

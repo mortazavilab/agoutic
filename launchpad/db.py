@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 def job_to_dict(job: DogmeJob) -> dict:
     """Convert DogmeJob row to dictionary."""
+    imported_source_complete = getattr(job, "imported_source_complete", None)
     return {
         "run_uuid": job.run_uuid,
         "project_id": job.project_id,
@@ -58,6 +59,17 @@ def job_to_dict(job: DogmeJob) -> dict:
         "data_cache_status": job.data_cache_status,
         "reference_cache_path": job.reference_cache_path,
         "data_cache_path": job.data_cache_path,
+        "imported_source_kind": getattr(job, "imported_source_kind", None),
+        "imported_source_path": getattr(job, "imported_source_path", None),
+        "imported_source_run_uuid": getattr(job, "imported_source_run_uuid", None),
+        "imported_config_path": getattr(job, "imported_config_path", None),
+        "imported_copy_mode": getattr(job, "imported_copy_mode", None),
+        "imported_source_complete": imported_source_complete,
+        "import_warning_message": (
+            "Imported from a workflow that does not look complete yet. Run /sync-workflow later to pull new outputs."
+            if imported_source_complete is False
+            else None
+        ),
     }
 
 async def create_job(
@@ -224,6 +236,95 @@ async def resolve_job_by_workflow_label(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def find_job_by_workflow_path(
+    session: AsyncSession,
+    workflow_path: str,
+) -> DogmeJob | None:
+    """Find the most recent job whose local or remote workflow path matches *workflow_path*."""
+    if not workflow_path:
+        return None
+    result = await session.execute(
+        select(DogmeJob)
+        .where(
+            or_(
+                DogmeJob.nextflow_work_dir == workflow_path,
+                DogmeJob.remote_work_dir == workflow_path,
+                DogmeJob.imported_source_path == workflow_path,
+            )
+        )
+        .order_by(DogmeJob.submitted_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def find_import_duplicate(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    source_kind: str,
+    source_path: str,
+) -> DogmeJob | None:
+    if not project_id or not source_kind or not source_path:
+        return None
+    result = await session.execute(
+        select(DogmeJob)
+        .where(DogmeJob.project_id == project_id)
+        .where(DogmeJob.imported_source_kind == source_kind)
+        .where(DogmeJob.imported_source_path == source_path)
+        .where(DogmeJob.status != "DELETED")
+        .order_by(DogmeJob.submitted_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_default_ssh_profile_id(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    project_id: str | None = None,
+) -> str | None:
+    if not user_id:
+        return None
+
+    if project_id:
+        defaults_result = await session.execute(
+            select(func.max(DogmeJob.ssh_profile_id))
+            .where(DogmeJob.user_id == user_id)
+            .where(DogmeJob.project_id == project_id)
+            .where(DogmeJob.ssh_profile_id.is_not(None))
+        )
+        defaults_value = defaults_result.scalar_one_or_none()
+        if defaults_value:
+            return str(defaults_value)
+
+    from launchpad.models import SlurmDefaults
+
+    defaults_query = select(SlurmDefaults).where(SlurmDefaults.user_id == user_id)
+    if project_id:
+        defaults_query = defaults_query.where(SlurmDefaults.project_id == project_id)
+    else:
+        defaults_query = defaults_query.where(SlurmDefaults.project_id.is_(None))
+    defaults_row = (await session.execute(defaults_query)).scalar_one_or_none()
+    if defaults_row and defaults_row.ssh_profile_id:
+        return str(defaults_row.ssh_profile_id)
+
+    profiles = list(
+        (
+            await session.execute(
+                select(SSHProfile)
+                .where(SSHProfile.user_id == user_id)
+                .where(SSHProfile.is_enabled.is_(True))
+                .order_by(SSHProfile.updated_at.desc())
+            )
+        ).scalars().all()
+    )
+    if len(profiles) == 1:
+        return profiles[0].id
+    return profiles[0].id if profiles else None
 
 async def update_job_status(
     session: AsyncSession,

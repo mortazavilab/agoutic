@@ -65,8 +65,9 @@ def render_sidebar(
                 st.rerun()
             st.caption("`/skill <skill_key>`  ·  `/use-skill <skill_key>`")
             st.caption("**Workflow Slash Commands**")
-            st.caption("`/use <workflow>`  ·  `/rerun <workflow>`")
+            st.caption("`/use <workflow>`  ·  `/rerun <workflow>`  ·  `/sync-workflow <workflow>`")
             st.caption("`/rename <workflow> <new_name>`  ·  `/delete <workflow>`")
+            st.caption("`/import-workflow <path> --remote`  ·  `--full-copy` optional")
             st.caption("**Dataframes**")
             if st.button("list dfs", key="help_prompt_list_dfs", width="stretch"):
                 st.session_state["_help_prompt"] = "list dfs"
@@ -123,6 +124,7 @@ def render_sidebar(
             if new_val and new_val != st.session_state.get("active_project_id"):
                 st.session_state["_project_switch_loading_for"] = new_val
                 st.session_state.active_project_id = new_val
+                st.session_state.pop("_page_project_name", None)
                 st.session_state.blocks = []
                 st.session_state._last_rendered_project = new_val
                 st.session_state.pop("_welcome_sent_for", None)
@@ -205,6 +207,7 @@ def render_sidebar(
                                     elif st.button(f"📂 {proj_name}{slug_hint}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
                                         st.session_state["_project_switch_loading_for"] = proj_id
                                         st.session_state.active_project_id = proj_id
+                                        st.session_state["_page_project_name"] = proj.get("name", "")
                                         st.session_state.blocks = []
                                         st.session_state._last_rendered_project = proj_id
                                         st.session_state["_project_id_input"] = proj_id

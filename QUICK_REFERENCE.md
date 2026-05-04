@@ -176,8 +176,18 @@ Slash commands currently fall into two buckets:
 | `/rerun` | `/rerun workflow7` | Rerun the matching workflow/job in the current project |
 | `/rename` | `/rename workflow7 treated-r1` | Rename the matching workflow/job |
 | `/delete` | `/delete workflow7` | Delete the matching workflow/job |
+| `/import-workflow` | `/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote` | Import an existing local or remote Dogme workflow into the current project as the next `workflowN`; metadata is inferred from the workflow `.config` files |
+| `/sync-workflow` | `/sync-workflow workflow12` | Retry or continue syncing outputs for a remote or imported workflow |
 
 Workflow references can match a workflow folder, workflow alias, workflow display name, or sample name.
+
+### Workflow Import and Sync
+
+- Remote import slash command: `/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote`
+- Remote import natural language: `import remote workflow from /scratch/youruser/agoutic/project-alpha/workflow12`
+- Continue or retry sync later: `/sync-workflow workflow12`
+- Optional flags: `--full-copy`, `--sample-name NAME`, `--mode DNA|RNA|CDNA`, `--reference GRCh38,mm39`, `--modifications 5mCG_5hmCG,6mA`
+- By default AGOUTIC copies the same result subset as a normal remote copy-back. Use `--full-copy` when you want the entire workflow directory.
 
 ### Differential Expression Slash Command
 

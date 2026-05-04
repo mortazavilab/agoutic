@@ -212,10 +212,30 @@ Typical prompts:
 - _"sync results back to local for workflow2"_
 - _"retry sync results for workflow2"_
 - _"sync results for 12345678-1234-1234-1234-123456789abc"_
+- _"/sync-workflow workflow2"_
 
 AGOUTIC resolves the run from the active workflow context, the named `workflowN`, or the run UUID you provide. When the sync starts successfully, progress appears in the task dock and the job status updates.
 
 Use manual sync before downstream analysis if the job was left as **Remote only**.
+
+## Import an Existing Completed Remote Workflow
+
+If a Dogme run already finished on the cluster outside AGOUTIC's submission flow, you can import it into the current project instead of rerunning it.
+
+Typical prompts:
+
+- _"/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote"_
+- _"import remote workflow from /scratch/youruser/agoutic/project-alpha/workflow12"_
+- _"/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote --full-copy"_
+
+What AGOUTIC does:
+
+- allocates the next local `workflowN` folder in the current project
+- reads workflow metadata from the Dogme `.config` file before asking for any missing fields
+- copies the same default result subset as a normal remote copy-back unless you add `--full-copy`
+- keeps the original source path as provenance so you can run `/sync-workflow workflowN` later if the source workflow was still incomplete during the import
+
+If the source workflow is incomplete, the execution card stays completed but shows a partial-import warning and a **Resume Sync** action in the UI.
 
 ## Step 8: Analyze or Inspect the Synced Workflow Outputs
 

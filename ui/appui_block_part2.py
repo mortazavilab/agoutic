@@ -702,12 +702,25 @@ def render_block_part2(
                 current_step_detail = (job_status.get("current_step_detail") or "").strip()
                 transfer_state = (job_status.get("transfer_state") or "").strip().lower()
                 result_destination = (job_status.get("result_destination") or "").strip().lower()
+                imported_source_kind = (job_status.get("imported_source_kind") or "").strip().lower()
+                import_warning = (job_status.get("import_warning_message") or "").strip()
+                sync_cancel_available = bool(run_uuid and transfer_state in {"pending_import", "downloading_outputs"})
+                show_resume_sync = bool(
+                    run_uuid and (
+                        (imported_source_kind and import_warning)
+                        or transfer_state == "sync_cancelled"
+                    )
+                )
+                resume_sync_in_progress = sync_cancel_available
+                resume_sync_force = transfer_state == "outputs_downloaded"
                 try:
                     progress_pct = max(0, min(100, int(progress or 0)))
                 except (TypeError, ValueError):
                     progress_pct = 0
                 _chip, _status_label, _status_icon = _run_status_label(status_str)
                 status_chip(_chip, label=_status_label, icon=_status_icon)
+                if import_warning:
+                    status_chip("warning", label="Partial Import", icon="⚠️")
 
                 run_meta = {"Mode": mode, "Run UUID": run_uuid}
                 if is_script_job and script_id:
@@ -769,7 +782,7 @@ def render_block_part2(
                         finalize_state = "running"
                     elif run_stage in {"completed"} or transfer_state in {"outputs_downloaded"}:
                         finalize_state = "complete"
-                    elif run_stage in {"failed", "cancelled"} or transfer_state in {"transfer_failed"}:
+                    elif run_stage in {"failed", "cancelled"} or transfer_state in {"transfer_failed", "sync_cancelled"}:
                         finalize_state = "failed"
 
                 elif is_done:
@@ -800,7 +813,7 @@ def render_block_part2(
                         sync_state = "complete"
                     elif transfer_state in {"downloading_outputs"} or run_stage == "syncing_results":
                         sync_state = "active"
-                    elif transfer_state in {"transfer_failed"}:
+                    elif transfer_state in {"transfer_failed", "sync_cancelled"}:
                         sync_state = "failed"
                     elif run_stage in {"completed"} and result_destination in {"remote", ""}:
                         sync_state = "complete"
@@ -831,6 +844,8 @@ def render_block_part2(
                 # Status indicator
                 if status_str == "COMPLETED":
                     st.success(f"✅ {message}")
+                    if import_warning:
+                        info_callout(import_warning, kind="warning", icon="⚠️")
                     
                     # Show completed tasks summary
                     if tasks and isinstance(tasks, dict):
@@ -870,7 +885,10 @@ def render_block_part2(
 
                     st.divider()
                     _completed_workflow_name = workflow_label or "workflow"
-                    _delete_col, _rerun_col = st.columns(2)
+                    _action_cols = st.columns(3 if show_resume_sync else 2)
+                    _delete_col = _action_cols[0]
+                    _rerun_col = _action_cols[1]
+                    _sync_col = _action_cols[2] if show_resume_sync else None
                     with _delete_col:
                         _confirm_key = f"completed_del_confirm_{block_id}"
                         if st.session_state.get(_confirm_key):
@@ -912,6 +930,41 @@ def render_block_part2(
                                     st.error(f"Rerun failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
                             except Exception as _e:
                                 st.error(f"Error: {_e}")
+                    if _sync_col is not None:
+                        with _sync_col:
+                            if resume_sync_in_progress:
+                                st.caption("Sync already in progress for this workflow.")
+                            if st.button(
+                                "Resume Sync",
+                                key=f"completed_sync_{block_id}",
+                                disabled=resume_sync_in_progress,
+                                help=(
+                                    "Results are still syncing into this workflow."
+                                    if resume_sync_in_progress else None
+                                ),
+                            ):
+                                try:
+                                    _sync_resp = make_authenticated_request(
+                                        "POST",
+                                        f"{API_URL}/jobs/{run_uuid}/sync-results",
+                                        params={"force": "true" if resume_sync_force else "false"},
+                                        timeout=30,
+                                    )
+                                    _sync_payload = _sync_resp.json() if _sync_resp.content else {}
+                                    if _sync_resp.status_code == 200:
+                                        _sync_state = (_sync_payload.get("transfer_state") or "").strip().lower()
+                                        if _sync_state:
+                                            st.session_state[f"_transfer_state_{run_uuid}"] = _sync_state
+                                        _sync_message = _sync_payload.get("message") or "Workflow sync triggered."
+                                        if _sync_payload.get("success", True):
+                                            st.success(_sync_message)
+                                        else:
+                                            st.warning(_sync_message)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Resume sync failed: {_sync_resp.status_code} — {_sync_resp.text[:200]}")
+                                except Exception as _e:
+                                    st.error(f"Error: {_e}")
 
                     _rename_default = sample_name or _completed_workflow_name
                     _rename_value = st.text_input(
@@ -1083,18 +1136,35 @@ def render_block_part2(
                             except Exception as _e:
                                 st.error(f"Error: {_e}")
                     with _resub_col:
-                        if st.button("🔄 Resubmit Job", key=f"resub_{block_id}"):
-                            try:
-                                _resub_resp = make_authenticated_request(
-                                    "POST", f"{API_URL}/jobs/{run_uuid}/resubmit", timeout=15
-                                )
-                                if _resub_resp.status_code == 200:
-                                    st.success("Approval gate created — scroll down to review and approve.")
-                                    st.rerun()
-                                else:
-                                    st.error(f"Resubmit failed: {_resub_resp.status_code} — {_resub_resp.text[:200]}")
-                            except Exception as _e:
-                                st.error(f"Error: {_e}")
+                        if transfer_state == "sync_cancelled":
+                            if st.button("Resume Sync", key=f"cancelled_sync_resume_{block_id}"):
+                                try:
+                                    _sync_resp = make_authenticated_request(
+                                        "POST",
+                                        f"{API_URL}/jobs/{run_uuid}/sync-results",
+                                        params={"force": "false"},
+                                        timeout=30,
+                                    )
+                                    if _sync_resp.status_code == 200:
+                                        st.success((_sync_resp.json() or {}).get("message", "Workflow sync triggered."))
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Resume sync failed: {_sync_resp.status_code} — {_sync_resp.text[:200]}")
+                                except Exception as _e:
+                                    st.error(f"Error: {_e}")
+                        else:
+                            if st.button("🔄 Resubmit Job", key=f"resub_{block_id}"):
+                                try:
+                                    _resub_resp = make_authenticated_request(
+                                        "POST", f"{API_URL}/jobs/{run_uuid}/resubmit", timeout=15
+                                    )
+                                    if _resub_resp.status_code == 200:
+                                        st.success("Approval gate created — scroll down to review and approve.")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Resubmit failed: {_resub_resp.status_code} — {_resub_resp.text[:200]}")
+                                except Exception as _e:
+                                    st.error(f"Error: {_e}")
 
                     _cancelled_rename = st.text_input(
                         "Rename workflow",
@@ -1228,14 +1298,20 @@ def render_block_part2(
                                         st.text(f"✔ {base_name} ({len(instances)}/{max(instances_sorted)})")
                     # Cancel button
                     st.divider()
-                    if st.button("🛑 Cancel Job", type="primary", key=f"cancel_job_{block_id}"):
+                    _cancel_label = "🛑 Cancel Sync" if sync_cancel_available else "🛑 Cancel Job"
+                    if st.button(_cancel_label, type="primary", key=f"cancel_job_{block_id}"):
                         try:
                             _cancel_resp = make_authenticated_request(
                                 "POST", f"{API_URL}/jobs/{run_uuid}/cancel", timeout=15
                             )
                             if _cancel_resp.status_code == 200:
                                 _cancel_data = _cancel_resp.json()
-                                st.success(_cancel_data.get("message", "Job cancelled successfully."))
+                                _cancel_status = str(_cancel_data.get("status") or "").strip().lower()
+                                _cancel_message = _cancel_data.get("message", "Job cancelled successfully.")
+                                if _cancel_status == "sync_cancelled":
+                                    st.info(_cancel_message)
+                                else:
+                                    st.success(_cancel_message)
                                 st.rerun()
                             elif _cancel_resp.status_code == 400:
                                 st.warning(_cancel_resp.json().get("detail", "Cannot cancel job."))

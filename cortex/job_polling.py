@@ -191,6 +191,8 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                         block.status = "DONE"
                     elif job_status == "FAILED":
                         block.status = "FAILED"
+                    elif job_status == "CANCELLED":
+                        block.status = "CANCELLED"
                     else:
                         block.status = "RUNNING"
 
@@ -203,7 +205,7 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                     logger.info("Job status updated", run_uuid=run_uuid, job_status=job_status, progress=status_data.get("progress_percent", 0))
 
                     # Stop polling if job is done
-                    if job_status == "FAILED" or (job_status == "COMPLETED" and completed_ready_for_analysis):
+                    if job_status in {"FAILED", "CANCELLED"} or (job_status == "COMPLETED" and completed_ready_for_analysis):
                         logger.info("Job finished", run_uuid=run_uuid, job_status=job_status)
 
                         workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
@@ -218,7 +220,10 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                                 session,
                                 workflow_block,
                                 run_step_id or "run_dogme",
-                                "COMPLETED" if job_status == "COMPLETED" else "FAILED",
+                                (
+                                    "COMPLETED" if job_status == "COMPLETED"
+                                    else ("CANCELLED" if job_status == "CANCELLED" else "FAILED")
+                                ),
                                 extra={
                                     "run_uuid": run_uuid,
                                     "block_id": block_id,

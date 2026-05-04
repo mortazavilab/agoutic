@@ -441,6 +441,83 @@ async def test_get_job_status_reports_transfer_failure_detail_for_completed_slur
 
 
 @pytest.mark.asyncio
+async def test_get_job_status_reports_cancelled_sync_for_slurm_job(monkeypatch):
+    fake_session = _FakeSession()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        return SimpleNamespace(
+            run_uuid="run-cancel",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.CANCELLED,
+            progress_percent=100,
+            error_message="Result synchronization cancelled. Run sync again to resume copying outputs.",
+            run_stage="completed",
+            slurm_job_id="50052942",
+            slurm_state="COMPLETED",
+            transfer_state="sync_cancelled",
+            result_destination="local",
+            nextflow_work_dir="/local/project/workflow6",
+            remote_work_dir="/remote/project/workflow6",
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+        )
+
+    def fail_get_backend(mode):
+        raise AssertionError(f"backend polling should be skipped for cancelled sync jobs, got {mode}")
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", fail_get_backend)
+
+    payload = await launchpad_app.get_job_status("run-cancel")
+
+    assert payload["status"] == launchpad_app.JobStatus.CANCELLED
+    assert payload["transfer_state"] == "sync_cancelled"
+    assert "Result synchronization cancelled" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_dispatches_to_active_result_sync(monkeypatch):
+    fake_session = _FakeSession()
+    add_log_entry = AsyncMock()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        return SimpleNamespace(
+            run_uuid="run-sync",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.COMPLETED,
+        )
+
+    class _FakeBackend:
+        def is_result_sync_active(self, run_uuid):
+            assert run_uuid == "run-sync"
+            return True
+
+        async def cancel_result_sync(self, *, run_uuid):
+            assert run_uuid == "run-sync"
+            return {
+                "success": True,
+                "status": "sync_cancelled",
+                "message": "Result synchronization cancelled. Run sync again to resume copying outputs.",
+                "run_uuid": run_uuid,
+                "transfer_state": "sync_cancelled",
+            }
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", lambda mode: _FakeBackend())
+    monkeypatch.setattr(launchpad_app, "add_log_entry", add_log_entry)
+
+    payload = await launchpad_app.cancel_job("run-sync")
+
+    assert payload["status"] == "sync_cancelled"
+    add_log_entry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_get_job_status_reports_live_reconcile_step_for_running_script(monkeypatch, tmp_path):
     fake_session = _FakeSession()
     stdout_log = tmp_path / "run-3.stdout.log"

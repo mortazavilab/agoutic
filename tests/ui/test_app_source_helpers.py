@@ -340,6 +340,53 @@ class TestProjectSwitchHelpers:
         fake_st.rerun.assert_called_once()
 
 
+class TestBrowserPageTitle:
+    def test_uses_cached_page_project_name(self):
+        fake_st = SimpleNamespace(session_state={"_page_project_name": "Tumor Panel"})
+        fn = _load_function(
+            "_browser_page_title",
+            {
+                "st": fake_st,
+                "AGOUTIC_VERSION": "3.6.6",
+                "_resolved_page_project_name": lambda: "Tumor Panel",
+            },
+        )
+
+        assert fn() == "Tumor Panel | AGOUTIC v3.6.6"
+
+    def test_uses_cached_project_lookup_when_name_not_cached(self):
+        fake_st = SimpleNamespace(
+            session_state={
+                "active_project_id": "proj-1",
+                "_cached_projects": [{"id": "proj-1", "name": "Remote Import Demo"}],
+            }
+        )
+        name_fn = _load_function("_resolved_page_project_name", {"st": fake_st})
+        title_fn = _load_function(
+            "_browser_page_title",
+            {
+                "st": fake_st,
+                "AGOUTIC_VERSION": "3.6.6",
+                "_resolved_page_project_name": name_fn,
+            },
+        )
+
+        assert title_fn() == "Remote Import Demo | AGOUTIC v3.6.6"
+
+    def test_falls_back_to_version_only_when_project_name_unknown(self):
+        fake_st = SimpleNamespace(session_state={})
+        title_fn = _load_function(
+            "_browser_page_title",
+            {
+                "st": fake_st,
+                "AGOUTIC_VERSION": "3.6.6",
+                "_resolved_page_project_name": lambda: "",
+            },
+        )
+
+        assert title_fn() == "AGOUTIC v3.6.6"
+
+
 class TestActiveChatIsolation:
     def test_handle_active_chat_ignores_other_project_request(self):
         fake_st = SimpleNamespace(
