@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Release:** 3.6.6
+**Release:** 3.6.7
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -282,7 +282,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   AGOUTIC System v3.3.2                     │
+│                   AGOUTIC System v3.6.7                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -931,7 +931,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.6.6 — rerun-heavy Streamlit polling paths now close short-lived API responses eagerly, auth helper calls use the same eager-close path, publication controls no longer leak threads or file descriptors on figure-heavy project pages, and projects with saved figures render chats and plots correctly on first visit
+- **Release**: 3.6.7 — completed Dogme workflows can now be imported from local or remote sources, `/cancel-sync` and resumable copy-back are available for imported remote workflows, and imported workflow cards now stay attached to live sync progress without restarting rsync
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

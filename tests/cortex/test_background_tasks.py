@@ -52,6 +52,7 @@ from cortex.job_polling import (
     poll_job_status,
     _auto_trigger_analysis,
     _completed_job_results_ready,
+    _prefer_richer_job_status,
     _resolved_job_work_directory,
 )
 from cortex.workflow_submission import submit_job_after_approval
@@ -2948,6 +2949,98 @@ class TestJobStatusProxyCache:
         assert payload["job_status"]["progress_percent"] == 17
         assert payload["job_status"]["tasks"]["completed_count"] == 32
         assert payload["job_status"]["last_poll_error"] == "Failed to poll scheduler: [Errno 111] Connection refused"
+        sess.close()
+
+    def test_prefer_richer_job_status_preserves_active_import_sync_on_incomplete_completed_snapshot(self):
+        previous_status = {
+            "status": "RUNNING",
+            "progress_percent": 99,
+            "message": "Copying results back to the local workflow...",
+            "result_destination": "local",
+            "transfer_state": "pending_import",
+            "imported_source_kind": "slurm",
+            "work_directory": "/local/workflow6",
+        }
+        incoming_status = {
+            "status": "COMPLETED",
+            "progress_percent": 100,
+            "message": "Job completed.",
+        }
+
+        merged = _prefer_richer_job_status(previous_status, incoming_status)
+
+        assert merged is not None
+        assert merged["status"] == "RUNNING"
+        assert merged["result_destination"] == "local"
+        assert merged["transfer_state"] == "pending_import"
+        assert merged["progress_percent"] >= 99
+
+    @pytest.mark.anyio
+    async def test_poll_job_status_keeps_import_sync_running_when_completed_snapshot_omits_transfer_fields(self, session_factory, seed_data):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "import-sync-gap-test",
+                "work_directory": "/local/workflow6",
+                "sample_name": "sample-import-gap",
+                "mode": "RNA",
+                "model": "default",
+                "job_status": {
+                    "status": "RUNNING",
+                    "progress_percent": 99,
+                    "message": "Copying results back to the local workflow...",
+                    "result_destination": "local",
+                    "transfer_state": "pending_import",
+                    "imported_source_kind": "slurm",
+                    "work_directory": "/local/workflow6",
+                },
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            {
+                "status": "COMPLETED",
+                "progress_percent": 100,
+                "message": "Job completed.",
+                "work_directory": "/local/workflow6",
+            },
+            {"logs": []},
+        ])
+        mock_auto = AsyncMock()
+
+        sleep_calls = {"count": 0}
+
+        async def _sleep_once_then_stop(_seconds):
+            sleep_calls["count"] += 1
+            if sleep_calls["count"] > 1:
+                raise RuntimeError("stop test loop")
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new=_sleep_once_then_stop), \
+             patch("cortex.job_polling._auto_trigger_analysis", mock_auto):
+            with pytest.raises(RuntimeError, match="stop test loop"):
+                await poll_job_status("proj-bg", job_block.id, "import-sync-gap-test")
+
+        sess = session_factory()
+        updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
+        payload = get_block_payload(updated)
+        assert updated.status == "RUNNING"
+        assert payload["job_status"]["status"] == "RUNNING"
+        assert payload["job_status"]["transfer_state"] == "pending_import"
+        assert payload["job_status"]["result_destination"] == "local"
+        assert mock_auto.await_count == 0
         sess.close()
 
     @pytest.mark.anyio

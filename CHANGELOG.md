@@ -16,6 +16,8 @@
 
 - **README, quick reference, tutorial, and UI docs now describe workflow import chat syntax, the new slash commands, and the project-aware page title**
 
+- **README version stamps and the root architecture banner now align with release 3.6.7**
+
 ### Bug Fixes
 
 - **Approval gates now default SLURM CPU memory to 64 GB while still allowing lower explicit overrides**
@@ -37,6 +39,8 @@
 - **Remote workflow import parsing now separates trailing SSH profile phrases like `on hpc3` from the actual source path before Launchpad validation**
 
 - **Imported and remote workflow result sync now starts asynchronously, avoids overlapping rsync copies for the same workflow, and supports clean cancellation of an active copy-back**
+
+- **Imported remote workflow cards now keep refreshing through `pending_import`, recover stale completed cards without restarting rsync, and no longer let incomplete completed snapshots stop copy-back polling early**
 
 - **Documentation and import-related user-facing messages now standardize the pipeline name capitalization as `Dogme`**
 

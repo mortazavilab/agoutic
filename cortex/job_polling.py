@@ -23,6 +23,7 @@ logger = get_logger(__name__)
 
 _TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
 _JOB_STATUS_CACHE_MAX_AGE_SECONDS = 5.0
+_ACTIVE_RESULT_SYNC_STATES = {"pending_import", "downloading_outputs"}
 _latest_job_status_by_run_uuid: dict[str, dict] = {}
 
 
@@ -60,6 +61,50 @@ def _is_transient_scheduler_poll_failure(status_data: dict | None) -> bool:
 def _prefer_richer_job_status(previous_status: dict | None, incoming_status: dict | None) -> dict | None:
     if not isinstance(incoming_status, dict):
         return None
+    if isinstance(previous_status, dict):
+        previous_transfer_state = str(previous_status.get("transfer_state") or "").strip().lower()
+        incoming_transfer_state = str(incoming_status.get("transfer_state") or "").strip().lower()
+        incoming_result_destination = str(incoming_status.get("result_destination") or "").strip().lower()
+        incoming_status_value = str(incoming_status.get("status") or "").upper()
+        if (
+            previous_transfer_state in _ACTIVE_RESULT_SYNC_STATES
+            and incoming_status_value == "COMPLETED"
+            and incoming_transfer_state not in {"outputs_downloaded", "transfer_failed", "sync_cancelled"}
+        ):
+            preserved = copy.deepcopy(incoming_status)
+            for key in (
+                "transfer_state",
+                "result_destination",
+                "transfer_detail",
+                "imported_source_kind",
+                "import_warning_message",
+                "work_directory",
+            ):
+                if preserved.get(key) in (None, "", [], {}):
+                    value = previous_status.get(key)
+                    if value not in (None, "", [], {}):
+                        preserved[key] = copy.deepcopy(value)
+
+            preserved_transfer_state = str(preserved.get("transfer_state") or "").strip().lower()
+            preserved_result_destination = str(preserved.get("result_destination") or "").strip().lower()
+            if (
+                preserved_transfer_state in _ACTIVE_RESULT_SYNC_STATES
+                and preserved_result_destination in {"local", "both"}
+            ):
+                previous_status_value = str(previous_status.get("status") or "").upper()
+                if previous_status_value in {"RUNNING", "PENDING", "QUEUED"}:
+                    preserved["status"] = previous_status_value
+                try:
+                    preserved["progress_percent"] = max(
+                        int(preserved.get("progress_percent", 0) or 0),
+                        int(previous_status.get("progress_percent", 0) or 0),
+                        95,
+                    )
+                except (TypeError, ValueError):
+                    preserved["progress_percent"] = previous_status.get("progress_percent", 95)
+                if not preserved.get("message"):
+                    preserved["message"] = previous_status.get("message")
+                return preserved
     if _is_transient_scheduler_poll_failure(incoming_status) and _job_status_has_useful_progress(previous_status):
         preserved = copy.deepcopy(previous_status)
         preserved["last_poll_error"] = incoming_status.get("message")

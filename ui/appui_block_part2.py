@@ -628,6 +628,13 @@ def render_block_part2(
             # Also check session state — the block payload may be stale but a
             # previous poll already saw the transfer become active.
             _cached_transfer = (st.session_state.get(f"_transfer_state_{run_uuid}") or "").strip().lower()
+            _active_result_sync_states = {"pending_import", "downloading_outputs"}
+            _terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled"}
+            _imported_source_kind_hint = str(
+                (content.get("job_status", {}) or {}).get("imported_source_kind")
+                or content.get("imported_source_kind")
+                or ""
+            ).strip().lower()
             run_type = str(content.get("run_type") or "").strip().lower()
             script_id = str(content.get("script_id") or "").strip()
             run_stage_hint = str(
@@ -639,8 +646,15 @@ def render_block_part2(
             is_script_job = run_type == "script" or bool(script_id) or run_stage_hint.startswith("SCRIPT_")
             _needs_live_poll = (
                 block_status_str == "RUNNING"
-                or _persisted_transfer in {"downloading_outputs"}
-                or _cached_transfer in {"downloading_outputs"}
+                or _persisted_transfer in _active_result_sync_states
+                or _cached_transfer in _active_result_sync_states
+                or (
+                    run_uuid
+                    and _imported_source_kind_hint == "slurm"
+                    and block_status_str in {"RUNNING", "DONE"}
+                    and _persisted_transfer not in _terminal_result_sync_states
+                    and _cached_transfer not in _terminal_result_sync_states
+                )
             )
             if run_uuid and _needs_live_poll:
                 if callable(get_cached_job_status):
@@ -778,7 +792,7 @@ def render_block_part2(
                     elif run_stage in run_stages:
                         execute_state = "running"
 
-                    if run_stage in {"syncing_results"} or transfer_state in {"downloading_outputs"}:
+                    if run_stage in {"syncing_results"} or transfer_state in _active_result_sync_states:
                         finalize_state = "running"
                     elif run_stage in {"completed"} or transfer_state in {"outputs_downloaded"}:
                         finalize_state = "complete"
@@ -811,7 +825,7 @@ def render_block_part2(
                     run_state = "active" if run_stage in {"queued", "running", "collecting_outputs"} else ("complete" if run_stage in {"syncing_results", "completed"} else ("failed" if run_stage in {"failed", "cancelled"} else "pending"))
                     if transfer_state in {"outputs_downloaded"}:
                         sync_state = "complete"
-                    elif transfer_state in {"downloading_outputs"} or run_stage == "syncing_results":
+                    elif transfer_state in _active_result_sync_states or run_stage == "syncing_results":
                         sync_state = "active"
                     elif transfer_state in {"transfer_failed", "sync_cancelled"}:
                         sync_state = "failed"

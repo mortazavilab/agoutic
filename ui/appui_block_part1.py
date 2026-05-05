@@ -270,6 +270,7 @@ def render_block_part1(
             if _sync_run_uuid:
                 _sync_detail = ""
                 _sync_message = ""
+                _active_result_sync_states = {"pending_import", "downloading_outputs"}
                 _sync_state = (
                     st.session_state.get(f"_transfer_state_{_sync_run_uuid}") or "downloading_outputs"
                 ).strip().lower()
@@ -278,7 +279,7 @@ def render_block_part1(
                     _sync_state = (_sj.get("transfer_state") or _sync_state).strip().lower()
                     _sync_detail = (_sj.get("transfer_detail") or "").strip()
                     _sync_message = (_sj.get("message") or "").strip()
-                if _sync_state == "downloading_outputs":
+                if _sync_state in _active_result_sync_states:
                     st.info(f"📥 **Sync in progress** — {_sync_detail or 'transferring files…'}", icon="⏳")
                 elif _sync_state == "outputs_downloaded":
                     st.success("✅ Results synced successfully.")

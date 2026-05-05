@@ -169,6 +169,8 @@ def _workflow_highlight_steps(workflow_block: dict) -> list[dict]:
 
 def _block_requires_full_refresh(block: dict) -> bool:
     """Return True when a block needs whole-page reruns, not just fragment refresh."""
+    active_result_sync_states = {"pending_import", "downloading_outputs"}
+    terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled"}
     if not isinstance(block, dict):
         return False
     btype = block.get("type")
@@ -180,17 +182,24 @@ def _block_requires_full_refresh(block: dict) -> bool:
         job_status = payload.get("job_status", {}) if isinstance(payload.get("job_status"), dict) else {}
         nested_status = str(job_status.get("status") or "").upper()
         transfer_state = str(job_status.get("transfer_state") or "").strip().lower()
+        imported_source_kind = str(payload.get("imported_source_kind") or job_status.get("imported_source_kind") or "").strip().lower()
+        needs_import_sync_recovery = (
+            imported_source_kind == "slurm"
+            and nested_status in {"COMPLETED", "RUNNING", "PENDING"}
+            and transfer_state not in terminal_result_sync_states
+        )
         return (
             bstatus == "RUNNING"
             or nested_status in {"RUNNING", "PENDING"}
-            or transfer_state in {"downloading_outputs"}
+            or transfer_state in active_result_sync_states
+            or needs_import_sync_recovery
         )
     if btype == "AGENT_PLAN":
         payload = block.get("payload", {}) if isinstance(block.get("payload"), dict) else {}
         run_uuid = payload.get("_sync_run_uuid", "")
         if run_uuid:
             cached = (st.session_state.get(f"_transfer_state_{run_uuid}") or "").strip().lower()
-            if cached in {"downloading_outputs"}:
+            if cached in active_result_sync_states:
                 return True
     return False
 

@@ -1723,6 +1723,27 @@ class TestBlockRequiresFullRefresh:
         assert fn({"type": "STAGING_TASK", "status": "RUNNING"}) is False
         assert fn({"type": "EXECUTION_JOB", "status": "DONE"}) is False
 
+    def test_import_pending_sync_still_requires_full_refresh(self):
+        fn = _load_function("_block_requires_full_refresh")
+
+        assert fn({
+            "type": "EXECUTION_JOB",
+            "status": "DONE",
+            "payload": {"job_status": {"status": "COMPLETED", "transfer_state": "pending_import"}},
+        }) is True
+
+    def test_stale_completed_import_without_transfer_state_still_requires_full_refresh(self):
+        fn = _load_function("_block_requires_full_refresh")
+
+        assert fn({
+            "type": "EXECUTION_JOB",
+            "status": "DONE",
+            "payload": {
+                "imported_source_kind": "slurm",
+                "job_status": {"status": "COMPLETED"},
+            },
+        }) is True
+
 
 class TestCachedJobStatus:
     def test_fetches_status_and_updates_session_cache(self):

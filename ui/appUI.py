@@ -696,6 +696,8 @@ def _render_chat():
         _has_full_refresh_job = False
         _has_pending_submission = False
         _has_finished_job = False
+        _active_result_sync_states = {"pending_import", "downloading_outputs"}
+        _terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled"}
         for blk in blocks:
             btype = blk.get("type")
             bstatus = blk.get("status")
@@ -711,9 +713,16 @@ def _render_chat():
                 _blk_payload = blk.get("payload", {}) if isinstance(blk.get("payload"), dict) else {}
                 _blk_js = _blk_payload.get("job_status", {}) if isinstance(_blk_payload.get("job_status"), dict) else {}
                 _blk_run_uuid = _blk_payload.get("run_uuid", "")
+                _blk_imported_source_kind = str(_blk_payload.get("imported_source_kind") or _blk_js.get("imported_source_kind") or "").strip().lower()
                 _blk_ts = (_blk_js.get("transfer_state") or "").strip().lower()
                 _cached_ts = (st.session_state.get(f"_transfer_state_{_blk_run_uuid}") or "").strip().lower() if _blk_run_uuid else ""
-                if _blk_ts in {"downloading_outputs"} or _cached_ts in {"downloading_outputs"}:
+                if _blk_ts in _active_result_sync_states or _cached_ts in _active_result_sync_states:
+                    _has_running_job = True
+                elif (
+                    _blk_imported_source_kind == "slurm"
+                    and _blk_ts not in _terminal_result_sync_states
+                    and _cached_ts not in _terminal_result_sync_states
+                ):
                     _has_running_job = True
             if btype == "STAGING_TASK" and bstatus == "RUNNING":
                 _has_running_job = True
