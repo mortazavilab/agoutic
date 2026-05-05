@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from common.logging_config import get_logger
+from cortex.config import GENOME_ALIASES
 
 if TYPE_CHECKING:
     from cortex.schemas import ConversationState
@@ -517,6 +518,14 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
                 pass
 
     if plan_type == "reconcile_bams":
+        mentioned_references: list[str] = []
+        for match in re.findall(r"\b(GRCh38|mm39|hg38|mm10|human|mouse)\b", message, re.I):
+            canonical = GENOME_ALIASES.get(match.strip().lower())
+            if canonical and canonical not in mentioned_references:
+                mentioned_references.append(canonical)
+        if len(mentioned_references) == 1:
+            params["reference"] = mentioned_references[0]
+
         m = re.search(r"(?:output\s+(?:prefix|name)|prefix)\s*[=:]?\s*([a-zA-Z0-9._-]+)", message, re.I)
         if m:
             params["output_prefix"] = m.group(1)

@@ -146,6 +146,18 @@ def test_reconcile_bams_template_orders_preflight_before_approval_and_run():
     assert "--json" in run_step["tool_calls"][0]["params"]["script_args"]
 
 
+def test_reconcile_bams_template_passes_requested_reference_to_preflight_and_run():
+    plan = _template_reconcile_bams(
+        {"work_dir": "/tmp/project", "output_prefix": "merged", "reference": "mm39"}
+    )
+
+    preflight_args = plan["steps"][1]["tool_calls"][0]["params"]["script_args"]
+    run_args = plan["steps"][3]["tool_calls"][0]["params"]["script_args"]
+
+    assert preflight_args[:6] == ["--json", "--preflight-only", "--output-prefix", "merged", "--reference", "mm39"]
+    assert run_args[:5] == ["--json", "--output-prefix", "merged", "--reference", "mm39"]
+
+
 def test_reconcile_bams_template_locate_step_uses_workflow_annot_dirs():
     plan = _template_reconcile_bams(
         {
@@ -410,6 +422,16 @@ def test_extract_plan_params_reconcile_annotation_gtf():
     )
 
     assert params["annotation_gtf"] == "/tmp/manual.GRCh38.annotation.gtf"
+
+
+def test_extract_plan_params_reconcile_requested_reference():
+    params = _extract_plan_params(
+        "Reconcile annotated BAMs for mm39 across workflow2 and workflow3",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+    )
+
+    assert params["reference"] == "mm39"
 
 
 def test_extract_plan_params_grouped_de_from_active_workflow():

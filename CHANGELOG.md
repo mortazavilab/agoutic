@@ -12,6 +12,8 @@
 
 - **The main Streamlit browser tab title now shows the active project name alongside the AGOUTIC version**
 
+- **Reconcile BAM requests can now target one specified genome directly, or automatically split mixed-reference inputs into separate per-genome workflows when no genome is specified**
+
 ### Documentation
 
 - **README, quick reference, tutorial, and UI docs now describe workflow import chat syntax, the new slash commands, and the project-aware page title**
@@ -43,6 +45,8 @@
 - **Imported remote workflow cards now keep refreshing through `pending_import`, recover stale completed cards without restarting rsync, and no longer let incomplete completed snapshots stop copy-back polling early**
 
 - **Documentation and import-related user-facing messages now standardize the pipeline name capitalization as `Dogme`**
+
+- **Reconcile preflight now always prefers the configured local reference GTF over workflow or manual remote-style paths, and it fails clearly instead of using an external reference path when the matching local genome is not installed**
 
 ## [3.6.6] - 2026-04-22
 

@@ -887,6 +887,7 @@ def _template_reconcile_bams(params: dict) -> dict:
     output_prefix = params.get("output_prefix", "reconciled")
     output_directory = params.get("output_directory", "")
     annotation_gtf = params.get("annotation_gtf", "")
+    reference = str(params.get("reference") or "").strip()
     work_dir = params.get("work_dir", "")
     workflow_dirs = [str(item) for item in params.get("workflow_dirs", []) if isinstance(item, str) and item]
     if not output_directory:
@@ -938,6 +939,8 @@ def _template_reconcile_bams(params: dict) -> dict:
     idx += 1
 
     preflight_args = ["--json", "--preflight-only", "--output-prefix", output_prefix]
+    if reference:
+        preflight_args.extend(["--reference", reference])
     if workflow_dirs:
         for workflow_dir in workflow_dirs:
             preflight_args.extend(["--workflow-dir", workflow_dir])
@@ -978,6 +981,8 @@ def _template_reconcile_bams(params: dict) -> dict:
     idx += 1
 
     script_args = ["--json", "--output-prefix", output_prefix]
+    if reference:
+        script_args.extend(["--reference", reference])
     if workflow_dirs:
         for workflow_dir in workflow_dirs:
             script_args.extend(["--workflow-dir", workflow_dir])
@@ -1057,6 +1062,7 @@ def _template_reconcile_bams(params: dict) -> dict:
         "auto_execute_safe_steps": True,
         "status": "PENDING",
         "current_step_id": steps[0]["id"],
+        "reference": reference,
         "output_prefix": output_prefix,
         "output_directory": output_directory,
         "annotation_gtf": annotation_gtf,

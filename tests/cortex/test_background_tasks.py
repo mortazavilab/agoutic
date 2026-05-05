@@ -2550,6 +2550,141 @@ async def test_ensure_workflow_plan_approval_gate_builds_reconcile_specific_payl
     sess.close()
 
 
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_uses_current_split_reconcile_group(session_factory, seed_data):
+    human_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "GRCh38",
+        "gtf": {"path": "/refs/GRCh38.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "A", "reference": "GRCh38", "path": "/proj/workflow2/annot/A.GRCh38.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled", "output_root": "/proj", "artifacts": []},
+    }
+    mouse_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "mm39",
+        "gtf": {"path": "/refs/mm39.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "B", "reference": "mm39", "path": "/proj/workflow3/annot/B.mm39.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled", "output_root": "/proj", "artifacts": []},
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "skill": "reconcile_bams",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_mm39",
+            "output_prefix": "reconciled",
+            "output_directory": "/proj",
+            "steps": [
+                {
+                    "id": "preflight_reconcile",
+                    "kind": "CHECK_EXISTING",
+                    "title": "Validate reconcile inputs",
+                    "status": "COMPLETED",
+                    "result": [
+                        {
+                            "tool": "run_allowlisted_script",
+                            "result": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "stdout": json.dumps({
+                                    "success": True,
+                                    "status": "split_by_reference",
+                                    "reference_groups": [human_preflight, mouse_preflight],
+                                }),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "id": "approve_grch38",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for GRCh38",
+                    "status": "COMPLETED",
+                    "requires_approval": True,
+                    "depends_on": ["preflight_reconcile"],
+                    "preflight_summary": human_preflight,
+                },
+                {
+                    "id": "run_grch38",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for GRCh38 using symlinked workflow inputs",
+                    "status": "COMPLETED",
+                    "depends_on": ["approve_grch38"],
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "GRCh38", "--output-prefix", "reconciled"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": human_preflight,
+                },
+                {
+                    "id": "approve_mm39",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for mm39",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "depends_on": ["run_grch38"],
+                    "preflight_summary": mouse_preflight,
+                },
+                {
+                    "id": "run_mm39",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mm39 using symlinked workflow inputs",
+                    "status": "PENDING",
+                    "depends_on": ["approve_mm39"],
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "mm39", "--output-prefix", "reconciled"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": mouse_preflight,
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["extracted_params"]["reference"] == "mm39"
+    assert gate_payload["extracted_params"]["annotation_gtf"] == "/refs/mm39.gtf"
+    assert gate_payload["extracted_params"]["bam_count"] == 1
+    sess.close()
+
+
 # ---------------------------------------------------------------------------
 # poll_job_status
 # ---------------------------------------------------------------------------

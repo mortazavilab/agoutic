@@ -464,6 +464,23 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
     if payload.get("plan_type") != "reconcile_bams":
         return None
 
+    current_step_id = payload.get("current_step_id")
+    current_approval_step = next(
+        (
+            step for step in payload.get("steps", [])
+            if step.get("id") == current_step_id and step.get("kind") == "REQUEST_APPROVAL"
+        ),
+        None,
+    )
+    if not isinstance(current_approval_step, dict):
+        current_approval_step = next(
+            (
+                step for step in payload.get("steps", [])
+                if step.get("kind") == "REQUEST_APPROVAL" and step.get("status") in {"WAITING_APPROVAL", "PENDING"}
+            ),
+            None,
+        )
+
     preflight_step = next(
         (
             step for step in payload.get("steps", [])
@@ -472,13 +489,26 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
         None,
     )
     run_step = next(
-        (step for step in payload.get("steps", []) if step.get("kind") == "RUN_SCRIPT"),
+        (
+            step for step in payload.get("steps", [])
+            if step.get("kind") == "RUN_SCRIPT"
+            and (
+                not isinstance(current_approval_step, dict)
+                or current_approval_step.get("id") in (step.get("depends_on") or [])
+            )
+        ),
         None,
     )
     if not isinstance(run_step, dict):
         return None
 
-    preflight_payload = _extract_reconcile_preflight_payload(preflight_step.get("result")) if isinstance(preflight_step, dict) else None
+    if isinstance(current_approval_step, dict) and isinstance(current_approval_step.get("preflight_summary"), dict):
+        preflight_payload = current_approval_step.get("preflight_summary")
+    elif isinstance(run_step.get("preflight_summary"), dict):
+        preflight_payload = run_step.get("preflight_summary")
+    else:
+        preflight_payload = _extract_reconcile_preflight_payload(preflight_step.get("result")) if isinstance(preflight_step, dict) else None
+
     tool_call = next(
         (
             call for call in (run_step.get("tool_calls") or [])
