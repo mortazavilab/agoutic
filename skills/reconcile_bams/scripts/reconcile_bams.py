@@ -106,6 +106,8 @@ def _canonical_reference(reference_token: str) -> str:
         return "GRCh38"
     if lowered in {"mm39", "mm10", "mouse"}:
         return "mm39"
+    if lowered == "mad1":
+        return "mad1"
     return reference_token
 
 
@@ -697,7 +699,7 @@ def main() -> int:
     parser.add_argument("--input-bam", action="append", default=[], help="Annotated BAM input path (repeatable).")
     parser.add_argument("--output-prefix", default="reconciled", help="Output prefix for generated artifacts.")
     parser.add_argument("--output-dir", default=".", help="Parent directory where reconcile workflow directory is created.")
-    parser.add_argument("--reference", help="Only reconcile BAMs for this reference genome (for example GRCh38 or mm39).")
+    parser.add_argument("--reference", help="Only reconcile BAMs for this reference genome (for example GRCh38, mm39, or mad1).")
     parser.add_argument("--annotation-gtf", help="Manual annotation GTF path. Only required when default resolution fails.")
     parser.add_argument("--gene-prefix", "--gene_prefix", dest="gene_prefix", default="CONSG", help="Consolidated novel gene ID prefix.")
     parser.add_argument("--tx-prefix", "--tx_prefix", dest="tx_prefix", default="CONST", help="Consolidated novel transcript ID prefix.")

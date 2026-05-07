@@ -251,6 +251,17 @@ class TestBuildConvStateSlowPath:
         assert params.get("sample_type") == "DNA"
         assert params.get("reference_genome") == "GRCh38"
 
+    def test_collected_params_accepts_mad1_reference(self):
+        history = _history([
+            ("user", "I want to analyze a DNA sample called MySample at path /data/pod5"),
+            ("assistant", "OK, what reference genome?"),
+            ("user", "mad1"),
+        ])
+        state = _build_conversation_state("analyze_local_sample", history)
+        params = state.collected_params
+        assert params.get("sample_type") == "DNA"
+        assert params.get("reference_genome") == "mad1"
+
     def test_multiple_dataframes_tracked(self):
         blocks = [
             _make_block("AGENT_PLAN", {

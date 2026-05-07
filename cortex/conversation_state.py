@@ -97,7 +97,7 @@ def _build_conversation_state(
                         _sample_re2 = re.compile(r'(?:called?|named?|sample[_ ]?name)\s+["\']?(\w+)', re.I)
                         _path_re2 = re.compile(r'(?:path|directory|folder)\s*[:=]?\s*(/\S+)', re.I)
                         _type_re2 = re.compile(r'\b(cdna|c-dna|cDNA|rna|dna)\b', re.I)
-                        _genome_re2 = re.compile(r'\b(GRCh38|mm39|hg38|mm10)\b', re.I)
+                        _genome_re2 = re.compile(r'\b(GRCh38|mm39|mad1|hg38|mm10)\b', re.I)
                         _fresh_params: dict[str, str] = {}
                         for _msg in reversed(conversation_history):
                             if _msg.get("role") != "user":
@@ -236,7 +236,7 @@ def _build_conversation_state(
         _sample_re = re.compile(r'(?:called?|named?|sample[_ ]?name)\s+["\']?(\w+)', re.I)
         _path_re = re.compile(r'(?:path|directory|folder)\s*[:=]?\s*(/\S+)', re.I)
         _type_re = re.compile(r'\b(cdna|c-dna|cDNA|rna|dna)\b', re.I)
-        _genome_re = re.compile(r'\b(GRCh38|mm39|hg38|mm10)\b', re.I)
+        _genome_re = re.compile(r'\b(GRCh38|mm39|mad1|hg38|mm10)\b', re.I)
         for msg in reversed(conversation_history):
             if msg.get("role") != "user":
                 continue

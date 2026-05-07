@@ -308,7 +308,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         params["input_type"] = "fastq"
 
     # Detect genome from keywords - support multiple genomes
-    genome_keywords = ["human", "mouse", "hg38", "mm39", "mm10", "grch38"]
+    genome_keywords = list(GENOME_ALIASES.keys())
     found_genomes = set()
 
     # Find all genome mentions
@@ -404,7 +404,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         r'analyze\s+(?:the\s+)?(?:sample\s+)?([a-zA-Z0-9_-]+)\s+on',  # "analyze Jamshid on hpc3"
     ]
     _skip_words = {"is", "the", "a", "an", "this", "that", "it", "at", "in", "on",
-                   "mm39", "grch38", "hg38", "mm10", "name", "type", "data", "file",
+                   "mm39", "grch38", "hg38", "mm10", "mad1", "name", "type", "data", "file",
                    "using", "with", "from", "for", "my", "new", "rna", "dna", "cdna"}
     for msg in reversed(user_messages):
         for pattern in explicit_patterns:
@@ -428,14 +428,21 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
                 if name_match:
                     potential_name = name_match.group(1)
                     # Not a path, not a common word, not a genome name
-                    if (potential_name.lower() not in ["dna", "rna", "cdna", "mm39", "grch38", "hg38", "mm10", "human", "mouse", "yes", "no", "sup", "hac", "fast"]
+                    if (potential_name.lower() not in ["dna", "rna", "cdna", "mm39", "grch38", "hg38", "mm10", "mad1", "human", "mouse", "yes", "no", "sup", "hac", "fast"]
                         and "/" not in potential_name):
                         params["sample_name"] = potential_name
                         break
 
     if not params["sample_name"]:
         # Use genome type + project timestamp as default
-        genome_type = "mouse" if "mm39" in params["reference_genome"] else "human"
+        if "mm39" in params["reference_genome"]:
+            genome_type = "mouse"
+        elif "GRCh38" in params["reference_genome"]:
+            genome_type = "human"
+        elif params["reference_genome"]:
+            genome_type = str(params["reference_genome"][0]).lower()
+        else:
+            genome_type = "sample"
         params["sample_name"] = f"{genome_type}_sample_{project_id.split('_')[-1]}"
 
     # Extract advanced parameters if mentioned

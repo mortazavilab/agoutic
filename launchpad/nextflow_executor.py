@@ -81,6 +81,46 @@ def resolve_local_max_task_memory_gb(max_task_memory_gb: int | None) -> int:
     return max(1, requested_memory_gb)
 
 
+def _resolve_reference_entry(reference_id: str) -> tuple[str, dict[str, object], bool]:
+    requested = str(reference_id or "").strip()
+    entry = REFERENCE_GENOMES.get(requested)
+    if isinstance(entry, dict):
+        return requested, entry, True
+
+    lower_map = {
+        key.lower(): key
+        for key, value in REFERENCE_GENOMES.items()
+        if isinstance(value, dict)
+    }
+    mapped_key = lower_map.get(requested.lower())
+    if mapped_key:
+        mapped_entry = REFERENCE_GENOMES.get(mapped_key)
+        if isinstance(mapped_entry, dict):
+            return mapped_key, mapped_entry, True
+
+    fallback = REFERENCE_GENOMES.get("mm39", {})
+    return requested, fallback if isinstance(fallback, dict) else {}, False
+
+
+def _resolve_reference_override(
+    reference_id: str,
+    reference_overrides: Optional[dict[str, dict[str, str]]],
+) -> dict[str, str]:
+    if not reference_overrides:
+        return {}
+
+    requested = str(reference_id or "").strip()
+    override = reference_overrides.get(requested)
+    if override:
+        return override
+
+    resolved_key, _, known_reference = _resolve_reference_entry(requested)
+    if known_reference and resolved_key != requested:
+        return reference_overrides.get(resolved_key, {})
+
+    return {}
+
+
 def _ensure_trailing_newline(content: str) -> str:
     if content.endswith("\n"):
         return content
@@ -392,7 +432,7 @@ class NextflowConfig:
             sample_name: Name of the sample
             mode: Dogme mode (DNA, RNA, or CDNA)
             input_dir: Path to pod5 input directory (not used in config generation)
-            reference_genome: List of genome versions (["GRCh38"], ["mm39"], or ["GRCh38", "mm39"])
+            reference_genome: List of genome versions (["GRCh38"], ["mm39"], ["mad1"], or mixed lists)
             modifications: Modification motifs to call (uses defaults if None)
         
         Returns:
@@ -405,8 +445,8 @@ class NextflowConfig:
         # Build genome_annot_refs list for all specified genomes
         genome_refs_lines = []
         for genome_name in reference_genome:
-            genome_config = REFERENCE_GENOMES.get(genome_name, REFERENCE_GENOMES["mm39"])
-            override = (reference_overrides or {}).get(genome_name, {})
+            resolved_name, genome_config, known_reference = _resolve_reference_entry(genome_name)
+            override = _resolve_reference_override(genome_name, reference_overrides)
             fasta = override.get("fasta") or genome_config.get("fasta", "/home/seyedam/genRefs/IGVFFI9282QLXO.fasta")
             gtf = override.get("gtf") or genome_config.get("gtf", "/home/seyedam/genRefs/IGVFFI4777RDZK.gtf")
             logger.debug(
@@ -415,12 +455,14 @@ class NextflowConfig:
                 using_fasta=fasta,
                 using_gtf=gtf,
             )
-            genome_refs_lines.append(f"        [name: '{genome_name}', genome: '{fasta}', annot: '{gtf}']")
+            display_name = resolved_name if known_reference else genome_name
+            genome_refs_lines.append(f"        [name: '{display_name}', genome: '{fasta}', annot: '{gtf}']")
         
         # Use first genome for kallisto index (TODO: support per-genome kallisto)
-        primary_genome = reference_genome[0]
-        primary_config = REFERENCE_GENOMES.get(primary_genome, REFERENCE_GENOMES["mm39"])
-        primary_override = (reference_overrides or {}).get(primary_genome, {})
+        primary_requested_genome = reference_genome[0]
+        primary_genome, primary_config, primary_known_reference = _resolve_reference_entry(primary_requested_genome)
+        primary_override = _resolve_reference_override(primary_requested_genome, reference_overrides)
+        primary_label = primary_genome if primary_known_reference else str(primary_requested_genome or "").strip() or "default"
         
         # Determine modifications based on mode
         if modifications:
@@ -524,11 +566,16 @@ class NextflowConfig:
         config_lines.append("    ]")
         config_lines.append("")
         # Use primary genome for kallisto
-        kallisto_index = primary_override.get("kallisto_index") or primary_config.get("kallisto_index", "/home/seyedam/genRefs/mm39GencM36_k63.idx")
-        kallisto_t2g = primary_override.get("kallisto_t2g") or primary_config.get("kallisto_t2g", "/home/seyedam/genRefs/mm39GencM36_k63.t2g")
-        config_lines.append(f"    kallistoIndex = '{kallisto_index}'")
-        config_lines.append(f"    t2g = '{kallisto_t2g}'")
-        config_lines.append("")
+        kallisto_index = primary_override.get("kallisto_index") or primary_config.get("kallisto_index")
+        kallisto_t2g = primary_override.get("kallisto_t2g") or primary_config.get("kallisto_t2g")
+        if bool(kallisto_index) != bool(kallisto_t2g):
+            raise ValueError(
+                f"Reference genome '{primary_label}' must define both kallisto_index and kallisto_t2g together."
+            )
+        if kallisto_index and kallisto_t2g:
+            config_lines.append(f"    kallistoIndex = '{kallisto_index}'")
+            config_lines.append(f"    t2g = '{kallisto_t2g}'")
+            config_lines.append("")
         config_lines.append("    //default accuracy is sup")
         config_lines.append(f"    accuracy = \"{accuracy}\"")
         config_lines.append("    // change this value if 0.9 is too strict")
@@ -918,7 +965,7 @@ class NextflowExecutor:
             if not reference_genome:
                 raise RuntimeError(
                     "reference_genome is required for modkit entry point. "
-                    "Please specify the genome the BAM was mapped to (e.g., GRCh38, mm39)."
+                    "Please specify the genome the BAM was mapped to (e.g., GRCh38, mm39, mad1)."
                 )
             bams_dir = work_dir / "bams"
             bams_dir.mkdir(parents=True, exist_ok=True)
@@ -944,7 +991,7 @@ class NextflowExecutor:
             if not reference_genome:
                 raise RuntimeError(
                     "reference_genome is required for annotateRNA entry point. "
-                    "Please specify the genome the BAM was mapped to (e.g., GRCh38, mm39)."
+                    "Please specify the genome the BAM was mapped to (e.g., GRCh38, mm39, mad1)."
                 )
             bams_dir = work_dir / "bams"
             bams_dir.mkdir(parents=True, exist_ok=True)

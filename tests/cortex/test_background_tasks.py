@@ -28,6 +28,7 @@ from sqlalchemy.pool import StaticPool
 
 from common.database import Base
 import cortex.job_polling as job_polling_module
+import cortex.workflow_submission as workflow_submission_module
 from cortex.models import (
     User, Session as SessionModel, Project, ProjectAccess,
     ProjectBlock,
@@ -921,7 +922,7 @@ class TestSubmitJobAfterApproval:
 
         with _patch_session(session_factory), \
              patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client) as mock_client_cls, \
              patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
@@ -945,7 +946,12 @@ class TestSubmitJobAfterApproval:
             "/refs/GRCh38.annotation.gtf",
         ]
         assert submitted["script_args"].count("--input-bam") == 2
+        assert submitted["timeout_seconds"] == workflow_submission_module.RECONCILE_SCRIPT_TIMEOUT_SECONDS
         assert "--filter_known" in submitted["script_args"]
+        assert mock_client_cls.call_args.kwargs["timeout"] == (
+            workflow_submission_module.RECONCILE_SCRIPT_TIMEOUT_SECONDS
+            + workflow_submission_module.SCRIPT_SUBMISSION_TIMEOUT_BUFFER_SECONDS
+        )
         job_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
         assert any(get_block_payload(block).get("run_type") == "script" for block in job_blocks)
         sess.close()
@@ -1015,7 +1021,7 @@ class TestSubmitJobAfterApproval:
 
         with _patch_session(session_factory), \
              patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client) as mock_client_cls, \
              patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
@@ -1027,7 +1033,9 @@ class TestSubmitJobAfterApproval:
         assert run_step["status"] == "RUNNING"
         assert run_step["run_uuid"] == "script-run-overlap-1"
         assert mock_client.call_tool.call_args.args[0] == "run_allowlisted_script"
+        assert "timeout_seconds" not in mock_client.call_tool.call_args.kwargs
         assert "script_working_directory" not in mock_client.call_tool.call_args.kwargs
+        assert mock_client_cls.call_args.kwargs["timeout"] == 900.0
         job_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").order_by(ProjectBlock.seq.desc()).first()
         job_payload = get_block_payload(job_block)
         assert job_payload["work_directory"] == "/proj/current/workflow7"

@@ -38,8 +38,33 @@ import cortex.job_parameters as job_parameters
 import cortex.job_polling as job_polling
 
 REMOTE_STAGE_MCP_TIMEOUT = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
+RECONCILE_SCRIPT_TIMEOUT_SECONDS = float(os.getenv("LAUNCHPAD_RECONCILE_TIMEOUT", "7200"))
+SCRIPT_SUBMISSION_TIMEOUT_BUFFER_SECONDS = 30.0
 
 logger = get_logger(__name__)
+
+
+def _is_reconcile_script_submission(job_data: dict) -> bool:
+    script_id = str(job_data.get("script_id") or "").strip()
+    if script_id in {"reconcile_bams/reconcile_bams", "reconcile_bams/reconcileBams"}:
+        return True
+    script_path = str(job_data.get("script_path") or "").strip()
+    return Path(script_path).name in {"reconcile_bams.py", "reconcileBams.py"}
+
+
+def _submission_client_timeout_seconds(run_type: str, submission_payload: dict) -> float:
+    if run_type != "script":
+        return 900.0
+    raw_timeout = submission_payload.get("timeout_seconds")
+    if raw_timeout in (None, ""):
+        return 900.0
+    try:
+        timeout_seconds = float(raw_timeout)
+    except (TypeError, ValueError):
+        return 900.0
+    if timeout_seconds <= 0:
+        return 900.0
+    return max(900.0, timeout_seconds + SCRIPT_SUBMISSION_TIMEOUT_BUFFER_SECONDS)
 
 
 def _bounded_reconcile_threads(raw_value: int | None = None) -> int:
@@ -506,6 +531,8 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         if run_type == "script":
             submission_tool = "run_allowlisted_script"
             submission_payload = _build_script_submission_payload(job_data)
+            if _is_reconcile_script_submission(job_data):
+                submission_payload["timeout_seconds"] = RECONCILE_SCRIPT_TIMEOUT_SECONDS
         else:
             submission_tool = "submit_dogme_job"
             submission_payload = dict(job_data)
@@ -718,7 +745,11 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         # Submit job to Launchpad via MCP (single call - Nextflow handles multi-genome)
         try:
             launchpad_url = get_service_url("launchpad")
-            client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=900.0)
+            client = MCPHttpClient(
+                name="launchpad",
+                base_url=launchpad_url,
+                timeout=_submission_client_timeout_seconds(run_type, submission_payload),
+            )
             await client.connect()
             try:
                 result = await client.call_tool(submission_tool, **submission_payload)

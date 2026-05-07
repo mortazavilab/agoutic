@@ -434,6 +434,16 @@ def test_extract_plan_params_reconcile_requested_reference():
     assert params["reference"] == "mm39"
 
 
+def test_extract_plan_params_reconcile_requested_mad1_reference():
+    params = _extract_plan_params(
+        "Reconcile annotated BAMs for mad1 across workflow2 and workflow3",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+    )
+
+    assert params["reference"] == "mad1"
+
+
 def test_extract_plan_params_grouped_de_from_active_workflow():
     params = _extract_plan_params(
         "compare the AD samples exc and jbh to the control samples gko and lwf",

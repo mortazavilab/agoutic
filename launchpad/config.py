@@ -129,6 +129,10 @@ REFERENCE_GENOMES = {
         "kallisto_index": AGOUTIC_DATA / "references" / "mm39" / "mm39GencM36_k63.idx",
         "kallisto_t2g": AGOUTIC_DATA / "references" / "mm39" / "mm39GencM36_k63.t2g",
     },
+    "mad1": {
+        "fasta": AGOUTIC_DATA / "references" / "mad1" / "MAD1.fa",
+        "gtf": AGOUTIC_DATA / "references" / "mad1" / "MAD1.gtf",
+    },
     "default": "GRCh38",
 }
 

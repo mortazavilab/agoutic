@@ -162,10 +162,11 @@ GENOME_ALIASES = {
     "mouse": "mm39",
     "mm10": "mm39",
     "mm39": "mm39",
+    "mad1": "mad1",
 }
 
 # Available reference genomes (for UI display)
-AVAILABLE_GENOMES = ["GRCh38", "mm39"]
+AVAILABLE_GENOMES = ["GRCh38", "mm39", "mad1"]
 
 # --- SKILL REGISTRY ---
 # Authoritative manifests live in skills/<skill_key>/manifest.yaml and are loaded

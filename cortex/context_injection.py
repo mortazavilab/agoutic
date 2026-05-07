@@ -233,7 +233,7 @@ def _inject_job_context(user_message: str, active_skill: str,
                 r'(DNA|RNA|CDNA|cDNA|Fiber-seq|Fiberseq)', re.IGNORECASE),
             "reference_genome": re.compile(
                 r'(?:reference\s*genome|genome)[:\s*]+'
-                r'(GRCh38|mm39|mm10|hg38|T2T-CHM13)', re.IGNORECASE),
+                r'(GRCh38|mm39|mad1|mm10|hg38|T2T-CHM13)', re.IGNORECASE),
         }
 
         # First pass: extract from the original user request and any assistant
@@ -304,13 +304,13 @@ def _inject_job_context(user_message: str, active_skill: str,
                 if msg.get("role") != "user":
                     continue
                 _genome_m = re.match(
-                    r'^\s*(GRCh38|mm39|mm10|hg38)\s*$', msg["content"], re.IGNORECASE)
+                    r'^\s*(GRCh38|mm39|mad1|mm10|hg38)\s*$', msg["content"], re.IGNORECASE)
                 if _genome_m:
                     _collected["reference_genome"] = _genome_m.group(1).strip()
 
         # Also check current message for a genome answer
         _cur_genome_m = re.match(
-            r'^\s*(GRCh38|mm39|mm10|hg38)\s*$', user_message, re.IGNORECASE)
+            r'^\s*(GRCh38|mm39|mad1|mm10|hg38)\s*$', user_message, re.IGNORECASE)
         if _cur_genome_m:
             _collected["reference_genome"] = _cur_genome_m.group(1).strip()
 

@@ -90,6 +90,34 @@ class TestGenerateConfig:
         assert f"kallistoIndex = '{REFERENCE_GENOMES['mm39']['kallisto_index']}'" in config
         assert f"t2g = '{REFERENCE_GENOMES['mm39']['kallisto_t2g']}'" in config
 
+    def test_mad1_dna_config_omits_kallisto_when_sidecars_are_not_configured(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-mad1",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mad1"],
+        )
+
+        assert "[name: 'mad1'" in config
+        assert f"genome: '{REFERENCE_GENOMES['mad1']['fasta']}'" in config
+        assert f"annot: '{REFERENCE_GENOMES['mad1']['gtf']}'" in config
+        assert "kallistoIndex =" not in config
+        assert "t2g =" not in config
+
+    def test_mad1_rna_config_omits_kallisto_when_sidecars_are_not_configured(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-mad1-rna",
+            mode="RNA",
+            input_dir="/tmp/input",
+            reference_genome=["mad1"],
+        )
+
+        assert "[name: 'mad1'" in config
+        assert f"genome: '{REFERENCE_GENOMES['mad1']['fasta']}'" in config
+        assert f"annot: '{REFERENCE_GENOMES['mad1']['gtf']}'" in config
+        assert "kallistoIndex =" not in config
+        assert "t2g =" not in config
+
     def test_explicit_modifications_override_mode_defaults(self):
         config = NextflowConfig.generate_config(
             sample_name="sample-c",

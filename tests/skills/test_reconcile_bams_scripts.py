@@ -113,6 +113,21 @@ def test_reference_helper_detects_reference_from_realistic_nextflow_config_token
     assert payload["workflows"][1]["resolution_source"] == "config_token_fallback"
 
 
+def test_reference_helper_detects_mad1_reference(tmp_path: Path):
+    wf1 = tmp_path / "workflow1"
+    wf2 = tmp_path / "workflow2"
+    wf1.mkdir()
+    wf2.mkdir()
+    (wf1 / "nextflow.config").write_text("params.reference_genome = 'mad1'\n", encoding="utf-8")
+    (wf2 / "nextflow.config").write_text("params.reference = 'mad1'\n", encoding="utf-8")
+
+    result = _run_script(HELPER, ["--workflow-dir", str(wf1), "--workflow-dir", str(wf2), "--json"])
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["consensus_reference"] == "mad1"
+
+
 def test_reference_helper_falls_back_to_annotated_bam_names_when_configs_missing(tmp_path: Path):
     wf1 = tmp_path / "workflow1"
     wf2 = tmp_path / "workflow2"

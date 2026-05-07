@@ -24,6 +24,7 @@ REFERENCE_ALIASES = {
     "mm39": "mm39",
     "mm10": "mm39",
     "mouse": "mm39",
+    "mad1": "mad1",
 }
 
 REFERENCE_KEYS = {
@@ -42,7 +43,7 @@ ASSIGNMENT_PATTERNS = [
 ]
 
 INCLUDE_PATTERN = re.compile(r"includeConfig\s+['\"](?P<path>[^'\"]+)['\"]")
-TOKEN_PATTERN = re.compile(r"\b(GRCh38|hg38|grch38|mm39|mm10|human|mouse)\b", re.IGNORECASE)
+TOKEN_PATTERN = re.compile(r"\b(GRCh38|hg38|grch38|mm39|mm10|human|mouse|mad1)\b", re.IGNORECASE)
 ANNOTATED_BAM_PATTERN = re.compile(r"^(?P<sample>.+)\.(?P<reference>[^.]+)\.annotated\.bam$")
 
 

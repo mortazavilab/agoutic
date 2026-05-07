@@ -139,6 +139,15 @@ class TestGenomeDetection:
         assert "mm39" in result["reference_genome"]
 
     @pytest.mark.asyncio
+    async def test_mad1_genome(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "analyze mad1 DNA data"})
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert result["reference_genome"] == ["mad1"]
+
+    @pytest.mark.asyncio
     async def test_default_genome_is_mouse(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "run my pipeline"})
         sess = self.sf()
