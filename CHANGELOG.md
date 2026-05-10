@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+### Features
+
+- **AGOUTIC now recognizes `mad1` as a supported reference genome across planner parsing, Launchpad reference configuration, Nextflow config generation, and reconcile BAM reference detection**
+
+- **Reconcile BAM approvals now run as durable Launchpad script jobs instead of the synchronous utility-tool path, preserving a `run_uuid`, persisted logs, and normal background polling for long-running reconcile workflows**
+
+### Bug Fixes
+
+- **Configured reference lookup now resolves genome names case-insensitively and only emits `kallistoIndex` / `t2g` when both sidecars are defined together, allowing genomes like `mad1` to run without inheriting mismatched fallback paths**
+
+- **Workflow-specific step-title updates are now scoped to overlap plans with stable step IDs, so reconcile workflows no longer pick up `Sample A` / `Sample B` wording from overlap label propagation**
+
+- **Standalone local script jobs now start in their own process group, and Launchpad timeout and cancel paths terminate the full script tree instead of leaving child reconcile processes running after an early failure or cancellation**
+
+### Tests
+
+- **Added regression coverage for `mad1` Nextflow config generation and reconcile reference detection**
+
+- **Added regression coverage for reconcile script-job submission, overlap step-title scoping, standalone script process-group startup, synchronous timeout cleanup, and local cancel cleanup**
+
 ## [3.6.7] - 2026-05-04
 
 ### Features

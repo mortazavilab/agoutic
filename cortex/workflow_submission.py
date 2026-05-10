@@ -38,7 +38,6 @@ import cortex.job_parameters as job_parameters
 import cortex.job_polling as job_polling
 
 REMOTE_STAGE_MCP_TIMEOUT = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
-RECONCILE_SCRIPT_TIMEOUT_SECONDS = float(os.getenv("LAUNCHPAD_RECONCILE_TIMEOUT", "7200"))
 SCRIPT_SUBMISSION_TIMEOUT_BUFFER_SECONDS = 30.0
 
 logger = get_logger(__name__)
@@ -65,6 +64,10 @@ def _submission_client_timeout_seconds(run_type: str, submission_payload: dict) 
     if timeout_seconds <= 0:
         return 900.0
     return max(900.0, timeout_seconds + SCRIPT_SUBMISSION_TIMEOUT_BUFFER_SECONDS)
+
+
+def _should_submit_script_as_job(job_data: dict) -> bool:
+    return _is_reconcile_script_submission(job_data)
 
 
 def _bounded_reconcile_threads(raw_value: int | None = None) -> int:
@@ -144,6 +147,47 @@ def _build_script_submission_payload(job_data: dict) -> dict:
         submission_payload["script_working_directory"] = script_working_directory
 
     return submission_payload
+
+
+def _apply_workflow_specific_step_updates(workflow_payload: dict, job_params: dict) -> None:
+    if not isinstance(workflow_payload, dict):
+        return
+
+    if str(workflow_payload.get("plan_type") or "").strip() != "compare_region_overlaps":
+        return
+
+    workflow_payload["sample_a_label"] = job_params.get("sample_a_label") or workflow_payload.get("sample_a_label")
+    workflow_payload["sample_b_label"] = job_params.get("sample_b_label") or workflow_payload.get("sample_b_label")
+    workflow_payload["plot_title"] = job_params.get("plot_title") or workflow_payload.get("plot_title")
+
+    steps = workflow_payload.get("steps") or []
+    locate_step = next(
+        (step for step in steps if isinstance(step, dict) and step.get("id") == "locate_overlap"),
+        None,
+    )
+    if locate_step is None:
+        locate_step = next(
+            (step for step in steps if isinstance(step, dict) and step.get("kind") == "LOCATE_DATA"),
+            None,
+        )
+    if isinstance(locate_step, dict):
+        locate_step["title"] = (
+            f"Identify region files for {workflow_payload.get('sample_a_label') or 'Sample A'} "
+            f"and {workflow_payload.get('sample_b_label') or 'Sample B'}"
+        )
+
+    if job_params.get("plot_title"):
+        plot_step = next(
+            (step for step in steps if isinstance(step, dict) and step.get("id") == "plot_overlap"),
+            None,
+        )
+        if plot_step is None:
+            plot_step = next(
+                (step for step in steps if isinstance(step, dict) and step.get("kind") == "GENERATE_PLOT"),
+                None,
+            )
+        if isinstance(plot_step, dict):
+            plot_step["plot_title"] = job_params.get("plot_title")
 
 
 def _remote_stage_data_action(job_data: dict) -> tuple[dict, str]:
@@ -381,21 +425,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             session.commit()
 
             workflow_payload = get_block_payload(workflow_block)
-            workflow_payload["sample_a_label"] = job_params.get("sample_a_label") or workflow_payload.get("sample_a_label")
-            workflow_payload["sample_b_label"] = job_params.get("sample_b_label") or workflow_payload.get("sample_b_label")
-            workflow_payload["plot_title"] = job_params.get("plot_title") or workflow_payload.get("plot_title")
-            steps = workflow_payload.get("steps") or []
-            for step in steps:
-                if not isinstance(step, dict):
-                    continue
-                if step.get("kind") == "GENERATE_PLOT":
-                    if job_params.get("plot_title"):
-                        step["plot_title"] = job_params.get("plot_title")
-                elif step.get("kind") == "LOCATE_DATA":
-                    step["title"] = (
-                        f"Identify region files for {workflow_payload.get('sample_a_label') or 'Sample A'} "
-                        f"and {workflow_payload.get('sample_b_label') or 'Sample B'}"
-                    )
+            _apply_workflow_specific_step_updates(workflow_payload, job_params)
             workflow_block.payload_json = json.dumps(workflow_payload)
             session.commit()
 
@@ -529,10 +559,13 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     job_data=job_data)
 
         if run_type == "script":
-            submission_tool = "run_allowlisted_script"
-            submission_payload = _build_script_submission_payload(job_data)
-            if _is_reconcile_script_submission(job_data):
-                submission_payload["timeout_seconds"] = RECONCILE_SCRIPT_TIMEOUT_SECONDS
+            if _should_submit_script_as_job(job_data):
+                submission_tool = "submit_dogme_job"
+                submission_payload = dict(job_data)
+                submission_payload.pop("staged_input_directory", None)
+            else:
+                submission_tool = "run_allowlisted_script"
+                submission_payload = _build_script_submission_payload(job_data)
         else:
             submission_tool = "submit_dogme_job"
             submission_payload = dict(job_data)

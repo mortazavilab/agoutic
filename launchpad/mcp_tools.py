@@ -10,10 +10,13 @@ import sys
 from typing import Optional
 import json
 import httpx
+import signal
 
 from launchpad.script_execution import (
     normalize_script_args,
     resolve_allowlisted_script,
+    script_subprocess_session_kwargs,
+    terminate_script_process_tree,
     validate_script_working_directory,
 )
 
@@ -118,6 +121,7 @@ class LaunchpadMCPTools:
             cwd=str(script_cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **script_subprocess_session_kwargs(),
         )
 
         try:
@@ -126,7 +130,10 @@ class LaunchpadMCPTools:
             else:
                 stdout, stderr = await process.communicate()
         except asyncio.TimeoutError:
-            process.kill()
+            try:
+                terminate_script_process_tree(process=process, sig=signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             stdout, stderr = await process.communicate()
             return {
                 "success": False,

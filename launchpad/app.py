@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import sys
 import uuid
 from datetime import datetime
@@ -94,6 +95,8 @@ from launchpad.import_workflows import (
 from launchpad.script_execution import (
     normalize_script_args,
     resolve_allowlisted_script,
+    script_subprocess_session_kwargs,
+    terminate_script_process_tree,
     validate_script_working_directory,
 )
 
@@ -1449,6 +1452,7 @@ async def submit_job(req: SubmitJobRequest):
                         cwd=str(script_cwd),
                         stdout=stdout_handle,
                         stderr=stderr_handle,
+                        **script_subprocess_session_kwargs(),
                     )
 
                 script_processes[run_uuid] = process
@@ -1956,7 +1960,6 @@ async def list_jobs(
 @app.post("/jobs/{run_uuid}/cancel")
 async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
     """Cancel a running job or an in-flight remote result sync."""
-    import signal
     session = SessionLocal()
     
     try:
@@ -2011,7 +2014,11 @@ async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                 task.cancel()
         
         # Kill the Nextflow process (SIGTERM for graceful cleanup)
-        _pid = job.nextflow_process_id
+        report = _parse_job_report(job)
+        is_script_job = report.get("run_type") == "script" or str(getattr(job, "run_stage", "")).startswith("SCRIPT_")
+        script_process = script_processes.get(run_uuid) if is_script_job else None
+
+        _pid = job.nextflow_process_id or getattr(script_process, "pid", None)
         _process_killed = False
         _kill_message = ""
         if not _pid and job.nextflow_work_dir:
@@ -2025,16 +2032,30 @@ async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
 
         if _pid:
             try:
-                os.kill(_pid, signal.SIGTERM)
-                _process_killed = True
-                _kill_message = f"Job cancelled. Nextflow process (PID {_pid}) terminated."
-                logger.info("Killed Nextflow process", run_uuid=run_uuid, pid=_pid)
+                if is_script_job:
+                    terminate_script_process_tree(process=script_process, pid=_pid, sig=signal.SIGTERM)
+                    _process_killed = True
+                    _kill_message = f"Job cancelled. Standalone script process group (PID {_pid}) terminated."
+                    logger.info("Killed standalone script process group", run_uuid=run_uuid, pid=_pid)
+                else:
+                    os.kill(_pid, signal.SIGTERM)
+                    _process_killed = True
+                    _kill_message = f"Job cancelled. Nextflow process (PID {_pid}) terminated."
+                    logger.info("Killed Nextflow process", run_uuid=run_uuid, pid=_pid)
             except ProcessLookupError:
-                _kill_message = "Job cancelled. Nextflow process had already exited."
-                logger.info("Nextflow process already exited", run_uuid=run_uuid, pid=_pid)
+                if is_script_job:
+                    _kill_message = "Job cancelled. Standalone script process had already exited."
+                    logger.info("Standalone script process already exited", run_uuid=run_uuid, pid=_pid)
+                else:
+                    _kill_message = "Job cancelled. Nextflow process had already exited."
+                    logger.info("Nextflow process already exited", run_uuid=run_uuid, pid=_pid)
             except PermissionError:
-                _kill_message = f"Job cancelled. Could not terminate process (PID {_pid}): permission denied."
-                logger.warning("Permission denied killing Nextflow process", run_uuid=run_uuid, pid=_pid)
+                if is_script_job:
+                    _kill_message = f"Job cancelled. Could not terminate standalone script process group (PID {_pid}): permission denied."
+                    logger.warning("Permission denied killing standalone script process group", run_uuid=run_uuid, pid=_pid)
+                else:
+                    _kill_message = f"Job cancelled. Could not terminate process (PID {_pid}): permission denied."
+                    logger.warning("Permission denied killing Nextflow process", run_uuid=run_uuid, pid=_pid)
         else:
             _kill_message = "Job cancelled. Could not find process to terminate (monitoring stopped)."
 

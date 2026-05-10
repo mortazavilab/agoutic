@@ -518,6 +518,49 @@ async def test_cancel_job_dispatches_to_active_result_sync(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancel_job_terminates_script_process_group(monkeypatch):
+    fake_session = _FakeSession()
+    add_log_entry = AsyncMock()
+    update_status = AsyncMock()
+    script_process = SimpleNamespace(pid=4321)
+    terminate_calls = []
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", add_log_entry)
+    monkeypatch.setattr(launchpad_app, "update_job_status", update_status)
+    monkeypatch.setattr(launchpad_app, "script_processes", {"run-script": script_process})
+    monkeypatch.setattr(
+        launchpad_app,
+        "terminate_script_process_tree",
+        lambda **kwargs: terminate_calls.append(kwargs) or True,
+    )
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-script"
+        return SimpleNamespace(
+            run_uuid="run-script",
+            execution_mode="local",
+            status=launchpad_app.JobStatus.RUNNING,
+            nextflow_process_id=4321,
+            nextflow_work_dir=None,
+            report_json=json.dumps({"run_type": "script", "script_id": "reconcile_bams/reconcile_bams"}),
+            run_stage="SCRIPT_RUNNING",
+        )
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+
+    payload = await launchpad_app.cancel_job("run-script")
+
+    assert payload["status"] == "cancelled"
+    assert payload["process_killed"] is True
+    assert "process group" in payload["message"]
+    assert terminate_calls == [{"process": script_process, "pid": 4321, "sig": launchpad_app.signal.SIGTERM}]
+    update_status.assert_awaited_once_with(fake_session, "run-script", launchpad_app.JobStatus.CANCELLED)
+    add_log_entry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_get_job_status_reports_live_reconcile_step_for_running_script(monkeypatch, tmp_path):
     fake_session = _FakeSession()
     stdout_log = tmp_path / "run-3.stdout.log"

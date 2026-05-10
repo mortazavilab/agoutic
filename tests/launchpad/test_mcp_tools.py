@@ -1,6 +1,8 @@
 """Tests for launchpad/mcp_tools.py."""
 
+import asyncio
 import json
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -314,6 +316,56 @@ class TestRunAllowlistedScript:
         assert result["success"] is False
         assert "workflow2: missing" in result["error"]
         assert result["script_output"]["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_allowlisted_script_timeout_kills_process_group(self, monkeypatch, tmp_path):
+        script_path = tmp_path / "slow_script.py"
+        script_path.write_text("print('slow')\n")
+
+        class _FakeProcess:
+            def __init__(self):
+                self.pid = 4321
+                self.returncode = None
+                self.communicate = AsyncMock(
+                    side_effect=[
+                        asyncio.TimeoutError(),
+                        (b"partial stdout\n", b"partial stderr\n"),
+                    ]
+                )
+
+            def kill(self):
+                raise AssertionError("expected process-group termination")
+
+            def terminate(self):
+                raise AssertionError("expected process-group termination")
+
+        fake_process = _FakeProcess()
+        create_subprocess_exec = AsyncMock(return_value=fake_process)
+        terminate_calls = []
+
+        monkeypatch.setattr(
+            "launchpad.mcp_tools.resolve_allowlisted_script",
+            lambda **_kwargs: SimpleNamespace(script_id="demo/slow", script_path=script_path.resolve()),
+        )
+        monkeypatch.setattr("launchpad.mcp_tools.normalize_script_args", lambda args: args or [])
+        monkeypatch.setattr("launchpad.mcp_tools.validate_script_working_directory", lambda _path: script_path.parent.resolve())
+        monkeypatch.setattr("launchpad.mcp_tools.asyncio.create_subprocess_exec", create_subprocess_exec)
+        monkeypatch.setattr(
+            "launchpad.mcp_tools.terminate_script_process_tree",
+            lambda **kwargs: terminate_calls.append(kwargs) or True,
+        )
+
+        tools = LaunchpadMCPTools("http://launchpad.local")
+        result = await tools.run_allowlisted_script(
+            script_id="demo/slow",
+            timeout_seconds=0.01,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "Script timed out"
+        assert "partial stdout" in result["stdout"]
+        assert create_subprocess_exec.await_args.kwargs["start_new_session"] is True
+        assert terminate_calls == [{"process": fake_process, "sig": signal.SIGKILL}]
 
     @pytest.mark.asyncio
     async def test_stage_remote_sample_posts_expected_payload(self, monkeypatch):

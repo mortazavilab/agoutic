@@ -57,6 +57,7 @@ def _fake_dogme_job():
 async def test_submit_script_job_success(monkeypatch, tmp_path):
     script_path = tmp_path / "run.py"
     script_path.write_text("print('ok')\n")
+    subprocess_kwargs = {}
 
     fake_session = _FakeSession()
     fake_job = SimpleNamespace(
@@ -93,6 +94,7 @@ async def test_submit_script_job_success(monkeypatch, tmp_path):
         return None
 
     async def fake_subprocess_exec(*_args, **_kwargs):
+        subprocess_kwargs.update(_kwargs)
         return _FakeProcess()
 
     def fake_create_task(coro):
@@ -128,6 +130,7 @@ async def test_submit_script_job_success(monkeypatch, tmp_path):
     assert result["work_directory"] == str(script_path.parent.resolve())
     assert fake_job.run_stage == "SCRIPT_RUNNING"
     assert fake_job.nextflow_process_id == 4321
+    assert subprocess_kwargs["start_new_session"] is True
 
 
 @pytest.mark.asyncio

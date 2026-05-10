@@ -28,7 +28,6 @@ from sqlalchemy.pool import StaticPool
 
 from common.database import Base
 import cortex.job_polling as job_polling_module
-import cortex.workflow_submission as workflow_submission_module
 from cortex.models import (
     User, Session as SessionModel, Project, ProjectAccess,
     ProjectBlock,
@@ -861,6 +860,18 @@ class TestSubmitJobAfterApproval:
                 "current_step_id": "run_reconcile",
                 "steps": [
                     {
+                        "id": "locate_reconcile_inputs",
+                        "kind": "LOCATE_DATA",
+                        "status": "COMPLETED",
+                        "title": "Locate annotated BAM candidates across workflow annot directories",
+                    },
+                    {
+                        "id": "locate_reconcile_outputs",
+                        "kind": "LOCATE_DATA",
+                        "status": "PENDING",
+                        "title": "List reconcile output files for parsing",
+                    },
+                    {
                         "id": "approve_reconcile",
                         "kind": "REQUEST_APPROVAL",
                         "status": "COMPLETED",
@@ -917,7 +928,7 @@ class TestSubmitJobAfterApproval:
         mock_client = AsyncMock()
         mock_client.call_tool = AsyncMock(return_value={
             "run_uuid": "script-run-1",
-            "work_directory": "/work/script-run-1",
+            "work_directory": "/Users/alim/vscode/agoutic/skills/reconcile_bams/scripts",
         })
 
         with _patch_session(session_factory), \
@@ -931,10 +942,16 @@ class TestSubmitJobAfterApproval:
         workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
         workflow_payload = get_block_payload(workflow)
         run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_reconcile")
+        locate_steps = [step for step in workflow_payload["steps"] if step["kind"] == "LOCATE_DATA"]
         assert run_step["status"] == "RUNNING"
         assert run_step["run_uuid"] == "script-run-1"
-        assert mock_client.call_tool.call_args.args[0] == "run_allowlisted_script"
+        assert [step["title"] for step in locate_steps] == [
+            "Locate annotated BAM candidates across workflow annot directories",
+            "List reconcile output files for parsing",
+        ]
+        assert mock_client.call_tool.call_args.args[0] == "submit_dogme_job"
         submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["run_type"] == "script"
         assert submitted["script_id"] == "reconcile_bams/reconcile_bams"
         assert submitted["script_args"][:7] == [
             "--json",
@@ -946,12 +963,9 @@ class TestSubmitJobAfterApproval:
             "/refs/GRCh38.annotation.gtf",
         ]
         assert submitted["script_args"].count("--input-bam") == 2
-        assert submitted["timeout_seconds"] == workflow_submission_module.RECONCILE_SCRIPT_TIMEOUT_SECONDS
         assert "--filter_known" in submitted["script_args"]
-        assert mock_client_cls.call_args.kwargs["timeout"] == (
-            workflow_submission_module.RECONCILE_SCRIPT_TIMEOUT_SECONDS
-            + workflow_submission_module.SCRIPT_SUBMISSION_TIMEOUT_BUFFER_SECONDS
-        )
+        assert submitted["input_directory"] == "/proj/reconcile"
+        assert mock_client_cls.call_args.kwargs["timeout"] == 900.0
         job_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
         assert any(get_block_payload(block).get("run_type") == "script" for block in job_blocks)
         sess.close()

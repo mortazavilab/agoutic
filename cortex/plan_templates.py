@@ -1220,6 +1220,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         idx,
         tool_calls=locate_calls,
     )
+    s_locate["id"] = "locate_overlap"
     steps.append(s_locate)
     idx += 1
 
@@ -1230,6 +1231,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         requires_approval=True,
         depends_on=[s_locate["id"]],
     )
+    s_approve["id"] = "approve_overlap"
     steps.append(s_approve)
     idx += 1
 
@@ -1250,6 +1252,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
             }
         ],
     )
+    s_run["id"] = "run_overlap"
     steps.append(s_run)
     idx += 1
 
@@ -1259,6 +1262,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         idx,
         depends_on=[s_run["id"]],
     )
+    s_parse["id"] = "parse_overlap_outputs"
     steps.append(s_parse)
     idx += 1
 
@@ -1268,6 +1272,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         idx,
         depends_on=[s_parse["id"]],
     )
+    s_plot["id"] = "plot_overlap"
     s_plot["plot_type"] = plot_type
     if plot_title:
         s_plot["plot_title"] = plot_title
