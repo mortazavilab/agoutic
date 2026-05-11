@@ -1,6 +1,6 @@
 # AGOUTIC Cortex: Agent Engine
 
-**Docs Current For:** AGOUTIC 3.6.7  
+**Docs Current For:** AGOUTIC 3.6.8  
 **Service Version:** 1.0  
 **Status:** Active Development 
 
@@ -18,6 +18,7 @@ Cortex is the **orchestration and reasoning engine** for AGOUTIC. It provides an
 - 🤝 **Integration**: Both REST and MCP interfaces for flexible access
 - 📜 **Tool Schema Contracts**: Fetches machine-readable tool schemas from all MCP servers and injects them into the LLM prompt; validates parameters pre-call
 - 🗂️ **Structured Conversation State**: Builds a typed `ConversationState` JSON each turn (skill, project, sample, experiment, dataframes, workflows) and injects it into the user message
+- 📄 **Direct File Reading**: Natural-language file inspection and `/read-file` route txt/markdown/HTML workflow reports through Analyzer render modes
 - 🛡️ **Error-Handling Playbook**: Deterministic failure rules in system prompt + structured `[TOOL_ERROR]` blocks + retry logic for transient failures
 - ✅ **Output Contract Validator**: Post-LLM validation catches malformed tags, unknown tools, duplicate approvals, and mixed sources
 - 🔍 **Provenance Tags**: Every tool result carries `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers for auditability

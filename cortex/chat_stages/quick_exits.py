@@ -18,6 +18,7 @@ from cortex.chat_sync_handler import (
 )
 from cortex.db import row_to_dict
 from cortex.db_helpers import _create_block_internal, save_conversation_message
+from cortex.file_commands import execute_file_command, parse_file_command
 from cortex.memory_commands import (
     detect_memory_intent,
     execute_memory_command,
@@ -70,6 +71,7 @@ class CapabilitiesStage:
             "Useful slash commands:\n"
             "- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`\n"
             "- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`, `/import-workflow <path> [--remote] [--full-copy]`, `/sync-workflow <workflow>`\n"
+            "- Files: `/read-file <path> [--lines N] [--mode auto|plain|markdown|html_text|html_raw]`\n"
             "- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`\n"
             "- Memory: `/remember <text>`, `/remember-global <text>`, `/remember-df DF5 as <name>`, `/memories`, `/pin #<id>`, `/unpin #<id>`, `/restore #<id>`, `/annotate <sample> key=value`, `/search-memories <query>`, `/upgrade-to-global #<id>`\n\n"
             "What would you like to do?\n"
@@ -284,6 +286,49 @@ class MemoryCommandStage:
 
 
 register_stage(MemoryCommandStage())
+
+
+class FileCommandStage:
+    name = "file_command"
+    priority = 233
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return parse_file_command(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        from sqlalchemy import select
+        from cortex.models import ProjectBlock
+
+        file_cmd = parse_file_command(ctx.message)
+
+        if not ctx.history_blocks:
+            history_result = ctx.session.execute(
+                select(ProjectBlock)
+                .where(ProjectBlock.project_id == ctx.project_id)
+                .where(ProjectBlock.type.in_(["USER_MESSAGE", "AGENT_PLAN", "EXECUTION_JOB"]))
+                .order_by(ProjectBlock.seq.asc())
+            )
+            ctx.history_blocks = history_result.scalars().all()
+
+        markdown = await execute_file_command(
+            file_cmd,
+            history_blocks=ctx.history_blocks,
+            project_dir=str(ctx.project_dir_path or ctx.project_dir or ""),
+        )
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="file_command",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(FileCommandStage())
 
 
 class WorkflowCommandStage:

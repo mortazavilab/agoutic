@@ -232,6 +232,39 @@ def _format_data(
                     result += f"| {f} | | |\n"
             return result
 
+        if "content" in data and "file_path" in data:
+            file_path = data.get("file_path", "")
+            render_mode = str(data.get("render_mode") or "plain")
+            source_extension = str(data.get("source_extension") or "")
+            line_count = data.get("line_count")
+            file_size = data.get("file_size_bytes", data.get("file_size"))
+            details: list[str] = []
+            if line_count is not None:
+                details.append(f"{line_count} lines")
+            if isinstance(file_size, (int, float)):
+                details.append(_human_size(int(file_size)))
+            details.append(f"rendered as {render_mode}")
+
+            if render_mode == "html_raw":
+                fence = "html"
+            elif render_mode == "markdown" or source_extension in {".md", ".markdown"}:
+                fence = "markdown"
+            else:
+                fence = "text"
+
+            result = f"**File: {file_path}**"
+            if details:
+                result += f" ({', '.join(details)})"
+            result += "\n\n"
+            content = str(data.get("content") or "")
+            if content:
+                result += f"```{fence}\n{content.rstrip()}\n```\n"
+            else:
+                result += "*File is empty.*\n"
+            if data.get("is_truncated"):
+                result += "\n*Preview truncated.*\n"
+            return result
+
         # Generic dict — show as compact JSON (strip deeply nested objects)
         # For analysis/parsing results (Analyzer), allow deeper nesting so row data is visible
         is_analysis_data = "records" in data or "preview_rows" in data

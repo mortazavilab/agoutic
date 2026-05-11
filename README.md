@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Release:** 3.6.7
+**Release:** 3.6.8
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -74,6 +74,7 @@ AGOUTIC is designed to help users:
 - Interpret isoform discovery and transcript structure outputs from long-read workflows
 - Summarize RNA and DNA modification signals from workflow artifacts
 - Review QC metrics across runs and identify quality or completeness issues
+- Read text, markdown, and HTML workflow reports directly from chat or with `/read-file`
 - Inspect gene-level and transcript-level result tables with context
 - Run downstream differential expression and enrichment analysis
 - Compare outputs across samples, conditions, and workflows
@@ -282,7 +283,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   AGOUTIC System v3.6.7                     │
+│                   AGOUTIC System v3.6.8                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -931,7 +932,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.6.7 — completed Dogme workflows can now be imported from local or remote sources, `/cancel-sync` and resumable copy-back are available for imported remote workflows, and imported workflow cards now stay attached to live sync progress without restarting rsync
+- **Release**: 3.6.8 — durable reconcile script jobs now clean up full process trees, completion snapshots persist the final workflow directory atomically, reconcile summaries ingest `reconciled_summary.txt`, and `/read-file` plus natural-language file reads can open txt/markdown/HTML reports
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

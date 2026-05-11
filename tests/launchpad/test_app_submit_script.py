@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,108 @@ class _FakeSession:
 class _FakeProcess:
     def __init__(self, pid: int = 4321):
         self.pid = pid
+
+
+@pytest.mark.asyncio
+async def test_monitor_script_job_commits_completed_status_with_final_output_directory(monkeypatch, tmp_path):
+    workflow_dir = tmp_path / "workflow10"
+    workflow_dir.mkdir()
+    stdout_log = tmp_path / "run-1.stdout.log"
+    stderr_log = tmp_path / "run-1.stderr.log"
+    stdout_log.write_text(
+        json.dumps(
+            {
+                "success": True,
+                "workflow": {
+                    "directory": str(workflow_dir),
+                    "output_directory": str(workflow_dir),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    stderr_log.write_text("", encoding="utf-8")
+
+    fake_job = SimpleNamespace(
+        run_uuid="run-1",
+        status="RUNNING",
+        progress_percent=0,
+        error_message=None,
+        completed_at=None,
+        run_stage="SCRIPT_RUNNING",
+        report_json=None,
+        nextflow_work_dir=str(tmp_path),
+        workflow_index=None,
+        workflow_alias=None,
+        workflow_folder_name=None,
+    )
+
+    class _CommitTrackingSession:
+        def __init__(self, tracked_job):
+            self.tracked_job = tracked_job
+            self.commit_snapshots = []
+
+        async def commit(self):
+            self.commit_snapshots.append(
+                {
+                    "status": self.tracked_job.status,
+                    "progress_percent": self.tracked_job.progress_percent,
+                    "error_message": self.tracked_job.error_message,
+                    "nextflow_work_dir": self.tracked_job.nextflow_work_dir,
+                    "run_stage": self.tracked_job.run_stage,
+                }
+            )
+
+        async def close(self):
+            return None
+
+    class _CompletingProcess:
+        async def wait(self):
+            return 0
+
+    fake_session = _CommitTrackingSession(fake_job)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-1"
+        return fake_job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "infer_workflow_index_from_path", lambda _path: 10)
+    monkeypatch.setattr(launchpad_app, "workflow_alias_for_index", lambda index: f"workflow{index}")
+    monkeypatch.setattr(launchpad_app, "script_processes", {"run-1": object()})
+    monkeypatch.setattr(launchpad_app, "job_monitors", {"run-1": object()})
+
+    await launchpad_app._monitor_script_job(
+        "run-1",
+        _CompletingProcess(),
+        str(stdout_log),
+        str(stderr_log),
+    )
+
+    assert fake_job.status == launchpad_app.JobStatus.COMPLETED
+    assert fake_job.progress_percent == 100
+    assert fake_job.run_stage == "SCRIPT_COMPLETED"
+    assert fake_job.nextflow_work_dir == str(workflow_dir)
+    assert fake_job.workflow_index == 10
+    assert fake_job.workflow_alias == "workflow10"
+    assert fake_job.workflow_folder_name == "workflow10"
+    assert fake_session.commit_snapshots == [
+        {
+            "status": launchpad_app.JobStatus.COMPLETED,
+            "progress_percent": 100,
+            "error_message": None,
+            "nextflow_work_dir": str(workflow_dir),
+            "run_stage": "SCRIPT_COMPLETED",
+        }
+    ]
+    assert "run-1" not in launchpad_app.script_processes
+    assert "run-1" not in launchpad_app.job_monitors
 
 
 def _fake_dogme_job():

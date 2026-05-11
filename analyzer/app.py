@@ -138,23 +138,33 @@ async def categorize_files_endpoint(run_uuid: str):
 
 @app.get("/analysis/files/content", response_model=FileContentResponse)
 async def get_file_content(
-    run_uuid: str = Query(..., description="Job UUID"),
+    run_uuid: str = Query("", description="Job UUID"),
+    work_dir: str = Query("", description="Absolute workflow directory"),
     file_path: str = Query(..., description="Relative file path"),
-    preview_lines: Optional[int] = Query(None, description="Line limit for preview")
+    preview_lines: Optional[int] = Query(None, description="Line limit for preview"),
+    render_mode: str = Query("auto", description="Render mode: auto, plain, markdown, html_text, or html_raw"),
 ):
     """
     Read content from a file.
     
     Args:
         run_uuid: Job UUID
+        work_dir: Absolute workflow directory
         file_path: Relative path to file
         preview_lines: Optional line limit
+        render_mode: How to render file content
     
     Returns:
         FileContentResponse with file content
     """
     try:
-        content_response = read_file_content(run_uuid, file_path, preview_lines)
+        content_response = read_file_content(
+            run_uuid or None,
+            file_path,
+            preview_lines,
+            work_dir_path=work_dir or None,
+            render_mode=render_mode or None,
+        )
         return content_response
     
     except FileNotFoundError as e:

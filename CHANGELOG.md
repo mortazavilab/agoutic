@@ -1,10 +1,14 @@
 ## [Unreleased]
 
+## [3.6.8] - 2026-05-11
+
 ### Features
 
 - **AGOUTIC now recognizes `mad1` as a supported reference genome across planner parsing, Launchpad reference configuration, Nextflow config generation, and reconcile BAM reference detection**
 
 - **Reconcile BAM approvals now run as durable Launchpad script jobs instead of the synchronous utility-tool path, preserving a `run_uuid`, persisted logs, and normal background polling for long-running reconcile workflows**
+
+- **Analyzer and Cortex can now read plain text, markdown, and HTML workflow reports through `read_file_content`, natural-language file requests, and the `/read-file` quick command, with readable HTML text as the default render mode and raw HTML available on demand**
 
 ### Bug Fixes
 
@@ -14,11 +18,21 @@
 
 - **Standalone local script jobs now start in their own process group, and Launchpad timeout and cancel paths terminate the full script tree instead of leaving child reconcile processes running after an early failure or cancellation**
 
+- **Launchpad now persists script completion state and the final output workflow directory atomically, preventing Cortex from polling stale parent directories before reconcile outputs finish publishing**
+
+- **Reconcile WRITE_SUMMARY now reads `reconciled_summary.txt` (and other unstructured report files when present) so the LLM can interpret summary findings alongside parsed tables**
+
 ### Tests
 
 - **Added regression coverage for `mad1` Nextflow config generation and reconcile reference detection**
 
-- **Added regression coverage for reconcile script-job submission, overlap step-title scoping, standalone script process-group startup, synchronous timeout cleanup, and local cancel cleanup**
+- **Added regression coverage for reconcile script-job submission, overlap step-title scoping, standalone script process-group startup, synchronous timeout cleanup, local cancel cleanup, and atomic script completion/work-directory persistence**
+
+- **Added regression coverage for analyzer render modes, reconcile summary ingestion, natural-language markdown file reads, file-content formatting, and the `/read-file` command**
+
+### Documentation
+
+- **README, Analyzer quickstart/docs, Cortex/UI slash-command help, and version surfaces now document `/read-file`, unstructured file reading, and release 3.6.8**
 
 ## [3.6.7] - 2026-05-04
 

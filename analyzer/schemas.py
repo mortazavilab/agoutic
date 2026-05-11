@@ -31,6 +31,10 @@ class FileContentRequest(BaseModel):
     work_dir: str = ""
     file_path: str
     preview_lines: Optional[int] = Field(None, description="Number of lines to preview")
+    render_mode: Optional[str] = Field(
+        None,
+        description="Render mode: auto, plain, markdown, html_text, or html_raw",
+    )
 
 
 class FileContentResponse(BaseModel):
@@ -41,6 +45,8 @@ class FileContentResponse(BaseModel):
     line_count: Optional[int] = None
     is_truncated: bool = False
     file_size: int
+    render_mode: str = "plain"
+    source_extension: str = ""
 
 
 # CSV/TSV parsing schemas

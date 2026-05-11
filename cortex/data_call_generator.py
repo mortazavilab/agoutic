@@ -723,13 +723,13 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
             file_pattern = (
                 r'(?:parse|show\s+me|read|open|display|view|get)'
                 r'\s+(?:the\s+)?(?:file\s+)?'
-                r'(\S+\.(?:csv|tsv|bed|txt|log|html))'
+                r'(\S+\.(?:csv|tsv|bed|txt|log|html|htm|md|markdown))'
             )
             # Secondary pattern: "parse FILE in/from workflowN"
             _workflow_suffix_pattern = (
                 r'(?:parse|show\s+me|read|open|display|view|get)'
                 r'\s+(?:the\s+)?(?:file\s+)?'
-                r'(\S+\.(?:csv|tsv|bed|txt|log|html))'
+                r'(\S+\.(?:csv|tsv|bed|txt|log|html|htm|md|markdown))'
                 r'\s+(?:in|from|under)\s+(workflow\d+)'
             )
             file_match = re.search(file_pattern, msg_lower)
@@ -962,7 +962,7 @@ def _validate_analyzer_params(
     _KNOWN_PARAMS: dict[str, set[str]] = {
         "list_job_files": {"work_dir", "run_uuid", "extensions", "compact", "max_depth"},
         "find_file": {"file_name", "work_dir", "run_uuid"},
-        "read_file_content": {"file_path", "work_dir", "run_uuid", "preview_lines"},
+        "read_file_content": {"file_path", "work_dir", "run_uuid", "preview_lines", "render_mode"},
         "parse_csv_file": {"file_path", "work_dir", "run_uuid", "max_rows"},
         "parse_bed_file": {"file_path", "work_dir", "run_uuid", "max_records"},
         "compare_bed_region_overlaps": {

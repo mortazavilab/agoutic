@@ -928,16 +928,11 @@ async def _monitor_script_job(
         progress = 100 if return_code == 0 else 0
         error_message = None if return_code == 0 else (stderr_tail.strip() or f"Script exited with code {return_code}")
 
-        await update_job_status(
-            session,
-            run_uuid,
-            final_status,
-            progress=progress,
-            error_message=error_message,
-        )
-
         job = await get_job(session, run_uuid)
         if job:
+            job.status = final_status
+            job.progress_percent = progress
+            job.error_message = error_message
             job.completed_at = datetime.utcnow()
             job.run_stage = "SCRIPT_COMPLETED" if return_code == 0 else "SCRIPT_FAILED"
             job.report_json = json.dumps(

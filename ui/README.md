@@ -1,6 +1,6 @@
 # AGOUTIC UI
 
-**Release:** 3.6.7  
+**Release:** 3.6.8  
 **Status:** Active Development
 
 ## Overview
@@ -14,6 +14,7 @@ The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUT
 - ✅ **Approval gates** for reviewing and editing job parameters before submission
 - ⚙️ **Live job monitoring** with Nextflow-style task progress visualization
 - 📊 **Results analysis** page for browsing, parsing, and downloading job outputs
+- 📄 **Direct file previews** — `/read-file` and natural-language file reads can open txt, markdown, and HTML workflow reports directly in chat
 - 📁 **Project management** with history, switching, and conversation recall
 - 🏷️ **Project-aware browser title** — the active project name appears in the browser tab alongside the AGOUTIC version
 - 🔑 **Admin panel** for user approval and role management

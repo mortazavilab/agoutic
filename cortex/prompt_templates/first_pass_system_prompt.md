@@ -30,12 +30,17 @@ need to be on a Dogme analysis skill.
 
 AVAILABLE COMMANDS (use [[DATA_CALL:...]] tags):
   [[DATA_CALL: service=analyzer, tool=list_job_files, work_dir=<path>, max_depth=1]]
+  [[DATA_CALL: service=analyzer, tool=find_file, work_dir=<path>, file_name=<name>]]
+  [[DATA_CALL: service=analyzer, tool=read_file_content, work_dir=<path>, file_path=<relative_path>, preview_lines=<n>, render_mode=<auto|plain|markdown|html_text|html_raw>]]
 
 WHEN TO USE:
 - "list workflows" → lists workflow directories in the project
 - "list files" → lists files in the current workflow directory
 - "list files in annot" → lists files in a specific subfolder
 - "list files in workflow1/annot" → lists files in a specific workflow's subfolder
+- "read reconciled_summary.txt" → finds and opens a text/markdown/HTML report in the active workflow
+
+For HTML reports, prefer readable extracted text by default; use `render_mode=html_raw` only when the user explicitly asks for raw source.
 
 The system automatically resolves the correct project/workflow directory from context.
 You do NOT need to guess the work_dir path — the system will override it.

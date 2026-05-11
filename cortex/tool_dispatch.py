@@ -1233,6 +1233,20 @@ async def _chain_find_file(
     """After a successful find_file, chain into parse/read for the found file."""
     chain_tool = call.get("_chain")
     primary_path = result_data["primary_path"]
+
+    def _infer_read_file_render_mode(message: str, file_path: str) -> str | None:
+        lower_message = message.lower()
+        lower_path = file_path.lower()
+        if not lower_path.endswith((".html", ".htm")):
+            return None
+        if (
+            re.search(r"\braw\s+html\b", lower_message)
+            or re.search(r"\bhtml\s+source\b", lower_message)
+            or ("html" in lower_message and "source" in lower_message)
+        ):
+            return "html_raw"
+        return None
+
     if (
         active_skill == "analyze_job_results"
         and primary_path.lower().endswith(".bed")
@@ -1271,6 +1285,9 @@ async def _chain_find_file(
                 chain_params["max_records"] = 100
             elif chain_tool == "read_file_content":
                 chain_params["preview_lines"] = 50
+                render_mode = _infer_read_file_render_mode(user_message, primary_path)
+                if render_mode:
+                    chain_params["render_mode"] = render_mode
             chain_result = await mcp_client.call_tool(chain_tool, **chain_params)
         source_results.append({
             "tool": chain_tool, "params": chain_params, "data": chain_result,

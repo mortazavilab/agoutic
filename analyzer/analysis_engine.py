@@ -5,6 +5,7 @@ Handles file discovery, parsing, and analysis of Dogme job results.
 
 import csv
 import fnmatch
+import html
 import json
 import re
 from collections import OrderedDict
@@ -36,6 +37,93 @@ from analyzer.schemas import (
 from sqlalchemy.orm import load_only
 from analyzer.models import DogmeJob
 from analyzer.db import get_db
+
+
+def _normalize_render_mode(file_path: Path, render_mode: Optional[str]) -> str:
+    extension = file_path.suffix.lower()
+    normalized = (render_mode or "auto").strip().lower()
+
+    if normalized not in {"auto", "plain", "markdown", "html_text", "html_raw"}:
+        raise ValueError(
+            f"Unsupported render_mode '{render_mode}'. "
+            "Use auto, plain, markdown, html_text, or html_raw."
+        )
+
+    if normalized == "auto":
+        if extension in {".html", ".htm"}:
+            return "html_text"
+        if extension in {".md", ".markdown"}:
+            return "markdown"
+        return "plain"
+
+    return normalized
+
+
+def _render_html_text(raw_content: str) -> str:
+    without_comments = re.sub(r"<!--.*?-->", "", raw_content, flags=re.DOTALL)
+    without_scripts = re.sub(
+        r"<script\b[^>]*>.*?</script>",
+        " ",
+        without_comments,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    without_styles = re.sub(
+        r"<style\b[^>]*>.*?</style>",
+        " ",
+        without_scripts,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    with_breaks = re.sub(
+        r"</?(?:br|p|div|li|tr|h[1-6])\b[^>]*>",
+        "\n",
+        without_styles,
+        flags=re.IGNORECASE,
+    )
+    without_tags = re.sub(r"<[^>]+>", " ", with_breaks)
+    unescaped = html.unescape(without_tags)
+    normalized_lines = [re.sub(r"\s+", " ", line).strip() for line in unescaped.splitlines()]
+    return "\n".join(line for line in normalized_lines if line)
+
+
+def _render_file_content(raw_content: str, render_mode: str) -> str:
+    if render_mode == "html_text":
+        return _render_html_text(raw_content)
+    return raw_content
+
+
+def _build_file_content_response(
+    *,
+    run_uuid: str,
+    file_path: str,
+    content: str,
+    preview_lines: Optional[int],
+    file_size: int,
+    render_mode: str,
+    source_extension: str,
+) -> FileContentResponse:
+    if preview_lines is not None:
+        all_lines = content.splitlines(keepends=True)
+        return FileContentResponse(
+            run_uuid=run_uuid,
+            file_path=file_path,
+            content="".join(all_lines[:preview_lines]),
+            line_count=len(all_lines),
+            is_truncated=len(all_lines) > preview_lines,
+            file_size=file_size,
+            render_mode=render_mode,
+            source_extension=source_extension,
+        )
+
+    return FileContentResponse(
+        run_uuid=run_uuid,
+        file_path=file_path,
+        content=content,
+        line_count=content.count('\n') + 1,
+        is_truncated=False,
+        file_size=file_size,
+        render_mode=render_mode,
+        source_extension=source_extension,
+    )
 
 
 # ==================== File Discovery ====================
@@ -254,6 +342,7 @@ def read_file_content(
     preview_lines: Optional[int] = None,
     *,
     work_dir_path: Optional[str] = None,
+    render_mode: Optional[str] = None,
 ) -> FileContentResponse:
     """
     Read content from a file.
@@ -263,6 +352,7 @@ def read_file_content(
         file_path: Relative path from work directory
         preview_lines: Optional line limit for preview
         work_dir_path: Absolute path to the workflow directory
+        render_mode: How to render content: auto, plain, markdown, html_text, or html_raw
 
     Returns:
         FileContentResponse with file content
@@ -291,48 +381,24 @@ def read_file_content(
     file_size = full_path.stat().st_size
     if file_size > MAX_FILE_SIZE_BYTES:
         raise ValueError(f"File too large: {file_size} bytes (max: {MAX_FILE_SIZE_BYTES})")
+
+    effective_render_mode = _normalize_render_mode(full_path, render_mode)
     
     # Read content
     try:
         _uuid = run_uuid or ""
         with open(full_path, 'r', encoding='utf-8') as f:
-            if preview_lines:
-                lines = []
-                for i, line in enumerate(f):
-                    if i >= preview_lines:
-                        return FileContentResponse(
-                            run_uuid=_uuid,
-                            file_path=file_path,
-                            content=''.join(lines),
-                            line_count=preview_lines,
-                            is_truncated=True,
-                            file_size=file_size
-                        )
-                    lines.append(line)
-                
-                # Count remaining lines
-                remaining = sum(1 for _ in f)
-                total_lines = preview_lines + remaining
-                
-                return FileContentResponse(
-                    run_uuid=_uuid,
-                    file_path=file_path,
-                    content=''.join(lines),
-                    line_count=total_lines,
-                    is_truncated=remaining > 0,
-                    file_size=file_size
-                )
-            else:
-                content = f.read()
-                line_count = content.count('\n') + 1
-                return FileContentResponse(
-                    run_uuid=_uuid,
-                    file_path=file_path,
-                    content=content,
-                    line_count=line_count,
-                    is_truncated=False,
-                    file_size=file_size
-                )
+            raw_content = f.read()
+
+        return _build_file_content_response(
+            run_uuid=_uuid,
+            file_path=file_path,
+            content=_render_file_content(raw_content, effective_render_mode),
+            preview_lines=preview_lines,
+            file_size=file_size,
+            render_mode=effective_render_mode,
+            source_extension=full_path.suffix.lower(),
+        )
     except UnicodeDecodeError:
         raise ValueError(f"File is not a text file: {file_path}")
 

@@ -580,6 +580,21 @@ class TestDogmeFileParsing:
         assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow10"
         assert calls[0]["params"]["file_name"] == "reconciled_abundance.tsv"
 
+    def test_read_markdown_file_generates_find_file_chain(self):
+        blocks = self._blocks_with_job("/tmp/proj/workflow9")
+        calls = _auto_generate_data_calls(
+            "read workflow10/reconcile_notes.md",
+            "analyze_job_results",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "find_file"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow10"
+        assert calls[0]["params"]["file_name"] == "reconcile_notes.md"
+        assert calls[0]["_chain"] == "read_file_content"
+
 
 # ---------------------------------------------------------------------------
 # analyze_job_results catch-all auto-generates get_analysis_summary

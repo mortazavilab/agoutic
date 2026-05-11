@@ -135,6 +135,21 @@ class TestFormatData:
         result = _format_data("just a string", [], None, "type")
         assert "just a string" in result
 
+    def test_dict_with_file_content(self):
+        data = {
+            "file_path": "workflow10/reconciled_summary.txt",
+            "content": "Analysis complete.\nAll checks passed.",
+            "line_count": 2,
+            "is_truncated": False,
+            "file_size_bytes": 36,
+            "render_mode": "plain",
+            "source_extension": ".txt",
+        }
+        result = _format_data(data, [], None, "type")
+        assert "File: workflow10/reconciled_summary.txt" in result
+        assert "rendered as plain" in result
+        assert "Analysis complete." in result
+
 
 # =========================================================================
 # _format_files_by_type

@@ -36,6 +36,8 @@ def job_dir(tmp_path):
     # Create some analysis output files
     (wd / "final_stats.csv").write_text("gene,score,pval\nBRCA1,0.95,0.001\nTP53,0.88,0.005\n")
     (wd / "summary.txt").write_text("Analysis complete.\n10 genes processed.\n")
+    (wd / "report.html").write_text("<html><body><h1>QC report</h1><p>All checks passed.</p></body></html>")
+    (wd / "notes.md").write_text("# Summary\n\n- item one\n")
     (wd / "regions.bed").write_text("chr1\t100\t200\tpeak1\t500\nchr2\t300\t400\tpeak2\t750\n")
     (wd / "data.tsv").write_text("sample\tcount\nliver\t42\nheart\t37\n")
     (wd / "output.bam").write_bytes(b"\x00" * 100)
@@ -181,6 +183,27 @@ class TestReadFileContent:
             work_dir_path=str(job_dir), file_path="annot/annotations.csv"
         )
         assert "exon" in result.content
+
+    def test_auto_render_html_as_readable_text(self, job_dir):
+        result = read_file_content(work_dir_path=str(job_dir), file_path="report.html")
+        assert result.render_mode == "html_text"
+        assert "QC report" in result.content
+        assert "All checks passed." in result.content
+        assert "<h1>" not in result.content
+
+    def test_render_raw_html_when_requested(self, job_dir):
+        result = read_file_content(
+            work_dir_path=str(job_dir),
+            file_path="report.html",
+            render_mode="html_raw",
+        )
+        assert result.render_mode == "html_raw"
+        assert "<h1>QC report</h1>" in result.content
+
+    def test_auto_render_markdown_as_markdown(self, job_dir):
+        result = read_file_content(work_dir_path=str(job_dir), file_path="notes.md")
+        assert result.render_mode == "markdown"
+        assert result.content.startswith("# Summary")
 
 
 # ---------------------------------------------------------------------------
