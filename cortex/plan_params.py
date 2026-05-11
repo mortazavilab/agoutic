@@ -542,10 +542,12 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
                 if m:
                     params["output_directory"] = m.group(1).rstrip(".,;:!?")
 
-        # Default output to the current project directory so cross-project
-        # reconcile writes into the active project, not the source project.
-        if not params.get("output_directory") and project_dir:
-            params["output_directory"] = project_dir
+        # Default output to a fresh workflow directory in the active project so
+        # reconcile can pass the exact destination downstream instead of asking
+        # the wrapper to allocate one later.
+        output_root = _project_output_root(project_dir, conv_state)
+        if not params.get("output_directory") and output_root:
+            params["output_directory"] = _next_project_workflow_dir(output_root)
 
         m = re.search(r"(?:annotation\s+gtf|gtf\s+(?:path|file)|use\s+gtf)\s*[=:]?\s*(\S+\.(?:gtf|gtf\.gz))", message, re.I)
         if m:

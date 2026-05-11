@@ -128,6 +128,28 @@ def test_reference_helper_detects_mad1_reference(tmp_path: Path):
     assert payload["consensus_reference"] == "mad1"
 
 
+def test_reconcile_helpers_treat_explicit_workflow_output_dir_as_exact_destination(tmp_path: Path):
+    module = _load_reconcile_module()
+
+    output_root, explicit_workflow_dir = module._resolve_output_root(
+        tmp_path,
+        [],
+        str(tmp_path / "workflow7"),
+    )
+
+    assert output_root == tmp_path.resolve()
+    assert explicit_workflow_dir == (tmp_path / "workflow7").resolve()
+
+    workflow_dir = module._ensure_reconcile_workflow_dir(
+        output_root,
+        explicit_workflow_dir=explicit_workflow_dir,
+    )
+
+    assert workflow_dir == (tmp_path / "workflow7").resolve()
+    assert (workflow_dir / "input").is_dir()
+    assert (workflow_dir / "output").is_dir()
+
+
 def test_reference_helper_falls_back_to_annotated_bam_names_when_configs_missing(tmp_path: Path):
     wf1 = tmp_path / "workflow1"
     wf2 = tmp_path / "workflow2"
@@ -386,6 +408,33 @@ def test_reconcile_script_defaults_output_root_to_workflow_parent_when_omitted(t
     assert payload["outputs"]["output_root"] == str(project_root.resolve())
     assert Path(payload["workflow"]["directory"]).parent == project_root.resolve()
     assert Path(payload["workflow"]["directory"]).name == "workflow4"
+
+
+def test_reconcile_script_honors_explicit_workflow_output_directory(tmp_path: Path):
+    data_root = tmp_path / "data"
+    gtf = data_root / "references" / "GRCh38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    gtf.parent.mkdir(parents=True)
+    _write_minimal_gtf(gtf)
+
+    bam = tmp_path / "sample1.GRCh38.annotated.bam"
+    _write_annotated_bam(bam, "sample1")
+    requested_workflow_dir = tmp_path / "workflow7"
+
+    env = dict(os.environ)
+    env["AGOUTIC_DATA"] = str(data_root)
+
+    result = _run_script(
+        RECONCILE,
+        ["--input-bam", str(bam), "--output-dir", str(requested_workflow_dir), "--json"],
+        env=env,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "completed"
+    assert payload["outputs"]["output_root"] == str(tmp_path.resolve())
+    assert payload["workflow"]["directory"] == str(requested_workflow_dir.resolve())
+    assert (requested_workflow_dir / "input").is_dir()
 
 
 def test_reconcile_script_requires_manual_gtf_when_default_missing(tmp_path: Path):

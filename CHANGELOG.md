@@ -8,6 +8,8 @@
 
 - **Reconcile BAM approvals now run as durable Launchpad script jobs instead of the synchronous utility-tool path, preserving a `run_uuid`, persisted logs, and normal background polling for long-running reconcile workflows**
 
+- **Split-reference reconcile approvals now present all detected genomes in one shared approval, show each planned per-genome workflow/output directory up front, and auto-authorize later per-genome reconcile launches from that first approval**
+
 - **Analyzer and Cortex can now read plain text, markdown, and HTML workflow reports through `read_file_content`, natural-language file requests, and the `/read-file` quick command, with readable HTML text as the default render mode and raw HTML available on demand**
 
 ### Bug Fixes
@@ -22,6 +24,16 @@
 
 - **Reconcile WRITE_SUMMARY now reads `reconciled_summary.txt` (and other unstructured report files when present) so the LLM can interpret summary findings alongside parsed tables**
 
+- **Reconcile planning now allocates explicit `workflowN` destinations before submission and passes the exact output directory end-to-end through Cortex, Launchpad, and the reconcile wrapper, avoiding wrapper-side guessing and keeping later per-genome runs in the intended workflow folders**
+
+- **Shared reconcile approvals now stay schema-valid for later auto-approved per-genome approval steps, and older persisted split-reconcile plans are normalized before validation so resumed runs do not fail after the first genome completes**
+
+- **Multi-genome reconcile job completion now resolves the active `RUN_SCRIPT` step instead of the first script step in the plan, allowing the second genome to continue into locate/parse/summary follow-up steps after its workflow finishes**
+
+- **Execution cards and deletion paths now prefer the persisted script output workflow directory instead of the script working directory, preventing delete actions from targeting project roots and keeping workflow labels aligned with the real `workflowN` folder**
+
+- **Live reconcile stderr progress lines are now classified as informational or warnings unless they contain real error markers, so routine reconcile progress no longer appears red in the UI**
+
 ### Tests
 
 - **Added regression coverage for `mad1` Nextflow config generation and reconcile reference detection**
@@ -29,6 +41,8 @@
 - **Added regression coverage for reconcile script-job submission, overlap step-title scoping, standalone script process-group startup, synchronous timeout cleanup, local cancel cleanup, and atomic script completion/work-directory persistence**
 
 - **Added regression coverage for analyzer render modes, reconcile summary ingestion, natural-language markdown file reads, file-content formatting, and the `/read-file` command**
+
+- **Added regression coverage for shared split-reconcile approvals, explicit workflow output directory planning, second-genome reconcile completion routing, safe workflow-folder deletion, large script-stdout output-directory recovery, and live script log classification**
 
 ### Documentation
 

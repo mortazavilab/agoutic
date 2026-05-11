@@ -5,6 +5,7 @@ and plan step advancement — extracted from *app.py* for clarity.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import os
@@ -251,6 +252,12 @@ async def _ensure_workflow_plan_approval_gate(
     if current_step.get("kind") != "REQUEST_APPROVAL" or current_step.get("status") != "WAITING_APPROVAL":
         return None
 
+    auto_approve_reconcile = bool(
+        payload.get("plan_type") == "reconcile_bams"
+        and current_step.get("auto_approve_from_shared_reconcile_authorization")
+        and payload.get("shared_reconcile_approval_granted")
+    )
+
     existing_gate = session.execute(
         select(ProjectBlock)
         .where(
@@ -262,6 +269,25 @@ async def _ensure_workflow_plan_approval_gate(
         .order_by(ProjectBlock.seq.desc())
     ).scalar_one_or_none()
     if existing_gate is not None:
+        if auto_approve_reconcile:
+            existing_gate_payload = get_block_payload(existing_gate)
+            existing_gate_payload["auto_approved"] = True
+            existing_gate_payload["shared_reconcile_approval_gate_id"] = payload.get("shared_reconcile_approval_gate_id")
+            existing_gate.status = "APPROVED"
+            existing_gate.payload_json = json.dumps(existing_gate_payload)
+            session.commit()
+            session.refresh(existing_gate)
+            _mark_workflow_plan_approval_complete(session, workflow_block, existing_gate.id)
+            _advance_workflow_plan_to_step_kind(
+                session,
+                workflow_block,
+                kind="RUN_SCRIPT",
+                approval_gate_id=existing_gate.id,
+            )
+            from cortex import workflow_submission
+
+            asyncio.create_task(workflow_submission.submit_job_after_approval(workflow_block.project_id, existing_gate.id))
+            sync_project_tasks(session, workflow_block.project_id)
         return existing_gate
 
     plan_specific_context = (
@@ -302,14 +328,31 @@ async def _ensure_workflow_plan_approval_gate(
             "skill": gate_skill,
             "model": model_name,
             "workflow_block_id": workflow_block.id,
+            **({
+                "auto_approved": True,
+                "shared_reconcile_approval_gate_id": payload.get("shared_reconcile_approval_gate_id"),
+            } if auto_approve_reconcile else {}),
         },
-        status="PENDING",
+        status="APPROVED" if auto_approve_reconcile else "PENDING",
         owner_id=owner_id,
     )
     gate_block.parent_id = workflow_block.id
     session.commit()
     session.refresh(gate_block)
     sync_project_tasks(session, workflow_block.project_id)
+
+    if auto_approve_reconcile:
+        _mark_workflow_plan_approval_complete(session, workflow_block, gate_block.id)
+        _advance_workflow_plan_to_step_kind(
+            session,
+            workflow_block,
+            kind="RUN_SCRIPT",
+            approval_gate_id=gate_block.id,
+        )
+        from cortex import workflow_submission
+
+        asyncio.create_task(workflow_submission.submit_job_after_approval(workflow_block.project_id, gate_block.id))
+
     return gate_block
 
 
@@ -434,6 +477,38 @@ def _mark_workflow_plan_approval_complete(session, workflow_block: ProjectBlock,
         return
 
 
+def _apply_shared_reconcile_approval(
+    session,
+    workflow_block: ProjectBlock,
+    gate_block_id: str,
+) -> None:
+    """Record that the first shared reconcile approval covers later per-reference approvals."""
+    payload = get_block_payload(workflow_block)
+    if payload.get("plan_type") != "reconcile_bams":
+        return
+
+    changed = False
+    if payload.get("shared_reconcile_approval_granted") is not True:
+        payload["shared_reconcile_approval_granted"] = True
+        changed = True
+    if payload.get("shared_reconcile_approval_gate_id") != gate_block_id:
+        payload["shared_reconcile_approval_gate_id"] = gate_block_id
+        changed = True
+    for step in payload.get("steps", []):
+        if step.get("kind") != "REQUEST_APPROVAL":
+            continue
+        if not step.get("auto_approve_from_shared_reconcile_authorization"):
+            continue
+        if step.get("status") not in {"PENDING", "WAITING_APPROVAL"}:
+            continue
+        step["shared_reconcile_approval_gate_id"] = gate_block_id
+        step["shared_reconcile_approval_granted"] = True
+        changed = True
+
+    if changed:
+        _persist_workflow_plan(session, workflow_block, payload)
+
+
 def _advance_workflow_plan_to_step_kind(
     session,
     workflow_block: ProjectBlock,
@@ -520,6 +595,7 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
     script_args = params.get("script_args") if isinstance(params.get("script_args"), list) else []
 
     output_root = payload.get("output_directory")
+    current_step_output_directory = current_approval_step.get("output_directory") if isinstance(current_approval_step, dict) else None
     output_prefix = payload.get("output_prefix") or "reconciled"
     reference = None
     annotation_gtf = None
@@ -545,6 +621,70 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
             output_root = outputs_info.get("output_root") or output_root
             output_prefix = outputs_info.get("output_prefix") or output_prefix
 
+    run_step_output_directory = run_step.get("output_directory") if isinstance(run_step, dict) else None
+    effective_output_directory = str(current_step_output_directory or run_step_output_directory or output_root or "").strip() or None
+    approved_references = []
+    if isinstance(current_approval_step, dict):
+        approved_references = current_approval_step.get("approved_references") or []
+    if not approved_references:
+        approved_references = payload.get("reference_groups") or []
+    shared_reconcile_authorization = bool(
+        isinstance(current_approval_step, dict)
+        and current_approval_step.get("shared_reconcile_authorization")
+    )
+    reconcile_runs: list[dict] = []
+    if shared_reconcile_authorization:
+        for approval_step in payload.get("steps", []):
+            if not isinstance(approval_step, dict) or approval_step.get("kind") != "REQUEST_APPROVAL":
+                continue
+            step_preflight = approval_step.get("preflight_summary")
+            if not isinstance(step_preflight, dict):
+                continue
+            step_reference = str(step_preflight.get("reference") or "").strip()
+            if not step_reference:
+                continue
+            matching_run_step = next(
+                (
+                    step for step in payload.get("steps", [])
+                    if isinstance(step, dict)
+                    and step.get("kind") == "RUN_SCRIPT"
+                    and approval_step.get("id") in (step.get("depends_on") or [])
+                ),
+                None,
+            )
+            run_tool_call = next(
+                (
+                    call for call in ((matching_run_step or {}).get("tool_calls") or [])
+                    if call.get("tool") == "run_allowlisted_script"
+                ),
+                None,
+            )
+            run_params = dict((run_tool_call or {}).get("params") or {})
+            run_script_args = run_params.get("script_args") if isinstance(run_params.get("script_args"), list) else []
+            step_outputs = step_preflight.get("outputs") or {}
+            step_gtf = step_preflight.get("gtf") or {}
+            step_inputs = step_preflight.get("inputs") or {}
+            step_bam_inputs = step_inputs.get("bams") if isinstance(step_inputs.get("bams"), list) else []
+            step_output_prefix = step_outputs.get("output_prefix") or output_prefix
+            step_output_directory = str(
+                approval_step.get("output_directory")
+                or ((matching_run_step or {}).get("output_directory") if isinstance(matching_run_step, dict) else "")
+                or step_outputs.get("output_root")
+                or ""
+            ).strip() or None
+            reconcile_runs.append(
+                {
+                    "reference": step_reference,
+                    "output_directory": step_output_directory,
+                    "output_prefix": step_output_prefix,
+                    "annotation_gtf": step_gtf.get("path"),
+                    "annotation_gtf_source": step_gtf.get("source"),
+                    "bam_inputs": step_bam_inputs,
+                    "bam_count": len(step_bam_inputs),
+                    "script_args": run_script_args,
+                }
+            )
+
     extracted_params = {
         "plan_type": "reconcile_bams",
         "workflow_block_id": workflow_block.id,
@@ -557,10 +697,13 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
         "mode": "RNA",
         "input_type": "bam",
         "input_directory": output_root or ".",
-        "output_directory": output_root,
+        "output_directory": effective_output_directory,
         "output_prefix": output_prefix,
         "reference_genome": [reference] if reference else [],
         "reference": reference,
+        "approve_all_references": shared_reconcile_authorization,
+        "approved_references": approved_references,
+        "reconcile_runs": reconcile_runs,
         "annotation_gtf": annotation_gtf,
         "annotation_gtf_source": annotation_gtf_source,
         "annotation_evidence": annotation_evidence,
@@ -579,8 +722,15 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
         "preflight_summary": preflight_payload,
         "gate_action": "reconcile_bams",
     }
+    if shared_reconcile_authorization and approved_references:
+        gate_label = (
+            "Do you authorize the Agent to reconcile these annotated BAMs across all detected genomes "
+            f"({', '.join(approved_references)})?"
+        )
+    else:
+        gate_label = "Do you authorize the Agent to reconcile these annotated BAMs?"
     return {
-        "label": "Do you authorize the Agent to reconcile these annotated BAMs?",
+        "label": gate_label,
         "extracted_params": extracted_params,
         "cache_preflight": None,
         "gate_action": "reconcile_bams",

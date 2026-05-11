@@ -649,6 +649,21 @@ def test_extract_plan_params_reconcile_does_not_treat_to_reconcile_as_output_dir
     assert "output_directory" not in params
 
 
+def test_extract_plan_params_reconcile_defaults_output_directory_to_next_project_workflow(tmp_path):
+    project_dir = tmp_path / "proj"
+    (project_dir / "workflow2").mkdir(parents=True)
+    (project_dir / "workflow5").mkdir()
+
+    params = _extract_plan_params(
+        "reconcile annotated BAMs across workflow2 and workflow5",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+        project_dir=str(project_dir),
+    )
+
+    assert params["output_directory"] == str(project_dir / "workflow6")
+
+
 def test_extract_plan_params_reconcile_cross_project_workflow_refs_resolve_from_known_base():
     params = _extract_plan_params(
         (

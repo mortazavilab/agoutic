@@ -177,8 +177,36 @@ def _next_workflow_number(project_dir: Path) -> int:
     return next_workflow_number(project_dir)
 
 
-def _ensure_reconcile_workflow_dir(output_root: Path) -> Path:
-    workflow_dir = output_root / workflow_dir_name(_next_workflow_number(output_root))
+def _resolve_output_root(project_dir: Path, workflow_dirs: list[Path], requested_output_dir: str) -> tuple[Path, Path | None]:
+    requested = (requested_output_dir or ".").strip()
+    if requested and requested != ".":
+        requested_path = Path(requested).expanduser().resolve()
+        if re.fullmatch(r"workflow\d+", requested_path.name, re.IGNORECASE):
+            return requested_path.parent, requested_path
+        return requested_path, None
+
+    if workflow_dirs:
+        workflow_parents = [str(path.parent) for path in workflow_dirs]
+        return Path(os.path.commonpath(workflow_parents)).expanduser().resolve(), None
+
+    script_dir = Path(__file__).resolve().parent
+    if project_dir.is_dir() and project_dir != script_dir:
+        return project_dir, None
+
+    cwd = Path.cwd().resolve()
+    if cwd != script_dir:
+        return cwd, None
+
+    raise ReconcileInputError(
+        "Unable to determine a writable reconcile output directory automatically. "
+        "Provide --output-dir explicitly."
+    )
+
+
+def _ensure_reconcile_workflow_dir(output_root: Path, explicit_workflow_dir: Path | None = None) -> Path:
+    workflow_dir = explicit_workflow_dir or (output_root / workflow_dir_name(_next_workflow_number(output_root)))
+    if workflow_dir.exists():
+        raise ReconcileInputError(f"Requested reconcile workflow directory already exists: {workflow_dir}")
     input_dir = workflow_dir / "input"
     output_dir = workflow_dir / "output"
     input_dir.mkdir(parents=True, exist_ok=False)
@@ -298,29 +326,6 @@ def _discover_workflow_annotation_gtf(workflow_dirs: list[Path], reference: str)
             f"Workflow config annotation GTF appears to mismatch BAM reference '{reference}': {selected}"
         )
     return selected, evidence, None
-
-
-def _resolve_output_root(project_dir: Path, workflow_dirs: list[Path], requested_output_dir: str) -> Path:
-    requested = (requested_output_dir or ".").strip()
-    if requested and requested != ".":
-        return Path(requested).expanduser().resolve()
-
-    if workflow_dirs:
-        workflow_parents = [str(path.parent) for path in workflow_dirs]
-        return Path(os.path.commonpath(workflow_parents)).expanduser().resolve()
-
-    script_dir = Path(__file__).resolve().parent
-    if project_dir.is_dir() and project_dir != script_dir:
-        return project_dir
-
-    cwd = Path.cwd().resolve()
-    if cwd != script_dir:
-        return cwd
-
-    raise ReconcileInputError(
-        "Unable to determine a writable reconcile output directory automatically. "
-        "Provide --output-dir explicitly."
-    )
 
 
 def _create_symlinks(workflow_dir: Path, bam_paths: list[Path]) -> list[dict]:
@@ -721,7 +726,7 @@ def main() -> int:
         workflow_dirs = _discover_workflow_dirs(project_dir, list(args.workflow_dir or []))
         if args.workflow_dir:
             _validate_explicit_workflow_dirs(workflow_dirs)
-        output_root = _resolve_output_root(project_dir, workflow_dirs, args.output_dir)
+        output_root, explicit_workflow_dir = _resolve_output_root(project_dir, workflow_dirs, args.output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
 
         input_bams: list[Path] = []
@@ -825,7 +830,7 @@ def main() -> int:
             selected_gtf = Path(str(gtf_info.get("path") or "")).expanduser().resolve()
             gtf_source = str(gtf_info.get("source") or "")
             annotation_evidence = preflight_payload.get("annotation_evidence") or []
-            workflow_dir = _ensure_reconcile_workflow_dir(output_root)
+            workflow_dir = _ensure_reconcile_workflow_dir(output_root, explicit_workflow_dir=explicit_workflow_dir)
             symlinks = _create_symlinks(workflow_dir, [Path(item["path"]) for item in metadata])
 
             manifest_path = _write_inputs_manifest(workflow_dir, metadata, symlinks, args.output_prefix)

@@ -708,7 +708,10 @@ def render_block_part1(
                 elif _gate_action == "reconcile_bams" and extracted_params:
                     preflight_summary = extracted_params.get("preflight_summary") or {}
                     bam_inputs = extracted_params.get("bam_inputs") or []
+                    reconcile_runs = extracted_params.get("reconcile_runs") if isinstance(extracted_params.get("reconcile_runs"), list) else []
                     reference = extracted_params.get("reference") or "unknown"
+                    approved_references = extracted_params.get("approved_references") if isinstance(extracted_params.get("approved_references"), list) else []
+                    shared_reconcile_approval = bool(extracted_params.get("approve_all_references") and reconcile_runs)
                     annotation_gtf = extracted_params.get("annotation_gtf") or "not resolved"
                     annotation_gtf_source = extracted_params.get("annotation_gtf_source") or "unknown"
                     annotation_evidence = extracted_params.get("annotation_evidence") or []
@@ -729,13 +732,32 @@ def render_block_part1(
 
                     with st.form(key=f"reconcile_form_{block_id}"):
                         grouped_section("Reconcile Summary")
-                        st.write(f"**Reference**: `{reference}`")
+                        if shared_reconcile_approval:
+                            shared_references = approved_references or [run.get("reference") for run in reconcile_runs if isinstance(run, dict)]
+                            st.write(f"**References**: `{', '.join(shared_references)}`")
+                            st.info("This approval covers all per-reference reconcile runs listed below. The editable fields here correspond to the first run in that sequence.")
+                        else:
+                            st.write(f"**Reference**: `{reference}`")
                         st.write(f"**Execution Script**: `{underlying_script_id}`")
 
                         grouped_section("Reconcile Settings")
-                        output_directory = st.text_input("Workflow Root", value=output_directory, help="Parent project directory where the next workflowN folder will be created.")
-                        output_prefix = st.text_input("Output Prefix", value=output_prefix)
-                        annotation_gtf = st.text_input("Annotation GTF", value=annotation_gtf)
+                        output_directory = st.text_input(
+                            "Current Workflow Output Directory" if shared_reconcile_approval else "Workflow Root",
+                            value=output_directory,
+                            help=(
+                                "Resolved workflow directory for the first reconcile run in this shared approval."
+                                if shared_reconcile_approval else
+                                "Parent project directory where the next workflowN folder will be created."
+                            ),
+                        )
+                        output_prefix = st.text_input(
+                            "Current Output Prefix" if shared_reconcile_approval else "Output Prefix",
+                            value=output_prefix,
+                        )
+                        annotation_gtf = st.text_input(
+                            "Current Reference Annotation GTF" if shared_reconcile_approval else "Annotation GTF",
+                            value=annotation_gtf,
+                        )
                         st.caption(f"GTF source: `{annotation_gtf_source}`")
                         col1, col2 = st.columns(2)
                         gene_prefix = col1.text_input("Gene Prefix", value=gene_prefix_default)
@@ -750,6 +772,25 @@ def render_block_part1(
                         min_tpm = col7.number_input("Min TPM", min_value=0.0, value=min_tpm_default, step=0.1, format="%.3f")
                         min_samples = col8.number_input("Min Samples", min_value=1, value=min_samples_default, step=1)
                         filter_known = st.checkbox("Filter Known Transcripts", value=filter_known_default)
+
+                        if shared_reconcile_approval:
+                            grouped_section("Planned Per-Reference Runs")
+                            for run in reconcile_runs:
+                                if not isinstance(run, dict):
+                                    continue
+                                run_reference = run.get("reference") or "unknown"
+                                st.write(f"**{run_reference}**")
+                                st.caption(
+                                    f"Output: `{run.get('output_directory') or 'not resolved'}` | "
+                                    f"Prefix: `{run.get('output_prefix') or 'reconciled'}` | "
+                                    f"GTF: `{run.get('annotation_gtf') or 'not resolved'}`"
+                                )
+                                for bam in run.get("bam_inputs") or []:
+                                    if not isinstance(bam, dict):
+                                        continue
+                                    sample_label = bam.get("sample") or "sample"
+                                    bam_path = bam.get("path") or ""
+                                    st.caption(f"{sample_label}: `{bam_path}`")
 
                         grouped_section("Validated Inputs")
                         st.write(f"{len(bam_inputs)} annotated BAM(s) passed preflight validation.")

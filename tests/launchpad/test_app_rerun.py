@@ -35,6 +35,76 @@ class _FakeExecuteResult:
 
 
 @pytest.mark.asyncio
+async def test_delete_job_prefers_script_output_directory(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    workflow_dir = tmp_path / "workflow5"
+    workflow_dir.mkdir()
+    (workflow_dir / "result.txt").write_text("ok", encoding="utf-8")
+    script_cwd = tmp_path / "scripts"
+    script_cwd.mkdir()
+
+    job = SimpleNamespace(
+        run_uuid="delete-1",
+        status=launchpad_app.JobStatus.CANCELLED,
+        nextflow_work_dir=str(script_cwd),
+        output_directory=str(workflow_dir),
+        workflow_folder_name="workflow5",
+        report_json={"run_type": "script"},
+    )
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "delete-1"
+        return job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+
+    result = await launchpad_app.delete_job("delete-1")
+
+    assert result["deleted_path"] == str(workflow_dir)
+    assert result["file_count"] == 1
+    assert not workflow_dir.exists()
+    assert script_cwd.exists()
+    assert job.status == launchpad_app.JobStatus.DELETED
+
+
+@pytest.mark.asyncio
+async def test_delete_job_rejects_unsafe_non_workflow_directory(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    project_root = tmp_path / "testimport"
+    project_root.mkdir()
+
+    job = SimpleNamespace(
+        run_uuid="delete-2",
+        status=launchpad_app.JobStatus.CANCELLED,
+        nextflow_work_dir=str(project_root),
+        output_directory=str(project_root),
+        workflow_folder_name=None,
+        report_json={"run_type": "script"},
+    )
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "delete-2"
+        return job
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await launchpad_app.delete_job("delete-2")
+
+    assert exc_info.value.status_code == 409
+    assert project_root.exists()
+    assert job.status == launchpad_app.JobStatus.CANCELLED
+
+
+@pytest.mark.asyncio
 async def test_rerun_job_local_reuses_workflow_identity_and_archives_previous_names(monkeypatch, tmp_path):
     fake_session = _FakeSession()
     rerun_job = SimpleNamespace(

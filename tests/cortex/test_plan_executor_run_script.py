@@ -2,7 +2,7 @@ import pytest
 import base64
 import pandas as pd
 
-from cortex.plan_executor import STEP_TOOL_DEFAULTS, execute_step, should_auto_execute
+from cortex.plan_executor import STEP_TOOL_DEFAULTS, execute_step, should_auto_execute, _normalize_legacy_reconcile_auto_approvals
 
 
 class _FakeSession:
@@ -129,6 +129,33 @@ def test_run_script_is_not_auto_executed_by_default():
     step = {"kind": "RUN_SCRIPT", "requires_approval": False}
     assert should_auto_execute(step) is False
     assert STEP_TOOL_DEFAULTS["RUN_SCRIPT"] is None
+
+
+def test_normalize_legacy_reconcile_auto_approvals_repairs_completed_request_steps():
+    payload = {
+        "plan_type": "reconcile_bams",
+        "steps": [
+            {
+                "id": "approve_mm39",
+                "kind": "REQUEST_APPROVAL",
+                "status": "COMPLETED",
+                "requires_approval": False,
+                "auto_approve_from_shared_reconcile_authorization": True,
+            },
+            {
+                "id": "run_mm39",
+                "kind": "RUN_SCRIPT",
+                "status": "PENDING",
+                "requires_approval": True,
+                "depends_on": ["approve_mm39"],
+            },
+        ],
+    }
+
+    changed = _normalize_legacy_reconcile_auto_approvals(payload)
+
+    assert changed is True
+    assert payload["steps"][0]["requires_approval"] is True
 
 
 @pytest.mark.asyncio

@@ -115,6 +115,7 @@ app = FastAPI(
 app.add_middleware(RequestLoggingMiddleware)
 
 _TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
+_WORKFLOW_FOLDER_RE = re.compile(r"^workflow\d+$", re.IGNORECASE)
 
 
 def _sanitize_work_directory(value: str | None) -> str | None:
@@ -126,11 +127,39 @@ def _sanitize_work_directory(value: str | None) -> str | None:
 
 def _effective_job_work_directory(job) -> str | None:
     result_destination = (getattr(job, "result_destination", "") or "").strip().lower()
+    output_directory = _sanitize_work_directory(getattr(job, "output_directory", None))
     local_work_dir = _sanitize_work_directory(getattr(job, "nextflow_work_dir", None))
     remote_work_dir = _sanitize_work_directory(getattr(job, "remote_work_dir", None))
-    if result_destination in {"local", "both"} and local_work_dir:
-        return local_work_dir
+    if result_destination in {"local", "both"}:
+        if output_directory:
+            return output_directory
+        if local_work_dir:
+            return local_work_dir
     return remote_work_dir or local_work_dir
+
+
+def _resolve_deletable_workflow_dir(job) -> Path | None:
+    expected_folder_name = str(getattr(job, "workflow_folder_name", "") or "").strip()
+    candidate_values = [
+        getattr(job, "output_directory", None),
+        _effective_job_work_directory(job),
+        getattr(job, "nextflow_work_dir", None),
+    ]
+    seen: set[str] = set()
+    for raw_value in candidate_values:
+        cleaned = _sanitize_work_directory(raw_value)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        candidate = Path(cleaned).expanduser()
+        candidate_name = candidate.name
+        if expected_folder_name:
+            if candidate_name != expected_folder_name:
+                continue
+        elif not _WORKFLOW_FOLDER_RE.fullmatch(candidate_name):
+            continue
+        return candidate
+    return None
 
 
 def _job_timing_payload(job) -> dict[str, str | int | None]:
@@ -744,15 +773,22 @@ def _describe_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc!r}"
 
 
-def _read_log_tail(path: str, *, max_chars: int = 4000) -> str:
-    """Read a safe tail snippet from a log file for status/error surfacing."""
+def _read_log_text(path: str) -> str:
     try:
-        text = Path(path).read_text(errors="replace")
+        return Path(path).read_text(errors="replace")
     except Exception:
         return ""
+
+
+def _tail_text(text: str, *, max_chars: int = 4000) -> str:
     if len(text) <= max_chars:
         return text
     return text[-max_chars:]
+
+
+def _read_log_tail(path: str, *, max_chars: int = 4000) -> str:
+    """Read a safe tail snippet from a log file for status/error surfacing."""
+    return _tail_text(_read_log_text(path), max_chars=max_chars)
 
 
 def _tail_log_lines(path: str | None, *, max_lines: int = 40, max_chars: int = 12000) -> list[str]:
@@ -762,6 +798,33 @@ def _tail_log_lines(path: str | None, *, max_lines: int = 40, max_chars: int = 1
     if not text:
         return []
     return [line for line in text.splitlines() if line.strip()][-max_lines:]
+
+
+def _classify_live_script_log_level(source: str, message: str) -> str:
+    stripped = (message or "").strip()
+    lowered = stripped.lower()
+
+    if source == "script-stdout-live":
+        return "INFO"
+
+    if not stripped:
+        return "INFO"
+
+    if stripped.startswith("[WARN]") or stripped.startswith("WARNING:"):
+        return "WARN"
+
+    error_markers = (
+        "[error]",
+        "error:",
+        "traceback",
+        "exception",
+        "failed",
+        "fatal",
+    )
+    if any(marker in lowered for marker in error_markers):
+        return "ERROR"
+
+    return "INFO"
 
 
 def _parse_job_report(job) -> dict:
@@ -859,15 +922,15 @@ def _build_live_script_status(job) -> dict[str, str | int | None]:
 def _build_live_script_logs(job, *, limit: int) -> list[dict[str, str]]:
     timestamp = datetime.utcnow().isoformat()
     live_logs: list[dict[str, str]] = []
-    for source, level, path in (
-        ("script-stdout-live", "INFO", getattr(job, "log_file", None)),
-        ("script-stderr-live", "ERROR", getattr(job, "stderr_log", None)),
+    for source, path in (
+        ("script-stdout-live", getattr(job, "log_file", None)),
+        ("script-stderr-live", getattr(job, "stderr_log", None)),
     ):
         for line in _tail_log_lines(path, max_lines=max(1, limit)):
             live_logs.append(
                 {
                     "timestamp": timestamp,
-                    "level": level,
+                    "level": _classify_live_script_log_level(source, line),
                     "message": line,
                     "source": source,
                 }
@@ -921,8 +984,10 @@ async def _monitor_script_job(
     session = SessionLocal()
     try:
         return_code = await process.wait()
-        stdout_tail = _read_log_tail(stdout_log_path)
-        stderr_tail = _read_log_tail(stderr_log_path)
+        stdout_text = _read_log_text(stdout_log_path)
+        stderr_text = _read_log_text(stderr_log_path)
+        stdout_tail = _tail_text(stdout_text)
+        stderr_tail = _tail_text(stderr_text)
 
         final_status = JobStatus.COMPLETED if return_code == 0 else JobStatus.FAILED
         progress = 100 if return_code == 0 else 0
@@ -947,7 +1012,7 @@ async def _monitor_script_job(
             # the authoritative work_directory so downstream "list files"
             # calls land in the right place instead of the script cwd.
             if return_code == 0:
-                _script_output_dir = _parse_script_output_directory(stdout_tail)
+                _script_output_dir = _parse_script_output_directory(stdout_text)
                 if _script_output_dir:
                     job.nextflow_work_dir = _script_output_dir
                     inferred_index = infer_workflow_index_from_path(_script_output_dir)
@@ -1399,6 +1464,11 @@ async def submit_job(req: SubmitJobRequest):
         job.slurm_gpu_type = req.slurm_gpu_type
         job.result_destination = req.result_destination
         job.cache_preflight_json = req.cache_preflight
+        job.output_directory = req.output_directory
+        if run_type == "script" and req.output_directory:
+            output_name = PurePosixPath(req.output_directory).name
+            if output_name:
+                job.workflow_folder_name = output_name
         await session.commit()
         
         # Log submission
@@ -1457,6 +1527,8 @@ async def submit_job(req: SubmitJobRequest):
                 job.run_stage = "SCRIPT_RUNNING"
                 job.nextflow_process_id = process.pid
                 job.nextflow_work_dir = str(script_cwd)
+                if req.output_directory:
+                    job.output_directory = req.output_directory
                 job.log_file = str(stdout_log)
                 job.stderr_log = str(stderr_log)
                 job.report_json = json.dumps(
@@ -2101,13 +2173,17 @@ async def delete_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                        f"Only {', '.join(s.value for s in _terminal)} jobs can be deleted.",
             )
 
-        _work_dir = Path(job.nextflow_work_dir) if job.nextflow_work_dir else None
+        _work_dir = _resolve_deletable_workflow_dir(job)
+        if _work_dir is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Could not determine a safe workflow directory to delete for this job.",
+            )
         _deleted_path = None
-        _folder_name = None
+        _folder_name = job.workflow_folder_name or _work_dir.name
         _file_count = 0
 
         if _work_dir and _work_dir.exists():
-            _folder_name = _work_dir.name  # e.g. "workflow6"
             # Count files before deleting
             for _root, _dirs, _files in os.walk(_work_dir):
                 _file_count += len(_files)

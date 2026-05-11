@@ -1758,6 +1758,17 @@ async def update_block(
                 _plan_block = _find_workflow_plan(session, block.project_id,
                                                   workflow_block_id=block.parent_id)
                 if _plan_block:
+                    if gate_payload.get("gate_action") == "reconcile_bams":
+                        _plan_payload = get_block_payload(_plan_block)
+                        _current_step = next(
+                            (
+                                step for step in _plan_payload.get("steps", [])
+                                if step.get("id") == _plan_payload.get("current_step_id")
+                            ),
+                            None,
+                        )
+                        if isinstance(_current_step, dict) and _current_step.get("shared_reconcile_authorization"):
+                            _apply_shared_reconcile_approval(session, _plan_block, block.id)
                     _mark_workflow_plan_approval_complete(session, _plan_block, block.id)
                     if is_script_plan_gate:
                         _advance_workflow_plan_to_step_kind(
@@ -1827,6 +1838,7 @@ from cortex.chat_approval import (  # noqa: F401 — re-exported for backward co
     handle_rejection, _ensure_workflow_plan_approval_gate,
     _handle_workflow_plan_remote_profile_auth,
     _mark_workflow_plan_approval_complete,
+    _apply_shared_reconcile_approval,
     _advance_workflow_plan_to_step_kind,
     _build_reconcile_plan_approval_context,
 )

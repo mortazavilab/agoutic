@@ -152,6 +152,48 @@ def _render_stage_transfer_snapshot(transfer_progress: dict | None):
         st.caption(f"Current file: `{current_file}`")
 
 
+def _looks_like_workflow_path(path_value: str) -> bool:
+    if not path_value:
+        return False
+    try:
+        import pathlib as _pathlib
+
+        name = _pathlib.PurePosixPath(path_value).name
+    except Exception:
+        return False
+    if not name.lower().startswith("workflow"):
+        return False
+    return name[8:].isdigit()
+
+
+def _execution_job_workflow_path(content: dict, job_status: dict | None = None) -> str:
+    input_directory = str(content.get("input_directory") or "").strip()
+    candidates: list[str] = []
+    if isinstance(job_status, dict):
+        candidates.extend([
+            str(job_status.get("output_directory") or "").strip(),
+            str(job_status.get("work_directory") or "").strip(),
+        ])
+    candidates.extend([
+        str(content.get("output_directory") or "").strip(),
+        str(content.get("work_directory") or "").strip(),
+    ])
+
+    seen: set[str] = set()
+    fallback = ""
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if input_directory and candidate == input_directory:
+            continue
+        if _looks_like_workflow_path(candidate):
+            return candidate
+        if not fallback:
+            fallback = candidate
+    return fallback
+
+
 def render_block_part2(
     *,
     btype,
@@ -682,6 +724,8 @@ def render_block_part2(
                     except Exception:
                         pass  # Fall back to block payload
 
+            workflow_directory = _execution_job_workflow_path(content, job_status)
+
             run_stage_hint = str(
                 job_status.get("run_stage")
                 or content.get("run_stage")
@@ -710,7 +754,7 @@ def render_block_part2(
                 submitted_at = job_status.get("submitted_at") or content.get("submitted_at") or block.get("created_at")
                 started_at = job_status.get("started_at") or content.get("started_at")
                 completed_at = job_status.get("completed_at") or content.get("completed_at")
-                workflow_label = _workflow_label_from_path(work_directory)
+                workflow_label = _workflow_label_from_path(workflow_directory)
                 run_stage = (job_status.get("run_stage") or "").strip().lower()
                 current_step = (job_status.get("current_step") or "").strip()
                 current_step_detail = (job_status.get("current_step_detail") or "").strip()
@@ -927,10 +971,13 @@ def render_block_part2(
                                 if st.button("No, keep it", key=f"completed_del_no_{block_id}"):
                                     st.session_state.pop(_confirm_key, None)
                                     st.rerun()
-                        elif st.button(f"🗑️ Delete {_completed_workflow_name}", key=f"completed_del_btn_{block_id}"):
-                            st.session_state[_confirm_key] = True
-                            _pause_auto_refresh(4)
-                            st.rerun()
+                        elif workflow_label:
+                            if st.button(f"🗑️ Delete {_completed_workflow_name}", key=f"completed_del_btn_{block_id}"):
+                                st.session_state[_confirm_key] = True
+                                _pause_auto_refresh(4)
+                                st.rerun()
+                        else:
+                            st.caption("Delete unavailable until the workflow folder is known.")
                     with _rerun_col:
                         if st.button("↻ Rerun Workflow", key=f"completed_rerun_{block_id}"):
                             try:
@@ -1100,10 +1147,7 @@ def render_block_part2(
 
                     # Post-cancel actions: Delete folder / Resubmit
                     st.divider()
-                    _work_dir_name = ""
-                    if work_directory:
-                        import pathlib as _pl
-                        _work_dir_name = _pl.PurePosixPath(work_directory).name
+                    _work_dir_name = workflow_label
                     _del_col, _rerun_col, _resub_col = st.columns(3)
                     with _del_col:
                         _del_key = f"del_{block_id}"
@@ -1131,11 +1175,13 @@ def render_block_part2(
                                 if st.button("No, keep it", key=f"del_no_{block_id}"):
                                     st.session_state.pop(_confirm_key, None)
                                     st.rerun()
-                        else:
-                            if st.button(f"🗑️ Delete {_work_dir_name or 'Workflow Folder'}", key=_del_key):
+                        elif _work_dir_name:
+                            if st.button(f"🗑️ Delete {_work_dir_name}", key=_del_key):
                                 st.session_state[_confirm_key] = True
                                 _pause_auto_refresh(4)
                                 st.rerun()
+                        else:
+                            st.caption("Delete unavailable until the workflow folder is known.")
                     with _rerun_col:
                         if st.button("↻ Rerun Workflow", key=f"cancel_rerun_{block_id}"):
                             try:
@@ -1340,7 +1386,7 @@ def render_block_part2(
 
                 if status_str == "FAILED" and run_uuid:
                     st.divider()
-                    _work_dir_name = workflow_label or "workflow folder"
+                    _work_dir_name = workflow_label
                     _delete_col, _rerun_col, _resubmit_col = st.columns(3)
                     with _delete_col:
                         _confirm_key = f"del_confirm_{block_id}"
@@ -1366,10 +1412,13 @@ def render_block_part2(
                                 if st.button("No, keep it", key=f"failed_del_no_{block_id}"):
                                     st.session_state.pop(_confirm_key, None)
                                     st.rerun()
-                        elif st.button(f"🗑️ Delete {_work_dir_name}", key=f"failed_del_btn_{block_id}"):
-                            st.session_state[_confirm_key] = True
-                            _pause_auto_refresh(4)
-                            st.rerun()
+                        elif _work_dir_name:
+                            if st.button(f"🗑️ Delete {_work_dir_name}", key=f"failed_del_btn_{block_id}"):
+                                st.session_state[_confirm_key] = True
+                                _pause_auto_refresh(4)
+                                st.rerun()
+                        else:
+                            st.caption("Delete unavailable until the workflow folder is known.")
                     with _rerun_col:
                         if st.button("↻ Rerun Workflow", key=f"failed_rerun_{block_id}"):
                             try:

@@ -2106,6 +2106,10 @@ async def execute_plan(
         except Exception:
             logger.debug("Failed to initialize DE workflow directory", exc_info=True)
 
+    if _normalize_legacy_reconcile_auto_approvals(plan_payload):
+        _persist_step_update(session, workflow_block, plan_payload)
+        plan_payload = get_block_payload(workflow_block)
+
     try:
         validate_plan(
             plan_payload,
@@ -2489,3 +2493,26 @@ def _persist_step_update(session, workflow_block: "ProjectBlock", payload: dict)
     session.commit()
     session.refresh(workflow_block)
     sync_project_tasks(session, workflow_block.project_id)
+
+
+def _normalize_legacy_reconcile_auto_approvals(payload: dict) -> bool:
+    """Repair older split-reconcile plans that auto-approved later REQUEST_APPROVAL steps incorrectly."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("plan_type") != "reconcile_bams":
+        return False
+
+    changed = False
+    for step in payload.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        if step.get("kind") != "REQUEST_APPROVAL":
+            continue
+        if not step.get("auto_approve_from_shared_reconcile_authorization"):
+            continue
+        if step.get("status") != "COMPLETED":
+            continue
+        if step.get("requires_approval") is not True:
+            step["requires_approval"] = True
+            changed = True
+    return changed

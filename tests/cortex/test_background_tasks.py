@@ -37,6 +37,7 @@ from cortex.app import (
     download_after_approval,
     _auto_execute_plan_steps,
     _ensure_workflow_plan_approval_gate,
+    _apply_shared_reconcile_approval,
     _recover_orphaned_background_tasks,
     _initial_stage_parts,
     _build_auto_analysis_context,
@@ -945,6 +946,8 @@ class TestSubmitJobAfterApproval:
         locate_steps = [step for step in workflow_payload["steps"] if step["kind"] == "LOCATE_DATA"]
         assert run_step["status"] == "RUNNING"
         assert run_step["run_uuid"] == "script-run-1"
+        assert run_step["work_directory"] == "/proj/reconcile"
+        assert run_step["output_directory"] == "/proj/reconcile"
         assert [step["title"] for step in locate_steps] == [
             "Locate annotated BAM candidates across workflow annot directories",
             "List reconcile output files for parsing",
@@ -2569,6 +2572,7 @@ async def test_ensure_workflow_plan_approval_gate_builds_reconcile_specific_payl
     assert gate_payload["extracted_params"]["reference"] == "mm39"
     assert gate_payload["extracted_params"]["annotation_gtf"] == "/refs/mm39.gtf"
     assert gate_payload["extracted_params"]["bam_count"] == 2
+    assert gate_payload["extracted_params"]["output_directory"] == "/proj/reconcile"
     sess.close()
 
 
@@ -2613,6 +2617,7 @@ async def test_ensure_workflow_plan_approval_gate_uses_current_split_reconcile_g
             "current_step_id": "approve_mm39",
             "output_prefix": "reconciled",
             "output_directory": "/proj",
+            "reference_groups": ["GRCh38", "mm39"],
             "steps": [
                 {
                     "id": "preflight_reconcile",
@@ -2636,11 +2641,13 @@ async def test_ensure_workflow_plan_approval_gate_uses_current_split_reconcile_g
                 {
                     "id": "approve_grch38",
                     "kind": "REQUEST_APPROVAL",
-                    "title": "Approve reconcile BAM execution for GRCh38",
+                    "title": "Approve reconcile BAM execution for all detected references (GRCh38, mm39)",
                     "status": "COMPLETED",
                     "requires_approval": True,
                     "depends_on": ["preflight_reconcile"],
                     "preflight_summary": human_preflight,
+                    "shared_reconcile_authorization": True,
+                    "approved_references": ["GRCh38", "mm39"],
                 },
                 {
                     "id": "run_grch38",
@@ -2648,6 +2655,7 @@ async def test_ensure_workflow_plan_approval_gate_uses_current_split_reconcile_g
                     "title": "Run reconcile BAM script for GRCh38 using symlinked workflow inputs",
                     "status": "COMPLETED",
                     "depends_on": ["approve_grch38"],
+                    "output_directory": "/proj/workflow4",
                     "tool_calls": [
                         {
                             "source_key": "launchpad",
@@ -2668,6 +2676,7 @@ async def test_ensure_workflow_plan_approval_gate_uses_current_split_reconcile_g
                     "requires_approval": True,
                     "depends_on": ["run_grch38"],
                     "preflight_summary": mouse_preflight,
+                    "output_directory": "/proj/workflow5",
                 },
                 {
                     "id": "run_mm39",
@@ -2675,6 +2684,7 @@ async def test_ensure_workflow_plan_approval_gate_uses_current_split_reconcile_g
                     "title": "Run reconcile BAM script for mm39 using symlinked workflow inputs",
                     "status": "PENDING",
                     "depends_on": ["approve_mm39"],
+                    "output_directory": "/proj/workflow5",
                     "tool_calls": [
                         {
                             "source_key": "launchpad",
@@ -2704,6 +2714,406 @@ async def test_ensure_workflow_plan_approval_gate_uses_current_split_reconcile_g
     assert gate_payload["extracted_params"]["reference"] == "mm39"
     assert gate_payload["extracted_params"]["annotation_gtf"] == "/refs/mm39.gtf"
     assert gate_payload["extracted_params"]["bam_count"] == 1
+    assert gate_payload["extracted_params"]["output_directory"] == "/proj/workflow5"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_builds_shared_reconcile_payload_for_all_references(session_factory, seed_data):
+    mad1_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "mad1",
+        "gtf": {"path": "/refs/mad1.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "A", "reference": "mad1", "path": "/proj/workflow2/annot/A.mad1.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled_mad1", "output_root": "/proj", "artifacts": []},
+    }
+    mm39_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "mm39",
+        "gtf": {"path": "/refs/mm39.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "B", "reference": "mm39", "path": "/proj/workflow3/annot/B.mm39.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled_mm39", "output_root": "/proj", "artifacts": []},
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "skill": "reconcile_bams",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_mad1",
+            "output_prefix": "reconciled",
+            "output_directory": "/proj",
+            "reference_groups": ["mad1", "mm39"],
+            "steps": [
+                {
+                    "id": "approve_mad1",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for all detected references (mad1, mm39)",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "shared_reconcile_authorization": True,
+                    "approved_references": ["mad1", "mm39"],
+                    "preflight_summary": mad1_preflight,
+                    "output_directory": "/proj/workflow13",
+                },
+                {
+                    "id": "run_mad1",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mad1 using symlinked workflow inputs",
+                    "status": "PENDING",
+                    "depends_on": ["approve_mad1"],
+                    "output_directory": "/proj/workflow13",
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "mad1", "--output-prefix", "reconciled_mad1"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": mad1_preflight,
+                },
+                {
+                    "id": "approve_mm39",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for mm39",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "auto_approve_from_shared_reconcile_authorization": True,
+                    "preflight_summary": mm39_preflight,
+                    "output_directory": "/proj/workflow14",
+                },
+                {
+                    "id": "run_mm39",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mm39 using symlinked workflow inputs",
+                    "status": "PENDING",
+                    "depends_on": ["approve_mm39"],
+                    "output_directory": "/proj/workflow14",
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "mm39", "--output-prefix", "reconciled_mm39"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": mm39_preflight,
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["extracted_params"]["approve_all_references"] is True
+    assert gate_payload["extracted_params"]["approved_references"] == ["mad1", "mm39"]
+    reconcile_runs = gate_payload["extracted_params"]["reconcile_runs"]
+    assert [run["reference"] for run in reconcile_runs] == ["mad1", "mm39"]
+    assert reconcile_runs[0]["output_directory"] == "/proj/workflow13"
+    assert reconcile_runs[1]["output_directory"] == "/proj/workflow14"
+    assert reconcile_runs[1]["annotation_gtf"] == "/refs/mm39.gtf"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_shared_reconcile_approval_records_later_steps_as_covered(session_factory, seed_data):
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_mad1",
+            "steps": [
+                {
+                    "id": "approve_mad1",
+                    "kind": "REQUEST_APPROVAL",
+                    "status": "WAITING_APPROVAL",
+                    "shared_reconcile_authorization": True,
+                },
+                {
+                    "id": "approve_mm39",
+                    "kind": "REQUEST_APPROVAL",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "auto_approve_from_shared_reconcile_authorization": True,
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    _apply_shared_reconcile_approval(sess, workflow_block, "gate-shared")
+
+    refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+    refreshed_payload = get_block_payload(refreshed_workflow)
+    later_step = next(step for step in refreshed_payload["steps"] if step["id"] == "approve_mm39")
+    assert refreshed_payload["shared_reconcile_approval_granted"] is True
+    assert refreshed_payload["shared_reconcile_approval_gate_id"] == "gate-shared"
+    assert later_step["status"] == "PENDING"
+    assert later_step["shared_reconcile_approval_gate_id"] == "gate-shared"
+    assert later_step["shared_reconcile_approval_granted"] is True
+    assert "approval_gate_id" not in later_step
+    assert later_step["requires_approval"] is True
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_execute_plan_steps_auto_approves_follow_on_reconcile_after_prior_reference(session_factory, seed_data):
+    mouse_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "mm39",
+        "gtf": {"path": "/refs/mm39.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "B", "reference": "mm39", "path": "/proj/workflow3/annot/B.mm39.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled_mm39", "output_root": "/proj", "artifacts": []},
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "skill": "reconcile_bams",
+            "status": "RUNNING",
+            "current_step_id": "write_mad1",
+            "output_prefix": "reconciled",
+            "output_directory": "/proj",
+            "shared_reconcile_approval_granted": True,
+            "shared_reconcile_approval_gate_id": "gate-shared",
+            "steps": [
+                {
+                    "id": "approve_mad1",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for all detected references (mad1, mm39)",
+                    "status": "COMPLETED",
+                    "requires_approval": True,
+                    "shared_reconcile_authorization": True,
+                    "approval_gate_id": "gate-shared",
+                },
+                {
+                    "id": "run_mad1",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mad1 using symlinked workflow inputs",
+                    "status": "COMPLETED",
+                    "requires_approval": True,
+                    "depends_on": ["approve_mad1"],
+                    "output_directory": "/proj/workflow15",
+                },
+                {
+                    "id": "write_mad1",
+                    "kind": "WRITE_SUMMARY",
+                    "title": "Summarize reconcile outputs and generated files for mad1",
+                    "status": "COMPLETED",
+                    "depends_on": ["run_mad1"],
+                },
+                {
+                    "id": "approve_mm39",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for mm39",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "depends_on": ["write_mad1"],
+                    "auto_approve_from_shared_reconcile_authorization": True,
+                    "preflight_summary": mouse_preflight,
+                    "output_directory": "/proj/workflow16",
+                },
+                {
+                    "id": "run_mm39",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mm39 using symlinked workflow inputs",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "depends_on": ["approve_mm39"],
+                    "output_directory": "/proj/workflow16",
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "mm39", "--output-prefix", "reconciled_mm39"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": mouse_preflight,
+                },
+            ],
+        },
+        status="RUNNING",
+        owner_id="u-bg",
+    )
+    sess.close()
+
+    user = type("UserStub", (), {"id": "u-bg"})()
+
+    with _patch_session(session_factory), \
+         patch("cortex.chat_downloads.AgentEngine") as mock_engine_cls, \
+         patch("cortex.chat_approval.asyncio.create_task") as mock_create_task:
+        mock_engine = MagicMock()
+        mock_engine.model_name = "default"
+        mock_engine_cls.return_value = mock_engine
+        mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+
+        await _auto_execute_plan_steps("proj-bg", workflow_block.id, user, "test-model")
+
+    assert mock_create_task.call_count == 1
+
+    sess = session_factory()
+    refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+    refreshed_payload = get_block_payload(refreshed_workflow)
+    approve_step = next(step for step in refreshed_payload["steps"] if step["id"] == "approve_mm39")
+    run_step = next(step for step in refreshed_payload["steps"] if step["id"] == "run_mm39")
+    assert refreshed_payload["current_step_id"] == "run_mm39"
+    assert approve_step["status"] == "COMPLETED"
+    assert run_step["approval_gate_id"] == approve_step["approval_gate_id"]
+
+    gate = sess.execute(
+        select(ProjectBlock)
+        .where(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "APPROVAL_GATE",
+            ProjectBlock.parent_id == workflow_block.id,
+            ProjectBlock.status == "APPROVED",
+        )
+        .order_by(ProjectBlock.seq.desc())
+    ).scalar_one()
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["auto_approved"] is True
+    assert gate_payload["extracted_params"]["reference"] == "mm39"
+    assert gate_payload["extracted_params"]["output_directory"] == "/proj/workflow16"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_auto_approves_follow_on_split_reconcile_steps(session_factory, seed_data):
+    mouse_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "mm39",
+        "gtf": {"path": "/refs/mm39.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "B", "reference": "mm39", "path": "/proj/workflow3/annot/B.mm39.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled", "output_root": "/proj", "artifacts": []},
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "skill": "reconcile_bams",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_mm39",
+            "output_prefix": "reconciled",
+            "output_directory": "/proj",
+            "shared_reconcile_approval_granted": True,
+            "shared_reconcile_approval_gate_id": "gate-shared",
+            "steps": [
+                {
+                    "id": "approve_mm39",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for mm39",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "auto_approve_from_shared_reconcile_authorization": True,
+                    "preflight_summary": mouse_preflight,
+                    "output_directory": "/proj/workflow5",
+                },
+                {
+                    "id": "run_mm39",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mm39 using symlinked workflow inputs",
+                    "status": "PENDING",
+                    "depends_on": ["approve_mm39"],
+                    "output_directory": "/proj/workflow5",
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "mm39", "--output-prefix", "reconciled"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": mouse_preflight,
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    with patch("cortex.chat_approval.asyncio") as mock_asyncio:
+        mock_asyncio.create_task = MagicMock()
+        gate = await _ensure_workflow_plan_approval_gate(
+            sess,
+            workflow_block,
+            owner_id="u-bg",
+            model_name="test-model",
+        )
+
+    gate_payload = get_block_payload(gate)
+    assert gate.status == "APPROVED"
+    assert gate_payload["auto_approved"] is True
+    assert gate_payload["shared_reconcile_approval_gate_id"] == "gate-shared"
+    refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+    refreshed_payload = get_block_payload(refreshed_workflow)
+    current_step = next(step for step in refreshed_payload["steps"] if step["id"] == "approve_mm39")
+    run_step = next(step for step in refreshed_payload["steps"] if step["id"] == "run_mm39")
+    assert current_step["status"] == "COMPLETED"
+    assert current_step["approval_gate_id"] == gate.id
+    assert refreshed_payload["current_step_id"] == "run_mm39"
+    assert run_step["approval_gate_id"] == gate.id
+    assert mock_asyncio.create_task.call_count == 1
+    scheduled_coro = mock_asyncio.create_task.call_args.args[0]
+    scheduled_coro.close()
     sess.close()
 
 
@@ -3510,6 +3920,117 @@ class TestJobStatusProxyCache:
         run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_reconcile")
         assert run_step["status"] == "COMPLETED"
         assert run_step["work_directory"] == "/work/workflow5"
+        sess.close()
+
+    @pytest.mark.anyio
+    async def test_completes_second_reconcile_run_script_and_keeps_first_run_intact(self, session_factory, seed_data):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "plan_type": "reconcile_bams",
+                "status": "RUNNING",
+                "run_uuid": "script-mm39",
+                "current_step_id": "run_mm39",
+                "steps": [
+                    {
+                        "id": "approve_mad1",
+                        "kind": "REQUEST_APPROVAL",
+                        "status": "COMPLETED",
+                    },
+                    {
+                        "id": "run_mad1",
+                        "kind": "RUN_SCRIPT",
+                        "status": "COMPLETED",
+                        "run_uuid": "script-mad1",
+                        "work_directory": "/work/workflow15",
+                    },
+                    {
+                        "id": "write_mad1",
+                        "kind": "WRITE_SUMMARY",
+                        "status": "COMPLETED",
+                        "depends_on": ["run_mad1"],
+                    },
+                    {
+                        "id": "approve_mm39",
+                        "kind": "REQUEST_APPROVAL",
+                        "status": "COMPLETED",
+                        "depends_on": ["write_mad1"],
+                    },
+                    {
+                        "id": "run_mm39",
+                        "kind": "RUN_SCRIPT",
+                        "status": "RUNNING",
+                        "depends_on": ["approve_mm39"],
+                    },
+                    {
+                        "id": "locate_mm39",
+                        "kind": "LOCATE_DATA",
+                        "status": "PENDING",
+                        "depends_on": ["run_mm39"],
+                    },
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "script-mm39",
+                "work_directory": "/work/script-mm39",
+                "sample_name": "reconciled",
+                "mode": "RNA",
+                "run_type": "script",
+                "model": "default",
+                "workflow_plan_block_id": workflow_block.id,
+                "job_status": {"status": "PENDING"},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            {"status": "COMPLETED", "progress_percent": 100, "message": "Done", "work_directory": "/work/workflow16\n,"},
+            {"logs": []},
+        ])
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+             patch("cortex.job_polling._auto_trigger_analysis", new_callable=AsyncMock) as mock_auto, \
+             patch("cortex.job_polling.asyncio.create_task") as mock_create_task, \
+             patch("cortex.chat_downloads.AgentEngine") as mock_engine_cls, \
+             patch("cortex.plan_executor.execute_plan", new=AsyncMock(return_value=None)):
+            mock_sleep.return_value = None
+            mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+            mock_engine = MagicMock()
+            mock_engine.model_name = "default"
+            mock_engine_cls.return_value = mock_engine
+            await poll_job_status("proj-bg", job_block.id, "script-mm39")
+
+        assert mock_auto.await_count == 0
+        assert mock_create_task.called
+
+        sess = session_factory()
+        workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        workflow_payload = get_block_payload(workflow)
+        mad1_run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_mad1")
+        mm39_run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_mm39")
+        assert mad1_run_step["status"] == "COMPLETED"
+        assert mad1_run_step["run_uuid"] == "script-mad1"
+        assert mad1_run_step["work_directory"] == "/work/workflow15"
+        assert mm39_run_step["status"] == "COMPLETED"
+        assert mm39_run_step["run_uuid"] == "script-mm39"
+        assert mm39_run_step["work_directory"] == "/work/workflow16"
         sess.close()
 
     @pytest.mark.anyio

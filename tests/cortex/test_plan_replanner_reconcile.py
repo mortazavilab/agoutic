@@ -117,6 +117,12 @@ def test_replan_with_new_info_splits_reconcile_plan_by_reference_group():
     assert updated["reference_groups"] == ["GRCh38", "mm39"]
     approval_titles = [step["title"] for step in updated["steps"] if step.get("kind") == "REQUEST_APPROVAL"]
     assert approval_titles == [
-        "Approve reconcile BAM execution for GRCh38",
+        "Approve reconcile BAM execution for all detected references (GRCh38, mm39)",
         "Approve reconcile BAM execution for mm39",
     ]
+    approval_steps = [step for step in updated["steps"] if step.get("kind") == "REQUEST_APPROVAL"]
+    assert approval_steps[0]["shared_reconcile_authorization"] is True
+    assert approval_steps[1]["auto_approve_from_shared_reconcile_authorization"] is True
+    run_steps = [step for step in updated["steps"] if step.get("kind") == "RUN_SCRIPT"]
+    assert run_steps[0]["output_directory"] == "/proj/workflow1"
+    assert run_steps[1]["output_directory"] == "/proj/workflow2"

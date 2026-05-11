@@ -8,16 +8,21 @@ Triggers:
 
 from __future__ import annotations
 
+import re
 import json
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from common.logging_config import get_logger
+from common.workflow_paths import next_workflow_number, workflow_dir_name
 
 if TYPE_CHECKING:
     from cortex.models import ProjectBlock
 
 logger = get_logger(__name__)
+
+
+_WORKFLOW_SUFFIX_RE = re.compile(r"^workflow(\d+)$", re.IGNORECASE)
 
 
 def _workflow_dirs_from_reconcile_inputs(bam_inputs: list[dict]) -> list[str]:
@@ -44,6 +49,34 @@ def _reference_suffix(reference: str) -> str:
     return normalized or "reference"
 
 
+def _planned_reconcile_output_dirs(
+    requested_output_directory: str | None,
+    output_root: str | None,
+    group_count: int,
+) -> list[str]:
+    if group_count <= 0:
+        return []
+
+    requested = str(requested_output_directory or "").strip()
+    fallback_root = str(output_root or "").strip()
+    requested_name = PurePosixPath(requested).name if requested else ""
+    workflow_match = _WORKFLOW_SUFFIX_RE.fullmatch(requested_name)
+    if workflow_match:
+        parent_dir = PurePosixPath(requested).parent
+        start_index = int(workflow_match.group(1))
+        return [
+            str(parent_dir / f"workflow{start_index + offset}")
+            for offset in range(group_count)
+        ]
+
+    root_path = Path(fallback_root or requested or ".").expanduser()
+    start_index = next_workflow_number(root_path)
+    return [
+        str(root_path / workflow_dir_name(start_index + offset))
+        for offset in range(group_count)
+    ]
+
+
 def _rebuild_reconcile_steps_for_reference_groups(payload: dict, completed_step_id: str, reconcile_preflight: dict) -> bool:
     from cortex.plan_templates import _make_step
 
@@ -68,7 +101,16 @@ def _rebuild_reconcile_steps_for_reference_groups(payload: dict, completed_step_
     previous_dependency = completed_step_id
     new_steps: list[dict] = []
     realized_references: list[str] = []
+    all_references = [
+        str(group.get("reference") or "").strip()
+        for group in reference_groups
+        if isinstance(group, dict) and str(group.get("reference") or "").strip()
+    ]
+    shared_reconcile_authorization = len(all_references) > 1
+    group_output_dirs = _planned_reconcile_output_dirs(payload.get("output_directory"), output_root, len(all_references))
+    shared_approval_step_id: str | None = None
 
+    valid_group_index = 0
     for group in reference_groups:
         if not isinstance(group, dict):
             continue
@@ -79,7 +121,13 @@ def _rebuild_reconcile_steps_for_reference_groups(payload: dict, completed_step_
             continue
 
         realized_references.append(reference)
-        group_output_root = str((group.get("outputs") or {}).get("output_root") or output_root).strip()
+        group_output_dir = group_output_dirs[valid_group_index] if valid_group_index < len(group_output_dirs) else ""
+        valid_group_index += 1
+        group_output_root = (
+            str(PurePosixPath(group_output_dir).parent)
+            if group_output_dir else
+            str((group.get("outputs") or {}).get("output_root") or output_root).strip()
+        )
         group_output_prefix = str((group.get("outputs") or {}).get("output_prefix") or "").strip()
         if not group_output_prefix:
             group_output_prefix = f"{base_output_prefix}_{_reference_suffix(reference)}"
@@ -88,19 +136,33 @@ def _rebuild_reconcile_steps_for_reference_groups(payload: dict, completed_step_
         script_args = ["--json", "--reference", reference, "--output-prefix", group_output_prefix]
         for workflow_dir in workflow_dirs:
             script_args.extend(["--workflow-dir", workflow_dir])
-        if group_output_root:
+        if group_output_dir:
+            script_args.extend(["--output-dir", group_output_dir])
+        elif group_output_root:
             script_args.extend(["--output-dir", group_output_root])
         if annotation_gtf:
             script_args.extend(["--annotation-gtf", annotation_gtf])
 
         approval_step = _make_step(
             "REQUEST_APPROVAL",
-            f"Approve reconcile BAM execution for {reference}",
+            (
+                f"Approve reconcile BAM execution for all detected references ({', '.join(all_references)})"
+                if shared_reconcile_authorization and shared_approval_step_id is None
+                else f"Approve reconcile BAM execution for {reference}"
+            ),
             next_order_index,
             requires_approval=True,
             depends_on=[previous_dependency],
         )
         approval_step["preflight_summary"] = group
+        approval_step["output_directory"] = group_output_dir or group_output_root
+        if shared_reconcile_authorization and shared_approval_step_id is None:
+            approval_step["shared_reconcile_authorization"] = True
+            approval_step["approved_references"] = all_references
+            shared_approval_step_id = approval_step["id"]
+        elif shared_reconcile_authorization:
+            approval_step["auto_approve_from_shared_reconcile_authorization"] = True
+            approval_step["shared_reconcile_authorization_step_id"] = shared_approval_step_id
         new_steps.append(approval_step)
         next_order_index += 1
 
@@ -122,6 +184,7 @@ def _rebuild_reconcile_steps_for_reference_groups(payload: dict, completed_step_
             ],
         )
         run_step["preflight_summary"] = group
+        run_step["output_directory"] = group_output_dir or group_output_root
         new_steps.append(run_step)
         next_order_index += 1
 
@@ -135,8 +198,8 @@ def _rebuild_reconcile_steps_for_reference_groups(payload: dict, completed_step_
                     "source_key": "analyzer",
                     "tool": "list_job_files",
                     "params": {
-                        "work_dir": group_output_root or output_root or ".",
-                        "max_depth": 2,
+                        "work_dir": group_output_dir or group_output_root or output_root or ".",
+                        "max_depth": 1,
                         "allow_missing": True,
                     },
                 }
@@ -171,6 +234,11 @@ def _rebuild_reconcile_steps_for_reference_groups(payload: dict, completed_step_
     payload["status"] = "WAITING_APPROVAL"
     payload["current_step_id"] = new_steps[0]["id"]
     payload["reference_groups"] = realized_references
+    if shared_reconcile_authorization:
+        payload["output_directory"] = output_root or str(PurePosixPath(group_output_dirs[0]).parent)
+        payload["shared_reconcile_authorization_required"] = True
+        payload["shared_reconcile_approval_granted"] = False
+        payload["shared_reconcile_authorization_step_id"] = shared_approval_step_id
     goal = str(payload.get("goal") or "").strip()
     if goal and "separately per genome" not in goal.lower():
         payload["goal"] = f"{goal.rstrip('.')} separately per genome."

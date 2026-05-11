@@ -126,6 +126,87 @@ async def test_monitor_script_job_commits_completed_status_with_final_output_dir
     assert "run-1" not in launchpad_app.job_monitors
 
 
+@pytest.mark.asyncio
+async def test_monitor_script_job_recovers_output_directory_from_large_stdout_payload(monkeypatch, tmp_path):
+    workflow_dir = tmp_path / "workflow11"
+    workflow_dir.mkdir()
+    stdout_log = tmp_path / "run-2.stdout.log"
+    stderr_log = tmp_path / "run-2.stderr.log"
+    stdout_log.write_text(
+        json.dumps(
+            {
+                "success": True,
+                "workflow": {
+                    "directory": str(workflow_dir),
+                    "output_directory": str(workflow_dir),
+                },
+                "details": "x" * 6000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    stderr_log.write_text("", encoding="utf-8")
+
+    fake_job = SimpleNamespace(
+        run_uuid="run-2",
+        status="RUNNING",
+        progress_percent=0,
+        error_message=None,
+        completed_at=None,
+        run_stage="SCRIPT_RUNNING",
+        report_json=None,
+        nextflow_work_dir=str(tmp_path),
+        workflow_index=None,
+        workflow_alias=None,
+        workflow_folder_name=None,
+    )
+
+    class _CommitTrackingSession:
+        def __init__(self, tracked_job):
+            self.tracked_job = tracked_job
+
+        async def commit(self):
+            return None
+
+        async def close(self):
+            return None
+
+    class _CompletingProcess:
+        async def wait(self):
+            return 0
+
+    fake_session = _CommitTrackingSession(fake_job)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-2"
+        return fake_job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "infer_workflow_index_from_path", lambda _path: 11)
+    monkeypatch.setattr(launchpad_app, "workflow_alias_for_index", lambda index: f"workflow{index}")
+    monkeypatch.setattr(launchpad_app, "script_processes", {"run-2": object()})
+    monkeypatch.setattr(launchpad_app, "job_monitors", {"run-2": object()})
+
+    await launchpad_app._monitor_script_job(
+        "run-2",
+        _CompletingProcess(),
+        str(stdout_log),
+        str(stderr_log),
+    )
+
+    assert fake_job.status == launchpad_app.JobStatus.COMPLETED
+    assert fake_job.nextflow_work_dir == str(workflow_dir)
+    assert fake_job.workflow_index == 11
+    assert fake_job.workflow_alias == "workflow11"
+    assert fake_job.workflow_folder_name == "workflow11"
+
+
 def _fake_dogme_job():
     return SimpleNamespace(
         run_uuid="run-dogme",

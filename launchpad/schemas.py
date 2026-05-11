@@ -60,6 +60,7 @@ class SubmitJobRequest(BaseModel):
     script_path: Optional[str] = None
     script_args: list[str] = Field(default_factory=list)
     script_working_directory: Optional[str] = None
+    output_directory: Optional[str] = None
     
     @field_validator("reference_genome")
     @classmethod

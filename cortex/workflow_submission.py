@@ -146,6 +146,10 @@ def _build_script_submission_payload(job_data: dict) -> dict:
     if script_working_directory:
         submission_payload["script_working_directory"] = script_working_directory
 
+    output_directory = str(job_data.get("output_directory") or "").strip()
+    if output_directory:
+        submission_payload["output_directory"] = output_directory
+
     return submission_payload
 
 
@@ -847,6 +851,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 {
                     "run_uuid": run_uuid,
                     "work_directory": _work_directory,
+                    "output_directory": _work_directory,
                     "sample_name": job_data["sample_name"],
                     "mode": job_data["mode"],
                     "run_type": run_type,
@@ -880,7 +885,11 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                         workflow_block,
                         run_step_id,
                         "RUNNING",
-                        extra={"run_uuid": run_uuid, "block_id": job_block.id},
+                        extra={
+                            "run_uuid": run_uuid,
+                            "block_id": job_block.id,
+                            **({"work_directory": _work_directory, "output_directory": _work_directory} if _work_directory else {}),
+                        },
                     )
 
             logger.info("Job submitted", run_uuid=run_uuid, project_id=project_id)
@@ -896,6 +905,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 {
                     "run_uuid": None,
                     "work_directory": _work_directory,
+                    "output_directory": _work_directory,
                     "sample_name": job_data["sample_name"],
                     "mode": job_data["mode"],
                     "run_type": run_type,

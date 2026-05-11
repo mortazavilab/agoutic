@@ -700,8 +700,24 @@ async def test_get_job_logs_returns_live_script_output_while_running(monkeypatch
 
     messages = [entry.message for entry in payload["logs"]]
     sources = [entry.source for entry in payload["logs"]]
+    levels_by_message = {entry.message: entry.level for entry in payload["logs"]}
     assert any("Collecting structures and assigning IDs" in message for message in messages)
     assert any("Initially processed 12 unique transcript structures." in message for message in messages)
     assert any("[WARN] example warning" in message for message in messages)
     assert "script-stdout-live" in sources
     assert "script-stderr-live" in sources
+    assert levels_by_message["[WARN] example warning"] == "WARN"
+
+
+def test_classify_live_script_log_level_treats_generic_stderr_progress_as_info():
+    assert launchpad_app._classify_live_script_log_level(
+        "script-stderr-live",
+        "=== Step 1: Collecting structures and assigning IDs (using 4 threads)... ===",
+    ) == "INFO"
+
+
+def test_classify_live_script_log_level_keeps_real_stderr_errors_red():
+    assert launchpad_app._classify_live_script_log_level(
+        "script-stderr-live",
+        "Traceback (most recent call last):",
+    ) == "ERROR"

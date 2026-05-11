@@ -1083,6 +1083,16 @@ def _resolve_workflow_step_id(payload: dict, *identifiers: str, kinds: tuple[str
             if step.get("id") == identifier:
                 return identifier
     if kinds:
+        current_step_id = payload.get("current_step_id")
+        if isinstance(current_step_id, str):
+            for step in steps:
+                if step.get("id") == current_step_id and step.get("kind") in kinds:
+                    return current_step_id
+        for step in steps:
+            if step.get("status") == "RUNNING" and step.get("kind") in kinds:
+                step_id = step.get("id")
+                if isinstance(step_id, str):
+                    return step_id
         for step in steps:
             if step.get("kind") in kinds:
                 return step.get("id")
