@@ -208,6 +208,112 @@ class TestCreateProjectServerSide:
         assert result["id"] == "uuid-fallback"
 
 
+class TestLoadReferenceGenomeCatalog:
+    def test_returns_api_catalog_and_caches(self):
+        fake_st = SimpleNamespace(session_state={})
+        request = MagicMock(
+            return_value=SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "default": "GRCh38",
+                    "genomes": ["GRCh38", "mm39", "mad1"],
+                    "items": [
+                        {
+                            "id": "GRCh38",
+                            "label": "GRCh38 (aliases: hg38, human)",
+                            "aliases": ["hg38", "human"],
+                            "is_default": True,
+                            "assets": {"fasta": True, "gtf": True, "kallisto_index": True, "kallisto_t2g": True},
+                        },
+                        {
+                            "id": "mm39",
+                            "label": "mm39 (aliases: mm10, mouse)",
+                            "aliases": ["mm10", "mouse"],
+                            "is_default": False,
+                            "assets": {"fasta": True, "gtf": True, "kallisto_index": True, "kallisto_t2g": True},
+                        },
+                        {
+                            "id": "mad1",
+                            "label": "mad1",
+                            "aliases": [],
+                            "is_default": False,
+                            "assets": {"fasta": True, "gtf": True, "kallisto_index": False, "kallisto_t2g": False},
+                        },
+                    ],
+                    "count": 3,
+                },
+            )
+        )
+        fn = _ast_load_fn_from_file(
+            "load_reference_genome_catalog",
+            _EXTRACTED_MODULES["appui_services"],
+            {"st": fake_st, "time": SimpleNamespace(time=lambda: 100.0)},
+        )
+
+        result = fn(api_url="http://api.test", request_fn=request)
+
+        assert result["genomes"] == ["GRCh38", "mm39", "mad1"]
+        assert result["default"] == "GRCh38"
+        items_by_id = {item["id"]: item for item in result["items"]}
+        assert items_by_id["mm39"]["aliases"] == ["mm10", "mouse"]
+        request.assert_called_once_with(
+            "GET",
+            "http://api.test/config/reference-genomes",
+            timeout=5,
+        )
+        assert fake_st.session_state["_reference_genome_catalog_cache"]["catalog"]["default"] == "GRCh38"
+        assert fake_st.session_state["_available_reference_genomes_cache"]["genomes"] == ["GRCh38", "mm39", "mad1"]
+
+    def test_falls_back_when_request_fails(self):
+        fake_st = SimpleNamespace(session_state={})
+        request = MagicMock(side_effect=RuntimeError("network down"))
+        fn = _ast_load_fn_from_file(
+            "load_reference_genome_catalog",
+            _EXTRACTED_MODULES["appui_services"],
+            {"st": fake_st, "time": SimpleNamespace(time=lambda: 100.0)},
+        )
+
+        result = fn(
+            api_url="http://api.test",
+            request_fn=request,
+            fallback=["mad1", "mm39"],
+        )
+
+        assert result["genomes"] == ["mad1", "mm39"]
+        assert [item["label"] for item in result["items"]] == ["mad1", "mm39"]
+
+
+class TestLoadAvailableReferenceGenomes:
+    def test_returns_genome_ids_from_catalog(self):
+        fake_st = SimpleNamespace(session_state={})
+        namespace = {"st": fake_st, "time": SimpleNamespace(time=lambda: 100.0)}
+        namespace["load_reference_genome_catalog"] = _ast_load_fn_from_file(
+            "load_reference_genome_catalog",
+            _EXTRACTED_MODULES["appui_services"],
+            namespace,
+        )
+        fn = _ast_load_fn_from_file(
+            "load_available_reference_genomes",
+            _EXTRACTED_MODULES["appui_services"],
+            namespace,
+        )
+        request = MagicMock(
+            return_value=SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "default": "GRCh38",
+                    "genomes": ["GRCh38", "mm39", "mad1"],
+                    "items": [],
+                    "count": 3,
+                },
+            )
+        )
+
+        result = fn(api_url="http://api.test", request_fn=request)
+
+        assert result == ["GRCh38", "mm39", "mad1"]
+
+
 class TestJobStatusUpdatedAt:
     def test_prefers_live_poll_time_when_live_status_succeeds(self):
         fn = _load_function("_job_status_updated_at")

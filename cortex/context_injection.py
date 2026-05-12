@@ -8,6 +8,7 @@ injection, local-sample parameter collection, and ENCODE follow-up DF injection.
 
 import re
 
+from cortex.config import GENOME_ALIASES
 from cortex.conversation_state import _extract_job_context_from_history
 from cortex.encode_helpers import (
     _ENCODE_ASSAY_ALIASES,
@@ -18,6 +19,14 @@ from cortex.llm_validators import get_block_payload
 from common.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+_GENOME_TOKENS = tuple(dict.fromkeys([*GENOME_ALIASES.keys(), *GENOME_ALIASES.values()]))
+_GENOME_PATTERN = "|".join(re.escape(token) for token in sorted(_GENOME_TOKENS, key=len, reverse=True))
+
+
+def _canonicalize_genome_token(token: str) -> str:
+    cleaned = str(token or "").strip()
+    return GENOME_ALIASES.get(cleaned.lower(), cleaned)
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +242,7 @@ def _inject_job_context(user_message: str, active_skill: str,
                 r'(DNA|RNA|CDNA|cDNA|Fiber-seq|Fiberseq)', re.IGNORECASE),
             "reference_genome": re.compile(
                 r'(?:reference\s*genome|genome)[:\s*]+'
-                r'(GRCh38|mm39|mad1|mm10|hg38|T2T-CHM13)', re.IGNORECASE),
+                rf'({_GENOME_PATTERN})', re.IGNORECASE),
         }
 
         # First pass: extract from the original user request and any assistant
@@ -243,7 +252,10 @@ def _inject_job_context(user_message: str, active_skill: str,
             for field, pat in _field_patterns.items():
                 m = pat.search(content)
                 if m:
-                    _collected[field] = m.group(1).strip().rstrip("*").strip()
+                    value = m.group(1).strip().rstrip("*").strip()
+                    if field == "reference_genome":
+                        value = _canonicalize_genome_token(value)
+                    _collected[field] = value
 
         # Heuristic: detect sample_type from keywords in ALL user messages
         # AND the current message (which hasn't been appended to history yet).
@@ -304,15 +316,15 @@ def _inject_job_context(user_message: str, active_skill: str,
                 if msg.get("role") != "user":
                     continue
                 _genome_m = re.match(
-                    r'^\s*(GRCh38|mm39|mad1|mm10|hg38)\s*$', msg["content"], re.IGNORECASE)
+                    rf'^\s*({_GENOME_PATTERN})\s*$', msg["content"], re.IGNORECASE)
                 if _genome_m:
-                    _collected["reference_genome"] = _genome_m.group(1).strip()
+                    _collected["reference_genome"] = _canonicalize_genome_token(_genome_m.group(1))
 
         # Also check current message for a genome answer
         _cur_genome_m = re.match(
-            r'^\s*(GRCh38|mm39|mad1|mm10|hg38)\s*$', user_message, re.IGNORECASE)
+            rf'^\s*({_GENOME_PATTERN})\s*$', user_message, re.IGNORECASE)
         if _cur_genome_m:
-            _collected["reference_genome"] = _cur_genome_m.group(1).strip()
+            _collected["reference_genome"] = _canonicalize_genome_token(_cur_genome_m.group(1))
 
         # Heuristic: infer reference_genome from organism keywords
         if "reference_genome" not in _collected:

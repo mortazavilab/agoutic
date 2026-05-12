@@ -353,6 +353,34 @@ async def _build_remote_stage_approval_context(
                 break
 
     if not selected_defaults:
+        wanted_nickname = (remote_request.get("ssh_profile_nickname") or "").strip().lower()
+        if wanted_nickname:
+            try:
+                fallback_profiles = await _list_user_ssh_profiles(owner_id)
+            except Exception:
+                fallback_profiles = []
+            for profile in fallback_profiles:
+                if not isinstance(profile, dict):
+                    continue
+                if (profile.get("nickname") or "").strip().lower() != wanted_nickname:
+                    continue
+                selected_defaults = {
+                    "ssh_profile_id": profile.get("id"),
+                    "nickname": profile.get("nickname"),
+                    "default_slurm_account": profile.get("default_slurm_account"),
+                    "default_slurm_partition": profile.get("default_slurm_partition"),
+                    "default_slurm_gpu_account": profile.get("default_slurm_gpu_account"),
+                    "default_slurm_gpu_partition": profile.get("default_slurm_gpu_partition"),
+                    "remote_base_path": profile.get("remote_base_path"),
+                }
+                if not defaults_data.get("selected_profile_defaults"):
+                    defaults_data = {
+                        **defaults_data,
+                        "selected_profile_defaults": selected_defaults,
+                    }
+                break
+
+    if not selected_defaults:
         return None
 
     params = await extract_params(session, project_id) or {}
@@ -413,7 +441,13 @@ async def _build_remote_stage_approval_context(
         if remote_input_path
         else f"📁 **Data Path:** {input_directory}\n"
     )
-    has_saved_defaults = bool(defaults_data.get("found"))
+    has_saved_defaults = bool(
+        defaults_data.get("found")
+        or selected_defaults.get("default_slurm_account")
+        or selected_defaults.get("default_slurm_partition")
+        or selected_defaults.get("default_slurm_gpu_account")
+        or selected_defaults.get("default_slurm_gpu_partition")
+    )
 
     if remote_request.get("stage_only"):
         intro = (

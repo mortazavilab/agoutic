@@ -111,6 +111,19 @@ class TestHealthCheck:
             {"key": "heavy", "model": "gpt-oss:120b"},
         ]
 
+    def test_reference_genomes(self, client):
+        resp = client.get("/config/reference-genomes")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == len(data["genomes"])
+        assert {"GRCh38", "mm39", "mad1"}.issubset(set(data["genomes"]))
+        assert data["default"] == "GRCh38"
+        items_by_id = {item["id"]: item for item in data["items"]}
+        assert items_by_id["GRCh38"]["aliases"] == ["hg38", "human"]
+        assert items_by_id["mm39"]["aliases"] == ["mm10", "mouse"]
+        assert items_by_id["mad1"]["assets"]["fasta"] is True
+        assert items_by_id["mad1"]["assets"]["kallisto_index"] is False
+
 
 # ---------------------------------------------------------------------------
 # POST /projects — create project

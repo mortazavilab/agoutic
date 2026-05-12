@@ -11,6 +11,11 @@ from cortex.user_jail import get_user_data_dir
 
 logger = get_logger(__name__)
 
+_GENOME_STOP_WORDS = {
+    str(token).lower()
+    for token in {*(GENOME_ALIASES.keys()), *(GENOME_ALIASES.values())}
+}
+
 _REMOTE_INPUT_PATTERNS = [
     re.compile(
         r"\b(?:use|using|with|from|at)\s+(?:the\s+)?remote\s+(?:data|folder|path|input(?:\s+folder)?|directory)\s+(?:at|in)?\s*(/[\w./-]+)",
@@ -403,9 +408,12 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         r'analyze\s+(?:the\s+)?(?:sample\s+)?([a-zA-Z0-9_-]+)\s+using',  # "analyze c2c12r1 using"
         r'analyze\s+(?:the\s+)?(?:sample\s+)?([a-zA-Z0-9_-]+)\s+on',  # "analyze Jamshid on hpc3"
     ]
-    _skip_words = {"is", "the", "a", "an", "this", "that", "it", "at", "in", "on",
-                   "mm39", "grch38", "hg38", "mm10", "mad1", "name", "type", "data", "file",
-                   "using", "with", "from", "for", "my", "new", "rna", "dna", "cdna"}
+    _skip_words = {
+        "is", "the", "a", "an", "this", "that", "it", "at", "in", "on",
+        "name", "type", "data", "file", "using", "with", "from", "for",
+        "my", "new", "rna", "dna", "cdna",
+        *_GENOME_STOP_WORDS,
+    }
     for msg in reversed(user_messages):
         for pattern in explicit_patterns:
             match = re.search(pattern, msg, re.IGNORECASE)
@@ -428,7 +436,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
                 if name_match:
                     potential_name = name_match.group(1)
                     # Not a path, not a common word, not a genome name
-                    if (potential_name.lower() not in ["dna", "rna", "cdna", "mm39", "grch38", "hg38", "mm10", "mad1", "human", "mouse", "yes", "no", "sup", "hac", "fast"]
+                    if (potential_name.lower() not in {"dna", "rna", "cdna", "human", "mouse", "yes", "no", "sup", "hac", "fast", *_GENOME_STOP_WORDS}
                         and "/" not in potential_name):
                         params["sample_name"] = potential_name
                         break

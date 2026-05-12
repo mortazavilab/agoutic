@@ -63,10 +63,27 @@ class TestGenerateConfig:
 
         assert "[name: 'GRCh38'" in config
         assert "[name: 'mm39'" in config
+        assert (
+            f"annot: '{REFERENCE_GENOMES['GRCh38']['gtf']}'],\n"
+            f"        [name: 'mm39', genome: '{REFERENCE_GENOMES['mm39']['fasta']}'"
+        ) in config
         assert f"kallistoIndex = '{REFERENCE_GENOMES['GRCh38']['kallisto_index']}'" in config
         assert f"t2g = '{REFERENCE_GENOMES['GRCh38']['kallisto_t2g']}'" in config
         assert "modifications = 'inosine_m6A_2OmeA,pseU_2OmeU,m5C_2OmeC,2OmeG'" in config
         assert "minCov = 3" in config
+
+    def test_multi_genome_config_includes_commas_between_reference_maps(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-mm39-mad1",
+            mode="CDNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39", "mad1"],
+        )
+
+        assert (
+            f"annot: '{REFERENCE_GENOMES['mm39']['gtf']}'],\n"
+            f"        [name: 'mad1', genome: '{REFERENCE_GENOMES['mad1']['fasta']}'"
+        ) in config
 
     def test_grch38_config_uses_human_kallisto_sidecars(self):
         config = NextflowConfig.generate_config(

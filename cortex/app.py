@@ -20,7 +20,14 @@ from sqlalchemy.exc import OperationalError
 # ✅ Import from your package
 from cortex.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from cortex.agent_engine import AgentEngine
-from cortex.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES, AGOUTIC_DATA, LLM_MODELS
+from cortex.config import (
+    SKILLS_REGISTRY,
+    GENOME_ALIASES,
+    AVAILABLE_GENOMES,
+    AGOUTIC_DATA,
+    LLM_MODELS,
+    get_reference_genome_catalog,
+)
 from cortex.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
 from cortex.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess, Project, UserFile
 from cortex.middleware import AuthMiddleware
@@ -400,6 +407,16 @@ async def get_llm_models():
             {"key": key, "model": model_name}
             for key, model_name in LLM_MODELS.items()
         ]
+    }
+
+
+@app.get("/config/reference-genomes")
+async def get_reference_genomes():
+    """Return the configured reference genome catalog for UI clients."""
+    catalog = get_reference_genome_catalog()
+    return {
+        **catalog,
+        "count": len(catalog["genomes"]),
     }
 
 @app.get("/skills")

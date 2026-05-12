@@ -165,6 +165,30 @@ class TestGenomeDetection:
         sess.close()
         assert set(result["reference_genome"]) == {"GRCh38", "mm39"}
 
+    @pytest.mark.asyncio
+    async def test_mm39_and_mad1_genomes(self):
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {"text": "run dogme for sample Jamshid on /data/jamshid/pod5 using both mm39 and mad1"},
+        )
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert set(result["reference_genome"]) == {"mm39", "mad1"}
+
+    @pytest.mark.asyncio
+    async def test_configured_future_genome_name_is_not_treated_as_sample_name(self, monkeypatch):
+        monkeypatch.setitem(__import__("cortex.job_parameters", fromlist=["GENOME_ALIASES"]).GENOME_ALIASES, "canfam4", "canFam4")
+        _add_block(self.sf, "USER_MESSAGE", {"text": "analyze canfam4 DNA data"})
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert result["reference_genome"] == ["canFam4"]
+        assert result["sample_name"] != "canfam4"
+
 
 class TestEntryPoint:
     @pytest.fixture(autouse=True)

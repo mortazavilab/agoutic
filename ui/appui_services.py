@@ -29,6 +29,156 @@ def create_project_server_side(name: str | None, api_url: str, request_fn) -> di
     return {"id": str(_uuid.uuid4()), "slug": "", "name": project_name}
 
 
+def load_reference_genome_catalog(
+    *,
+    api_url: str,
+    request_fn,
+    fallback: list[str] | None = None,
+    cache_seconds: float = 60.0,
+) -> dict:
+    normalized_fallback: list[str] = []
+    for genome in fallback or ["GRCh38", "mm39", "mad1"]:
+        cleaned = str(genome or "").strip()
+        if cleaned and cleaned not in normalized_fallback:
+            normalized_fallback.append(cleaned)
+
+    fallback_catalog = {
+        "default": None,
+        "genomes": normalized_fallback,
+        "items": [
+            {
+                "id": genome,
+                "label": genome,
+                "aliases": [],
+                "is_default": False,
+                "assets": {},
+            }
+            for genome in normalized_fallback
+        ],
+        "count": len(normalized_fallback),
+    }
+
+    cache_key = "_reference_genome_catalog_cache"
+    now = time.time()
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, dict):
+        catalog = cached.get("catalog")
+        fetched_at = float(cached.get("fetched_at") or 0.0)
+        if (
+            isinstance(catalog, dict)
+            and isinstance(catalog.get("genomes"), list)
+            and catalog.get("genomes")
+            and (now - fetched_at) < cache_seconds
+        ):
+            return catalog
+
+    try:
+        resp = request_fn(
+            "GET",
+            f"{api_url}/config/reference-genomes",
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            genomes = data.get("genomes") if isinstance(data, dict) else None
+            items = data.get("items") if isinstance(data, dict) else None
+            if isinstance(genomes, list):
+                normalized_genomes: list[str] = []
+                for genome in genomes:
+                    cleaned = str(genome or "").strip()
+                    if cleaned and cleaned not in normalized_genomes:
+                        normalized_genomes.append(cleaned)
+
+                items_by_id: dict[str, dict] = {}
+                if isinstance(items, list):
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        genome_id = str(item.get("id") or item.get("genome") or "").strip()
+                        if not genome_id or genome_id not in normalized_genomes:
+                            continue
+
+                        aliases: list[str] = []
+                        raw_aliases = item.get("aliases")
+                        if isinstance(raw_aliases, list):
+                            for alias in raw_aliases:
+                                cleaned_alias = str(alias or "").strip()
+                                if cleaned_alias and cleaned_alias not in aliases:
+                                    aliases.append(cleaned_alias)
+
+                        assets: dict[str, bool] = {}
+                        raw_assets = item.get("assets")
+                        if isinstance(raw_assets, dict):
+                            for key, value in raw_assets.items():
+                                cleaned_key = str(key or "").strip()
+                                if cleaned_key:
+                                    assets[cleaned_key] = bool(value)
+
+                        label = str(item.get("label") or genome_id).strip() or genome_id
+                        items_by_id[genome_id] = {
+                            "id": genome_id,
+                            "label": label,
+                            "aliases": aliases,
+                            "is_default": bool(item.get("is_default")),
+                            "assets": assets,
+                        }
+
+                normalized_items = [
+                    items_by_id.get(
+                        genome,
+                        {
+                            "id": genome,
+                            "label": genome,
+                            "aliases": [],
+                            "is_default": False,
+                            "assets": {},
+                        },
+                    )
+                    for genome in normalized_genomes
+                ]
+                default_genome = str(data.get("default") or "").strip() if isinstance(data, dict) else ""
+                normalized_catalog = {
+                    "default": default_genome if default_genome in normalized_genomes else None,
+                    "genomes": normalized_genomes,
+                    "items": normalized_items,
+                    "count": len(normalized_genomes),
+                }
+                st.session_state[cache_key] = {
+                    "fetched_at": now,
+                    "catalog": normalized_catalog,
+                }
+                st.session_state["_available_reference_genomes_cache"] = {
+                    "fetched_at": now,
+                    "genomes": normalized_genomes,
+                }
+                return normalized_catalog
+    except Exception:
+        pass
+
+    if isinstance(cached, dict):
+        catalog = cached.get("catalog")
+        if isinstance(catalog, dict) and isinstance(catalog.get("genomes"), list) and catalog.get("genomes"):
+            return catalog
+    return fallback_catalog
+
+
+def load_available_reference_genomes(
+    *,
+    api_url: str,
+    request_fn,
+    fallback: list[str] | None = None,
+    cache_seconds: float = 60.0,
+) -> list[str]:
+    catalog = load_reference_genome_catalog(
+        api_url=api_url,
+        request_fn=request_fn,
+        fallback=fallback,
+        cache_seconds=cache_seconds,
+    )
+    genomes = catalog.get("genomes") if isinstance(catalog, dict) else None
+    return list(genomes) if isinstance(genomes, list) else []
+
+
 def launchpad_headers(internal_api_secret: str | None) -> dict:
     headers = {"Content-Type": "application/json"}
     if internal_api_secret:

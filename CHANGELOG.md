@@ -1,5 +1,29 @@
 ## [Unreleased]
 
+### Features
+
+- **Chat workflow commands now support `list launchpad workflows` / `/list-launchpad-workflows` to show the non-deleted Launchpad workflow rows tracked for the active project**
+
+- **Dogme approval gates now populate Reference Genome(s) from the configured reference catalog, so `mad1` and other installed genomes appear automatically and multi-genome runs can be approved from the UI without another hardcoded option update**
+
+- **The reference-genome config API now returns alias and asset metadata, and Dogme approval gates render alias-aware genome labels from that server payload so future client-side UIs can discover the same catalog without importing backend code**
+
+### Bug Fixes
+
+- **Workflow quick-delete now removes immediate-child untracked `workflow*` folders from the active project root when no Launchpad job row exists, instead of failing outright for visible but untracked workflow directories**
+
+- **Workflow quick-exit commands now resolve the project directory before context prep runs, so tracked-listing and untracked-folder deletion use the real project root even in the early shortcut path**
+
+- **Remote execution approval building now falls back to a direct Launchpad SSH-profile lookup when the `list_ssh_profiles` data call comes back empty or stale, so runs like `... on hpc3` can still resolve saved profiles and defaults from the live profile store**
+
+- **Dogme intake parsing and context genome extraction now derive recognized genome names from the configured reference catalog, so requests like `use both mm39 and mad1` work reliably and newly added canonical genomes are not mistaken for sample names**
+
+### Tests
+
+- **Added regression coverage for tracked Launchpad workflow listing, untracked workflow-folder deletion, and quick-exit project-directory resolution before context prep**
+
+- **Added regression coverage for Dogme multi-genome extraction with `mm39` plus `mad1`, and for future configured genome names so they are recognized as reference genomes instead of sample names**
+
 ## [3.6.8] - 2026-05-11
 
 ### Features

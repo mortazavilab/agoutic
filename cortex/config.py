@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from launchpad.config import REFERENCE_GENOMES  # noqa: E402
+
 # --- ROOT PATH CONFIGURATION ---
 # AGOUTIC_CODE: Where the source code lives (this repository)
 AGOUTIC_CODE = Path(os.getenv("AGOUTIC_CODE", Path(__file__).resolve().parent.parent))
@@ -154,19 +156,68 @@ def get_source_for_skill(skill_key: str) -> tuple[str, str] | None:
     return None
 
 # --- GENOME ALIASES ---
-# Map common genome names to canonical IDs
-GENOME_ALIASES = {
-    "human": "GRCh38",
-    "hg38": "GRCh38",
-    "grch38": "GRCh38",
-    "mouse": "mm39",
-    "mm10": "mm39",
-    "mm39": "mm39",
-    "mad1": "mad1",
-}
+# Derive canonical genomes from the Launchpad reference catalog so newly added
+# references appear automatically in the UI and intake parser.
+AVAILABLE_GENOMES = [
+    str(genome)
+    for genome, entry in REFERENCE_GENOMES.items()
+    if genome != "default" and isinstance(entry, dict)
+]
 
-# Available reference genomes (for UI display)
-AVAILABLE_GENOMES = ["GRCh38", "mm39", "mad1"]
+GENOME_ALIASES = {genome.lower(): genome for genome in AVAILABLE_GENOMES}
+if "GRCh38" in AVAILABLE_GENOMES:
+    GENOME_ALIASES.update({
+        "human": "GRCh38",
+        "hg38": "GRCh38",
+        "grch38": "GRCh38",
+    })
+if "mm39" in AVAILABLE_GENOMES:
+    GENOME_ALIASES.update({
+        "mouse": "mm39",
+        "mm10": "mm39",
+    })
+
+
+def get_reference_genome_catalog() -> dict:
+    """Return canonical genome ids plus alias and asset metadata."""
+    aliases_by_genome: dict[str, list[str]] = {genome: [] for genome in AVAILABLE_GENOMES}
+    for alias, genome in GENOME_ALIASES.items():
+        if genome not in aliases_by_genome:
+            continue
+        if alias.lower() == genome.lower():
+            continue
+        if alias not in aliases_by_genome[genome]:
+            aliases_by_genome[genome].append(alias)
+
+    default_genome = str(REFERENCE_GENOMES.get("default") or "").strip() or None
+    items: list[dict[str, object]] = []
+    for genome in AVAILABLE_GENOMES:
+        entry = REFERENCE_GENOMES.get(genome)
+        if not isinstance(entry, dict):
+            entry = {}
+        aliases = sorted(aliases_by_genome.get(genome, []))
+        assets = {
+            "fasta": bool(entry.get("fasta")),
+            "gtf": bool(entry.get("gtf")),
+            "kallisto_index": bool(entry.get("kallisto_index")),
+            "kallisto_t2g": bool(entry.get("kallisto_t2g")),
+        }
+        label = genome if not aliases else f"{genome} (aliases: {', '.join(aliases)})"
+        items.append(
+            {
+                "id": genome,
+                "label": label,
+                "aliases": aliases,
+                "is_default": genome == default_genome,
+                "assets": assets,
+            }
+        )
+
+    return {
+        "default": default_genome if default_genome in AVAILABLE_GENOMES else None,
+        "genomes": list(AVAILABLE_GENOMES),
+        "items": items,
+    }
 
 # --- SKILL REGISTRY ---
 # Authoritative manifests live in skills/<skill_key>/manifest.yaml and are loaded

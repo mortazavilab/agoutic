@@ -456,7 +456,7 @@ class NextflowConfig:
                 using_gtf=gtf,
             )
             display_name = resolved_name if known_reference else genome_name
-            genome_refs_lines.append(f"        [name: '{display_name}', genome: '{fasta}', annot: '{gtf}']")
+            genome_refs_lines.append(f"[name: '{display_name}', genome: '{fasta}', annot: '{gtf}']")
         
         # Use first genome for kallisto index (TODO: support per-genome kallisto)
         primary_requested_genome = reference_genome[0]
@@ -562,7 +562,9 @@ class NextflowConfig:
         config_lines.append(f"    // needs to be modified to match the right genomic reference")
         config_lines.append(f"    genome_annot_refs = [")
         # Add all genome references
-        config_lines.extend(genome_refs_lines)
+        for index, genome_ref in enumerate(genome_refs_lines):
+            suffix = "," if index < len(genome_refs_lines) - 1 else ""
+            config_lines.append(f"        {genome_ref}{suffix}")
         config_lines.append("    ]")
         config_lines.append("")
         # Use primary genome for kallisto

@@ -2,6 +2,7 @@ import os
 
 import streamlit as st
 from appui_config import LOCAL_DEFAULT_MAX_TASK_MEMORY_GB, SLURM_DEFAULT_CPU_MEMORY_GB
+from appui_services import load_reference_genome_catalog
 from components.cards import info_callout, metadata_row, section_header, status_chip
 from components.forms import grouped_section, review_panel
 
@@ -66,6 +67,72 @@ def _build_cluster_modkit_profile(modkit_dir: str) -> str:
 
 _DEFAULT_CLUSTER_MODKIT_PROFILE = _build_cluster_modkit_profile(_DEFAULT_CLUSTER_MODKIT_BINARY_DIR)
 _DEFAULT_CLUSTER_MODKIT_BIND_PATHS = _default_cluster_modkit_bind_paths(_DEFAULT_CLUSTER_MODKIT_BINARY_DIR)
+
+
+def _approval_gate_reference_genome_catalog(api_url: str, request_fn, raw_value=None) -> dict:
+    fallback: list[str] = []
+    if isinstance(raw_value, str):
+        fallback.append(raw_value)
+    elif isinstance(raw_value, list):
+        fallback.extend(str(item or "").strip() for item in raw_value)
+    fallback.extend(["GRCh38", "mm39", "mad1"])
+    normalized_fallback: list[str] = []
+    for genome in fallback:
+        cleaned = str(genome or "").strip()
+        if cleaned and cleaned not in normalized_fallback:
+            normalized_fallback.append(cleaned)
+    return load_reference_genome_catalog(
+        api_url=api_url,
+        request_fn=request_fn,
+        fallback=normalized_fallback,
+    )
+
+
+def _approval_gate_genome_options(genome_catalog: dict) -> list[str]:
+    genomes = genome_catalog.get("genomes") if isinstance(genome_catalog, dict) else None
+    normalized_genomes: list[str] = []
+    if isinstance(genomes, list):
+        for genome in genomes:
+            cleaned = str(genome or "").strip()
+            if cleaned and cleaned not in normalized_genomes:
+                normalized_genomes.append(cleaned)
+    return normalized_genomes
+
+
+def _approval_gate_genome_labels(genome_catalog: dict) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    items = genome_catalog.get("items") if isinstance(genome_catalog, dict) else None
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            genome_id = str(item.get("id") or "").strip()
+            if not genome_id:
+                continue
+            label = str(item.get("label") or genome_id).strip() or genome_id
+            labels[genome_id] = label
+    for genome in _approval_gate_genome_options(genome_catalog):
+        labels.setdefault(genome, genome)
+    return labels
+
+
+def _normalize_reference_genome_selection(raw_value, genome_options: list[str]) -> list[str]:
+    current_genomes = raw_value if raw_value is not None else ["mm39"]
+    if isinstance(current_genomes, str):
+        if current_genomes.startswith("["):
+            try:
+                import json as _json
+                current_genomes = _json.loads(current_genomes)
+            except (ValueError, TypeError):
+                current_genomes = [current_genomes]
+        else:
+            current_genomes = [current_genomes]
+    current_genomes = [genome for genome in current_genomes if genome in genome_options]
+    if current_genomes:
+        return current_genomes
+    if "mm39" in genome_options:
+        return ["mm39"]
+    return genome_options[:1]
 
 
 def _extract_modkit_binary_dir_from_profile(profile_text: str) -> str:
@@ -543,22 +610,22 @@ def render_block_part1(
                             help="Local source folder that will be staged to the remote data cache."
                         )
 
-                        genome_options = ["GRCh38", "mm39"]
-                        current_genomes = extracted_params.get("reference_genome", ["mm39"])
-                        if isinstance(current_genomes, str):
-                            if current_genomes.startswith("["):
-                                try:
-                                    import json as _json
-                                    current_genomes = _json.loads(current_genomes)
-                                except (ValueError, TypeError):
-                                    current_genomes = [current_genomes]
-                            else:
-                                current_genomes = [current_genomes]
-                        current_genomes = [g for g in current_genomes if g in genome_options] or ["mm39"]
+                        genome_catalog = _approval_gate_reference_genome_catalog(
+                            API_URL,
+                            make_authenticated_request,
+                            extracted_params.get("reference_genome", ["mm39"]),
+                        )
+                        genome_options = _approval_gate_genome_options(genome_catalog)
+                        genome_labels = _approval_gate_genome_labels(genome_catalog)
+                        current_genomes = _normalize_reference_genome_selection(
+                            extracted_params.get("reference_genome", ["mm39"]),
+                            genome_options,
+                        )
                         reference_genomes = st.multiselect(
                             "Reference Genome(s)",
                             genome_options,
                             default=current_genomes,
+                            format_func=lambda genome: genome_labels.get(genome, genome),
                             help="Reference assets that should be available under the remote ref/ cache."
                         )
 
@@ -1036,26 +1103,22 @@ def render_block_part1(
                         )
                         
                         # Reference genomes (multi-select)
-                        genome_options = ["GRCh38", "mm39"]  # TODO: fetch from /genomes endpoint
-                        current_genomes = extracted_params.get("reference_genome", ["mm39"])
-                        # Handle stringified JSON lists from DB (e.g. '["mm39"]')
-                        if isinstance(current_genomes, str):
-                            if current_genomes.startswith("["):
-                                try:
-                                    import json as _json
-                                    current_genomes = _json.loads(current_genomes)
-                                except (ValueError, TypeError):
-                                    current_genomes = [current_genomes]
-                            else:
-                                current_genomes = [current_genomes]
-                        # Filter to only valid options
-                        current_genomes = [g for g in current_genomes if g in genome_options]
-                        if not current_genomes:
-                            current_genomes = ["mm39"]
+                        genome_catalog = _approval_gate_reference_genome_catalog(
+                            API_URL,
+                            make_authenticated_request,
+                            extracted_params.get("reference_genome", ["mm39"]),
+                        )
+                        genome_options = _approval_gate_genome_options(genome_catalog)
+                        genome_labels = _approval_gate_genome_labels(genome_catalog)
+                        current_genomes = _normalize_reference_genome_selection(
+                            extracted_params.get("reference_genome", ["mm39"]),
+                            genome_options,
+                        )
                         reference_genomes = st.multiselect(
                             "Reference Genome(s)",
                             genome_options,
                             default=current_genomes,
+                            format_func=lambda genome: genome_labels.get(genome, genome),
                             help="Select one or more reference genomes"
                         )
                         
