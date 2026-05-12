@@ -176,10 +176,13 @@ Slash commands currently fall into two buckets:
 | `/rerun` | `/rerun workflow7` | Rerun the matching workflow/job in the current project |
 | `/rename` | `/rename workflow7 treated-r1` | Rename the matching workflow/job |
 | `/delete` | `/delete workflow7` | Delete the matching workflow/job |
+| `/list-launchpad-workflows` | `/list-launchpad-workflows` | List workflows that are currently tracked in Launchpad for the active project |
 | `/import-workflow` | `/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote` | Import an existing local or remote Dogme workflow into the current project as the next `workflowN`; metadata is inferred from the workflow `.config` files |
 | `/sync-workflow` | `/sync-workflow workflow12` | Retry or continue syncing outputs for a remote or imported workflow |
 
 Workflow references can match a workflow folder, workflow alias, workflow display name, or sample name.
+
+`/delete workflowN` can also remove an untracked on-disk `workflow*` folder when it exists as an immediate child of the current project root but has no Launchpad job row.
 
 ### Workflow Import and Sync
 

@@ -4,7 +4,9 @@ import asyncio
 import os
 import re
 import shlex
+import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 import httpx
@@ -20,7 +22,7 @@ from cortex.remote_orchestration import _launchpad_internal_headers, _launchpad_
 
 @dataclass
 class WorkflowCommand:
-    action: Literal["rerun", "delete", "rename", "use", "import", "sync", "cancel_sync"]
+    action: Literal["rerun", "delete", "rename", "use", "import", "sync", "cancel_sync", "list_tracked"]
     workflow_ref: str = ""
     new_name: str = ""
     source_path: str = ""
@@ -38,6 +40,7 @@ _SLASH_RERUN = re.compile(r"^/rerun\s+(\S+)$", re.IGNORECASE)
 _SLASH_DELETE = re.compile(r"^/delete\s+(\S+)$", re.IGNORECASE)
 _SLASH_RENAME = re.compile(r"^/rename\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _SLASH_USE = re.compile(r"^/use\s+(\S+)$", re.IGNORECASE)
+_SLASH_LIST_TRACKED = re.compile(r"^/(?:list-launchpad-workflows|list-tracked-workflows)$", re.IGNORECASE)
 _SLASH_IMPORT = re.compile(r"^/import-workflow(?:\s+.*)?$", re.IGNORECASE | re.DOTALL)
 _SLASH_SYNC = re.compile(r"^/sync-workflow(?:\s+.*)?$", re.IGNORECASE | re.DOTALL)
 _SLASH_CANCEL_SYNC = re.compile(r"^/cancel-sync(?:\s+.*)?$", re.IGNORECASE | re.DOTALL)
@@ -47,6 +50,10 @@ _NL_DELETE = re.compile(r"^(?:please\s+)?delete\s+(\S+)$", re.IGNORECASE)
 _NL_RENAME = re.compile(r"^(?:please\s+)?rename\s+(\S+)\s+(?:to\s+)?(.+)$", re.IGNORECASE | re.DOTALL)
 _NL_USE = re.compile(
     r"^(?:please\s+)?(?:use|switch\s+to|set\s+(?:active\s+)?workflow(?:\s+to)?)\s+(\S+)$",
+    re.IGNORECASE,
+)
+_NL_LIST_TRACKED = re.compile(
+    r"^(?:please\s+)?(?:list|show)(?:\s+me)?\s+(?:the\s+)?(?:launchpad|tracked)\s+workflows?(?:\s+for\s+this\s+project)?$",
     re.IGNORECASE,
 )
 _NL_IMPORT = re.compile(r"^(?:please\s+)?import\s+(remote\s+)?workflow\s+from\s+(.+)$", re.IGNORECASE | re.DOTALL)
@@ -61,10 +68,114 @@ _NL_CANCEL_SYNC = re.compile(
 _IMPORT_PROFILE_SUFFIX = re.compile(r"^(?P<path>.+?)\s+(?:on|using|via)\s+(?P<profile>[A-Za-z0-9_.-]+)\s*$", re.IGNORECASE | re.DOTALL)
 
 
+def _workflow_reference_candidates(job) -> list[str]:
+    candidates = [
+        getattr(job, "workflow_alias", None),
+        getattr(job, "workflow_folder_name", None),
+        getattr(job, "workflow_display_name", None),
+        getattr(job, "sample_name", None),
+    ]
+    for path_attr in ("nextflow_work_dir", "remote_work_dir"):
+        raw_path = str(getattr(job, path_attr, "") or "").strip().rstrip("/")
+        if not raw_path:
+            continue
+        folder_name = raw_path.rsplit("/", 1)[-1].strip()
+        if folder_name:
+            candidates.append(folder_name)
+    return candidates
+
+
+def _workflow_path_tail(job) -> str | None:
+    for path_attr in ("nextflow_work_dir", "remote_work_dir"):
+        raw_path = str(getattr(job, path_attr, "") or "").strip().rstrip("/")
+        if raw_path:
+            tail = raw_path.rsplit("/", 1)[-1].strip()
+            if tail:
+                return tail
+    return None
+
+
+def _workflow_label(job) -> str:
+    return (
+        str(getattr(job, "workflow_folder_name", "") or "").strip()
+        or str(getattr(job, "workflow_alias", "") or "").strip()
+        or str(_workflow_path_tail(job) or "").strip()
+        or str(getattr(job, "run_uuid", "") or "").strip()
+    )
+
+
+def _format_tracked_workflows(session: Session, project_id: str) -> str:
+    jobs = list(
+        session.execute(
+            select(LaunchpadDogmeJob)
+            .where(LaunchpadDogmeJob.project_id == project_id)
+            .order_by(desc(LaunchpadDogmeJob.submitted_at), desc(LaunchpadDogmeJob.run_uuid))
+        ).scalars().all()
+    )
+    tracked_jobs = [job for job in jobs if str(getattr(job, "status", "") or "").upper() != "DELETED"]
+    if not tracked_jobs:
+        return (
+            "Launchpad is not tracking any workflows for this project. "
+            "The project directory may still contain untracked workflow folders on disk."
+        )
+
+    lines = [f"Tracked Launchpad workflows for this project ({len(tracked_jobs)}):"]
+    for job in tracked_jobs:
+        label = _workflow_label(job)
+        alias = str(getattr(job, "workflow_alias", "") or "").strip()
+        sample = str(getattr(job, "workflow_display_name", "") or getattr(job, "sample_name", "") or "").strip()
+        status = str(getattr(job, "status", "") or "UNKNOWN").strip()
+        run_uuid = str(getattr(job, "run_uuid", "") or "").strip()
+
+        parts = [f"`{label}`"]
+        if alias and alias != label:
+            parts.append(f"alias `{alias}`")
+        if sample and sample not in {label, alias}:
+            parts.append(f"sample `{sample}`")
+        parts.append(f"status `{status}`")
+        parts.append(f"run UUID `{run_uuid}`")
+        lines.append(f"- {' | '.join(parts)}")
+
+    return "\n".join(lines)
+
+
+def _delete_untracked_workflow_dir(project_dir: str | None, workflow_ref: str) -> str | None:
+    raw_project_dir = str(project_dir or "").strip()
+    ref = str(workflow_ref or "").strip().rstrip("/")
+    if not raw_project_dir or not ref or "/" in ref or ref in {".", ".."}:
+        return None
+    if not ref.lower().startswith("workflow"):
+        return None
+
+    project_root = Path(raw_project_dir).expanduser()
+    try:
+        resolved_root = project_root.resolve()
+    except OSError:
+        return None
+
+    candidate = (resolved_root / ref).resolve()
+    if candidate.parent != resolved_root:
+        return None
+    if not candidate.exists() or not candidate.is_dir() or candidate.is_symlink():
+        return None
+
+    file_count = 0
+    for _root, _dirs, files in os.walk(candidate):
+        file_count += len(files)
+    shutil.rmtree(candidate)
+    return (
+        f"Deleted untracked workflow folder `{candidate.name}` ({file_count} files removed). "
+        "It was present on disk but not tracked by Launchpad."
+    )
+
+
 def parse_workflow_command(message: str) -> WorkflowCommand | None:
     msg = str(message or "").strip()
     if not msg.startswith("/"):
         return None
+
+    if _SLASH_LIST_TRACKED.match(msg):
+        return WorkflowCommand(action="list_tracked")
 
     if _SLASH_IMPORT.match(msg):
         return _parse_import_workflow_command(msg)
@@ -102,6 +213,10 @@ def detect_workflow_intent(message: str) -> WorkflowCommand | None:
     msg = str(message or "").strip()
     if not msg or msg.startswith("/"):
         return None
+
+    match = _NL_LIST_TRACKED.match(msg)
+    if match:
+        return WorkflowCommand(action="list_tracked")
 
     match = _NL_RERUN.match(msg)
     if match:
@@ -164,13 +279,11 @@ def resolve_workflow_reference(session: Session, project_id: str, workflow_ref: 
         return None
 
     def _matches(job) -> bool:
-        aliases = [
-            getattr(job, "workflow_alias", None),
-            getattr(job, "workflow_folder_name", None),
-            getattr(job, "workflow_display_name", None),
-            getattr(job, "sample_name", None),
-        ]
-        return any(str(value or "").strip().lower() == normalized for value in aliases if value)
+        return any(
+            str(value or "").strip().lower() == normalized
+            for value in _workflow_reference_candidates(job)
+            if value
+        )
 
     matches = [job for job in jobs if _matches(job)]
     if not matches:
@@ -187,9 +300,23 @@ async def execute_workflow_command(
     command: WorkflowCommand,
     *,
     project_id: str,
+    project_dir: str | None = None,
     owner_id: str | None = None,
     model: str | None = None,
 ) -> str:
+    if command.action == "list_tracked":
+        return _format_tracked_workflows(session, project_id)
+
+    job = None
+    if command.action in {"rerun", "delete", "rename", "sync", "cancel_sync"}:
+        job = resolve_workflow_reference(session, project_id, command.workflow_ref)
+        if job is None and command.action == "delete":
+            deleted_message = _delete_untracked_workflow_dir(project_dir, command.workflow_ref)
+            if deleted_message is not None:
+                return deleted_message
+        if job is None:
+            return f"I couldn't find `{command.workflow_ref}` in this project."
+
     base_url = _launchpad_rest_base_url()
     headers = _launchpad_internal_headers()
 
@@ -251,9 +378,6 @@ async def execute_workflow_command(
             return message
 
         if command.action == "sync":
-            job = resolve_workflow_reference(session, project_id, command.workflow_ref)
-            if job is None:
-                return f"I couldn't find `{command.workflow_ref}` in this project."
             transfer_state = str(getattr(job, "transfer_state", "") or "").strip().lower()
             imported_retry = bool(getattr(job, "imported_source_kind", None)) and transfer_state == "outputs_downloaded"
             sync_force = bool(command.force or imported_retry)
@@ -271,19 +395,12 @@ async def execute_workflow_command(
             return f"{message} {warning}".strip()
 
         if command.action == "cancel_sync":
-            job = resolve_workflow_reference(session, project_id, command.workflow_ref)
-            if job is None:
-                return f"I couldn't find `{command.workflow_ref}` in this project."
             resp = await client.post(f"{base_url}/jobs/{job.run_uuid}/cancel", headers=headers)
             if resp.status_code >= 400:
                 detail = _response_detail(resp)
                 return f"Cancel sync failed for `{command.workflow_ref}`: {detail}"
             payload = resp.json() or {}
             return payload.get("message") or f"Sync cancelled for `{command.workflow_ref}`."
-
-        job = resolve_workflow_reference(session, project_id, command.workflow_ref)
-        if job is None:
-            return f"I couldn't find `{command.workflow_ref}` in this project."
 
         if command.action == "rerun":
             resp = await client.post(f"{base_url}/jobs/{job.run_uuid}/rerun", headers=headers)

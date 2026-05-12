@@ -17,7 +17,7 @@ from cortex.chat_sync_handler import (
     _render_list_dfs,
 )
 from cortex.db import row_to_dict
-from cortex.db_helpers import _create_block_internal, save_conversation_message
+from cortex.db_helpers import _create_block_internal, _resolve_project_dir, save_conversation_message
 from cortex.file_commands import execute_file_command, parse_file_command
 from cortex.memory_commands import (
     detect_memory_intent,
@@ -34,6 +34,17 @@ from cortex.workflow_commands import (
 )
 
 logger = get_logger(__name__)
+
+
+def _resolve_workflow_command_project_dir(ctx: ChatContext) -> str:
+    if ctx.project_dir_path:
+        return str(ctx.project_dir_path)
+    if ctx.project_dir:
+        return str(ctx.project_dir)
+    if not ctx.session or not ctx.user or not ctx.project_id:
+        return ""
+    resolved = _resolve_project_dir(ctx.session, ctx.user, ctx.project_id)
+    return str(resolved) if resolved else ""
 
 
 # ── 200  Capabilities ─────────────────────────────────────────────────────
@@ -345,6 +356,7 @@ class WorkflowCommandStage:
             ctx.session,
             workflow_cmd,
             project_id=ctx.project_id,
+            project_dir=_resolve_workflow_command_project_dir(ctx),
             owner_id=ctx.user.id,
             model=ctx.model or "default",
         )
@@ -380,6 +392,7 @@ class WorkflowIntentStage:
             ctx.session,
             workflow_cmd,
             project_id=ctx.project_id,
+            project_dir=_resolve_workflow_command_project_dir(ctx),
             owner_id=ctx.user.id,
             model=ctx.model or "default",
         )

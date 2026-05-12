@@ -63,6 +63,10 @@ class _FakeAsyncClient:
 
 
 class TestParseWorkflowCommand:
+    def test_parse_list_tracked_slash_command(self):
+        cmd = parse_workflow_command("/list-launchpad-workflows")
+        assert cmd == WorkflowCommand(action="list_tracked")
+
     def test_parse_rerun_slash_command(self):
         cmd = parse_workflow_command("/rerun workflow7")
         assert cmd == WorkflowCommand(action="rerun", workflow_ref="workflow7", new_name="")
@@ -103,6 +107,10 @@ class TestParseWorkflowCommand:
 
 
 class TestDetectWorkflowIntent:
+    def test_detect_natural_language_list_tracked_workflows(self):
+        cmd = detect_workflow_intent("list launchpad workflows for this project")
+        assert cmd == WorkflowCommand(action="list_tracked")
+
     def test_detect_natural_language_rerun(self):
         cmd = detect_workflow_intent("rerun workflow3")
         assert cmd == WorkflowCommand(action="rerun", workflow_ref="workflow3", new_name="")
@@ -149,6 +157,75 @@ class TestResolveWorkflowReference:
 
         assert resolved.run_uuid == "run-2"
 
+    def test_matches_legacy_work_dir_suffix_when_identity_fields_missing(self):
+        jobs = [
+            SimpleNamespace(
+                run_uuid="run-legacy",
+                workflow_alias=None,
+                workflow_folder_name=None,
+                workflow_display_name=None,
+                sample_name="sample-legacy",
+                nextflow_work_dir="/data/proj/workflow13",
+                remote_work_dir=None,
+                status="FAILED",
+                submitted_at=13,
+            )
+        ]
+
+        resolved = resolve_workflow_reference(_FakeSession(jobs), "proj-1", "workflow13")
+
+        assert resolved.run_uuid == "run-legacy"
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_lists_tracked_workflows():
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-2",
+            workflow_alias="workflow7",
+            workflow_folder_name="tumor-retry",
+            workflow_display_name="tumor-retry",
+            sample_name="tumor-retry",
+            nextflow_work_dir="/data/proj/tumor-retry",
+            remote_work_dir=None,
+            status="COMPLETED",
+            submitted_at=2,
+        ),
+        SimpleNamespace(
+            run_uuid="run-legacy",
+            workflow_alias=None,
+            workflow_folder_name=None,
+            workflow_display_name=None,
+            sample_name="sample-legacy",
+            nextflow_work_dir="/data/proj/workflow13",
+            remote_work_dir=None,
+            status="FAILED",
+            submitted_at=13,
+        ),
+        SimpleNamespace(
+            run_uuid="run-deleted",
+            workflow_alias="workflow9",
+            workflow_folder_name="workflow9",
+            workflow_display_name="sample-9",
+            sample_name="sample-9",
+            nextflow_work_dir="/data/proj/workflow9",
+            remote_work_dir=None,
+            status="DELETED",
+            submitted_at=9,
+        ),
+    ]
+
+    message = await execute_workflow_command(
+        _FakeSession(jobs),
+        WorkflowCommand(action="list_tracked"),
+        project_id="proj-1",
+    )
+
+    assert "Tracked Launchpad workflows for this project (2)" in message
+    assert "tumor-retry" in message
+    assert "workflow13" in message
+    assert "run-deleted" not in message
+
 
 @pytest.mark.asyncio
 async def test_execute_workflow_command_posts_rename(monkeypatch):
@@ -186,6 +263,70 @@ async def test_execute_workflow_command_posts_rename(monkeypatch):
             None,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_deletes_legacy_workflow_by_folder_suffix(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-13",
+            workflow_alias=None,
+            workflow_folder_name=None,
+            workflow_display_name=None,
+            sample_name="sample-13",
+            nextflow_work_dir="/data/proj/workflow13",
+            remote_work_dir=None,
+            status="FAILED",
+            submitted_at=13,
+        )
+    ]
+    fake_client = _FakeAsyncClient(
+        delete_response=_FakeResponse(
+            status_code=200,
+            payload={"message": "Workflow folder `workflow13` deleted (12 files removed)."},
+        )
+    )
+
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_rest_base_url", lambda: "http://launchpad")
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_internal_headers", lambda: {"X-Internal-Secret": "secret"})
+    monkeypatch.setattr("cortex.workflow_commands.httpx.AsyncClient", lambda timeout: fake_client)
+
+    message = await execute_workflow_command(
+        _FakeSession(jobs),
+        WorkflowCommand(action="delete", workflow_ref="workflow13"),
+        project_id="proj-1",
+    )
+
+    assert fake_client.calls == [
+        (
+            "DELETE",
+            "http://launchpad/jobs/run-13",
+            {"X-Internal-Secret": "secret"},
+            None,
+        )
+    ]
+    assert "workflow13" in message
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_deletes_untracked_workflow_folder(tmp_path):
+    workflow_dir = tmp_path / "workflow21"
+    workflow_dir.mkdir()
+    (workflow_dir / "result.txt").write_text("ok", encoding="utf-8")
+    nested = workflow_dir / "nested"
+    nested.mkdir()
+    (nested / "file.tsv").write_text("data", encoding="utf-8")
+
+    message = await execute_workflow_command(
+        _FakeSession([]),
+        WorkflowCommand(action="delete", workflow_ref="workflow21"),
+        project_id="proj-1",
+        project_dir=str(tmp_path),
+    )
+
+    assert not workflow_dir.exists()
+    assert "Deleted untracked workflow folder `workflow21`" in message
+    assert "not tracked by Launchpad" in message
 
 
 @pytest.mark.asyncio
