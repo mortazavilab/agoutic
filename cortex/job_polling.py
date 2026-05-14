@@ -352,7 +352,14 @@ def _resolved_job_work_directory(existing_work_directory: str | None, status_dat
 
 
 async def _auto_trigger_analysis(
-    project_id: str, run_uuid: str, job_payload: dict, owner_id: str | None
+    project_id: str,
+    run_uuid: str,
+    job_payload: dict,
+    owner_id: str | None,
+    *,
+    request_message: str | None = None,
+    persist_request_message: bool = True,
+    force: bool = False,
 ):
     """
     Automatically analyse a just-completed Dogme job.
@@ -363,6 +370,8 @@ async def _auto_trigger_analysis(
     4. Saves the LLM response as an AGENT_PLAN block with token tracking.
 
     Falls back to a static template if the LLM call fails.
+
+    Returns the created AGENT_PLAN block on success, else ``None``.
     """
     sample_name = job_payload.get("sample_name", "Unknown")
     mode = job_payload.get("mode", "DNA")
@@ -377,9 +386,9 @@ async def _auto_trigger_analysis(
         workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
         if workflow_block is not None:
             workflow_payload = get_block_payload(workflow_block)
-            if workflow_payload.get("next_step") != "analyze_results":
+            if not force and workflow_payload.get("next_step") != "analyze_results":
                 logger.info("Skipping auto-analysis because analysis is not the next todo", run_uuid=run_uuid)
-                return
+                return None
             _set_workflow_step_status(
                 session,
                 workflow_block,
@@ -388,21 +397,21 @@ async def _auto_trigger_analysis(
                 extra={"run_uuid": run_uuid},
             )
 
-        # 1. Create a system message announcing the transition
-        _create_block_internal(
-            session,
-            project_id,
-            "USER_MESSAGE",
-            {"text": f"Job \"{sample_name}\" completed. Analyze the results."},
-            owner_id=owner_id,
-        )
-
-        # Also save to conversation history so the LLM sees it
-        if owner_id:
-            await save_conversation_message(
-                session, project_id, owner_id, "user",
-                f"Job \"{sample_name}\" completed. Analyze the results."
+        request_text = request_message or f"Job \"{sample_name}\" completed. Analyze the results."
+        if persist_request_message:
+            _create_block_internal(
+                session,
+                project_id,
+                "USER_MESSAGE",
+                {"text": request_text},
+                owner_id=owner_id,
             )
+
+            # Also save to conversation history so the LLM sees it
+            if owner_id:
+                await save_conversation_message(
+                    session, project_id, owner_id, "user", request_text
+                )
 
         # 2. Fetch analysis summary + key CSV data from Analyzer
         summary_data = {}  # structured summary from get_analysis_summary
@@ -478,11 +487,21 @@ async def _auto_trigger_analysis(
             user_prompt = (
                 f"A Dogme {mode} job for sample \"{sample_name}\" just completed.\n"
                 f"Work directory: {work_directory}\n\n"
+                f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                f"Use only the supplied analysis data, and prefer concrete metrics and filenames over generalities.\n\n"
                 f"Here is the analysis summary and key result data:\n\n"
                 f"{data_context}\n\n"
-                f"Provide a concise interpretation of these results. "
-                f"Highlight key metrics, any QC concerns, and suggest "
-                f"next steps the user could explore."
+                f"Write a structured markdown report with these sections when the data support them:\n"
+                f"1. Overall Assessment\n"
+                f"2. Key Metrics\n"
+                f"3. Reference-Specific Findings (separate subsections if multiple genomes are present)\n"
+                f"4. QC Concerns or Limitations\n"
+                f"5. Recommended Next Steps\n"
+                f"6. Notable Output Files\n\n"
+                f"Call out whether sequencing depth or yield is adequate for downstream interpretation, "
+                f"name any obvious failure modes, and mention the most relevant QC/statistics files explicitly. "
+                f"If the data are sparse, say that clearly, but still explain what can and cannot be concluded."
             )
             llm_md, llm_usage = await run_in_threadpool(
                 engine.think,
@@ -532,7 +551,7 @@ async def _auto_trigger_analysis(
             **llm_usage,
             "model": _model_name,
         }
-        _create_block_internal(
+        agent_block = _create_block_internal(
             session,
             project_id,
             "AGENT_PLAN",
@@ -567,6 +586,8 @@ async def _auto_trigger_analysis(
                 extra={"run_uuid": run_uuid},
             )
 
+        return agent_block
+
     except Exception as e:
         logger.error("Auto-trigger analysis failed", run_uuid=run_uuid, error=str(e))
         if "workflow_block" in locals() and workflow_block is not None:
@@ -577,6 +598,7 @@ async def _auto_trigger_analysis(
                 "FAILED",
                 extra={"run_uuid": run_uuid, "error": str(e)},
             )
+            return None
     finally:
         session.close()
 

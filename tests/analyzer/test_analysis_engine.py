@@ -16,11 +16,13 @@ from unittest.mock import patch, MagicMock
 from analyzer.analysis_engine import (
     discover_files,
     categorize_files,
+    generate_analysis_summary,
     read_file_content,
     parse_csv_file,
     parse_xgenepy_outputs,
     resolve_work_dir,
 )
+from analyzer.schemas import JobFileSummary
 
 
 # ---------------------------------------------------------------------------
@@ -298,3 +300,32 @@ class TestParseXgenePyOutputs:
                 work_dir_path=str(tmp_path),
                 output_dir="../../outside",
             )
+
+
+class TestGenerateAnalysisSummary:
+    def test_generate_summary_accepts_work_dir_only_when_job_resolves(self, job_dir):
+        job = MagicMock(
+            run_uuid="run-555",
+            sample_name="Jamshid999",
+            mode="RNA",
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+        empty_summary = JobFileSummary(
+            txt_files=[],
+            csv_files=[],
+            bed_files=[],
+            other_files=[],
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job) as lookup:
+            with patch("analyzer.analysis_engine.categorize_files", return_value=empty_summary) as categorize:
+                with patch("analyzer.analysis_engine.resolve_work_dir", return_value=job_dir):
+                    summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        lookup.assert_called_once_with(run_uuid=None, work_dir_path=str(job_dir))
+        categorize.assert_called_once_with("run-555", work_dir_path=str(job_dir))
+        assert summary.run_uuid == "run-555"
+        assert summary.sample_name == "Jamshid999"
+        assert summary.work_dir == str(job_dir)

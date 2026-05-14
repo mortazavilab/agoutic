@@ -944,14 +944,14 @@ TOOL_SCHEMAS = {
             "properties": {
                 "run_uuid": {
                     "type": "string",
-                    "description": "Job UUID (needed for DB metadata lookup)"
+                    "description": "Job UUID (legacy fallback — optional when work_dir is provided)"
                 },
                 "work_dir": {
                     "type": "string",
-                    "description": "Absolute path to the workflow directory"
+                    "description": "Absolute path to the workflow directory (preferred)"
                 },
             },
-            "required": ["run_uuid"]
+            "required": []
         }
     },
     "categorize_job_files": {

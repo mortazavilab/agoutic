@@ -28,12 +28,61 @@ from cortex.memory_commands import (
 from cortex.skill_commands import detect_skill_intent, execute_skill_command, parse_skill_command, resolve_skill_key
 from cortex.workflow_commands import (
     detect_workflow_intent,
+    execute_manual_workflow_analysis,
     execute_use_workflow,
     execute_workflow_command,
     parse_workflow_command,
 )
 
 logger = get_logger(__name__)
+
+
+def _slash_commands_markdown() -> str:
+    return (
+        "### Slash Commands\n\n"
+        "Use `/commands` any time to reopen this list.\n\n"
+        "**Skills**\n"
+        "- `/skills`\n"
+        "- `/skill <skill_key>`\n"
+        "- `/use-skill <skill_key>`\n\n"
+        "**Workflows**\n"
+        "- `/use <workflow>`\n"
+        "- `/reanalyze [workflow[, workflow2, ...]]` — omit the workflow to use the active workflow\n"
+        "- `/rerun [workflow[, workflow2, ...]]` — omit the workflow to use the active workflow\n"
+        "- `/delete [workflow[, workflow2, ...]]` — omit the workflow to use the active workflow\n"
+        "- `/sync-workflow [workflow[, workflow2, ...]]` — omit the workflow to use the active workflow\n"
+        "- `/cancel-sync <workflow[, workflow2, ...]>`\n"
+        "- `/rename <workflow> <new_name>`\n"
+        "- `/import-workflow <path> [--remote] [--profile NAME] [--full-copy] [--sample-name NAME] [--mode DNA|RNA|CDNA] [--reference GRCh38,mm39] [--modifications MODS]`\n"
+        "- `/list-launchpad-workflows`\n\n"
+        "**Files**\n"
+        "- `/read-file <path> [--lines N] [--mode auto|plain|markdown|html_text|html_raw]`\n\n"
+        "**Differential Expression**\n"
+        "- `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`\n\n"
+        "**Memory**\n"
+        "- `/memories`\n"
+        "- `/remember <text>`\n"
+        "- `/remember-global <text>`\n"
+        "- `/remember-df DF5 as <name>`\n"
+        "- `/pin #<id>` · `/unpin #<id>` · `/restore #<id>`\n"
+        "- `/annotate <sample> key=value`\n"
+        "- `/search-memories <query>`\n"
+        "- `/upgrade-to-global #<id>`\n"
+    )
+
+
+def _is_slash_commands_request(message: str) -> bool:
+    msg = str(message or "").strip().lower()
+    return msg in {
+        "/commands",
+        "/slash-commands",
+        "/help-commands",
+        "show commands",
+        "list commands",
+        "show slash commands",
+        "list slash commands",
+        "what slash commands are available",
+    }
 
 
 def _resolve_workflow_command_project_dir(ctx: ChatContext) -> str:
@@ -79,9 +128,11 @@ class CapabilitiesStage:
             "from DE results or custom gene sets\n"
             "7. **Search IGVF data** — Browse IGVF datasets, files, samples, and "
             "genes from the IGVF portal\n\n"
+            "Use `/commands` to list all slash commands by category.\n\n"
             "Useful slash commands:\n"
+            "- `/commands`\n"
             "- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`\n"
-            "- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`, `/import-workflow <path> [--remote] [--full-copy]`, `/sync-workflow <workflow>`\n"
+            "- Workflows: `/use <workflow>`, `/reanalyze [workflow[, workflow2, ...]]`, `/rerun [workflow[, workflow2, ...]]`, `/delete [workflow[, workflow2, ...]]`, `/sync-workflow [workflow[, workflow2, ...]]`\n"
             "- Files: `/read-file <path> [--lines N] [--mode auto|plain|markdown|html_text|html_raw]`\n"
             "- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`\n"
             "- Memory: `/remember <text>`, `/remember-global <text>`, `/remember-df DF5 as <name>`, `/memories`, `/pin #<id>`, `/unpin #<id>`, `/restore #<id>`, `/annotate <sample> key=value`, `/search-memories <query>`, `/upgrade-to-global #<id>`\n\n"
@@ -108,6 +159,30 @@ class CapabilitiesStage:
 
 
 register_stage(CapabilitiesStage())
+
+
+class CommandsCatalogStage:
+    name = "commands_catalog"
+    priority = 205
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return _is_slash_commands_request(ctx.message)
+
+    async def run(self, ctx: ChatContext) -> None:
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            _slash_commands_markdown(),
+            prompt_type="commands_catalog",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(CommandsCatalogStage())
 
 
 # ── 210  Prompt inspection ─────────────────────────────────────────────────
@@ -340,6 +415,77 @@ class FileCommandStage:
 
 
 register_stage(FileCommandStage())
+
+
+class WorkflowReanalyzeStage:
+    name = "workflow_reanalyze"
+    priority = 234
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        cmd = parse_workflow_command(ctx.message) or detect_workflow_intent(ctx.message)
+        return cmd is not None and cmd.action == "reanalyze"
+
+    async def run(self, ctx: ChatContext) -> None:
+        workflow_cmd = parse_workflow_command(ctx.message) or detect_workflow_intent(ctx.message)
+        workflow_refs = workflow_cmd.workflow_refs or ([workflow_cmd.workflow_ref] if workflow_cmd.workflow_ref else [])
+        if not workflow_refs:
+            workflow_refs = [""]
+
+        created_blocks = []
+        errors = []
+        for workflow_ref in workflow_refs:
+            cmd = workflow_cmd if workflow_ref == workflow_cmd.workflow_ref else type(workflow_cmd)(
+                **{**workflow_cmd.__dict__, "workflow_ref": workflow_ref, "workflow_refs": [workflow_ref]}
+            )
+            agent_block, error_markdown = await execute_manual_workflow_analysis(
+                ctx.session,
+                cmd,
+                project_id=ctx.project_id,
+                owner_id=ctx.user.id,
+                model=ctx.model or "default",
+            )
+            if agent_block is not None:
+                created_blocks.append(agent_block)
+            elif error_markdown:
+                errors.append(error_markdown)
+
+        if not created_blocks:
+            resp = await _create_prompt_response(
+                ctx.session,
+                _req_shim(ctx),
+                ctx.user_block,
+                ctx.user.id,
+                ctx.active_skill,
+                ctx.model or "default",
+                "\n".join(errors) or "Manual automatic analysis failed.",
+                prompt_type="workflow_intent" if not ctx.message.strip().startswith("/") else "workflow_command",
+            )
+            ctx.short_circuit(resp)
+            return
+
+        if errors:
+            resp = await _create_prompt_response(
+                ctx.session,
+                _req_shim(ctx),
+                ctx.user_block,
+                ctx.user.id,
+                ctx.active_skill,
+                ctx.model or "default",
+                "\n".join(errors),
+                prompt_type="workflow_intent" if not ctx.message.strip().startswith("/") else "workflow_command",
+            )
+            ctx.short_circuit(resp)
+            return
+
+        ctx.short_circuit({
+            "status": "ok",
+            "user_block": row_to_dict(ctx.user_block),
+            "agent_block": row_to_dict(created_blocks[-1]),
+            "gate_block": None,
+        })
+
+
+register_stage(WorkflowReanalyzeStage())
 
 
 class WorkflowCommandStage:

@@ -18,6 +18,18 @@
 
 - **Dogme intake parsing and context genome extraction now derive recognized genome names from the configured reference catalog, so requests like `use both mm39 and mad1` work reliably and newly added canonical genomes are not mistaken for sample names**
 
+- **Analyzer result summaries can now resolve the owning job from a workflow path when `get_analysis_summary` is called with `work_dir` only, so follow-ups like `analyze results` work for the latest workflow even when the LLM omits the `run_uuid`**
+
+- **Analyzer MCP tool schemas now allow `get_analysis_summary` calls with only `work_dir`, so cached Cortex schema validation no longer drops valid `analyze results` requests before tool execution**
+
+- **Automatic post-run Dogme analysis now asks the LLM for a structured first-pass report instead of a terse completion note, so completed local jobs surface richer metrics, per-reference findings, QC concerns, and next-step guidance immediately in the chat**
+
+- **Completed workflows can now re-run the automatic post-run analysis from chat via `/reanalyze <workflow>` or natural requests like `reanalyze workflow5`, returning the same analysis-card path on demand without waiting for a fresh completion event**
+
+- **Workflow quick commands now accept the active workflow by default and comma-separated workflow batches for `reanalyze`, `rerun`, `delete`, and `sync-workflow`, so chat requests like `reanalyze`, `reanalyze workflow5, workflow6`, or `/delete workflow2, workflow3` execute sequentially without repeating the command**
+
+- **Chat now supports `/commands` to list slash commands by category, and both the welcome card and sidebar help surface point users to that command for the full slash-command catalog**
+
 ### Tests
 
 - **Added regression coverage for tracked Launchpad workflow listing, untracked workflow-folder deletion, and quick-exit project-directory resolution before context prep**

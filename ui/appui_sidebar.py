@@ -43,12 +43,13 @@ def render_sidebar(
             st.caption("🔑 Admin")
 
         with st.expander("❓ Help", expanded=False):
+            st.caption("Use `/commands` to list all slash commands by category.")
             st.caption("**Workflows**")
             if st.button("help", key="help_prompt_help", width="stretch"):
                 st.session_state["_help_prompt"] = "help"
                 st.rerun()
-            if st.button("show commands", key="help_prompt_commands", width="stretch"):
-                st.session_state["_help_prompt"] = "show commands"
+            if st.button("/commands", key="help_prompt_commands", width="stretch"):
+                st.session_state["_help_prompt"] = "/commands"
                 st.rerun()
             if st.button("what can you do", key="help_prompt_capabilities", width="stretch"):
                 st.session_state["_help_prompt"] = "what can you do"
@@ -65,8 +66,10 @@ def render_sidebar(
                 st.rerun()
             st.caption("`/skill <skill_key>`  ·  `/use-skill <skill_key>`")
             st.caption("**Workflow Slash Commands**")
-            st.caption("`/use <workflow>`  ·  `/rerun <workflow>`  ·  `/sync-workflow <workflow>`")
-            st.caption("`/rename <workflow> <new_name>`  ·  `/delete <workflow>`")
+            st.caption("`/use <workflow>`  ·  `/reanalyze [workflow[, workflow2, ...]]`")
+            st.caption("`/rerun [workflow[, workflow2, ...]]`  ·  `/sync-workflow [workflow[, workflow2, ...]]`")
+            st.caption("`/rename <workflow> <new_name>`  ·  `/delete [workflow[, workflow2, ...]]`")
+            st.caption("omit the workflow to use the active workflow for `reanalyze`, `rerun`, `delete`, and `sync-workflow`")
             st.caption("`/import-workflow <path> --remote`  ·  `--full-copy` optional")
             st.caption("**Dataframes**")
             if st.button("list dfs", key="help_prompt_list_dfs", width="stretch"):

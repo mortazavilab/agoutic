@@ -4281,6 +4281,10 @@ class TestAutoTriggerAnalysis:
         assert "1000 reads" in payload.get("markdown", "")
         assert payload.get("skill") == "run_dogme_dna"
         assert payload.get("tokens", {}).get("total_tokens") == 150
+        prompt = mock_engine.think.call_args.args[0]
+        assert "substantive first-pass interpretation" in prompt
+        assert "Reference-Specific Findings" in prompt
+        assert "Notable Output Files" in prompt
         sess.close()
 
     @pytest.mark.asyncio

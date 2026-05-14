@@ -14,16 +14,19 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from launchpad.models import DogmeJob as LaunchpadDogmeJob, SSHProfile as LaunchpadSSHProfile
+from cortex.conversation_state import _build_conversation_state
 from cortex.db_helpers import _create_block_internal
-from cortex.job_polling import poll_job_status
-from cortex.models import Project, User
+from cortex.job_polling import _auto_trigger_analysis, poll_job_status
+from cortex.llm_validators import get_block_payload
+from cortex.models import Project, ProjectBlock, User
 from cortex.remote_orchestration import _launchpad_internal_headers, _launchpad_rest_base_url
 
 
 @dataclass
 class WorkflowCommand:
-    action: Literal["rerun", "delete", "rename", "use", "import", "sync", "cancel_sync", "list_tracked"]
+    action: Literal["rerun", "reanalyze", "delete", "rename", "use", "import", "sync", "cancel_sync", "list_tracked"]
     workflow_ref: str = ""
+    workflow_refs: list[str] = field(default_factory=list)
     new_name: str = ""
     source_path: str = ""
     source_kind: Literal["local", "slurm"] = "local"
@@ -36,17 +39,23 @@ class WorkflowCommand:
     modifications: str | None = None
 
 
-_SLASH_RERUN = re.compile(r"^/rerun\s+(\S+)$", re.IGNORECASE)
-_SLASH_DELETE = re.compile(r"^/delete\s+(\S+)$", re.IGNORECASE)
+_SLASH_RERUN = re.compile(r"^/rerun(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+_SLASH_REANALYZE = re.compile(r"^/(?:reanaly[sz]e|rerun-analysis|auto-analyze)(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+_SLASH_DELETE = re.compile(r"^/delete(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_RENAME = re.compile(r"^/rename\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _SLASH_USE = re.compile(r"^/use\s+(\S+)$", re.IGNORECASE)
 _SLASH_LIST_TRACKED = re.compile(r"^/(?:list-launchpad-workflows|list-tracked-workflows)$", re.IGNORECASE)
 _SLASH_IMPORT = re.compile(r"^/import-workflow(?:\s+.*)?$", re.IGNORECASE | re.DOTALL)
-_SLASH_SYNC = re.compile(r"^/sync-workflow(?:\s+.*)?$", re.IGNORECASE | re.DOTALL)
+_SLASH_SYNC = re.compile(r"^/sync-workflows?(?:\s+.*)?$", re.IGNORECASE | re.DOTALL)
 _SLASH_CANCEL_SYNC = re.compile(r"^/cancel-sync(?:\s+.*)?$", re.IGNORECASE | re.DOTALL)
 
-_NL_RERUN = re.compile(r"^(?:please\s+)?rerun\s+(\S+)$", re.IGNORECASE)
-_NL_DELETE = re.compile(r"^(?:please\s+)?delete\s+(\S+)$", re.IGNORECASE)
+_NL_RERUN = re.compile(r"^(?:please\s+)?rerun(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
+_NL_REANALYZE = re.compile(r"^(?:please\s+)?re-?analy[sz]e(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
+_NL_RERUN_ANALYSIS = re.compile(
+    r"^(?:please\s+)?(?:re-?run|rerun|regenerate)\s+(?:the\s+)?(?:(?:automatic|auto)\s+)?analysis(?:\s+(?:for|of))?(?:\s+(.+))?$",
+    re.IGNORECASE | re.DOTALL,
+)
+_NL_DELETE = re.compile(r"^(?:please\s+)?delete(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
 _NL_RENAME = re.compile(r"^(?:please\s+)?rename\s+(\S+)\s+(?:to\s+)?(.+)$", re.IGNORECASE | re.DOTALL)
 _NL_USE = re.compile(
     r"^(?:please\s+)?(?:use|switch\s+to|set\s+(?:active\s+)?workflow(?:\s+to)?)\s+(\S+)$",
@@ -58,12 +67,12 @@ _NL_LIST_TRACKED = re.compile(
 )
 _NL_IMPORT = re.compile(r"^(?:please\s+)?import\s+(remote\s+)?workflow\s+from\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _NL_SYNC = re.compile(
-    r"^(?:please\s+)?(?:sync(?:\s+workflow)?|sync\s+results(?:\s+for)?)\s+(\S+)$",
-    re.IGNORECASE,
+    r"^(?:please\s+)?(?:sync(?:\s+workflows?)?|sync\s+results(?:\s+for)?)?(?:\s+(.+))?$",
+    re.IGNORECASE | re.DOTALL,
 )
 _NL_CANCEL_SYNC = re.compile(
-    r"^(?:please\s+)?(?:cancel|stop)\s+sync(?:\s+for)?\s+(\S+)$",
-    re.IGNORECASE,
+    r"^(?:please\s+)?(?:cancel|stop)\s+sync(?:\s+for)?(?:\s+(.+))?$",
+    re.IGNORECASE | re.DOTALL,
 )
 _IMPORT_PROFILE_SUFFIX = re.compile(r"^(?P<path>.+?)\s+(?:on|using|via)\s+(?P<profile>[A-Za-z0-9_.-]+)\s*$", re.IGNORECASE | re.DOTALL)
 
@@ -102,6 +111,139 @@ def _workflow_label(job) -> str:
         or str(_workflow_path_tail(job) or "").strip()
         or str(getattr(job, "run_uuid", "") or "").strip()
     )
+
+
+def _job_work_directory(job) -> str:
+    for path_attr in ("nextflow_work_dir", "output_directory", "remote_work_dir", "remote_output_dir"):
+        raw_path = str(getattr(job, path_attr, "") or "").strip().rstrip("/")
+        if raw_path:
+            return raw_path
+    return ""
+
+
+def _job_results_ready(job) -> bool:
+    status = str(getattr(job, "status", "") or "").upper()
+    if status != "COMPLETED":
+        return False
+    result_destination = str(getattr(job, "result_destination", "") or "").strip().lower()
+    if result_destination not in {"local", "both"}:
+        return True
+    return str(getattr(job, "transfer_state", "") or "") == "outputs_downloaded"
+
+
+def _normalize_workflow_ref(ref: str) -> str:
+    value = str(ref or "").strip().rstrip(",").rstrip(".").rstrip(";").rstrip(":")
+    return value.strip()
+
+
+def _parse_workflow_ref_list(raw: str | None) -> list[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    text = re.sub(r"\band\b", ",", text, flags=re.IGNORECASE)
+    refs = []
+    for part in re.split(r"[\s,]+", text):
+        ref = _normalize_workflow_ref(part)
+        if ref:
+            refs.append(ref)
+    return refs
+
+
+def _command_with_refs(action: str, raw_refs: str | None = None, **kwargs) -> WorkflowCommand:
+    refs = _parse_workflow_ref_list(raw_refs)
+    return WorkflowCommand(
+        action=action,
+        workflow_ref=refs[0] if refs else "",
+        workflow_refs=refs,
+        **kwargs,
+    )
+
+
+def _build_workflow_command_history(session: Session, project_id: str) -> tuple[list, list[dict]]:
+    history_blocks = list(
+        session.execute(
+            select(ProjectBlock)
+            .where(ProjectBlock.project_id == project_id)
+            .where(ProjectBlock.type.in_(["USER_MESSAGE", "AGENT_PLAN", "EXECUTION_JOB", "WORKFLOW_PLAN", "PENDING_ACTION"]))
+            .order_by(ProjectBlock.seq.asc())
+        ).scalars().all()
+    )
+
+    conversation_history: list[dict] = []
+    for block in history_blocks:
+        payload = get_block_payload(block)
+        if block.type == "USER_MESSAGE":
+            conversation_history.append({"role": "user", "content": payload.get("text", "")})
+        elif block.type == "AGENT_PLAN":
+            conversation_history.append({"role": "assistant", "content": payload.get("markdown", "")})
+    return history_blocks, conversation_history
+
+
+def _load_active_workflow_ref(session: Session, project_id: str) -> str | None:
+    history_blocks, conversation_history = _build_workflow_command_history(session, project_id)
+    state = _build_conversation_state(
+        "welcome",
+        conversation_history,
+        history_blocks=history_blocks,
+        project_id=project_id,
+    )
+    work_dir = str(getattr(state, "work_dir", "") or "").strip().rstrip("/")
+    if work_dir:
+        tail = work_dir.rsplit("/", 1)[-1].strip()
+        if tail:
+            return tail
+    workflows = getattr(state, "workflows", []) or []
+    active_index = getattr(state, "active_workflow_index", None)
+    if isinstance(active_index, int) and 0 <= active_index < len(workflows):
+        work_dir = str(workflows[active_index].get("work_dir", "") or "").strip().rstrip("/")
+        if work_dir:
+            tail = work_dir.rsplit("/", 1)[-1].strip()
+            if tail:
+                return tail
+    return None
+
+
+def _resolve_command_refs(session: Session, project_id: str, command: WorkflowCommand) -> list[str]:
+    refs = [_normalize_workflow_ref(ref) for ref in (command.workflow_refs or []) if _normalize_workflow_ref(ref)]
+    if refs:
+        return refs
+    if command.workflow_ref:
+        ref = _normalize_workflow_ref(command.workflow_ref)
+        return [ref] if ref else []
+    active_ref = _load_active_workflow_ref(session, project_id)
+    return [active_ref] if active_ref else []
+
+
+def _missing_workflow_target_message(action: str) -> str:
+    examples = {
+        "reanalyze": "Try `reanalyze`, `reanalyze workflow5`, or `reanalyze workflow5, workflow6`.",
+        "rerun": "Try `rerun`, `rerun workflow5`, or `rerun workflow5, workflow6`.",
+        "delete": "Try `delete active workflow`, `delete workflow5`, or `delete workflow5, workflow6`.",
+        "sync": "Try `sync workflow`, `sync workflow5`, or `sync workflow5, workflow6`.",
+        "cancel_sync": "Try `cancel sync workflow5`.",
+    }
+    return (
+        "I couldn't determine which workflow to use. "
+        "Set an active workflow with `/use <workflow>` or name one explicitly. "
+        + examples.get(action, "")
+    ).strip()
+
+
+def _combine_workflow_messages(action: str, messages: list[str]) -> str:
+    if not messages:
+        return "No workflow actions were executed."
+    if len(messages) == 1:
+        return messages[0]
+    title_map = {
+        "reanalyze": "Manual workflow analysis results:",
+        "rerun": "Workflow rerun results:",
+        "delete": "Workflow delete results:",
+        "sync": "Workflow sync results:",
+        "cancel_sync": "Workflow sync-cancel results:",
+    }
+    header = title_map.get(action, "Workflow command results:")
+    body = "\n".join(f"- {message}" for message in messages)
+    return f"{header}\n{body}"
 
 
 def _format_tracked_workflows(session: Session, project_id: str) -> str:
@@ -188,11 +330,15 @@ def parse_workflow_command(message: str) -> WorkflowCommand | None:
 
     match = _SLASH_RERUN.match(msg)
     if match:
-        return WorkflowCommand(action="rerun", workflow_ref=match.group(1).strip())
+        return _command_with_refs("rerun", match.group(1))
+
+    match = _SLASH_REANALYZE.match(msg)
+    if match:
+        return _command_with_refs("reanalyze", match.group(1))
 
     match = _SLASH_DELETE.match(msg)
     if match:
-        return WorkflowCommand(action="delete", workflow_ref=match.group(1).strip())
+        return _command_with_refs("delete", match.group(1))
 
     match = _SLASH_RENAME.match(msg)
     if match:
@@ -218,13 +364,24 @@ def detect_workflow_intent(message: str) -> WorkflowCommand | None:
     if match:
         return WorkflowCommand(action="list_tracked")
 
+    match = _NL_RERUN_ANALYSIS.match(msg)
+    if match:
+        return _command_with_refs("reanalyze", match.group(1))
+
     match = _NL_RERUN.match(msg)
     if match:
-        return WorkflowCommand(action="rerun", workflow_ref=match.group(1).strip())
+        return _command_with_refs("rerun", match.group(1))
+
+    match = _NL_REANALYZE.match(msg)
+    if match:
+        return _command_with_refs("reanalyze", match.group(1))
 
     match = _NL_DELETE.match(msg)
     if match:
-        return WorkflowCommand(action="delete", workflow_ref=match.group(1).strip())
+        _raw_refs = match.group(1)
+        if _raw_refs and _raw_refs.lower().strip() in {"workflow", "active workflow", "the active workflow"}:
+            _raw_refs = None
+        return _command_with_refs("delete", _raw_refs)
 
     match = _NL_RENAME.match(msg)
     if match:
@@ -254,11 +411,14 @@ def detect_workflow_intent(message: str) -> WorkflowCommand | None:
 
     match = _NL_SYNC.match(msg)
     if match:
-        return WorkflowCommand(action="sync", workflow_ref=match.group(1).strip())
+        _raw_refs = match.group(1)
+        if msg.lower() in {"sync", "sync workflow", "sync workflows", "sync results"}:
+            _raw_refs = None
+        return _command_with_refs("sync", _raw_refs)
 
     match = _NL_CANCEL_SYNC.match(msg)
     if match:
-        return WorkflowCommand(action="cancel_sync", workflow_ref=match.group(1).strip())
+        return _command_with_refs("cancel_sync", match.group(1))
 
     return None
 
@@ -307,13 +467,13 @@ async def execute_workflow_command(
     if command.action == "list_tracked":
         return _format_tracked_workflows(session, project_id)
 
+    target_refs = _resolve_command_refs(session, project_id, command)
+    if command.action in {"rerun", "delete", "sync", "cancel_sync"} and not target_refs:
+        return _missing_workflow_target_message(command.action)
+
     job = None
-    if command.action in {"rerun", "delete", "rename", "sync", "cancel_sync"}:
+    if command.action == "rename":
         job = resolve_workflow_reference(session, project_id, command.workflow_ref)
-        if job is None and command.action == "delete":
-            deleted_message = _delete_untracked_workflow_dir(project_dir, command.workflow_ref)
-            if deleted_message is not None:
-                return deleted_message
         if job is None:
             return f"I couldn't find `{command.workflow_ref}` in this project."
 
@@ -377,46 +537,69 @@ async def execute_workflow_command(
                 message = f"{message} {warning}"
             return message
 
-        if command.action == "sync":
-            transfer_state = str(getattr(job, "transfer_state", "") or "").strip().lower()
-            imported_retry = bool(getattr(job, "imported_source_kind", None)) and transfer_state == "outputs_downloaded"
-            sync_force = bool(command.force or imported_retry)
-            resp = await client.post(
-                f"{base_url}/jobs/{job.run_uuid}/sync-results",
-                headers=headers,
-                params={"force": str(sync_force).lower()},
-            )
-            if resp.status_code >= 400:
-                detail = _response_detail(resp)
-                return f"Sync failed for `{command.workflow_ref}`: {detail}"
-            payload = resp.json() or {}
-            warning = str(payload.get("import_warning_message") or "").strip()
-            message = payload.get("message") or f"Sync started for `{command.workflow_ref}`."
-            return f"{message} {warning}".strip()
+        if command.action in {"sync", "cancel_sync", "rerun", "delete"}:
+            messages: list[str] = []
+            for workflow_ref in target_refs:
+                job = resolve_workflow_reference(session, project_id, workflow_ref)
+                if job is None and command.action == "delete":
+                    deleted_message = _delete_untracked_workflow_dir(project_dir, workflow_ref)
+                    if deleted_message is not None:
+                        messages.append(deleted_message)
+                        continue
+                if job is None:
+                    messages.append(f"I couldn't find `{workflow_ref}` in this project.")
+                    continue
 
-        if command.action == "cancel_sync":
-            resp = await client.post(f"{base_url}/jobs/{job.run_uuid}/cancel", headers=headers)
-            if resp.status_code >= 400:
-                detail = _response_detail(resp)
-                return f"Cancel sync failed for `{command.workflow_ref}`: {detail}"
-            payload = resp.json() or {}
-            return payload.get("message") or f"Sync cancelled for `{command.workflow_ref}`."
+                if command.action == "sync":
+                    transfer_state = str(getattr(job, "transfer_state", "") or "").strip().lower()
+                    imported_retry = bool(getattr(job, "imported_source_kind", None)) and transfer_state == "outputs_downloaded"
+                    sync_force = bool(command.force or imported_retry)
+                    resp = await client.post(
+                        f"{base_url}/jobs/{job.run_uuid}/sync-results",
+                        headers=headers,
+                        params={"force": str(sync_force).lower()},
+                    )
+                    if resp.status_code >= 400:
+                        detail = _response_detail(resp)
+                        messages.append(f"Sync failed for `{workflow_ref}`: {detail}")
+                        continue
+                    payload = resp.json() or {}
+                    warning = str(payload.get("import_warning_message") or "").strip()
+                    message = payload.get("message") or f"Sync started for `{workflow_ref}`."
+                    messages.append(f"{message} {warning}".strip())
+                    continue
 
-        if command.action == "rerun":
-            resp = await client.post(f"{base_url}/jobs/{job.run_uuid}/rerun", headers=headers)
-            if resp.status_code >= 400:
-                detail = _response_detail(resp)
-                return f"Rerun failed for `{command.workflow_ref}`: {detail}"
-            payload = resp.json() or {}
-            return f"Rerunning `{command.workflow_ref}` as `{payload.get('sample_name') or job.sample_name}`. New run UUID: `{payload.get('run_uuid', '')}`."
+                if command.action == "cancel_sync":
+                    resp = await client.post(f"{base_url}/jobs/{job.run_uuid}/cancel", headers=headers)
+                    if resp.status_code >= 400:
+                        detail = _response_detail(resp)
+                        messages.append(f"Cancel sync failed for `{workflow_ref}`: {detail}")
+                        continue
+                    payload = resp.json() or {}
+                    messages.append(payload.get("message") or f"Sync cancelled for `{workflow_ref}`.")
+                    continue
 
-        if command.action == "delete":
-            resp = await client.delete(f"{base_url}/jobs/{job.run_uuid}", headers=headers)
-            if resp.status_code >= 400:
-                detail = _response_detail(resp)
-                return f"Delete failed for `{command.workflow_ref}`: {detail}"
-            payload = resp.json() or {}
-            return payload.get("message") or f"Deleted `{command.workflow_ref}`."
+                if command.action == "rerun":
+                    resp = await client.post(f"{base_url}/jobs/{job.run_uuid}/rerun", headers=headers)
+                    if resp.status_code >= 400:
+                        detail = _response_detail(resp)
+                        messages.append(f"Rerun failed for `{workflow_ref}`: {detail}")
+                        continue
+                    payload = resp.json() or {}
+                    messages.append(
+                        f"Rerunning `{workflow_ref}` as `{payload.get('sample_name') or job.sample_name}`. New run UUID: `{payload.get('run_uuid', '')}`."
+                    )
+                    continue
+
+                resp = await client.delete(f"{base_url}/jobs/{job.run_uuid}", headers=headers)
+                if resp.status_code >= 400:
+                    detail = _response_detail(resp)
+                    messages.append(f"Delete failed for `{workflow_ref}`: {detail}")
+                    continue
+                payload = resp.json() or {}
+                messages.append(payload.get("message") or f"Deleted `{workflow_ref}`.")
+
+            return _combine_workflow_messages(command.action, messages)
 
         resp = await client.post(
             f"{base_url}/jobs/{job.run_uuid}/rename",
@@ -428,6 +611,48 @@ async def execute_workflow_command(
             return f"Rename failed for `{command.workflow_ref}`: {detail}"
         payload = resp.json() or {}
         return f"Renamed `{command.workflow_ref}` to `{payload.get('new_name') or command.new_name}`."
+
+
+async def execute_manual_workflow_analysis(
+    session: Session,
+    command: WorkflowCommand,
+    *,
+    project_id: str,
+    owner_id: str | None = None,
+    model: str | None = None,
+) -> tuple[object | None, str | None]:
+    target_refs = _resolve_command_refs(session, project_id, command)
+    if not target_refs:
+        return None, _missing_workflow_target_message("reanalyze")
+
+    job = resolve_workflow_reference(session, project_id, target_refs[0])
+    if job is None:
+        return None, f"I couldn't find `{target_refs[0]}` in this project."
+
+    label = _workflow_label(job)
+    if not _job_results_ready(job):
+        status = str(getattr(job, "status", "") or "UNKNOWN").strip() or "UNKNOWN"
+        return None, (
+            f"`{label}` is currently `{status}`. Manual automatic analysis is only available "
+            "after the workflow finishes and any required local result sync is complete."
+        )
+
+    agent_block = await _auto_trigger_analysis(
+        project_id,
+        str(getattr(job, "run_uuid", "") or ""),
+        {
+            "sample_name": str(getattr(job, "sample_name", "") or "Unknown").strip() or "Unknown",
+            "mode": str(getattr(job, "mode", "") or "DNA").strip() or "DNA",
+            "model": model or "default",
+            "work_directory": _job_work_directory(job),
+        },
+        owner_id,
+        persist_request_message=False,
+        force=True,
+    )
+    if agent_block is None:
+        return None, f"Manual automatic analysis failed for `{label}`."
+    return agent_block, None
 
 
 def execute_use_workflow(
@@ -561,9 +786,13 @@ def _parse_sync_workflow_command(message: str) -> WorkflowCommand:
         lowered = token.lower()
         if lowered == "--force":
             command.force = True
-        elif not command.workflow_ref:
-            command.workflow_ref = token
+        else:
+            ref = _normalize_workflow_ref(token)
+            if ref:
+                command.workflow_refs.append(ref)
         index += 1
+    if command.workflow_refs:
+        command.workflow_ref = command.workflow_refs[0]
     return command
 
 
@@ -571,7 +800,11 @@ def _parse_cancel_sync_command(message: str) -> WorkflowCommand:
     tokens = shlex.split(str(message or "").strip())
     command = WorkflowCommand(action="cancel_sync")
     if len(tokens) > 1:
-        command.workflow_ref = tokens[1].strip()
+        command.workflow_refs = [
+            ref for ref in (_normalize_workflow_ref(token) for token in tokens[1:]) if ref
+        ]
+        if command.workflow_refs:
+            command.workflow_ref = command.workflow_refs[0]
     return command
 
 

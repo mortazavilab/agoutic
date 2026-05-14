@@ -1904,6 +1904,55 @@ class TestDataCallExecution:
         resp = _chat(client, "get summary", skill="analyze_job_results")
         assert resp.status_code == 200
 
+    def test_analyze_results_work_dir_only_summary_call_still_returns_markdown(self, SL, seed, tmp_path):
+        """Analyze-results follow-ups should still work when the summary call only provides work_dir."""
+        workflow_dir = tmp_path / "workflow5"
+        workflow_dir.mkdir(parents=True, exist_ok=True)
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool.return_value = {
+            "summary": "Analysis Summary for: Jamshid999",
+            "mode": "RNA",
+            "status": "COMPLETED",
+            "sample_name": "Jamshid999",
+            "work_dir": str(workflow_dir),
+        }
+
+        def think(msg, skill, history):
+            return (
+                "To analyze the results for Jamshid999, I will first retrieve the job summary.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow_dir}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        call_count = [0]
+
+        def think_multi(msg, skill, history):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return think(msg, skill, history)
+            return (
+                "The workflow completed and the analysis summary was retrieved successfully.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.app._resolve_project_dir", return_value=tmp_path),
+            patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path),
+        ]
+
+        client = next(_make_client(SL, seed, tmp_path, think_multi, extra_patches=extra))
+        resp = _chat(client, "analyze results.", skill="analyze_job_results")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        mock_mcp.call_tool.assert_awaited_once_with("get_analysis_summary", work_dir=str(workflow_dir))
+        assert "analysis complete" in md.lower()
+        assert "Raw Query Results" in md
+
 
 # ===========================================================================
 # 2b. edgePython generate_plot DATA_CALL regressions

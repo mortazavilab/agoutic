@@ -1,10 +1,12 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from cortex.workflow_commands import (
     WorkflowCommand,
     detect_workflow_intent,
+    execute_manual_workflow_analysis,
     execute_use_workflow,
     execute_workflow_command,
     parse_workflow_command,
@@ -69,7 +71,23 @@ class TestParseWorkflowCommand:
 
     def test_parse_rerun_slash_command(self):
         cmd = parse_workflow_command("/rerun workflow7")
-        assert cmd == WorkflowCommand(action="rerun", workflow_ref="workflow7", new_name="")
+        assert cmd == WorkflowCommand(action="rerun", workflow_ref="workflow7", workflow_refs=["workflow7"], new_name="")
+
+    def test_parse_rerun_slash_command_without_target(self):
+        cmd = parse_workflow_command("/rerun")
+        assert cmd == WorkflowCommand(action="rerun")
+
+    def test_parse_reanalyze_slash_command(self):
+        cmd = parse_workflow_command("/reanalyze workflow7")
+        assert cmd == WorkflowCommand(action="reanalyze", workflow_ref="workflow7", workflow_refs=["workflow7"], new_name="")
+
+    def test_parse_reanalyze_slash_command_multiple_targets(self):
+        cmd = parse_workflow_command("/reanalyze workflow7, workflow8 workflow9")
+        assert cmd == WorkflowCommand(
+            action="reanalyze",
+            workflow_ref="workflow7",
+            workflow_refs=["workflow7", "workflow8", "workflow9"],
+        )
 
     def test_parse_rename_slash_command(self):
         cmd = parse_workflow_command("/rename workflow7 tumor-retry")
@@ -99,11 +117,11 @@ class TestParseWorkflowCommand:
 
     def test_parse_sync_workflow_slash_command(self):
         cmd = parse_workflow_command("/sync-workflow workflow7 --force")
-        assert cmd == WorkflowCommand(action="sync", workflow_ref="workflow7", force=True)
+        assert cmd == WorkflowCommand(action="sync", workflow_ref="workflow7", workflow_refs=["workflow7"], force=True)
 
     def test_parse_cancel_sync_slash_command(self):
         cmd = parse_workflow_command("/cancel-sync workflow7")
-        assert cmd == WorkflowCommand(action="cancel_sync", workflow_ref="workflow7")
+        assert cmd == WorkflowCommand(action="cancel_sync", workflow_ref="workflow7", workflow_refs=["workflow7"])
 
 
 class TestDetectWorkflowIntent:
@@ -113,7 +131,31 @@ class TestDetectWorkflowIntent:
 
     def test_detect_natural_language_rerun(self):
         cmd = detect_workflow_intent("rerun workflow3")
-        assert cmd == WorkflowCommand(action="rerun", workflow_ref="workflow3", new_name="")
+        assert cmd == WorkflowCommand(action="rerun", workflow_ref="workflow3", workflow_refs=["workflow3"], new_name="")
+
+    def test_detect_natural_language_rerun_without_target(self):
+        cmd = detect_workflow_intent("rerun")
+        assert cmd == WorkflowCommand(action="rerun")
+
+    def test_detect_natural_language_reanalyze(self):
+        cmd = detect_workflow_intent("reanalyze workflow3")
+        assert cmd == WorkflowCommand(action="reanalyze", workflow_ref="workflow3", workflow_refs=["workflow3"], new_name="")
+
+    def test_detect_natural_language_reanalyze_without_target(self):
+        cmd = detect_workflow_intent("reanalyze")
+        assert cmd == WorkflowCommand(action="reanalyze")
+
+    def test_detect_natural_language_reanalyze_multiple_targets(self):
+        cmd = detect_workflow_intent("reanalyze workflow3, workflow4 and workflow5")
+        assert cmd == WorkflowCommand(
+            action="reanalyze",
+            workflow_ref="workflow3",
+            workflow_refs=["workflow3", "workflow4", "workflow5"],
+        )
+
+    def test_detect_natural_language_rerun_automatic_analysis(self):
+        cmd = detect_workflow_intent("rerun automatic analysis for workflow3")
+        assert cmd == WorkflowCommand(action="reanalyze", workflow_ref="workflow3", workflow_refs=["workflow3"], new_name="")
 
     def test_detect_natural_language_rename(self):
         cmd = detect_workflow_intent("rename workflow3 to tumor-fix")
@@ -132,11 +174,15 @@ class TestDetectWorkflowIntent:
 
     def test_detect_natural_language_sync_shorthand(self):
         cmd = detect_workflow_intent("sync workflow2")
-        assert cmd == WorkflowCommand(action="sync", workflow_ref="workflow2")
+        assert cmd == WorkflowCommand(action="sync", workflow_ref="workflow2", workflow_refs=["workflow2"])
+
+    def test_detect_natural_language_sync_without_target(self):
+        cmd = detect_workflow_intent("sync workflow")
+        assert cmd == WorkflowCommand(action="sync")
 
     def test_detect_natural_language_cancel_sync(self):
         cmd = detect_workflow_intent("cancel sync workflow2")
-        assert cmd == WorkflowCommand(action="cancel_sync", workflow_ref="workflow2")
+        assert cmd == WorkflowCommand(action="cancel_sync", workflow_ref="workflow2", workflow_refs=["workflow2"])
 
 
 class TestResolveWorkflowReference:
@@ -225,6 +271,84 @@ async def test_execute_workflow_command_lists_tracked_workflows():
     assert "tumor-retry" in message
     assert "workflow13" in message
     assert "run-deleted" not in message
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_uses_active_workflow_when_target_missing(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-7",
+            workflow_alias="workflow7",
+            workflow_folder_name="workflow7",
+            workflow_display_name="sample-7",
+            sample_name="sample-7",
+            status="FAILED",
+            submitted_at=7,
+        )
+    ]
+    fake_client = _FakeAsyncClient(
+        post_response=_FakeResponse(status_code=200, payload={"sample_name": "sample-7", "run_uuid": "rerun-7"})
+    )
+
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_rest_base_url", lambda: "http://launchpad")
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_internal_headers", lambda: {"X-Internal-Secret": "secret"})
+    monkeypatch.setattr("cortex.workflow_commands.httpx.AsyncClient", lambda timeout: fake_client)
+    monkeypatch.setattr("cortex.workflow_commands._load_active_workflow_ref", lambda _session, _project_id: "workflow7")
+
+    message = await execute_workflow_command(
+        _FakeSession(jobs),
+        WorkflowCommand(action="rerun"),
+        project_id="proj-1",
+    )
+
+    assert "rerun-7" in message
+    assert fake_client.calls[0][1] == "http://launchpad/jobs/run-7/rerun"
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_batches_multiple_sync_targets(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-7",
+            workflow_alias="workflow7",
+            workflow_folder_name="workflow7",
+            workflow_display_name="sample-7",
+            sample_name="sample-7",
+            imported_source_kind="slurm",
+            transfer_state="outputs_downloaded",
+            status="COMPLETED",
+            submitted_at=7,
+        ),
+        SimpleNamespace(
+            run_uuid="run-8",
+            workflow_alias="workflow8",
+            workflow_folder_name="workflow8",
+            workflow_display_name="sample-8",
+            sample_name="sample-8",
+            imported_source_kind="slurm",
+            transfer_state="outputs_downloaded",
+            status="COMPLETED",
+            submitted_at=8,
+        ),
+    ]
+    fake_client = _FakeAsyncClient(
+        post_response=_FakeResponse(status_code=200, payload={"message": "Result synchronization started."})
+    )
+
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_rest_base_url", lambda: "http://launchpad")
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_internal_headers", lambda: {"X-Internal-Secret": "secret"})
+    monkeypatch.setattr("cortex.workflow_commands.httpx.AsyncClient", lambda timeout: fake_client)
+
+    message = await execute_workflow_command(
+        _FakeSession(jobs),
+        WorkflowCommand(action="sync", workflow_ref="workflow7", workflow_refs=["workflow7", "workflow8"]),
+        project_id="proj-1",
+    )
+
+    assert "Workflow sync results:" in message
+    assert len(fake_client.calls) == 2
+    assert fake_client.calls[0][1] == "http://launchpad/jobs/run-7/sync-results"
+    assert fake_client.calls[1][1] == "http://launchpad/jobs/run-8/sync-results"
 
 
 @pytest.mark.asyncio
@@ -594,6 +718,120 @@ async def test_execute_workflow_command_cancels_sync(monkeypatch):
         )
     ]
     assert "Result synchronization cancelled" in message
+
+
+@pytest.mark.asyncio
+async def test_execute_manual_workflow_analysis_reuses_auto_trigger(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-12",
+            workflow_alias="workflow12",
+            workflow_folder_name="workflow12",
+            workflow_display_name="sample-12",
+            sample_name="sample-12",
+            mode="DNA",
+            nextflow_work_dir="/data/proj/workflow12",
+            status="COMPLETED",
+            result_destination="local",
+            transfer_state="outputs_downloaded",
+            submitted_at=12,
+        )
+    ]
+    sentinel_block = object()
+    mock_auto = AsyncMock(return_value=sentinel_block)
+
+    monkeypatch.setattr("cortex.workflow_commands._auto_trigger_analysis", mock_auto)
+
+    agent_block, error = await execute_manual_workflow_analysis(
+        _FakeSession(jobs),
+        WorkflowCommand(action="reanalyze", workflow_ref="workflow12"),
+        project_id="proj-1",
+        owner_id="user-1",
+        model="gemma-test",
+    )
+
+    assert agent_block is sentinel_block
+    assert error is None
+    mock_auto.assert_awaited_once_with(
+        "proj-1",
+        "run-12",
+        {
+            "sample_name": "sample-12",
+            "mode": "DNA",
+            "model": "gemma-test",
+            "work_directory": "/data/proj/workflow12",
+        },
+        "user-1",
+        persist_request_message=False,
+        force=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_manual_workflow_analysis_uses_active_workflow_when_target_missing(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-14",
+            workflow_alias="workflow14",
+            workflow_folder_name="workflow14",
+            workflow_display_name="sample-14",
+            sample_name="sample-14",
+            mode="RNA",
+            nextflow_work_dir="/data/proj/workflow14",
+            status="COMPLETED",
+            result_destination="local",
+            transfer_state="outputs_downloaded",
+            submitted_at=14,
+        )
+    ]
+    sentinel_block = object()
+    mock_auto = AsyncMock(return_value=sentinel_block)
+
+    monkeypatch.setattr("cortex.workflow_commands._auto_trigger_analysis", mock_auto)
+    monkeypatch.setattr("cortex.workflow_commands._load_active_workflow_ref", lambda _session, _project_id: "workflow14")
+
+    agent_block, error = await execute_manual_workflow_analysis(
+        _FakeSession(jobs),
+        WorkflowCommand(action="reanalyze"),
+        project_id="proj-1",
+        owner_id="user-1",
+        model="gemma-test",
+    )
+
+    assert agent_block is sentinel_block
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_execute_manual_workflow_analysis_requires_ready_results(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-13",
+            workflow_alias="workflow13",
+            workflow_folder_name="workflow13",
+            workflow_display_name="sample-13",
+            sample_name="sample-13",
+            mode="DNA",
+            nextflow_work_dir="/data/proj/workflow13",
+            status="RUNNING",
+            submitted_at=13,
+        )
+    ]
+    mock_auto = AsyncMock()
+
+    monkeypatch.setattr("cortex.workflow_commands._auto_trigger_analysis", mock_auto)
+
+    agent_block, error = await execute_manual_workflow_analysis(
+        _FakeSession(jobs),
+        WorkflowCommand(action="reanalyze", workflow_ref="workflow13"),
+        project_id="proj-1",
+        owner_id="user-1",
+        model="gemma-test",
+    )
+
+    assert agent_block is None
+    assert "only available after the workflow finishes" in error
+    mock_auto.assert_not_awaited()
 
 
 # ── Parse / detect "use" ──────────────────────────────────────────────────
