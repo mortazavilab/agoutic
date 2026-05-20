@@ -24,8 +24,31 @@ class TestSubmitJobRequest:
         )
         assert req.project_id == "proj-1"
         assert req.sample_name == "sample1"
+        assert req.workflow_key == "dogme"
         assert req.mode == "DNA"
         assert req.input_type == "pod5"  # default
+
+    def test_normalizes_workflow_key(self):
+        req = SubmitJobRequest(
+            project_id="proj-1",
+            sample_name="sample1",
+            workflow_key="DOGME",
+            mode="DNA",
+            input_directory="/data/pod5",
+        )
+
+        assert req.workflow_key == "dogme"
+
+    def test_non_dogme_workflow_allows_missing_mode(self):
+        req = SubmitJobRequest(
+            project_id="proj-1",
+            sample_name="sample1",
+            workflow_key="wf_pore_c",
+            input_directory="/data/reads.fastq.gz",
+        )
+
+        assert req.workflow_key == "wf_pore_c"
+        assert req.mode is None
 
     def test_genome_string_normalised_to_list(self):
         req = SubmitJobRequest(
@@ -52,6 +75,15 @@ class TestSubmitJobRequest:
         with pytest.raises(ValidationError):
             SubmitJobRequest(
                 project_id="p", sample_name="", mode="DNA",
+                input_directory="/d",
+            )
+
+    def test_dogme_requires_mode(self):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="s",
+                workflow_key="dogme",
                 input_directory="/d",
             )
 
@@ -315,6 +347,7 @@ class TestJobDetailsResponse:
         resp = JobDetailsResponse(
             run_uuid="abc",
             project_id="proj-1",
+            workflow_key="dogme",
             workflow_index=1,
             workflow_alias="workflow1",
             workflow_folder_name="workflow1",
@@ -334,6 +367,30 @@ class TestJobDetailsResponse:
         assert resp.error_message is None
         assert resp.workflow_alias == "workflow1"
         assert resp.workflow_display_name == "sample-a-renamed"
+
+    def test_allows_nullable_mode_for_non_dogme_rows(self):
+        resp = JobDetailsResponse(
+            run_uuid="abc",
+            project_id="proj-1",
+            workflow_key="wf_pore_c",
+            workflow_index=1,
+            workflow_alias="workflow1",
+            workflow_folder_name="workflow1",
+            workflow_display_name="sample-a-renamed",
+            sample_name="s1",
+            mode=None,
+            status="COMPLETED",
+            progress_percent=100,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+            output_directory=None,
+            error_message=None,
+            report=None,
+        )
+
+        assert resp.workflow_key == "wf_pore_c"
+        assert resp.mode is None
 
 
 class TestJobSubmitResponse:

@@ -372,6 +372,86 @@ class LaunchpadMCPTools:
         except Exception as e:
             raise RuntimeError(f"Failed to submit job: {_describe_exception(e)}")
 
+    async def preview_workflow(
+        self,
+        workflow_key: str = "dogme",
+        sample_name: Optional[str] = None,
+        mode: Optional[str] = None,
+        input_type: Optional[str] = None,
+        input_path: Optional[str] = None,
+        input_directory: Optional[str] = None,
+        reference_genome: str | list[str] | None = None,
+        reference_fasta: Optional[str] = None,
+        vcf: Optional[str] = None,
+        sample_sheet: Optional[str] = None,
+        cutter: Optional[str] = None,
+        output_directory: Optional[str] = None,
+        workflow_repo: Optional[str] = None,
+        workflow_version: Optional[str] = None,
+        report_filename: Optional[str] = None,
+        output_flags: Optional[dict] = None,
+    ) -> dict:
+        """Build a workflow preview without submitting a Launchpad job."""
+        payload = {
+            "workflow_key": workflow_key,
+        }
+        if sample_name is not None:
+            payload["sample_name"] = sample_name
+        if mode is not None:
+            payload["mode"] = mode
+        if input_type is not None:
+            payload["input_type"] = input_type
+        if input_path is not None:
+            payload["input_path"] = input_path
+        if input_directory is not None:
+            payload["input_directory"] = input_directory
+        if reference_genome is not None:
+            payload["reference_genome"] = reference_genome
+        if reference_fasta is not None:
+            payload["reference_fasta"] = reference_fasta
+        if vcf is not None:
+            payload["vcf"] = vcf
+        if sample_sheet is not None:
+            payload["sample_sheet"] = sample_sheet
+        if cutter is not None:
+            payload["cutter"] = cutter
+        if output_directory is not None:
+            payload["output_directory"] = output_directory
+        if workflow_repo is not None:
+            payload["workflow_repo"] = workflow_repo
+        if workflow_version is not None:
+            payload["workflow_version"] = workflow_version
+        if report_filename is not None:
+            payload["report_filename"] = report_filename
+        if output_flags is not None:
+            payload["output_flags"] = output_flags
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.server_url}/workflows/preview",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = e.response.text
+            except Exception:
+                detail = ""
+            if detail:
+                raise RuntimeError(
+                    f"Failed to preview workflow: HTTP {e.response.status_code} from {e.request.url} - {detail}"
+                )
+            raise RuntimeError(
+                f"Failed to preview workflow: HTTP {e.response.status_code} from {e.request.url}"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to preview workflow: {_describe_exception(e)}")
+
     async def stage_remote_sample(
         self,
         project_id: str,
@@ -945,6 +1025,38 @@ TOOL_REGISTRY = {
                 "script_working_directory": {"type": "string", "description": "Explicit script working directory under allowlisted roots"},
             },
             "required": ["sample_name", "mode"],
+        }
+    },
+    "preview_workflow": {
+        "description": "Build a workflow preview by workflow_key without submitting a Launchpad job. Supports dogme previews and Phase 1 wf-pore-c dry-run previews.",
+        "tool_function": "preview_workflow",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workflow_key": {"type": "string", "description": "Workflow family key such as dogme or wf_pore_c"},
+                "sample_name": {"type": "string", "description": "Optional sample name for the preview"},
+                "mode": {"type": "string", "description": "Dogme mode such as DNA, RNA, or CDNA"},
+                "input_type": {"type": "string", "enum": ["pod5", "bam", "fastq"], "description": "Input file type when relevant"},
+                "input_path": {"type": "string", "description": "Workflow-specific input path, used by wf-pore-c previews"},
+                "input_directory": {"type": "string", "description": "Workflow input directory, used by dogme previews and as a fallback path field"},
+                "reference_genome": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}}
+                    ],
+                    "description": "Dogme reference genome or genomes"
+                },
+                "reference_fasta": {"type": "string", "description": "Reference FASTA path for wf-pore-c previews"},
+                "vcf": {"type": "string", "description": "Optional VCF path for wf-pore-c previews"},
+                "sample_sheet": {"type": "string", "description": "Optional sample sheet path for wf-pore-c previews"},
+                "cutter": {"type": "string", "description": "Restriction enzyme name for wf-pore-c previews"},
+                "output_directory": {"type": "string", "description": "Planned output directory"},
+                "workflow_repo": {"type": "string", "description": "Optional workflow repository override"},
+                "workflow_version": {"type": "string", "description": "Optional workflow revision override"},
+                "report_filename": {"type": "string", "description": "Optional report filename override"},
+                "output_flags": {"type": "object", "description": "Optional workflow-specific output toggles"}
+            },
+            "required": ["workflow_key"]
         }
     },
     "stage_remote_sample": {

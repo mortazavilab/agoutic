@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import shlex
 from pathlib import Path
 
 from sqlalchemy import select
@@ -223,6 +224,155 @@ def _should_background_remote_stage(
     return True
 
 
+def _wf_pore_c_output_flags(job_params: dict) -> dict[str, bool]:
+    raw_flags = job_params.get("output_flags") if isinstance(job_params.get("output_flags"), dict) else {}
+    flags = {
+        "pairs": bool(raw_flags.get("pairs", True)),
+        "mcool": bool(raw_flags.get("mcool", True)),
+        "hi_c": bool(raw_flags.get("hi_c", False)),
+        "bed": bool(raw_flags.get("bed", False)),
+        "chromunity": bool(raw_flags.get("chromunity", False)),
+        "coverage": bool(raw_flags.get("coverage", False)),
+        "paired_end": bool(raw_flags.get("paired_end", False)),
+    }
+    if flags["bed"]:
+        flags["paired_end"] = True
+    return flags
+
+
+def _wf_pore_c_preview_work_dir(output_directory: str, input_path: str, sample_name: str) -> str:
+    if output_directory:
+        output_path = Path(output_directory).expanduser()
+        work_root = output_path.parent / ".nextflow-work" / "wf-pore-c"
+        return str(work_root / sample_name)
+
+    normalized_input = str(input_path or "").strip()
+    if normalized_input:
+        input_path_obj = Path(normalized_input).expanduser()
+        parent = input_path_obj if input_path_obj.is_dir() else input_path_obj.parent
+        return str(parent / ".nextflow-work" / "wf-pore-c" / sample_name)
+
+    return str(Path(".").resolve() / ".nextflow-work" / "wf-pore-c" / sample_name)
+
+
+def _build_wf_pore_c_dry_run_preview(job_params: dict) -> dict:
+    sample_name = str(job_params.get("sample_name") or job_params.get("sample") or "pore_c_sample").strip() or "pore_c_sample"
+    workflow_repo = str(job_params.get("workflow_repo") or "epi2me-labs/wf-pore-c").strip() or "epi2me-labs/wf-pore-c"
+    workflow_version = str(job_params.get("workflow_version") or "v1.3.1").strip() or "v1.3.1"
+    input_path = str(job_params.get("file_path") or job_params.get("input_directory") or "").strip()
+    input_type = str(job_params.get("input_type") or "").strip().lower() or ("bam" if input_path.lower().endswith(".bam") else "fastq")
+    reference_fasta = str(job_params.get("reference_fasta") or "").strip()
+    vcf = str(job_params.get("vcf") or "").strip()
+    sample_sheet = str(job_params.get("sample_sheet") or "").strip()
+    cutter = str(job_params.get("cutter") or "NlaIII").strip() or "NlaIII"
+    output_directory = str(job_params.get("output_directory") or "").strip()
+    report_filename = str(job_params.get("report_filename") or "wf-pore-c-report.html").strip() or "wf-pore-c-report.html"
+    output_flags = _wf_pore_c_output_flags(job_params)
+    work_dir = _wf_pore_c_preview_work_dir(output_directory, input_path, sample_name)
+
+    command_parts: list[str] = [
+        "nextflow",
+        "run",
+        workflow_repo,
+        "-r",
+        workflow_version,
+        f"--{input_type}",
+        input_path,
+        "--ref",
+        reference_fasta,
+        "--out_dir",
+        output_directory,
+        "-work-dir",
+        work_dir,
+    ]
+    if sample_name and not sample_sheet:
+        command_parts.extend(["--sample", sample_name])
+    if sample_sheet:
+        command_parts.extend(["--sample_sheet", sample_sheet])
+    if vcf:
+        command_parts.extend(["--vcf", vcf])
+    if cutter:
+        command_parts.extend(["--cutter", cutter])
+    for flag_name in ("pairs", "mcool", "hi_c", "bed", "chromunity", "coverage", "paired_end"):
+        if output_flags[flag_name]:
+            command_parts.append(f"--{flag_name}")
+    command_parts.extend(["-profile", "standard"])
+
+    expected_outputs = ["bams/{alias}.cs.bam", report_filename]
+    if output_flags["pairs"]:
+        expected_outputs.append("pairs/{alias}.pairs.gz")
+    if output_flags["mcool"]:
+        expected_outputs.append("cooler/{alias}.mcool")
+    if output_flags["hi_c"]:
+        expected_outputs.append("hi-c/{alias}.hic")
+    if output_flags["chromunity"]:
+        expected_outputs.append("chromunity/")
+    if output_flags["coverage"]:
+        expected_outputs.append("coverage/")
+
+    return {
+        "workflow_key": "wf_pore_c",
+        "workflow_repo": workflow_repo,
+        "workflow_version": workflow_version,
+        "sample_name": sample_name,
+        "input_type": input_type,
+        "input_path": input_path,
+        "reference_fasta": reference_fasta,
+        "vcf": vcf or None,
+        "sample_sheet": sample_sheet or None,
+        "cutter": cutter,
+        "output_directory": output_directory,
+        "work_dir": work_dir,
+        "report_filename": report_filename,
+        "output_flags": output_flags,
+        "expected_outputs": expected_outputs,
+        "command": " \\\n    ".join(shlex.quote(part) for part in command_parts),
+        "notes": [
+            "Phase 1 preview only: no Launchpad job has been submitted.",
+            "Keep -work-dir outside --out_dir to avoid Nextflow work/output collisions.",
+            "Preflight the reference sidecars before real submission: .fai and chromsizes.",
+            "Large BAM/FASTQ staging is planned as symlink-first with copy fallback only when required.",
+        ],
+    }
+
+
+def _wf_pore_c_preview_markdown(preview: dict) -> str:
+    output_flags = preview.get("output_flags") or {}
+    enabled_outputs = [name for name, enabled in output_flags.items() if enabled]
+    outputs_text = ", ".join(enabled_outputs) if enabled_outputs else "none"
+    expected_outputs = preview.get("expected_outputs") or []
+    expected_outputs_text = "\n".join(f"- `{item}`" for item in expected_outputs)
+    notes = preview.get("notes") or []
+    notes_text = "\n".join(f"- {item}" for item in notes)
+    optional_lines = []
+    if preview.get("vcf"):
+        optional_lines.append(f"- VCF: `{preview['vcf']}`")
+    if preview.get("sample_sheet"):
+        optional_lines.append(f"- Sample sheet: `{preview['sample_sheet']}`")
+    optional_text = "\n".join(optional_lines) if optional_lines else "- Optional inputs: none"
+    return (
+        "### wf-pore-c Dry-Run Preview\n\n"
+        "No workflow was submitted. This card shows the Phase 1 execution draft that AGOUTIC would hand to Launchpad later.\n\n"
+        f"- Sample: `{preview['sample_name']}`\n"
+        f"- Input type: `{preview['input_type']}`\n"
+        f"- Input path: `{preview['input_path']}`\n"
+        f"- Reference FASTA: `{preview['reference_fasta']}`\n"
+        f"{optional_text}\n"
+        f"- Cutter: `{preview['cutter']}`\n"
+        f"- Output directory: `{preview['output_directory']}`\n"
+        f"- Work directory: `{preview['work_dir']}`\n"
+        f"- Enabled outputs: `{outputs_text}`\n"
+        f"- Report filename: `{preview['report_filename']}`\n\n"
+        "Expected outputs:\n"
+        f"{expected_outputs_text}\n\n"
+        "```bash\n"
+        f"{preview['command']}\n"
+        "```\n\n"
+        "Notes:\n"
+        f"{notes_text}\n"
+    )
+
+
 async def submit_job_after_approval(project_id: str, gate_block_id: str):
     """
     Background task to submit a job to Launchpad after approval.
@@ -272,11 +422,33 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             logger.error("Failed to extract parameters", project_id=project_id)
             return
 
+        gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
+        workflow_key = str(job_params.get("workflow_key") or "").strip().lower()
+        if gate_action == "workflow_dry_run_preview" and workflow_key == "wf_pore_c":
+            preview_payload = _build_wf_pore_c_dry_run_preview(job_params)
+            preview_block = _create_block_internal(
+                session,
+                project_id,
+                "AGENT_PLAN",
+                {
+                    "markdown": _wf_pore_c_preview_markdown(preview_payload),
+                    "skill": "run_wf_pore_c",
+                    "model": gate_payload.get("model", "default"),
+                    "workflow_preview": preview_payload,
+                },
+                status="DONE",
+                owner_id=owner_id,
+            )
+            gate_payload["preview_block_id"] = preview_block.id
+            gate_payload["workflow_preview"] = preview_payload
+            gate_block.payload_json = json.dumps(gate_payload)
+            session.commit()
+            return
+
         run_type = (job_params.get("run_type") or "dogme").strip().lower()
         if run_type not in {"dogme", "script"}:
             run_type = "dogme"
 
-        gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
         if run_type == "script" and gate_action == "reconcile_bams":
             job_params = dict(job_params)
             job_params["script_id"] = "reconcile_bams/reconcile_bams"
@@ -617,7 +789,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 extra={"cache_preflight": job_data.get("cache_preflight")},
             )
 
-        if execution_mode == "slurm" and workflow_block is not None and stage_input_step_id and not remote_stage_only:
+        if execution_mode == "slurm" and workflow_block is not None and stage_input_step_id:
             if job_data.get("staged_remote_input_path"):
                 decision = "use_remote_path" if data_action_name == "use_remote_path" else (
                     "reuse" if data_action_name == "reuse" else "stage"
@@ -633,7 +805,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                         "data_action": data_action,
                     },
                 )
-            else:
+            elif not remote_stage_only:
                 _set_workflow_step_status(
                     session,
                     workflow_block,
@@ -771,6 +943,26 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 sample_name=job_data["sample_name"],
                 staging_task_id=staging_task_id,
                 continue_submission=not remote_stage_only,
+            )
+            return
+
+        if remote_stage_only and job_data.get("staged_remote_input_path"):
+            if workflow_block is not None and complete_stage_only_step_id:
+                _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    complete_stage_only_step_id,
+                    "COMPLETED",
+                    extra={
+                        "staged_input_directory": job_data.get("staged_remote_input_path"),
+                        "data_action": data_action,
+                    },
+                )
+            logger.info(
+                "Remote stage-only request already satisfied by remote path",
+                project_id=project_id,
+                sample_name=job_data["sample_name"],
+                remote_input_path=job_data.get("staged_remote_input_path"),
             )
             return
 

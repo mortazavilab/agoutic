@@ -12,6 +12,7 @@ from collections import OrderedDict
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
@@ -58,6 +59,326 @@ def _normalize_render_mode(file_path: Path, render_mode: Optional[str]) -> str:
         return "plain"
 
     return normalized
+
+
+def _normalize_workflow_key(value: Any) -> str:
+    if not isinstance(value, str):
+        return "dogme"
+    normalized = value.strip().lower()
+    return normalized or "dogme"
+
+
+def _normalize_job_mode(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().upper()
+    return normalized or None
+
+
+def _load_workflow_metadata(work_dir: Optional[Path]) -> Dict[str, Any]:
+    if work_dir is None:
+        return {}
+
+    metadata_path = work_dir / ".agoutic.workflow.json"
+    if not metadata_path.is_file():
+        return {}
+
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
+
+
+def _workflow_key_file_patterns(
+    workflow_key: str,
+    mode: Optional[str],
+    workflow_metadata: Dict[str, Any],
+) -> List[str]:
+    if workflow_key == "wf_pore_c":
+        patterns: List[str] = []
+        summary_contract = workflow_metadata.get("summary_contract")
+        result_sync_spec = workflow_metadata.get("result_sync_spec")
+        if not isinstance(summary_contract, dict):
+            summary_contract = {}
+        if not isinstance(result_sync_spec, dict):
+            result_sync_spec = {}
+
+        report_filename = str(
+            result_sync_spec.get("report_filename")
+            or summary_contract.get("report_filename")
+            or "wf-pore-c-report.html"
+        ).strip().lower()
+        if report_filename:
+            patterns.append(report_filename)
+
+        expected_outputs = result_sync_spec.get("expected_outputs")
+        if isinstance(expected_outputs, list):
+            for output_name in expected_outputs:
+                normalized_output = str(output_name or "").strip().lower()
+                for suffix in (".pairs.gz", ".mcool", ".hic"):
+                    if suffix in normalized_output and suffix not in patterns:
+                        patterns.append(suffix)
+
+        return patterns
+
+    if mode == "CDNA":
+        return [
+            'qc_summary', 'qc', 'stats', 'flagstat', 'gene_counts', 'transcript_counts',
+            'isoform', 'junctions', 'counts'
+        ]
+    if mode == 'DNA':
+        return [
+            'qc_summary', 'qc', 'stats', 'flagstat', 'modkit', 'methylation', 'mod_freq'
+        ]
+    if mode == 'RNA':
+        return [
+            'qc_summary', 'qc', 'stats', 'flagstat', 'gene_counts', 'transcript_counts', 'isoform'
+        ]
+    return []
+
+
+def _summary_files(file_summary: JobFileSummary) -> List[FileInfo]:
+    return file_summary.txt_files + file_summary.csv_files + file_summary.bed_files + file_summary.other_files
+
+
+def _normalize_output_flag(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _find_matching_files(files: List[FileInfo], *, exact_name: str | None = None, suffix: str | None = None) -> List[FileInfo]:
+    matches: List[FileInfo] = []
+    normalized_name = exact_name.lower() if exact_name else None
+    normalized_suffix = suffix.lower() if suffix else None
+    for file_info in files:
+        name_lower = file_info.name.lower()
+        if normalized_name and name_lower == normalized_name:
+            matches.append(file_info)
+            continue
+        if normalized_suffix and name_lower.endswith(normalized_suffix):
+            matches.append(file_info)
+    return matches
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return None
+    return int(numeric)
+
+
+def _pairs_stats_value(raw_stats: Dict[str, float], *keys: str) -> Optional[float]:
+    for key in keys:
+        if key in raw_stats:
+            return raw_stats[key]
+    return None
+
+
+def _parse_pairs_stats_file(stats_path: Path) -> Dict[str, Any]:
+    raw_stats: Dict[str, float] = {}
+    for raw_line in stats_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if "\t" in line:
+            key, value = line.split("\t", 1)
+        elif ":" in line:
+            key, value = line.split(":", 1)
+        else:
+            continue
+
+        normalized_key = re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_")
+        normalized_value = value.strip().replace(",", "")
+        numeric_value = _safe_float(normalized_value)
+        if numeric_value is None:
+            continue
+        raw_stats[normalized_key] = numeric_value
+
+    total_pairs = _pairs_stats_value(raw_stats, "total_pairs", "total", "total_mapped", "total_nodups")
+    cis_pairs = _pairs_stats_value(raw_stats, "cis_pairs", "cis")
+    trans_pairs = _pairs_stats_value(raw_stats, "trans_pairs", "trans")
+    duplicate_rate = _pairs_stats_value(raw_stats, "duplicate_rate", "dup_rate", "duplicates_rate")
+    if duplicate_rate is None:
+        duplicate_pairs = _pairs_stats_value(raw_stats, "duplicate_pairs", "duplicates", "total_dups")
+        if duplicate_pairs is not None and total_pairs not in (None, 0):
+            duplicate_rate = duplicate_pairs / float(total_pairs)
+
+    cis_trans_ratio = _pairs_stats_value(raw_stats, "cis_trans_ratio", "cis_to_trans_ratio")
+    if cis_trans_ratio is None and cis_pairs is not None and trans_pairs not in (None, 0):
+        cis_trans_ratio = cis_pairs / float(trans_pairs)
+
+    return {
+        "source_file": stats_path.name,
+        "total_pairs": _safe_int(total_pairs),
+        "cis_pairs": _safe_int(cis_pairs),
+        "trans_pairs": _safe_int(trans_pairs),
+        "cis_trans_ratio": cis_trans_ratio,
+        "duplicate_rate": duplicate_rate,
+        "raw_stats": raw_stats,
+    }
+
+
+def _infer_sample_alias_from_sample_sheet(sample_sheet_path: str | None) -> Optional[str]:
+    if not sample_sheet_path:
+        return None
+    sheet_path = Path(sample_sheet_path).expanduser()
+    if not sheet_path.is_file():
+        return None
+
+    sample_columns = ("sample", "sample_name", "alias", "sample_alias")
+    try:
+        with sheet_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            preview = handle.read(4096)
+            handle.seek(0)
+            delimiter = "\t" if "\t" in preview and preview.count("\t") >= preview.count(",") else ","
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            for row in reader:
+                for column in sample_columns:
+                    value = str(row.get(column) or "").strip()
+                    if value:
+                        return value
+    except Exception:
+        return None
+
+    return None
+
+
+def _infer_wf_pore_c_sample_alias(summary_contract: Dict[str, Any], validated_inputs: Dict[str, Any]) -> Optional[str]:
+    for value in (
+        validated_inputs.get("sample_name"),
+        summary_contract.get("sample_name"),
+    ):
+        cleaned = str(value or "").strip()
+        if cleaned:
+            return cleaned
+    return _infer_sample_alias_from_sample_sheet(validated_inputs.get("sample_sheet"))
+
+
+def _resolve_expected_output_match(expected_output: str, files: List[FileInfo], report_filename: str) -> List[FileInfo]:
+    normalized_output = str(expected_output or "").strip().lower()
+    basename = PurePosixPath(normalized_output).name
+    if basename == report_filename.lower():
+        return _find_matching_files(files, exact_name=report_filename)
+    for suffix in (".pairs.gz", ".mcool", ".hic"):
+        if basename.endswith(suffix):
+            return _find_matching_files(files, suffix=suffix)
+    if basename:
+        return _find_matching_files(files, exact_name=basename)
+    return []
+
+
+def _build_wf_pore_c_summary(
+    *,
+    work_dir: Optional[Path],
+    all_file_summary: JobFileSummary,
+    workflow_metadata: Dict[str, Any],
+    summary_contract: Dict[str, Any],
+    result_sync_spec: Dict[str, Any],
+) -> tuple[Dict[str, Any], List[str]]:
+    validated_inputs = workflow_metadata.get("validated_inputs") if isinstance(workflow_metadata.get("validated_inputs"), dict) else {}
+    output_flags = summary_contract.get("output_flags") if isinstance(summary_contract.get("output_flags"), dict) else {}
+    all_files = _summary_files(all_file_summary)
+    warnings: List[str] = []
+
+    report_filename = str(
+        result_sync_spec.get("report_filename")
+        or summary_contract.get("report_filename")
+        or "wf-pore-c-report.html"
+    ).strip() or "wf-pore-c-report.html"
+    artifact_specs = {
+        "report_html": {
+            "requested": True,
+            "matches": _find_matching_files(all_files, exact_name=report_filename),
+            "expected": report_filename,
+        },
+        "pairs": {
+            "requested": _normalize_output_flag(output_flags.get("pairs"), default=True),
+            "matches": _find_matching_files(all_files, suffix=".pairs.gz"),
+            "expected": ".pairs.gz",
+        },
+        "mcool": {
+            "requested": _normalize_output_flag(output_flags.get("mcool"), default=True),
+            "matches": _find_matching_files(all_files, suffix=".mcool"),
+            "expected": ".mcool",
+        },
+        "hic": {
+            "requested": _normalize_output_flag(output_flags.get("hi_c"), default=False),
+            "matches": _find_matching_files(all_files, suffix=".hic"),
+            "expected": ".hic",
+        },
+    }
+
+    expected_outputs = result_sync_spec.get("expected_outputs") if isinstance(result_sync_spec.get("expected_outputs"), list) else []
+    requested_outputs: List[Dict[str, Any]] = []
+    for expected_output in expected_outputs:
+        matches = _resolve_expected_output_match(str(expected_output), all_files, report_filename)
+        requested_outputs.append(
+            {
+                "expected": str(expected_output),
+                "present": bool(matches),
+                "matches": [file_info.path for file_info in matches],
+            }
+        )
+        if not matches:
+            warnings.append(f"Missing requested output: {expected_output}")
+
+    artifacts: Dict[str, Any] = {}
+    for label, spec in artifact_specs.items():
+        matches = spec["matches"]
+        present = bool(matches)
+        artifacts[label] = {
+            "requested": bool(spec["requested"]),
+            "present": present,
+            "matches": [file_info.path for file_info in matches],
+        }
+        if spec["requested"] and not present:
+            warnings.append(f"Missing requested output: {spec['expected']}")
+
+    pairs_stats_files = _find_matching_files(all_files, exact_name="pairs.stats.txt")
+    pairs_stats: Dict[str, Any] = {}
+    if pairs_stats_files and work_dir is not None:
+        stats_path = work_dir / pairs_stats_files[0].path
+        if stats_path.is_file():
+            pairs_stats = _parse_pairs_stats_file(stats_path)
+            sparse_metrics = [
+                metric_name
+                for metric_name in ("total_pairs", "cis_trans_ratio", "duplicate_rate")
+                if pairs_stats.get(metric_name) is None
+            ]
+            if sparse_metrics:
+                warnings.append(
+                    "pairs.stats.txt missing summary metrics: " + ", ".join(sparse_metrics)
+                )
+
+    sample_alias = _infer_wf_pore_c_sample_alias(summary_contract, validated_inputs)
+    metadata = {
+        "sample_alias": sample_alias,
+        "reference_fasta": validated_inputs.get("reference_fasta"),
+        "cutter": validated_inputs.get("cutter"),
+        "workflow_repo": validated_inputs.get("workflow_repo"),
+        "workflow_version": validated_inputs.get("workflow_version") or summary_contract.get("workflow_version"),
+    }
+
+    return {
+        "artifacts": artifacts,
+        "requested_outputs": requested_outputs,
+        "pairs_stats": pairs_stats,
+        "sample_alias": sample_alias,
+        "metadata": metadata,
+    }, warnings
 
 
 def _render_html_text(raw_content: str) -> str:
@@ -204,6 +525,7 @@ def _get_job_by_run_uuid_or_work_dir(
             load_only(
                 DogmeJob.run_uuid,
                 DogmeJob.sample_name,
+                DogmeJob.workflow_key,
                 DogmeJob.mode,
                 DogmeJob.status,
                 DogmeJob.nextflow_work_dir,
@@ -1162,25 +1484,19 @@ def generate_analysis_summary(
 
     resolved_run_uuid = str(job.run_uuid or run_uuid or "")
     _wdp = work_dir_path or (job.nextflow_work_dir or job.output_directory or None)
+    normalized_mode = _normalize_job_mode(getattr(job, "mode", None))
+    workflow_key = _normalize_workflow_key(getattr(job, "workflow_key", None))
 
     # Categorize all files
     all_file_summary = categorize_files(resolved_run_uuid or None, work_dir_path=_wdp)
+    work_dir = resolve_work_dir(work_dir=_wdp, run_uuid=resolved_run_uuid or None)
+    workflow_metadata = _load_workflow_metadata(work_dir)
+    workflow_key = _normalize_workflow_key(workflow_metadata.get("workflow_key") or workflow_key)
+    summary_contract = workflow_metadata.get("summary_contract") if isinstance(workflow_metadata.get("summary_contract"), dict) else {}
+    result_sync_spec = workflow_metadata.get("result_sync_spec") if isinstance(workflow_metadata.get("result_sync_spec"), dict) else {}
         
     # Filter to key result files only for display
-    key_file_patterns = []
-    if job.mode.upper() == 'CDNA':
-        key_file_patterns = [
-            'qc_summary', 'qc', 'stats', 'flagstat', 'gene_counts', 'transcript_counts', 
-            'isoform', 'junctions', 'counts'
-        ]
-    elif job.mode.upper() == 'DNA':
-        key_file_patterns = [
-            'qc_summary', 'qc', 'stats', 'flagstat', 'modkit', 'methylation', 'mod_freq'
-        ]
-    elif job.mode.upper() == 'RNA':
-        key_file_patterns = [
-            'qc_summary', 'qc', 'stats', 'flagstat', 'gene_counts', 'transcript_counts', 'isoform'
-        ]
+    key_file_patterns = _workflow_key_file_patterns(workflow_key, normalized_mode, workflow_metadata)
         
     def is_key_file(file_info):
         name_lower = file_info.name.lower()
@@ -1202,9 +1518,10 @@ def generate_analysis_summary(
     # Parse key result files
     key_results = {}
     parsed_reports = {}
+    workflow_summary: Dict[str, Any] = {}
+    summary_warnings: List[str] = []
 
     # Look for common report files
-    work_dir = resolve_work_dir(work_dir=_wdp, run_uuid=resolved_run_uuid or None)
     if work_dir:
         # Parse QC summary if exists
         qc_files = [f for f in file_summary.csv_files if 'qc_summary' in f.name.lower() or 'qc' in f.name.lower()]
@@ -1225,7 +1542,7 @@ def generate_analysis_summary(
                 pass
 
         # Mode-specific parsing
-        if job.mode.upper() == 'CDNA':
+        if normalized_mode == 'CDNA':
             # Parse gene counts
             gene_files = [f for f in file_summary.csv_files if 'gene_counts' in f.name.lower() or 'counts' in f.name.lower() and 'gene' in f.name.lower()]
             if gene_files:
@@ -1260,6 +1577,29 @@ def generate_analysis_summary(
         key_results["QC Summary"] = "Available" if 'qc_summary' in parsed_reports else "Not found"
         key_results["Stats"] = "Available" if 'stats' in parsed_reports else "Not found"
 
+        if workflow_key == "wf_pore_c":
+            report_filename = str(
+                result_sync_spec.get("report_filename")
+                or summary_contract.get("report_filename")
+                or "wf-pore-c-report.html"
+            ).strip()
+            visible_files = (
+                file_summary.txt_files
+                + file_summary.csv_files
+                + file_summary.bed_files
+                + file_summary.other_files
+            )
+            key_results["Workflow Report"] = "Available" if any(f.name == report_filename for f in visible_files) else "Not found"
+            workflow_summary, summary_warnings = _build_wf_pore_c_summary(
+                work_dir=work_dir,
+                all_file_summary=all_file_summary,
+                workflow_metadata=workflow_metadata,
+                summary_contract=summary_contract,
+                result_sync_spec=result_sync_spec,
+            )
+            if workflow_summary.get("pairs_stats"):
+                parsed_reports["pairs_stats"] = workflow_summary["pairs_stats"]
+
         # Extract key metrics from parsed reports
         if 'qc_summary' in parsed_reports and parsed_reports['qc_summary'].get('data'):
             qc_data = parsed_reports['qc_summary']['data']
@@ -1278,7 +1618,7 @@ def generate_analysis_summary(
                             key_results[key] = value
 
         # Mode-specific key results
-        if job.mode.upper() == 'CDNA':
+        if normalized_mode == 'CDNA':
             key_results["Gene Counts"] = "Available" if 'gene_counts' in parsed_reports else "Not found"
             key_results["Transcript Counts"] = "Available" if 'transcript_counts' in parsed_reports else "Not found"
 
@@ -1293,7 +1633,8 @@ def generate_analysis_summary(
     return AnalysisSummary(
         run_uuid=resolved_run_uuid,
         sample_name=job.sample_name,
-        mode=job.mode,
+        workflow_key=workflow_key,
+        mode=normalized_mode,
         status=job.status,
         work_dir=str(work_dir) if work_dir else "",
         file_summary=file_summary,  # Filtered
@@ -1305,5 +1646,9 @@ def generate_analysis_summary(
             "total_files": len(all_file_summary.txt_files) + len(all_file_summary.csv_files) + len(all_file_summary.bed_files) + len(all_file_summary.other_files)
         },
         key_results=key_results,
-        parsed_reports=parsed_reports
+        parsed_reports=parsed_reports,
+        summary_contract=summary_contract,
+        result_sync_spec=result_sync_spec,
+        workflow_summary=workflow_summary,
+        warnings=summary_warnings,
     )

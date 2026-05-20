@@ -71,6 +71,24 @@ def seed(SL, tmp_path):
     s.close()
 
 
+_ACTIVE_CLIENT_RESOURCES = []
+
+
+def _cleanup_active_client_resources():
+    while _ACTIVE_CLIENT_RESOURCES:
+        client, stack = _ACTIVE_CLIENT_RESOURCES.pop()
+        with contextlib.suppress(Exception):
+            client.close()
+        stack.close()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_make_client_resources():
+    _cleanup_active_client_resources()
+    yield
+    _cleanup_active_client_resources()
+
+
 def _make_client(SL, seed, tmp_path, think_fn, extra_patches=None):
     """Build a TestClient with a custom AgentEngine.think mock."""
     mock_engine_cls = MagicMock()
@@ -86,6 +104,7 @@ def _make_client(SL, seed, tmp_path, think_fn, extra_patches=None):
     patches = [
         patch("cortex.db.SessionLocal", SL),
         patch("cortex.app.SessionLocal", SL),
+        patch("cortex.chat_downloads.SessionLocal", SL),
         patch("cortex.chat_stages.setup.SessionLocal", SL),
         patch("cortex.chat_stages.overrides.SessionLocal", SL),
         patch("cortex.dependencies.SessionLocal", SL),
@@ -104,17 +123,18 @@ def _make_client(SL, seed, tmp_path, think_fn, extra_patches=None):
     if extra_patches:
         patches.extend(extra_patches)
 
-    for p in patches:
-        p.start()
+    stack = contextlib.ExitStack()
+    try:
+        for p in patches:
+            stack.enter_context(p)
 
-    c = TestClient(app, raise_server_exceptions=False)
-    c.cookies.set("session", "plot-session")
-    yield c
-
-    for p in reversed(patches):
-        p.stop()
-    for p in reversed(patches):
-        p.stop()
+        client = TestClient(app, raise_server_exceptions=False)
+        client.cookies.set("session", "plot-session")
+        _ACTIVE_CLIENT_RESOURCES.append((client, stack))
+        return client
+    except Exception:
+        stack.close()
+        raise
 
 
 def _chat(client, message, skill="welcome", project_id="proj-plot"):
@@ -174,7 +194,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by sample", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -231,7 +251,7 @@ class TestPlotTagParsing:
             patch("cortex.tool_dispatch.MCPHttpClient", return_value=analyzer_mcp),
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
 
         resp = _chat(
             client,
@@ -260,11 +280,8 @@ class TestPlotTagParsing:
 
     def test_project_workflow_shorthand_auto_generates_bed_overlap_call(self, SL, seed, tmp_path):
         analyzer_mcp = AsyncMock()
-        observed: dict[str, dict] = {}
 
         async def analyzer_call_tool(tool_name, **kwargs):
-            observed["tool"] = tool_name
-            observed["params"] = dict(kwargs)
             return {
                 "success": True,
                 "comparison_label": "Auto overlap",
@@ -299,7 +316,7 @@ class TestPlotTagParsing:
             patch("cortex.tool_dispatch.MCPHttpClient", return_value=analyzer_mcp),
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
 
         resp = _chat(
             client,
@@ -308,18 +325,24 @@ class TestPlotTagParsing:
         )
 
         assert resp.status_code == 200
-        assert observed["tool"] == "compare_bed_region_overlaps"
-        assert observed["params"]["folder_a"] == str((tmp_path / "testslopenchrom" / "workflow2" / "openChromatin").resolve())
-        assert observed["params"]["folder_b"] == str((tmp_path / "testopenchrom2" / "workflow4" / "openChromatin").resolve())
-        assert observed["params"]["pattern_a"] == "*.m6Aopen.bed"
-        assert observed["params"]["pattern_b"] == "*.m6Aopen.bed"
-        assert observed["params"]["min_overlap_bp"] == 1
-
         data = resp.json()
-        plot_blocks = data.get("plot_blocks", [])
-        assert plot_blocks
-        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
-        assert chart["type"] == "venn"
+        assert data.get("gate_block") is None
+        plan_block = data.get("plan_block") or {}
+        plan_payload = plan_block.get("payload") or {}
+        assert plan_payload["plan_type"] == "compare_region_overlaps"
+        assert plan_payload["folder_a"] == str((tmp_path / "testslopenchrom" / "workflow2" / "openChromatin").resolve())
+        assert plan_payload["folder_b"] == str((tmp_path / "testopenchrom2" / "workflow4" / "openChromatin").resolve())
+        assert plan_payload["pattern_a"] == "*.m6Aopen.bed"
+        assert plan_payload["pattern_b"] == "*.m6Aopen.bed"
+        assert plan_payload["min_overlap_bp"] == 1
+        assert plan_payload["plot_type"] == "venn"
+        assert [step["kind"] for step in plan_payload["steps"]] == [
+            "LOCATE_DATA",
+            "REQUEST_APPROVAL",
+            "RUN_SCRIPT",
+            "PARSE_OUTPUT_FILE",
+            "GENERATE_PLOT",
+        ]
 
     def test_plot_payload_preserves_ylabel(self, SL, seed, tmp_path):
         s = SL()
@@ -362,7 +385,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by sample with y axis label Reads", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -423,7 +446,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "make an upset plot comparing DF1 and DF2 by gene", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -632,7 +655,7 @@ class TestPlotTagParsing:
             patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -781,7 +804,7 @@ class TestPlotTagParsing:
             patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -942,7 +965,7 @@ class TestPlotTagParsing:
             patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -1073,7 +1096,7 @@ class TestPlotTagParsing:
             patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -1176,7 +1199,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -1287,7 +1310,7 @@ class TestPlotTagParsing:
             patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -1342,7 +1365,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by sample", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -1409,7 +1432,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by assay type", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -1462,7 +1485,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by assay type", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -1515,7 +1538,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "get the K562 experiments in ENCODE and make a plot by assay type in green", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -1570,7 +1593,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "get the K562 experiments in ENCODE and make a plot by assay type", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -1624,7 +1647,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by measure", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -1641,7 +1664,7 @@ class TestPlotTagParsing:
                 "Here is a scatter plot.\n[[PLOT: type=scatter, df=DF1, x=score, y=enrichment]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot a scatter of score vs enrichment")
         assert resp.status_code == 200
         data = resp.json()
@@ -1659,7 +1682,7 @@ class TestPlotTagParsing:
                 "[[PLOT: histogram of DF2 with Category on the x-axis]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot a histogram of DF2")
         assert resp.status_code == 200
         data = resp.json()
@@ -1676,7 +1699,7 @@ class TestPlotTagParsing:
                 "Here's the chart:\n```python\nimport matplotlib.pyplot as plt\nplt.bar(df['x'], df['y'])\n```\n",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot a bar chart by category")
         assert resp.status_code == 200
         data = resp.json()
@@ -1698,7 +1721,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by assay in green")
         assert resp.status_code == 200
         data = resp.json()
@@ -1718,7 +1741,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by assay in red")
         assert resp.status_code == 200
         data = resp.json()
@@ -1738,7 +1761,7 @@ class TestPlotTagParsing:
                 "[[DATA_CALL: service=analyzer, tool=list_job_files, run_uuid=abc]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot this as a bar chart")
         assert resp.status_code == 200
         data = resp.json()
@@ -1755,7 +1778,7 @@ class TestPlotTagParsing:
                 "[[PLOT: type=pie, df=DF3]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "make a pie chart")
         assert resp.status_code == 200
         data = resp.json()
@@ -1810,7 +1833,7 @@ class TestDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think_multi, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think_multi, extra_patches=extra)
         resp = _chat(client, "show me job results for abc-123", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -1836,7 +1859,7 @@ class TestDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "show results", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -1874,7 +1897,7 @@ class TestDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "search K562 experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -1900,7 +1923,7 @@ class TestDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "get summary", skill="analyze_job_results")
         assert resp.status_code == 200
 
@@ -1942,7 +1965,7 @@ class TestDataCallExecution:
             patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think_multi, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think_multi, extra_patches=extra)
         resp = _chat(client, "analyze results.", skill="analyze_job_results")
 
         assert resp.status_code == 200
@@ -2023,7 +2046,7 @@ class TestEdgepythonPlotDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://edgepython:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "make a heatmap of DF1", skill="analyze_job_results")
 
         assert resp.status_code == 200
@@ -2086,7 +2109,7 @@ class TestEdgepythonPlotDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://edgepython:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "make a normalized stacked bar chart of DF1 by condition and sample", skill="analyze_job_results")
 
         assert resp.status_code == 200
@@ -2152,7 +2175,7 @@ class TestLegacyTags:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "find K562 experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
 
@@ -2179,7 +2202,7 @@ class TestLegacyTags:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "analyze job abc-123", skill="analyze_job_results")
         assert resp.status_code == 200
 
@@ -2214,7 +2237,7 @@ class TestFallbackTagConversion:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "summarize job results", skill="analyze_job_results")
         assert resp.status_code == 200
 
@@ -2238,7 +2261,7 @@ class TestFallbackTagConversion:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "categorize files", skill="analyze_job_results")
         assert resp.status_code == 200
 
@@ -2257,7 +2280,7 @@ class TestENCSRFix:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "Tell me about ENCSR111AAA", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2281,7 +2304,7 @@ class TestApprovalSuppressionDetail:
                 "Found 5 experiments.\n[[APPROVAL_NEEDED]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "find K562 experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2321,7 +2344,7 @@ class TestEmbeddedDataframes:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "search K562", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2369,7 +2392,7 @@ class TestEmbeddedDataframes:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "show me results.csv", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -2401,7 +2424,7 @@ class TestEmbeddedDataframes:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "plot C2C12 experiments in encode by assay type in purple", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2478,7 +2501,7 @@ class TestEmbeddedDataframes:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "get the C2C12 experiments in ENCODE and make a plot by assay type", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2508,7 +2531,7 @@ class TestTokenTracking:
                 "Here is your answer.",
                 {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "what is DNA?", skill="welcome")
         assert resp.status_code == 200
         data = resp.json()
@@ -2536,7 +2559,7 @@ class TestCleanMarkdown:
                 "Now analyzing your results.",
                 {"prompt_tokens": 15, "completion_tokens": 10, "total_tokens": 25},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "analyze the job", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2573,7 +2596,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "list files", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -2598,7 +2621,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "list files", skill="analyze_job_results")
         assert resp.status_code == 200
 
@@ -2627,7 +2650,7 @@ class TestBrowsingToolBypass:
             patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "list files on hpc3", skill="remote_execution")
         assert resp.status_code == 200
         assert mock_mcp.call_tool.await_count == 1
@@ -2664,7 +2687,7 @@ class TestBrowsingToolBypass:
             patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "list files on hpc3", skill="remote_execution")
         assert resp.status_code == 200
         payload = (resp.json().get("agent_block") or {}).get("payload", {})
@@ -2695,7 +2718,7 @@ class TestBrowsingToolBypass:
             patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "list files on hpc3", skill="analyze_job_results")
         assert resp.status_code == 200
         payload = (resp.json().get("agent_block") or {}).get("payload", {})
@@ -2805,7 +2828,7 @@ class TestBrowsingToolBypass:
             ),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "stage the mouse CDNA sample called Jamshid at /media/backup_disk/agoutic_root/testdata/CDNA/pod5 on hpc3",
@@ -2858,7 +2881,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "check my slurm defaults", skill="remote_execution")
         assert resp.status_code == 200
         assert mock_mcp.call_tool.await_count == 1
@@ -2890,7 +2913,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "Analyze the mouse DNA sample called JamshidDNA at /media/backup_disk/agoutic_root/testdata/GDNA/pod5 on hpc3",
@@ -2923,7 +2946,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "run Jamshid remotely on hpc3", skill="remote_execution")
         assert resp.status_code == 200
         assert mock_mcp.call_tool.await_count == 1
@@ -3010,7 +3033,7 @@ class TestBrowsingToolBypass:
             ),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "Analyze the mouse RNA sample igvfr_698-04 using remote data at /dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip on hpc3",
@@ -3116,7 +3139,7 @@ class TestBrowsingToolBypass:
             ),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "Analyze the mouse CDNA sample called Jamshid at /media/backup_disk/agoutic_root/testdata/CDNA/pod5 on hpc3",
@@ -3218,7 +3241,7 @@ class TestBrowsingToolBypass:
             ),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "Analyze the mouse RNA sample C2C12r1 using the file data/ENCFF921XAH.bam on hpc3",
@@ -3302,7 +3325,7 @@ class TestBrowsingToolBypass:
             ),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "Analyze the mouse RNA sample called Jamshid999 at /media/backup_disk/agoutic_root/testdata/DRNA/pod5 using mm39 and mad1 on hpc3",
@@ -3354,7 +3377,7 @@ class TestDownloadWorkflow:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "download ENCFF123ABC", skill="download_files")
         assert resp.status_code == 200
         data = resp.json()
@@ -3410,7 +3433,7 @@ class TestEncodeSearchSwap:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "find ChIP-seq experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
 
@@ -3453,7 +3476,7 @@ class TestEncodeSearchSwap:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "find ATAC-seq experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
         # Verify both calls were made (original + swap)
@@ -3503,7 +3526,7 @@ class TestEncodeSearchSwap:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "How many RNA-seq experiments for K562", skill="ENCODE_Search")
         assert resp.status_code == 200
         # Verify: first compound call, then relaxed (without assay_title)
@@ -3548,7 +3571,7 @@ class TestResultTruncation:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "search all K562", skill="ENCODE_Search")
         assert resp.status_code == 200
 
@@ -3602,7 +3625,7 @@ class TestFileToolChaining:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "show me data.csv", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -3651,7 +3674,7 @@ class TestFileToolChaining:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "count bed regions by chromosome for data.bed",
@@ -3715,7 +3738,7 @@ class TestFileToolChaining:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "count BED regions by chromosome for JamshidP.mm39.minus.m6A.filtered.bed",
@@ -3780,7 +3803,7 @@ class TestFileToolChaining:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "count inosine modifications by chromosome",
@@ -3947,7 +3970,7 @@ class TestDFInspectionIntegration:
         def think(msg, skill, history):
             raise AssertionError("LLM should NOT be called for list dfs")
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "list dfs")
         assert resp.status_code == 200
         data = resp.json()
@@ -3962,7 +3985,7 @@ class TestDFInspectionIntegration:
         def think(msg, skill, history):
             raise AssertionError("LLM should NOT be called for head df")
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "head df1")
         assert resp.status_code == 200
         data = resp.json()
@@ -4031,7 +4054,7 @@ class TestDFInspectionIntegration:
         def think(msg, skill, history):
             raise AssertionError("LLM should NOT be called for head df")
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "head df1 120")
         assert resp.status_code == 200
         data = resp.json()
@@ -4101,7 +4124,7 @@ class TestDFInspectionIntegration:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by group", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -4116,7 +4139,7 @@ class TestDFInspectionIntegration:
         def think(msg, skill, history):
             raise AssertionError("LLM should NOT be called for head df")
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "head df")
         assert resp.status_code == 200
         data = resp.json()

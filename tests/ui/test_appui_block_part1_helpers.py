@@ -15,8 +15,15 @@ def _load_part1_namespace() -> dict:
         "_DEFAULT_CLUSTER_MODKIT_MODEL_NAME",
         "_DEFAULT_CLUSTER_MODKIT_PROFILE",
         "_DEFAULT_CLUSTER_MODKIT_BIND_PATHS",
+        "_WF_PORE_C_DEFAULT_CUTTER",
+        "_WF_PORE_C_OUTPUT_FLAG_ORDER",
+        "_WF_PORE_C_OUTPUT_FLAG_LABELS",
         "_pending_gate_slurm_default_refresh_payload",
         "_prime_post_approval_refresh_state",
+        "_wf_pore_c_ui_enabled",
+        "_approval_workflow_key",
+        "_wf_pore_c_output_flag_values",
+        "_approval_gate_field_visibility",
         "_split_cluster_modkit_paths",
         "_default_cluster_modkit_bind_paths",
         "_build_cluster_modkit_profile",
@@ -245,3 +252,65 @@ def test_prime_post_approval_refresh_state_marks_background_work_active():
     assert fake_st.session_state["_has_full_refresh_job"] is True
     assert "_job_finished_at" not in fake_st.session_state
     assert fake_st.session_state["_suppress_auto_refresh_until"] == 0.0
+
+
+def test_approval_gate_field_visibility_preserves_dogme_controls(monkeypatch):
+    monkeypatch.delenv("WF_PORE_C_ENABLED", raising=False)
+    namespace = _load_part1_namespace()
+
+    visibility = namespace["_approval_gate_field_visibility"](
+        {"workflow_key": "dogme"},
+        gate_action="job",
+    )
+
+    assert visibility == {
+        "workflow_key": "dogme",
+        "show_mode": True,
+        "show_entry_point": True,
+        "show_modifications": True,
+        "show_dogme_advanced": True,
+        "show_reference_fasta": False,
+        "show_vcf": False,
+        "show_sample_sheet": False,
+        "show_cutter": False,
+        "show_output_flags": False,
+    }
+
+
+def test_approval_gate_field_visibility_switches_to_wf_pore_c_controls(monkeypatch):
+    monkeypatch.setenv("WF_PORE_C_ENABLED", "true")
+    namespace = _load_part1_namespace()
+
+    visibility = namespace["_approval_gate_field_visibility"](
+        {"workflow_key": "wf_pore_c"},
+        gate_action="remote_stage",
+    )
+
+    assert visibility == {
+        "workflow_key": "wf_pore_c",
+        "show_mode": False,
+        "show_entry_point": False,
+        "show_modifications": False,
+        "show_dogme_advanced": False,
+        "show_reference_fasta": True,
+        "show_vcf": True,
+        "show_sample_sheet": True,
+        "show_cutter": True,
+        "show_output_flags": True,
+    }
+
+
+def test_wf_pore_c_output_flag_values_force_paired_end_when_bed_enabled():
+    namespace = _load_part1_namespace()
+
+    flags = namespace["_wf_pore_c_output_flag_values"]({"bed": True, "pairs": False})
+
+    assert flags == {
+        "pairs": False,
+        "mcool": True,
+        "hi_c": False,
+        "bed": True,
+        "chromunity": False,
+        "coverage": False,
+        "paired_end": True,
+    }

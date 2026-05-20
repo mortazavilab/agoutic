@@ -9,6 +9,7 @@ from __future__ import annotations
 from common.logging_config import get_logger
 from launchpad.backends.base import ExecutionBackend, SubmitParams, JobStatus, LogEntry
 from launchpad.backends.stage_machine import RunStage
+from launchpad.workflow_executors import get_workflow_executor
 
 logger = get_logger(__name__)
 
@@ -22,6 +23,11 @@ class LocalBackend:
 
     async def submit(self, run_uuid: str, params: SubmitParams) -> str:
         """Submit a local Nextflow job."""
+        workflow_executor = get_workflow_executor(params.workflow_key)
+        if not workflow_executor.supports_submission:
+            raise ValueError(
+                f"workflow_key '{workflow_executor.workflow_key}' is preview-only in Phase 1 and cannot be submitted yet"
+            )
         _run_uuid, work_dir = await self._executor.submit_job(
             run_uuid=run_uuid,
             sample_name=params.sample_name,

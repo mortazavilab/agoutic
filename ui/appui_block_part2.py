@@ -9,6 +9,144 @@ from components.progress import progress_stats, segmented_progress, stepper, tim
 _STAGING_UI_STALE_SECONDS = float(os.getenv("STAGING_UI_STALE_SECONDS", "90"))
 _STAGING_UI_ACTIVE_REFRESH_SECONDS = float(os.getenv("STAGING_UI_ACTIVE_REFRESH_SECONDS", "8"))
 _STAGING_UI_REFRESH_RETRY_SECONDS = float(os.getenv("STAGING_UI_REFRESH_RETRY_SECONDS", "5"))
+_WF_PORE_C_OUTPUT_FLAG_ORDER = ("pairs", "mcool", "hi_c", "bed", "chromunity", "coverage", "paired_end")
+_WF_PORE_C_OUTPUT_FLAG_LABELS = {
+    "pairs": "Pairs",
+    "mcool": "mcool",
+    "hi_c": "Hi-C",
+    "bed": "BED",
+    "chromunity": "Chromunity",
+    "coverage": "Coverage",
+    "paired_end": "Paired-End",
+}
+
+
+def _wf_pore_c_ui_enabled() -> bool:
+    return str(os.getenv("WF_PORE_C_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _workflow_key_from_payload(*payloads) -> str:
+    for payload in payloads:
+        if isinstance(payload, dict):
+            raw_value = payload.get("workflow_key")
+            normalized = str(raw_value or "").strip().lower()
+            if normalized:
+                if normalized == "wf_pore_c" and _wf_pore_c_ui_enabled():
+                    return "wf_pore_c"
+                if normalized != "wf_pore_c":
+                    return normalized
+    return "dogme"
+
+
+def _wf_pore_c_output_flag_values(raw_flags) -> dict[str, bool]:
+    flags = {
+        "pairs": bool((raw_flags or {}).get("pairs", True)),
+        "mcool": bool((raw_flags or {}).get("mcool", True)),
+        "hi_c": bool((raw_flags or {}).get("hi_c", False)),
+        "bed": bool((raw_flags or {}).get("bed", False)),
+        "chromunity": bool((raw_flags or {}).get("chromunity", False)),
+        "coverage": bool((raw_flags or {}).get("coverage", False)),
+        "paired_end": bool((raw_flags or {}).get("paired_end", False)),
+    }
+    if flags["bed"]:
+        flags["paired_end"] = True
+    return flags
+
+
+def _workflow_path_label(value) -> str:
+    cleaned = str(value or "").strip().rstrip("/")
+    if not cleaned:
+        return ""
+    return os.path.basename(cleaned) or cleaned
+
+
+def _wf_pore_c_output_flag_summary(raw_flags) -> str:
+    flags = _wf_pore_c_output_flag_values(raw_flags)
+    enabled = [
+        _WF_PORE_C_OUTPUT_FLAG_LABELS[flag_name]
+        for flag_name in _WF_PORE_C_OUTPUT_FLAG_ORDER
+        if flags.get(flag_name)
+    ]
+    return ", ".join(enabled)
+
+
+def _workflow_specific_metadata(content: dict | None, job_status: dict | None = None) -> dict[str, str]:
+    workflow_key = _workflow_key_from_payload(job_status, content)
+    if workflow_key != "wf_pore_c":
+        return {}
+
+    payload = job_status if isinstance(job_status, dict) and job_status else content or {}
+    details = {}
+    input_type = str(payload.get("input_type") or "").strip().lower()
+    if input_type:
+        details["Input"] = input_type.upper()
+    reference_fasta = payload.get("reference_fasta") or (content or {}).get("reference_fasta")
+    if reference_fasta:
+        details["Reference"] = _workflow_path_label(reference_fasta)
+    sample_sheet = payload.get("sample_sheet") or (content or {}).get("sample_sheet")
+    if sample_sheet:
+        details["Sample Sheet"] = _workflow_path_label(sample_sheet)
+    cutter = str(payload.get("cutter") or (content or {}).get("cutter") or "").strip()
+    if cutter:
+        details["Cutter"] = cutter
+    outputs = _wf_pore_c_output_flag_summary(payload.get("output_flags") or (content or {}).get("output_flags"))
+    if outputs:
+        details["Outputs"] = outputs
+    return details
+
+
+def _staging_card_metadata(content: dict, *, remote_profile: str, progress: int) -> dict[str, str]:
+    workflow_key = _workflow_key_from_payload(content)
+    if workflow_key == "wf_pore_c":
+        metadata = {
+            "Workflow": "wf-pore-c",
+            "Target": remote_profile,
+            "Progress": f"{max(min(progress, 100), 0)}%",
+        }
+        input_type = str(content.get("input_type") or "").strip().lower()
+        if input_type:
+            metadata["Input"] = input_type.upper()
+        return metadata
+    return {
+        "Mode": content.get("mode", "Unknown"),
+        "Target": remote_profile,
+        "Progress": f"{max(min(progress, 100), 0)}%",
+    }
+
+
+def _execution_run_metadata(
+    content: dict,
+    job_status: dict,
+    *,
+    run_uuid: str,
+    workflow_label: str,
+    started_label: str,
+    completed_label: str,
+    duration_label: str,
+    is_script_job: bool,
+    script_id: str,
+) -> dict[str, str]:
+    workflow_key = _workflow_key_from_payload(job_status, content)
+    if workflow_key == "wf_pore_c":
+        run_meta = {"Workflow": "wf-pore-c", "Run UUID": run_uuid}
+        if is_script_job and script_id:
+            run_meta["Script"] = script_id
+        if workflow_label:
+            run_meta["Folder"] = workflow_label
+    else:
+        run_meta = {"Mode": content.get("mode", "Unknown"), "Run UUID": run_uuid}
+        if is_script_job and script_id:
+            run_meta["Script"] = script_id
+        if workflow_label:
+            run_meta["Workflow"] = workflow_label
+
+    if started_label:
+        run_meta["Started"] = started_label
+    if completed_label:
+        run_meta["Completed"] = completed_label
+    if duration_label:
+        run_meta["Duration"] = duration_label
+    return run_meta
 
 
 def _parse_stage_timestamp(value):
@@ -367,7 +505,6 @@ def render_block_part2(
         handled = True
         with st.chat_message("assistant", avatar="📤"):
             sample_name = content.get("sample_name", "Unknown")
-            mode = content.get("mode", "Unknown")
             message = content.get("message", "Preparing remote staging...")
             progress = int(content.get("progress_percent", 0) or 0)
             remote_profile = content.get("ssh_profile_nickname") or content.get("ssh_profile_id") or "remote profile"
@@ -409,7 +546,10 @@ def render_block_part2(
                 _step_current = 1
 
             section_header(f"Remote Staging · {sample_name}", "Reference and data staging progress", icon="📤")
-            metadata_row({"Mode": mode, "Target": remote_profile, "Progress": f"{max(min(progress, 100), 0)}%"})
+            metadata_row(_staging_card_metadata(content, remote_profile=remote_profile, progress=progress))
+            _workflow_details = _workflow_specific_metadata(content)
+            if _workflow_details:
+                metadata_row(_workflow_details)
             stepper(["References", "Sample Data"], current=_step_current, completed=_step_completed, failed=_step_failed)
 
             def _render_stage_part(label: str, part: dict):
@@ -653,7 +793,6 @@ def render_block_part2(
         with st.chat_message("assistant", avatar="⚙️"):
             run_uuid = content.get("run_uuid", "")
             sample_name = content.get("sample_name", "Unknown")
-            mode = content.get("mode", "Unknown")
             work_directory = content.get("work_directory", "")
             has_identity = bool(run_uuid) or bool(content.get("sample_name"))
             block_status_str = block.get("status", "")
@@ -780,21 +919,24 @@ def render_block_part2(
                 if import_warning:
                     status_chip("warning", label="Partial Import", icon="⚠️")
 
-                run_meta = {"Mode": mode, "Run UUID": run_uuid}
-                if is_script_job and script_id:
-                    run_meta["Script"] = script_id
-                if workflow_label:
-                    run_meta["Workflow"] = workflow_label
                 started_label = _format_timestamp(started_at or submitted_at)
                 completed_label = _format_timestamp(completed_at)
                 duration_label = _format_duration(started_at or submitted_at, completed_at)
-                if started_label:
-                    run_meta["Started"] = started_label
-                if completed_label:
-                    run_meta["Completed"] = completed_label
-                if duration_label:
-                    run_meta["Duration"] = duration_label
+                run_meta = _execution_run_metadata(
+                    content,
+                    job_status,
+                    run_uuid=run_uuid,
+                    workflow_label=workflow_label,
+                    started_label=started_label,
+                    completed_label=completed_label,
+                    duration_label=duration_label,
+                    is_script_job=is_script_job,
+                    script_id=script_id,
+                )
                 metadata_row(run_meta)
+                _workflow_details = _workflow_specific_metadata(content, job_status)
+                if _workflow_details:
+                    metadata_row(_workflow_details)
 
                 if current_step:
                     current_step_message = current_step

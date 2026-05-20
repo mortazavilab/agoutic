@@ -67,6 +67,35 @@ class TestAnalyzeLocalSample:
         assert result is None
 
 
+class TestRunWfPoreC:
+    def test_routes_to_run_wf_pore_c_when_flag_enabled(self, monkeypatch):
+        monkeypatch.setattr("cortex.llm_validators.WF_PORE_C_ENABLED", True)
+
+        result = _auto_detect_skill_switch(
+            "run wf-pore-c on data/sample.bam", "welcome"
+        )
+
+        assert result == "run_wf_pore_c"
+
+    def test_flag_off_preserves_existing_local_sample_routing(self, monkeypatch):
+        monkeypatch.setattr("cortex.llm_validators.WF_PORE_C_ENABLED", False)
+
+        result = _auto_detect_skill_switch(
+            "run wf-pore-c on data/sample.bam", "welcome"
+        )
+
+        assert result == "analyze_local_sample"
+
+    def test_contact_map_phrase_routes_without_path_when_flag_enabled(self, monkeypatch):
+        monkeypatch.setattr("cortex.llm_validators.WF_PORE_C_ENABLED", True)
+
+        result = _auto_detect_skill_switch(
+            "make an mcool contact map from this pore-c dataset", "welcome"
+        )
+
+        assert result == "run_wf_pore_c"
+
+
 class TestRemoteExecution:
     def test_using_slurm_routes_remote_execution(self):
         result = _auto_detect_skill_switch(

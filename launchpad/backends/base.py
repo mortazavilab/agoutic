@@ -4,7 +4,7 @@ ExecutionBackend protocol and shared types.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, runtime_checkable
 
 
 @dataclass
@@ -15,12 +15,22 @@ class SubmitParams:
     user_id: str | None = None
     username: str | None = None
     project_slug: str | None = None
+    workflow_key: str = "dogme"
+    workflow_executor: Any | None = None
 
     # Dogme-specific
     sample_name: str = ""
-    mode: str = ""  # DNA, RNA, CDNA
+    mode: str | None = None  # Dogme-only mode: DNA, RNA, CDNA
     input_type: str = "pod5"
     input_directory: str = ""
+    reference_fasta: str | None = None
+    vcf: str | None = None
+    sample_sheet: str | None = None
+    cutter: str | None = None
+    workflow_repo: str | None = None
+    workflow_version: str | None = None
+    report_filename: str | None = None
+    output_flags: dict[str, bool] = field(default_factory=dict)
     reference_genome: list[str] = field(default_factory=lambda: ["GRCh38"])
     modifications: str | None = None
     entry_point: str | None = None
@@ -56,6 +66,9 @@ class SubmitParams:
     cache_preflight: dict | None = None
     reference_cache_path: str | None = None
     data_cache_path: str | None = None
+    remote_work_dir: str | None = None
+    remote_output_dir: str | None = None
+    remote_nextflow_work_dir: str | None = None
 
     # Standalone script execution (local only)
     run_type: str = "dogme"  # "dogme" or "script"

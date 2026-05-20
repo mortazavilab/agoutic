@@ -159,6 +159,47 @@ async def submit_dogme_job(
 
 
 @mcp.tool()
+async def preview_workflow(
+    workflow_key: str = "dogme",
+    sample_name: str | None = None,
+    mode: str | None = None,
+    input_type: str | None = None,
+    input_path: str | None = None,
+    input_directory: str | None = None,
+    reference_genome: str | list[str] | None = None,
+    reference_fasta: str | None = None,
+    vcf: str | None = None,
+    sample_sheet: str | None = None,
+    cutter: str | None = None,
+    output_directory: str | None = None,
+    workflow_repo: str | None = None,
+    workflow_version: str | None = None,
+    report_filename: str | None = None,
+    output_flags: dict | None = None,
+) -> str:
+    """Build a workflow preview without submitting a Launchpad job."""
+    result = await tools.preview_workflow(
+        workflow_key=workflow_key,
+        sample_name=sample_name,
+        mode=mode,
+        input_type=input_type,
+        input_path=input_path,
+        input_directory=input_directory,
+        reference_genome=reference_genome,
+        reference_fasta=reference_fasta,
+        vcf=vcf,
+        sample_sheet=sample_sheet,
+        cutter=cutter,
+        output_directory=output_directory,
+        workflow_repo=workflow_repo,
+        workflow_version=workflow_version,
+        report_filename=report_filename,
+        output_flags=output_flags,
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 async def stage_remote_sample(
     project_id: str,
     user_id: str,

@@ -59,6 +59,8 @@ from launchpad.schemas import (
     ImportWorkflowRequest,
     ImportWorkflowResponse,
     SubmitJobRequest,
+    WorkflowPreviewRequest,
+    WorkflowPreviewResponse,
     StageRemoteSampleRequest,
     StageRemoteSampleResponse,
     StageTaskAcceptedResponse,
@@ -84,6 +86,8 @@ from launchpad.schemas import (
 from launchpad.backends import get_backend, SubmitParams
 from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
 from launchpad.backends.ssh_manager import SSHConnectionManager, SSHProfileData
+from launchpad.workflow_executors import get_workflow_executor
+from launchpad.workflow_executors.base import UnknownWorkflowKeyError
 from launchpad.import_workflows import (
     copy_local_results_to_workflow,
     import_warning_message,
@@ -220,6 +224,13 @@ def _replace_path_prefix(path_value: str | None, old_prefix: str | None, new_pre
     return path_value
 
 
+def _get_workflow_executor_or_400(workflow_key: str | None):
+    try:
+        return get_workflow_executor(workflow_key)
+    except UnknownWorkflowKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _rename_local_workflow_artifacts(work_dir: Path, old_sample_names: list[str], new_sample_name: str) -> None:
     seen: set[str] = set()
     for sample_name in old_sample_names:
@@ -267,6 +278,7 @@ def _allocate_import_workflow_directory(project_dir: Path, workflow_index: int) 
 def _merge_import_metadata(
     req: ImportWorkflowRequest,
     *,
+    workflow_key: str,
     inferred_metadata,
     source_job: DogmeJob | None,
 ) -> tuple[str | None, str | None, list[str], str | None]:
@@ -292,11 +304,16 @@ def _merge_import_metadata(
     if mode == "CDNA" and modifications is None:
         modifications = ""
 
+    if workflow_key == "wf_pore_c":
+        mode = None
+        modifications = None
+
     return sample_name, mode, reference_genome, modifications
 
 
 def _missing_import_fields(
     *,
+    workflow_key: str,
     sample_name: str | None,
     mode: str | None,
     reference_genome: list[str],
@@ -305,11 +322,11 @@ def _missing_import_fields(
     missing: list[str] = []
     if not sample_name:
         missing.append("sample_name")
-    if not mode:
+    if workflow_key == "dogme" and not mode:
         missing.append("mode")
     if not reference_genome:
         missing.append("reference_genome")
-    if modifications is None:
+    if workflow_key == "dogme" and modifications is None:
         missing.append("modifications")
     return missing
 
@@ -405,7 +422,12 @@ async def _copy_imported_local_results(job: DogmeJob) -> dict[str, object]:
 
     job.transfer_state = "downloading_outputs"
     await sessionless_commit_job(job)
-    copy_local_results_to_workflow(source_dir, destination_dir, full_copy=full_copy)
+    copy_local_results_to_workflow(
+        source_dir,
+        destination_dir,
+        full_copy=full_copy,
+        workflow_key=getattr(job, "workflow_key", None),
+    )
     job.transfer_state = "outputs_downloaded"
     job.status = JobStatus.COMPLETED
     job.progress_percent = 100
@@ -571,12 +593,19 @@ async def import_existing_workflow(req: ImportWorkflowRequest):
             finally:
                 await conn.close()
 
+        workflow_key = str(
+            getattr(existing_source_job, "workflow_key", None)
+            or getattr(inferred_metadata, "workflow_key", None)
+            or "dogme"
+        ).strip().lower() or "dogme"
         sample_name, mode, reference_genome, modifications = _merge_import_metadata(
             req,
+            workflow_key=workflow_key,
             inferred_metadata=inferred_metadata,
             source_job=existing_source_job,
         )
         missing_fields = _missing_import_fields(
+            workflow_key=workflow_key,
             sample_name=sample_name,
             mode=mode,
             reference_genome=reference_genome,
@@ -612,6 +641,7 @@ async def import_existing_workflow(req: ImportWorkflowRequest):
             workflow_alias=workflow_alias,
             workflow_folder_name=workflow_alias,
             workflow_display_name=sample_name,
+            workflow_key=workflow_key,
             sample_name=sample_name,
             mode=mode,
             input_directory=getattr(inferred_metadata, "input_directory", None) or normalized_source_path,
@@ -654,7 +684,12 @@ async def import_existing_workflow(req: ImportWorkflowRequest):
         warning = import_warning_message(getattr(job, "imported_source_complete", None))
         if source_kind == "local":
             try:
-                copy_local_results_to_workflow(source_dir, work_dir, full_copy=req.full_copy)
+                copy_local_results_to_workflow(
+                    source_dir,
+                    work_dir,
+                    full_copy=req.full_copy,
+                    workflow_key=workflow_key,
+                )
                 job.status = JobStatus.COMPLETED
                 job.progress_percent = 100
                 job.transfer_state = "outputs_downloaded"
@@ -1191,28 +1226,28 @@ async def monitor_job(run_uuid: str, work_dir):
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     """Health check endpoint."""
-    session = SessionLocal()
-    try:
-        # Count running jobs
-        result = await session.execute(
-            select(DogmeJob).where(DogmeJob.status == JobStatus.RUNNING)
-        )
-        running_jobs = len(result.scalars().all())
-        
-        return {
-            "status": "ok",
-            "version": "0.3.0",
-            "running_jobs": running_jobs,
-            "database_ok": True,
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "version": "0.3.0",
-            "running_jobs": 0,
-            "database_ok": False,
-            "error": str(e)
-        }
+    async with SessionLocal() as session:
+        try:
+            # Count running jobs
+            result = await session.execute(
+                select(DogmeJob).where(DogmeJob.status == JobStatus.RUNNING)
+            )
+            running_jobs = len(result.scalars().all())
+
+            return {
+                "status": "ok",
+                "version": "0.3.0",
+                "running_jobs": running_jobs,
+                "database_ok": True,
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "version": "0.3.0",
+                "running_jobs": 0,
+                "database_ok": False,
+                "error": str(e)
+            }
 
 
 # --- GENOME LIST ENDPOINT ---
@@ -1399,6 +1434,20 @@ async def list_remote_files(
         path=path,
     )
 
+
+@app.post("/workflows/preview", response_model=WorkflowPreviewResponse)
+async def preview_workflow(req: WorkflowPreviewRequest):
+    """Build a workflow-family preview without submitting a Launchpad job."""
+    workflow_executor = _get_workflow_executor_or_400(req.workflow_key)
+    preview = workflow_executor.build_preview(**req.model_dump())
+    return WorkflowPreviewResponse(
+        workflow_key=preview.workflow_key,
+        supports_submission=preview.supports_submission,
+        command=preview.command,
+        preview_markdown=preview.preview_markdown,
+        preview_payload=preview.preview_payload,
+    )
+
 # --- JOB SUBMISSION ---
 @app.post("/jobs/submit", response_model=JobSubmitResponse)
 async def submit_job(req: SubmitJobRequest):
@@ -1409,11 +1458,32 @@ async def submit_job(req: SubmitJobRequest):
     Returns job UUID for tracking.
     """
     session = SessionLocal()
-    
+
     try:
         # Generate unique run ID
         run_uuid = str(uuid.uuid4())
         run_type = (req.run_type or "dogme").strip().lower()
+        workflow_key = "dogme" if run_type == "script" else (req.workflow_key or "dogme")
+        workflow_executor = None
+
+        if run_type != "script":
+            workflow_executor = _get_workflow_executor_or_400(workflow_key)
+            if not workflow_executor.supports_submission:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "workflow_key 'wf_pore_c' requires WF_PORE_C_ENABLED=true for local submission"
+                        if workflow_executor.workflow_key == "wf_pore_c"
+                        else (
+                            f"workflow_key '{workflow_executor.workflow_key}' is preview-only in Phase 1 "
+                            "and cannot be submitted yet; use /workflows/preview instead"
+                        )
+                    ),
+                )
+            try:
+                workflow_executor.validate_submission(mode=req.mode)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         workflow_index = None
         workflow_alias = None
@@ -1423,7 +1493,7 @@ async def submit_job(req: SubmitJobRequest):
             if "max_gpu_tasks" in req.model_fields_set
             else DEFAULT_MAX_GPU_TASKS
         )
-        if run_type == "dogme":
+        if run_type != "script":
             workflow_index, workflow_alias, workflow_folder_name = await get_workflow_identity_for_path(
                 session,
                 req.project_id,
@@ -1442,7 +1512,8 @@ async def submit_job(req: SubmitJobRequest):
             workflow_index=workflow_index,
             workflow_alias=workflow_alias,
             workflow_folder_name=workflow_folder_name,
-            workflow_display_name=req.sample_name if run_type == "dogme" else None,
+            workflow_display_name=req.sample_name if run_type != "script" else None,
+            workflow_key=workflow_key,
             sample_name=req.sample_name,
             mode=req.mode,
             input_directory=req.input_directory,
@@ -1470,16 +1541,16 @@ async def submit_job(req: SubmitJobRequest):
             if output_name:
                 job.workflow_folder_name = output_name
         await session.commit()
-        
+
         # Log submission
         await add_log_entry(
             session,
             run_uuid,
             "INFO",
-            f"Job submitted: {req.sample_name} ({req.mode} mode, run_type={run_type})",
+            f"Job submitted: {req.sample_name} (workflow_key={workflow_key}, mode={req.mode or 'n/a'}, run_type={run_type})",
             source="api",
         )
-        
+
         # Submit to selected execution backend
         try:
             # Validate and normalize execution_mode
@@ -1492,7 +1563,7 @@ async def submit_job(req: SubmitJobRequest):
                     sample_name=req.sample_name,
                 )
                 exec_mode = "local"
-            
+
             if run_type == "script":
                 if exec_mode != "local":
                     raise ValueError("Standalone script execution only supports local execution_mode")
@@ -1582,48 +1653,16 @@ async def submit_job(req: SubmitJobRequest):
                 await session.commit()
 
                 backend = get_backend("slurm")
+                if workflow_executor is None:
+                    raise HTTPException(status_code=500, detail="Workflow executor resolution failed")
+                backend_submit_kwargs = workflow_executor.build_backend_submit_params(
+                    request=req,
+                    workflow_number=workflow_number,
+                    max_gpu_tasks=max_gpu_tasks,
+                )
                 await backend.submit(
                     run_uuid,
-                    SubmitParams(
-                        project_id=req.project_id,
-                        user_id=req.user_id,
-                        username=req.username,
-                        project_slug=req.project_slug,
-                        sample_name=req.sample_name,
-                        mode=req.mode,
-                        input_type=req.input_type,
-                        input_directory=req.input_directory,
-                        reference_genome=req.reference_genome,
-                        modifications=req.modifications,
-                        entry_point=req.entry_point,
-                        modkit_filter_threshold=req.modkit_filter_threshold,
-                        min_cov=req.min_cov,
-                        per_mod=req.per_mod,
-                        accuracy=req.accuracy,
-                        max_gpu_tasks=max_gpu_tasks,
-                        local_max_task_cpus=req.local_max_task_cpus,
-                        local_max_task_memory_gb=req.local_max_task_memory_gb,
-                        custom_dogme_profile=req.custom_dogme_profile,
-                        custom_dogme_bind_paths=req.custom_dogme_bind_paths,
-                        resume_from_dir=req.resume_from_dir,
-                        parent_block_id=req.parent_block_id,
-                        ssh_profile_id=req.ssh_profile_id,
-                        slurm_account=req.slurm_account,
-                        slurm_partition=req.slurm_partition,
-                        slurm_gpu_account=req.slurm_gpu_account,
-                        slurm_gpu_partition=req.slurm_gpu_partition,
-                        slurm_cpus=req.slurm_cpus,
-                        slurm_memory_gb=req.slurm_memory_gb,
-                        slurm_walltime=req.slurm_walltime,
-                        slurm_gpus=req.slurm_gpus,
-                        slurm_gpu_type=req.slurm_gpu_type,
-                        remote_base_path=req.remote_base_path,
-                        remote_input_path=req.remote_input_path,
-                        workflow_number=workflow_number,
-                        staged_remote_input_path=req.staged_remote_input_path,
-                        cache_preflight=req.cache_preflight,
-                        result_destination=req.result_destination or "local",
-                    ),
+                    SubmitParams(**backend_submit_kwargs),
                 )
                 await session.refresh(job)
                 job.started_at = datetime.utcnow()
@@ -1636,33 +1675,19 @@ async def submit_job(req: SubmitJobRequest):
                 # Local execution
                 logger.info("Using local NextflowExecutor", run_uuid=run_uuid,
                            sample_name=req.sample_name, exec_mode=exec_mode)
-                run_uuid_returned, work_dir = await executor.submit_job(
+                if workflow_executor is None:
+                    raise HTTPException(status_code=500, detail="Workflow executor resolution failed")
+                local_submit_kwargs = workflow_executor.build_local_submit_kwargs(
                     run_uuid=run_uuid,
-                    sample_name=req.sample_name,
-                    mode=req.mode,
-                    input_type=req.input_type,
-                    input_dir=req.input_directory,
-                    reference_genome=req.reference_genome,  # Now normalized to list by validator
-                    modifications=req.modifications,
-                    entry_point=req.entry_point,
-                    modkit_filter_threshold=req.modkit_filter_threshold,
-                    min_cov=req.min_cov,
-                    per_mod=req.per_mod,
-                    accuracy=req.accuracy,
-                    max_gpu_tasks=max_gpu_tasks,
-                    local_max_task_cpus=req.local_max_task_cpus,
-                    local_max_task_memory_gb=req.local_max_task_memory_gb,
-                    custom_dogme_profile=req.custom_dogme_profile,
+                    request=req,
                     workflow_index=workflow_index,
-                    user_id=req.user_id,
-                    project_id=req.project_id,
-                    username=req.username,
-                    project_slug=req.project_slug,
-                    resume_from_dir=req.resume_from_dir,
+                    max_gpu_tasks=max_gpu_tasks,
                 )
-                
+                run_uuid_returned, work_dir = await executor.submit_job(**local_submit_kwargs)
+
                 # Update job with work directory info
                 job.nextflow_work_dir = str(work_dir)
+                job.output_directory = str(work_dir)
                 job.workflow_folder_name = work_dir.name
                 job.status = JobStatus.RUNNING
                 job.started_at = datetime.utcnow()
@@ -1674,13 +1699,13 @@ async def submit_job(req: SubmitJobRequest):
                     except (ValueError, OSError):
                         pass
                 await session.commit()
-                
+
                 # Start background monitoring task
                 monitor_task = asyncio.create_task(monitor_job(run_uuid, work_dir))
                 job_monitors[run_uuid] = monitor_task
                 work_directory = str(work_dir)
                 response_status = JobStatus.RUNNING
-            
+
             await add_log_entry(
                 session,
                 run_uuid,
@@ -1688,7 +1713,7 @@ async def submit_job(req: SubmitJobRequest):
                 f"{req.execution_mode.upper()} submission completed successfully",
                 source="api",
             )
-            
+
             return {
                 "run_uuid": run_uuid,
                 "sample_name": req.sample_name,
@@ -1702,18 +1727,15 @@ async def submit_job(req: SubmitJobRequest):
                     "cache_preflight": job.cache_preflight_json,
                 },
             }
-        
-        except Exception as e:
-            # Job submission failed
-            import traceback
-            error_trace = traceback.format_exc()
+
+        except ValueError as e:
             error_detail = _describe_exception(e)
-            logger.error("Nextflow submission error", run_uuid=run_uuid, error=error_detail, exc_info=True)
-            
+            logger.warning("Workflow submission validation failed", run_uuid=run_uuid, error=error_detail)
+
             job.status = JobStatus.FAILED
             job.error_message = error_detail
             await session.commit()
-            
+
             await add_log_entry(
                 session,
                 run_uuid,
@@ -1721,12 +1743,33 @@ async def submit_job(req: SubmitJobRequest):
                 f"Failed to submit to Nextflow: {error_detail}",
                 source="api",
             )
-            
+
+            raise HTTPException(status_code=400, detail=error_detail) from e
+
+        except Exception as e:
+            # Job submission failed
+            import traceback
+            error_trace = traceback.format_exc()
+            error_detail = _describe_exception(e)
+            logger.error("Nextflow submission error", run_uuid=run_uuid, error=error_detail, exc_info=True)
+
+            job.status = JobStatus.FAILED
+            job.error_message = error_detail
+            await session.commit()
+
+            await add_log_entry(
+                session,
+                run_uuid,
+                "ERROR",
+                f"Failed to submit to Nextflow: {error_detail}",
+                source="api",
+            )
+
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to submit job: {error_detail}"
             )
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -2242,6 +2285,16 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         archive_sample_names = [source_job.sample_name]
         if sample_name != source_job.sample_name:
             archive_sample_names.append(sample_name)
+        workflow_key = getattr(source_job, "workflow_key", None) or "dogme"
+        workflow_executor = _get_workflow_executor_or_400(workflow_key)
+        if not workflow_executor.supports_submission:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"workflow_key '{workflow_executor.workflow_key}' is preview-only in Phase 1 "
+                    "and cannot be rerun yet"
+                ),
+            )
 
         rerun_uuid = str(uuid.uuid4())
         rerun_job = await create_job(
@@ -2252,6 +2305,7 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             workflow_alias=source_job.workflow_alias,
             workflow_folder_name=source_job.workflow_folder_name,
             workflow_display_name=getattr(source_job, "workflow_display_name", None) or sample_name,
+            workflow_key=workflow_key,
             sample_name=sample_name,
             mode=source_job.mode,
             input_directory=source_job.input_directory,
@@ -2296,6 +2350,7 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             params = SubmitParams(
                 project_id=source_job.project_id,
                 user_id=source_job.user_id,
+                workflow_key=workflow_key,
                 sample_name=sample_name,
                 mode=source_job.mode,
                 input_type="pod5",

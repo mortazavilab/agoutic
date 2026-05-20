@@ -174,6 +174,9 @@ class PlanDetectionStage:
                     model_name=ctx.engine.model_name,
                 )
 
+                # Persist the new plan before a background executor opens its own session.
+                ctx.session.commit()
+
                 from cortex.chat_downloads import _auto_execute_plan_steps
                 if _plan_payload.get("auto_execute_safe_steps", True):
                     asyncio.create_task(

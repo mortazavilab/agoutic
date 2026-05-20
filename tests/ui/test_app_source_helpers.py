@@ -4,6 +4,7 @@ import ast
 import base64
 import datetime as dt
 import json
+import os
 import re as _re_module
 from collections import defaultdict
 from pathlib import Path
@@ -76,6 +77,24 @@ def _ast_load_fn_from_file(fn_name: str, src_path: Path, namespace: dict):
     mod = ast.Module(body=[fn_node], type_ignores=[])
     exec(compile(mod, filename=str(src_path), mode="exec"), namespace)
     return namespace[fn_name]
+
+
+def _ast_load_symbols_from_file(symbol_names: set[str], src_path: Path, namespace: dict):
+    """Parse *src_path* and compile selected assignments/functions into *namespace*."""
+    source = src_path.read_text()
+    tree = ast.parse(source, filename=str(src_path))
+    selected_nodes = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in symbol_names:
+            selected_nodes.append(node)
+            continue
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in symbol_names:
+                    selected_nodes.append(node)
+                    break
+    mod = ast.Module(body=selected_nodes, type_ignores=[])
+    exec(compile(mod, filename=str(src_path), mode="exec"), namespace)
 
 
 # Build the import maps once at module load time.
@@ -154,9 +173,28 @@ def _load_function(name: str, extra_globals: dict | None = None):
 
 
 def _load_block_part2_function(name: str, extra_globals: dict | None = None):
-    namespace: dict = {"datetime": dt}
+    namespace: dict = {"datetime": dt, "os": os}
     if extra_globals:
         namespace.update(extra_globals)
+    if name == "render_block_part2":
+        _ast_load_symbols_from_file(
+            {
+                "_WF_PORE_C_OUTPUT_FLAG_ORDER",
+                "_WF_PORE_C_OUTPUT_FLAG_LABELS",
+                "_wf_pore_c_ui_enabled",
+                "_workflow_key_from_payload",
+                "_wf_pore_c_output_flag_values",
+                "_workflow_path_label",
+                "_wf_pore_c_output_flag_summary",
+                "_workflow_specific_metadata",
+                "_staging_card_metadata",
+                "_execution_run_metadata",
+                "_looks_like_workflow_path",
+                "_execution_job_workflow_path",
+            },
+            _BLOCK_PART2_PATH,
+            namespace,
+        )
     if name != "_parse_stage_timestamp":
         namespace["_parse_stage_timestamp"] = _ast_load_fn_from_file(
             "_parse_stage_timestamp", _BLOCK_PART2_PATH, namespace

@@ -1,0 +1,29 @@
+key: run_wf_pore_c
+display_name: Run wf-pore-c
+description: Collect Oxford Nanopore Pore-C parameters and prepare a dry-run workflow preview.
+category: execution
+source:
+  type: service
+  key: launchpad
+required_services:
+  - launchpad
+expected_inputs:
+  - file_path
+  - reference_fasta
+  - input_type
+output_types:
+  - job
+  - report
+sample_types:
+  - DNA
+estimated_runtime: slow
+plan_type: run_wf_pore_c
+trigger_patterns:
+  - 'run\s+(?:the\s+)?(?:wf[-\s]?)?pore[-\s]?c(?:\s+workflow)?'
+  - 'launch\s+(?:wf[-\s]?)?pore[-\s]?c'
+  - 'submit\s+(?:wf[-\s]?)?pore[-\s]?c'
+  - '(?:contact\s+map|mcool|pairs(?:\.gz)?)\s+.*\b(?:pore[-\s]?c|porec)\b'
+slash_commands:
+  - /pore-c
+  - /wf-pore-c
+classification_priority: 35

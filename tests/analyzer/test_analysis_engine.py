@@ -307,6 +307,7 @@ class TestGenerateAnalysisSummary:
         job = MagicMock(
             run_uuid="run-555",
             sample_name="Jamshid999",
+            workflow_key="dogme",
             mode="RNA",
             status="COMPLETED",
             nextflow_work_dir=str(job_dir),
@@ -328,4 +329,197 @@ class TestGenerateAnalysisSummary:
         categorize.assert_called_once_with("run-555", work_dir_path=str(job_dir))
         assert summary.run_uuid == "run-555"
         assert summary.sample_name == "Jamshid999"
+        assert summary.workflow_key == "dogme"
         assert summary.work_dir == str(job_dir)
+
+    def test_generate_summary_recognizes_wf_pore_c_with_nullable_mode(self, tmp_path):
+        job_dir = tmp_path / "workflow8"
+        job_dir.mkdir()
+        (job_dir / "wf-pore-c-report.html").write_text("<html><body>report</body></html>", encoding="utf-8")
+        pairs_dir = job_dir / "pairs"
+        pairs_dir.mkdir()
+        (pairs_dir / "sample.pairs.gz").write_text("pairs\n", encoding="utf-8")
+        cooler_dir = job_dir / "cooler"
+        cooler_dir.mkdir()
+        (cooler_dir / "sample.mcool").write_text("mcool\n", encoding="utf-8")
+        hic_dir = job_dir / "hi-c"
+        hic_dir.mkdir()
+        (hic_dir / "sample.hic").write_text("hic\n", encoding="utf-8")
+        (job_dir / "pairs.stats.txt").write_text(
+            "total\t100\n"
+            "cis\t80\n"
+            "trans\t20\n"
+            "total_dups\t10\n",
+            encoding="utf-8",
+        )
+        (job_dir / ".agoutic.workflow.json").write_text(
+            json.dumps(
+                {
+                    "workflow_key": "wf_pore_c",
+                    "validated_inputs": {
+                        "reference_fasta": "/refs/grch38.fa",
+                        "cutter": "NlaIII",
+                        "workflow_repo": "epi2me-labs/wf-pore-c",
+                        "workflow_version": "v1.3.1",
+                        "sample_name": "POREC_A",
+                        "sample_sheet": None,
+                    },
+                    "summary_contract": {
+                        "workflow_key": "wf_pore_c",
+                        "workflow_version": "v1.3.1",
+                        "report_filename": "wf-pore-c-report.html",
+                        "sample_name": "POREC_A",
+                        "output_flags": {"pairs": True, "mcool": True, "hi_c": True},
+                    },
+                    "result_sync_spec": {
+                        "workflow_key": "wf_pore_c",
+                        "report_filename": "wf-pore-c-report.html",
+                        "expected_outputs": [
+                            "wf-pore-c-report.html",
+                            "pairs/{alias}.pairs.gz",
+                            "cooler/{alias}.mcool",
+                            "hi-c/{alias}.hic",
+                        ],
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-pore-c",
+            sample_name="POREC_A",
+            workflow_key="wf_pore_c",
+            mode=None,
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job) as lookup:
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        lookup.assert_called_once_with(run_uuid=None, work_dir_path=str(job_dir))
+        assert summary.run_uuid == "run-pore-c"
+        assert summary.sample_name == "POREC_A"
+        assert summary.workflow_key == "wf_pore_c"
+        assert summary.mode is None
+        assert summary.summary_contract["workflow_key"] == "wf_pore_c"
+        assert summary.result_sync_spec["report_filename"] == "wf-pore-c-report.html"
+        assert summary.key_results["Workflow Report"] == "Available"
+        assert summary.workflow_summary["artifacts"]["pairs"]["present"] is True
+        assert summary.workflow_summary["artifacts"]["mcool"]["present"] is True
+        assert summary.workflow_summary["artifacts"]["hic"]["present"] is True
+        assert summary.workflow_summary["artifacts"]["report_html"]["present"] is True
+        assert summary.workflow_summary["sample_alias"] == "POREC_A"
+        assert summary.workflow_summary["metadata"]["reference_fasta"] == "/refs/grch38.fa"
+        assert summary.workflow_summary["metadata"]["cutter"] == "NlaIII"
+        assert summary.workflow_summary["metadata"]["workflow_version"] == "v1.3.1"
+        assert summary.parsed_reports["pairs_stats"]["total_pairs"] == 100
+        assert summary.parsed_reports["pairs_stats"]["cis_trans_ratio"] == 4.0
+        assert summary.parsed_reports["pairs_stats"]["duplicate_rate"] == 0.1
+
+    def test_generate_summary_infers_wf_pore_c_sample_alias_from_sample_sheet(self, tmp_path):
+        job_dir = tmp_path / "workflow9"
+        job_dir.mkdir()
+        sample_sheet = tmp_path / "samples.csv"
+        sample_sheet.write_text("sample,fastq\nSHEET_ALIAS,/data/sample.fastq.gz\n", encoding="utf-8")
+        (job_dir / "wf-pore-c-report.html").write_text("<html></html>", encoding="utf-8")
+        (job_dir / ".agoutic.workflow.json").write_text(
+            json.dumps(
+                {
+                    "workflow_key": "wf_pore_c",
+                    "validated_inputs": {
+                        "reference_fasta": "/refs/grch38.fa",
+                        "cutter": "NlaIII",
+                        "workflow_version": "v1.3.1",
+                        "sample_name": "",
+                        "sample_sheet": str(sample_sheet),
+                    },
+                    "summary_contract": {
+                        "workflow_key": "wf_pore_c",
+                        "workflow_version": "v1.3.1",
+                        "report_filename": "wf-pore-c-report.html",
+                        "sample_name": "",
+                        "output_flags": {"pairs": False, "mcool": False, "hi_c": False},
+                    },
+                    "result_sync_spec": {
+                        "workflow_key": "wf_pore_c",
+                        "report_filename": "wf-pore-c-report.html",
+                        "expected_outputs": ["wf-pore-c-report.html"],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-pore-c-sheet",
+            sample_name="",
+            workflow_key="wf_pore_c",
+            mode=None,
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_summary["sample_alias"] == "SHEET_ALIAS"
+
+    def test_generate_summary_warns_when_requested_wf_pore_c_outputs_are_missing(self, tmp_path):
+        job_dir = tmp_path / "workflow10"
+        job_dir.mkdir()
+        (job_dir / "wf-pore-c-report.html").write_text("<html></html>", encoding="utf-8")
+        (job_dir / "pairs.stats.txt").write_text("total\t10\n", encoding="utf-8")
+        (job_dir / ".agoutic.workflow.json").write_text(
+            json.dumps(
+                {
+                    "workflow_key": "wf_pore_c",
+                    "validated_inputs": {
+                        "reference_fasta": "/refs/grch38.fa",
+                        "cutter": "NlaIII",
+                        "workflow_version": "v1.3.1",
+                        "sample_name": "POREC_WARN",
+                    },
+                    "summary_contract": {
+                        "workflow_key": "wf_pore_c",
+                        "workflow_version": "v1.3.1",
+                        "report_filename": "wf-pore-c-report.html",
+                        "sample_name": "POREC_WARN",
+                        "output_flags": {"pairs": True, "mcool": True, "hi_c": False},
+                    },
+                    "result_sync_spec": {
+                        "workflow_key": "wf_pore_c",
+                        "report_filename": "wf-pore-c-report.html",
+                        "expected_outputs": [
+                            "wf-pore-c-report.html",
+                            "pairs/{alias}.pairs.gz",
+                            "cooler/{alias}.mcool",
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-pore-c-warn",
+            sample_name="POREC_WARN",
+            workflow_key="wf_pore_c",
+            mode=None,
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_summary["artifacts"]["pairs"]["present"] is False
+        assert summary.workflow_summary["artifacts"]["mcool"]["present"] is False
+        assert any("Missing requested output: .pairs.gz" == warning for warning in summary.warnings)
+        assert any("Missing requested output: cooler/{alias}.mcool" == warning for warning in summary.warnings)
+        assert any("pairs.stats.txt missing summary metrics" in warning for warning in summary.warnings)

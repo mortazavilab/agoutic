@@ -218,6 +218,62 @@ class TestSubmitDogmeJob:
         assert kwargs["json"]["script_working_directory"] == "/opt/agoutic/scripts"
 
 
+class TestPreviewWorkflow:
+    @pytest.mark.asyncio
+    async def test_preview_workflow_posts_expected_payload(self, monkeypatch):
+        fake_client = FakeAsyncClient(
+            post_response=FakeResponse(
+                json_data={"workflow_key": "wf_pore_c", "command": "nextflow run epi2me-labs/wf-pore-c"}
+            )
+        )
+        monkeypatch.setenv("INTERNAL_API_SECRET", "secret")
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            result = await tools.preview_workflow(
+                workflow_key="wf_pore_c",
+                sample_name="POREC_A",
+                input_type="bam",
+                input_path="/data/pore-c.bam",
+                reference_fasta="/refs/reference.fa",
+                output_directory="/projects/demo/workflow4",
+            )
+
+        assert result == {"workflow_key": "wf_pore_c", "command": "nextflow run epi2me-labs/wf-pore-c"}
+        assert len(fake_client.post_calls) == 1
+        url, kwargs = fake_client.post_calls[0]
+        assert url == "http://launchpad.local/workflows/preview"
+        assert kwargs["headers"] == {"X-Internal-Secret": "secret"}
+        assert kwargs["timeout"] == 30.0
+        assert kwargs["json"] == {
+            "workflow_key": "wf_pore_c",
+            "sample_name": "POREC_A",
+            "input_type": "bam",
+            "input_path": "/data/pore-c.bam",
+            "reference_fasta": "/refs/reference.fa",
+            "output_directory": "/projects/demo/workflow4",
+        }
+
+    @pytest.mark.asyncio
+    async def test_preview_workflow_surfaces_unknown_workflow_key_error(self):
+        error = httpx.HTTPStatusError(
+            "bad request",
+            request=httpx.Request("POST", "http://launchpad.local/workflows/preview"),
+            response=httpx.Response(
+                400,
+                text="Unknown workflow_key 'mystery_workflow'. Known workflow keys: dogme, wf_pore_c.",
+            ),
+        )
+        fake_client = FakeAsyncClient(post_error=error)
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            with pytest.raises(RuntimeError) as exc_info:
+                await tools.preview_workflow(workflow_key="mystery_workflow")
+
+        assert "Unknown workflow_key 'mystery_workflow'" in str(exc_info.value)
+
+
 class TestRunAllowlistedScript:
     @pytest.mark.asyncio
     async def test_run_allowlisted_script_returns_stdout(self, monkeypatch, tmp_path):

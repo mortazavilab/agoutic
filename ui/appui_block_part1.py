@@ -67,6 +67,70 @@ def _build_cluster_modkit_profile(modkit_dir: str) -> str:
 
 _DEFAULT_CLUSTER_MODKIT_PROFILE = _build_cluster_modkit_profile(_DEFAULT_CLUSTER_MODKIT_BINARY_DIR)
 _DEFAULT_CLUSTER_MODKIT_BIND_PATHS = _default_cluster_modkit_bind_paths(_DEFAULT_CLUSTER_MODKIT_BINARY_DIR)
+_WF_PORE_C_DEFAULT_CUTTER = "NlaIII"
+_WF_PORE_C_OUTPUT_FLAG_ORDER = ("pairs", "mcool", "hi_c", "bed", "chromunity", "coverage", "paired_end")
+_WF_PORE_C_OUTPUT_FLAG_LABELS = {
+    "pairs": "Pairs",
+    "mcool": "mcool",
+    "hi_c": "Hi-C",
+    "bed": "BED",
+    "chromunity": "Chromunity",
+    "coverage": "Coverage",
+    "paired_end": "Paired-End",
+}
+
+
+def _wf_pore_c_ui_enabled() -> bool:
+    return str(os.getenv("WF_PORE_C_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _approval_workflow_key(params: dict | None) -> str:
+    raw_value = ""
+    if isinstance(params, dict):
+        raw_value = params.get("workflow_key")
+    normalized = str(raw_value or "dogme").strip().lower() or "dogme"
+    if normalized == "wf_pore_c" and _wf_pore_c_ui_enabled():
+        return "wf_pore_c"
+    return "dogme"
+
+
+def _wf_pore_c_output_flag_values(raw_flags) -> dict[str, bool]:
+    flags = {
+        "pairs": bool((raw_flags or {}).get("pairs", True)),
+        "mcool": bool((raw_flags or {}).get("mcool", True)),
+        "hi_c": bool((raw_flags or {}).get("hi_c", False)),
+        "bed": bool((raw_flags or {}).get("bed", False)),
+        "chromunity": bool((raw_flags or {}).get("chromunity", False)),
+        "coverage": bool((raw_flags or {}).get("coverage", False)),
+        "paired_end": bool((raw_flags or {}).get("paired_end", False)),
+    }
+    if flags["bed"]:
+        flags["paired_end"] = True
+    return flags
+
+
+def _approval_gate_field_visibility(extracted_params: dict | None, *, gate_action: str) -> dict[str, bool | str]:
+    workflow_key = _approval_workflow_key(extracted_params)
+    is_remote_stage = str(gate_action or "").strip().lower() == "remote_stage"
+    is_wf_pore_c = workflow_key == "wf_pore_c"
+    return {
+        "workflow_key": workflow_key,
+        "show_mode": not is_wf_pore_c,
+        "show_entry_point": not is_wf_pore_c and not is_remote_stage,
+        "show_modifications": not is_wf_pore_c and not is_remote_stage,
+        "show_dogme_advanced": not is_wf_pore_c and not is_remote_stage,
+        "show_reference_fasta": is_wf_pore_c,
+        "show_vcf": is_wf_pore_c,
+        "show_sample_sheet": is_wf_pore_c,
+        "show_cutter": is_wf_pore_c,
+        "show_output_flags": is_wf_pore_c,
+    }
+
+
+def _workflow_input_path_label(workflow_key: str) -> str:
+    if workflow_key == "wf_pore_c":
+        return "Input BAM / FASTQ"
+    return "Input Directory"
 
 
 def _approval_gate_reference_genome_catalog(api_url: str, request_fn, raw_value=None) -> dict:
@@ -582,6 +646,8 @@ def render_block_part1(
 
                 elif _gate_action == "remote_stage":
                     st.write("**📤 Remote Staging Plan**")
+                    _field_visibility = _approval_gate_field_visibility(extracted_params, gate_action="remote_stage")
+                    _workflow_key = str(_field_visibility["workflow_key"])
 
                     _current_user_id = user.get("id") or user.get("user_id", "")
                     _saved_profiles = _load_user_ssh_profiles(_current_user_id)
@@ -599,16 +665,74 @@ def render_block_part1(
                             help="Name to register for the staged sample."
                         )
 
-                        mode_options = ["DNA", "RNA", "CDNA"]
-                        current_mode = extracted_params.get("mode", "DNA")
-                        mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
-                        mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
+                        mode = None
+                        reference_fasta = ""
+                        vcf = ""
+                        sample_sheet = ""
+                        cutter = _WF_PORE_C_DEFAULT_CUTTER
+                        output_flags = {}
+
+                        if _field_visibility["show_mode"]:
+                            mode_options = ["DNA", "RNA", "CDNA"]
+                            current_mode = extracted_params.get("mode", "DNA")
+                            mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
+                            mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
+                        else:
+                            st.caption("Workflow: `wf-pore-c`")
 
                         input_directory = st.text_input(
-                            "Input Directory",
+                            _workflow_input_path_label(_workflow_key),
                             value=extracted_params.get("input_directory", ""),
                             help="Local source folder that will be staged to the remote data cache."
                         )
+
+                        input_type = extracted_params.get("input_type", "pod5")
+                        if _workflow_key == "wf_pore_c":
+                            input_type_options = ["bam", "fastq"]
+                            current_input_type = str(extracted_params.get("input_type", "bam") or "bam").strip().lower()
+                            input_type_index = (
+                                input_type_options.index(current_input_type)
+                                if current_input_type in input_type_options
+                                else 0
+                            )
+                            input_type = st.selectbox("Input Type", input_type_options, index=input_type_index)
+
+                            reference_fasta = st.text_input(
+                                "Reference FASTA",
+                                value=extracted_params.get("reference_fasta", "") or "",
+                                help="Reference FASTA that wf-pore-c will stage into the shared remote reference cache.",
+                            )
+                            vcf = st.text_input(
+                                "VCF (optional)",
+                                value=extracted_params.get("vcf", "") or "",
+                                help="Optional phased VCF to stage alongside the wf-pore-c run.",
+                            )
+                            sample_sheet = st.text_input(
+                                "Sample Sheet (optional)",
+                                value=extracted_params.get("sample_sheet", "") or "",
+                                help="Optional wf-pore-c sample sheet. Leave empty for a single-sample run using Sample Name.",
+                            )
+                            cutter = st.text_input(
+                                "Cutter",
+                                value=extracted_params.get("cutter", _WF_PORE_C_DEFAULT_CUTTER) or _WF_PORE_C_DEFAULT_CUTTER,
+                                help="Restriction enzyme cutter passed to wf-pore-c.",
+                            )
+
+                            grouped_section("wf-pore-c Outputs")
+                            current_output_flags = _wf_pore_c_output_flag_values(extracted_params.get("output_flags"))
+                            _flag_columns = st.columns(2)
+                            for flag_index, flag_name in enumerate(_WF_PORE_C_OUTPUT_FLAG_ORDER):
+                                with _flag_columns[flag_index % 2]:
+                                    output_flags[flag_name] = st.checkbox(
+                                        _WF_PORE_C_OUTPUT_FLAG_LABELS.get(flag_name, flag_name),
+                                        value=current_output_flags[flag_name],
+                                        key=f"remote_stage_{block_id}_{flag_name}",
+                                    )
+                            if output_flags.get("bed"):
+                                output_flags["paired_end"] = True
+                                st.caption("BED output requires paired-end output; paired-end will be submitted automatically.")
+                        else:
+                            st.caption(f"Input type: `{input_type}`")
 
                         genome_catalog = _approval_gate_reference_genome_catalog(
                             API_URL,
@@ -628,9 +752,6 @@ def render_block_part1(
                             format_func=lambda genome: genome_labels.get(genome, genome),
                             help="Reference assets that should be available under the remote ref/ cache."
                         )
-
-                        input_type = extracted_params.get("input_type", "pod5")
-                        st.caption(f"Input type: `{input_type}`")
 
                         grouped_section("Remote Target")
                         ssh_profile_id = extracted_params.get("ssh_profile_id") or ""
@@ -729,8 +850,8 @@ def render_block_part1(
                                 if candidate.startswith("/"):
                                     remote_input_path = candidate.rstrip('.,;:!?')
                             edited_params = {
+                                "workflow_key": _workflow_key,
                                 "sample_name": sample_name,
-                                "mode": mode,
                                 "input_type": input_type,
                                 "input_directory": input_directory,
                                 "reference_genome": reference_genomes,
@@ -745,6 +866,17 @@ def render_block_part1(
                                 "staged_remote_input_path": remote_input_path or None,
                                 "result_destination": extracted_params.get("result_destination") or ("both" if remote_input_path else "local"),
                             }
+                            if _workflow_key == "wf_pore_c":
+                                edited_params.update({
+                                    "mode": None,
+                                    "reference_fasta": reference_fasta or None,
+                                    "vcf": vcf or None,
+                                    "sample_sheet": sample_sheet or None,
+                                    "cutter": cutter or _WF_PORE_C_DEFAULT_CUTTER,
+                                    "output_flags": output_flags,
+                                })
+                            else:
+                                edited_params["mode"] = mode
                             payload_update = dict(content)
                             payload_update["edited_params"] = edited_params
                             resp = make_authenticated_request(
@@ -1062,6 +1194,8 @@ def render_block_part1(
 
                 elif extracted_params:
                     st.write("**📋 Extracted Parameters** (edit if needed):")
+                    _field_visibility = _approval_gate_field_visibility(extracted_params, gate_action=_gate_action)
+                    _workflow_key = str(_field_visibility["workflow_key"])
                     
                     with st.form(key=f"params_form_{block_id}"):
                         grouped_section("Core Run Settings")
@@ -1072,35 +1206,69 @@ def render_block_part1(
                             help="Name for this sample"
                         )
                         
-                        # Mode selection
-                        mode_options = ["DNA", "RNA", "CDNA"]
-                        current_mode = extracted_params.get("mode", "DNA")
-                        mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
-                        mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
+                        mode = None
+                        modifications = None
+                        entry_point = None
+                        reference_fasta = ""
+                        vcf = ""
+                        sample_sheet = ""
+                        cutter = _WF_PORE_C_DEFAULT_CUTTER
+                        output_flags = {}
+
+                        if _field_visibility["show_mode"]:
+                            mode_options = ["DNA", "RNA", "CDNA"]
+                            current_mode = extracted_params.get("mode", "DNA")
+                            mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
+                            mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
+                        else:
+                            st.caption("Workflow: `wf-pore-c`")
                         
                         # Input type
-                        input_type_options = ["pod5", "bam"]
-                        current_input_type = extracted_params.get("input_type", "pod5")
+                        input_type_options = ["pod5", "bam"] if _workflow_key != "wf_pore_c" else ["bam", "fastq"]
+                        current_input_type = extracted_params.get("input_type", "pod5" if _workflow_key != "wf_pore_c" else "bam")
                         input_type_index = input_type_options.index(current_input_type) if current_input_type in input_type_options else 0
                         input_type = st.selectbox("Input Type", input_type_options, index=input_type_index)
                         
                         # Entry point (Dogme workflow)
-                        entry_point_options = ["(auto)", "basecall", "remap", "modkit", "annotateRNA", "reports"]
-                        current_entry = extracted_params.get("entry_point") or "(auto)"
-                        entry_index = entry_point_options.index(current_entry) if current_entry in entry_point_options else 0
-                        entry_point = st.selectbox(
-                            "Pipeline Entry Point",
-                            entry_point_options,
-                            index=entry_index,
-                            help="main=(auto) full pipeline, basecall=only basecalling, remap=from unmapped BAM, modkit=modifications only, annotateRNA=transcript annotation, reports=generate reports"
-                        )
+                        if _field_visibility["show_entry_point"]:
+                            entry_point_options = ["(auto)", "basecall", "remap", "modkit", "annotateRNA", "reports"]
+                            current_entry = extracted_params.get("entry_point") or "(auto)"
+                            entry_index = entry_point_options.index(current_entry) if current_entry in entry_point_options else 0
+                            entry_point = st.selectbox(
+                                "Pipeline Entry Point",
+                                entry_point_options,
+                                index=entry_index,
+                                help="main=(auto) full pipeline, basecall=only basecalling, remap=from unmapped BAM, modkit=modifications only, annotateRNA=transcript annotation, reports=generate reports"
+                            )
                         
                         # Input directory
                         input_directory = st.text_input(
-                            "Input Directory",
+                            _workflow_input_path_label(_workflow_key),
                             value=extracted_params.get("input_directory", ""),
                             help="Full path to input files"
                         )
+
+                        if _workflow_key == "wf_pore_c":
+                            reference_fasta = st.text_input(
+                                "Reference FASTA",
+                                value=extracted_params.get("reference_fasta", "") or "",
+                                help="Reference FASTA passed to wf-pore-c.",
+                            )
+                            vcf = st.text_input(
+                                "VCF (optional)",
+                                value=extracted_params.get("vcf", "") or "",
+                                help="Optional phased VCF for haplotype-aware wf-pore-c runs.",
+                            )
+                            sample_sheet = st.text_input(
+                                "Sample Sheet (optional)",
+                                value=extracted_params.get("sample_sheet", "") or "",
+                                help="Optional wf-pore-c sample sheet. Leave empty for a single-sample run.",
+                            )
+                            cutter = st.text_input(
+                                "Cutter",
+                                value=extracted_params.get("cutter", _WF_PORE_C_DEFAULT_CUTTER) or _WF_PORE_C_DEFAULT_CUTTER,
+                                help="Restriction enzyme cutter argument for wf-pore-c.",
+                            )
                         
                         # Reference genomes (multi-select)
                         genome_catalog = _approval_gate_reference_genome_catalog(
@@ -1123,28 +1291,45 @@ def render_block_part1(
                         )
                         
                         # Modifications (optional)
-                        modifications = st.text_input(
-                            "Modifications (optional)",
-                            value=extracted_params.get("modifications", "") or "",
-                            help="Comma-separated modification motifs (leave empty for auto)"
-                        )
+                        if _field_visibility["show_modifications"]:
+                            modifications = st.text_input(
+                                "Modifications (optional)",
+                                value=extracted_params.get("modifications", "") or "",
+                                help="Comma-separated modification motifs (leave empty for auto)"
+                            )
+                        elif _field_visibility["show_output_flags"]:
+                            grouped_section("wf-pore-c Outputs")
+                            current_output_flags = _wf_pore_c_output_flag_values(extracted_params.get("output_flags"))
+                            _flag_columns = st.columns(2)
+                            for flag_index, flag_name in enumerate(_WF_PORE_C_OUTPUT_FLAG_ORDER):
+                                with _flag_columns[flag_index % 2]:
+                                    output_flags[flag_name] = st.checkbox(
+                                        _WF_PORE_C_OUTPUT_FLAG_LABELS.get(flag_name, flag_name),
+                                        value=current_output_flags[flag_name],
+                                        key=f"approval_{block_id}_{flag_name}",
+                                    )
+                            if output_flags.get("bed"):
+                                output_flags["paired_end"] = True
+                                st.caption("BED output requires paired-end output; paired-end will be submitted automatically.")
                         
                         # Max concurrent GPU tasks — visible at top level (not hidden in Advanced)
-                        _gpu_raw = extracted_params.get("max_gpu_tasks")
-                        _gpu_val = int(_gpu_raw) if _gpu_raw is not None else None
-                        if _gpu_val is not None and _gpu_val < 1:
-                            _gpu_val = 1
-                        if _gpu_val is not None and _gpu_val > 16:
-                            _gpu_val = 16
-                        _gpu_options = [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-                        _gpu_idx = _gpu_options.index(_gpu_val) if _gpu_val in _gpu_options else 0
-                        max_gpu_tasks = st.selectbox(
-                            "🖥️ Max Concurrent GPU Tasks",
-                            options=_gpu_options,
-                            index=_gpu_idx,
-                            format_func=lambda value: "No maximum" if value is None else str(value),
-                            help="Maximum simultaneous dorado/GPU tasks within a pipeline run. Leave at 'No maximum' to let Nextflow manage concurrency.",
-                        )
+                        max_gpu_tasks = None
+                        if _workflow_key != "wf_pore_c":
+                            _gpu_raw = extracted_params.get("max_gpu_tasks")
+                            _gpu_val = int(_gpu_raw) if _gpu_raw is not None else None
+                            if _gpu_val is not None and _gpu_val < 1:
+                                _gpu_val = 1
+                            if _gpu_val is not None and _gpu_val > 16:
+                                _gpu_val = 16
+                            _gpu_options = [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+                            _gpu_idx = _gpu_options.index(_gpu_val) if _gpu_val in _gpu_options else 0
+                            max_gpu_tasks = st.selectbox(
+                                "🖥️ Max Concurrent GPU Tasks",
+                                options=_gpu_options,
+                                index=_gpu_idx,
+                                format_func=lambda value: "No maximum" if value is None else str(value),
+                                help="Maximum simultaneous dorado/GPU tasks within a pipeline run. Leave at 'No maximum' to let Nextflow manage concurrency.",
+                            )
 
                         grouped_section("Execution")
                         execution_mode_options = ["local", "slurm"]
@@ -1304,7 +1489,7 @@ def render_block_part1(
                                 help="Choose whether results stay remote, sync back locally, or both."
                             )
 
-                            if mode == "DNA":
+                            if _workflow_key == "dogme" and mode == "DNA":
                                 st.caption(
                                     "DNA SLURM runs now use the shared Dogme SIF with the built-in OpenChromatin GPU runtime. "
                                     "Custom cluster modkit and bind-path overrides are no longer needed in this approval form."
@@ -1384,7 +1569,10 @@ def render_block_part1(
                                 custom_dogme_profile_value = ""
                                 custom_dogme_bind_paths_text = ""
                         else:
-                            st.caption("Local execution uses these per-task CPU and memory ceilings to keep Dogme within the AGOUTIC host's available resources.")
+                            if _workflow_key == "wf_pore_c":
+                                st.caption("Local execution uses these per-task CPU and memory ceilings to keep wf-pore-c within the AGOUTIC host's available resources.")
+                            else:
+                                st.caption("Local execution uses these per-task CPU and memory ceilings to keep Dogme within the AGOUTIC host's available resources.")
                             local_max_task_cpus = st.number_input(
                                 "Local Max Task CPUs",
                                 min_value=1,
@@ -1404,54 +1592,58 @@ def render_block_part1(
                             custom_dogme_bind_paths_text = ""
                         
                         # Advanced parameters in expander
-                        with st.expander("⚙️ Advanced Parameters (optional)"):
-                            st.caption("Leave empty to use defaults")
-                            
-                            # modkit_filter_threshold
-                            modkit_threshold = st.number_input(
-                                "Modkit Filter Threshold",
-                                min_value=0.0,
-                                max_value=1.0,
-                                value=extracted_params.get("modkit_filter_threshold", 0.9),
-                                step=0.05,
-                                help="Modification calling threshold (default: 0.9)"
-                            )
-                            
-                            # min_cov
-                            min_cov_default = extracted_params.get("min_cov")
-                            if min_cov_default is None:
-                                # Show placeholder based on mode
-                                min_cov_placeholder = 1 if mode == "DNA" else 3
-                                st.caption(f"Min Coverage: (auto - will use {min_cov_placeholder} for {mode} mode)")
-                                min_cov = None
-                            else:
-                                min_cov = st.number_input(
-                                    "Minimum Coverage",
+                        modkit_threshold = extracted_params.get("modkit_filter_threshold", 0.9)
+                        min_cov = extracted_params.get("min_cov")
+                        per_mod = extracted_params.get("per_mod", 5)
+                        accuracy = extracted_params.get("accuracy", "sup")
+                        if _field_visibility["show_dogme_advanced"]:
+                            with st.expander("⚙️ Advanced Parameters (optional)"):
+                                st.caption("Leave empty to use defaults")
+                                
+                                # modkit_filter_threshold
+                                modkit_threshold = st.number_input(
+                                    "Modkit Filter Threshold",
+                                    min_value=0.0,
+                                    max_value=1.0,
+                                    value=extracted_params.get("modkit_filter_threshold", 0.9),
+                                    step=0.05,
+                                    help="Modification calling threshold (default: 0.9)"
+                                )
+                                
+                                # min_cov
+                                min_cov_default = extracted_params.get("min_cov")
+                                if min_cov_default is None:
+                                    min_cov_placeholder = 1 if mode == "DNA" else 3
+                                    st.caption(f"Min Coverage: (auto - will use {min_cov_placeholder} for {mode} mode)")
+                                    min_cov = None
+                                else:
+                                    min_cov = st.number_input(
+                                        "Minimum Coverage",
+                                        min_value=1,
+                                        max_value=100,
+                                        value=min_cov_default,
+                                        help="Minimum coverage for modification calls"
+                                    )
+                                
+                                # per_mod
+                                per_mod = st.number_input(
+                                    "Per Mod Threshold",
                                     min_value=1,
                                     max_value=100,
-                                    value=min_cov_default,
-                                    help="Minimum coverage for modification calls"
+                                    value=extracted_params.get("per_mod", 5),
+                                    help="Percentage threshold for modifications (default: 5)"
                                 )
-                            
-                            # per_mod
-                            per_mod = st.number_input(
-                                "Per Mod Threshold",
-                                min_value=1,
-                                max_value=100,
-                                value=extracted_params.get("per_mod", 5),
-                                help="Percentage threshold for modifications (default: 5)"
-                            )
-                            
-                            # accuracy
-                            accuracy_options = ["sup", "hac", "fast"]
-                            current_accuracy = extracted_params.get("accuracy", "sup")
-                            accuracy_index = accuracy_options.index(current_accuracy) if current_accuracy in accuracy_options else 0
-                            accuracy = st.selectbox(
-                                "Basecalling Accuracy",
-                                accuracy_options,
-                                index=accuracy_index,
-                                help="Model accuracy: sup=super accurate, hac=high accuracy, fast=fast mode"
-                            )
+                                
+                                # accuracy
+                                accuracy_options = ["sup", "hac", "fast"]
+                                current_accuracy = extracted_params.get("accuracy", "sup")
+                                accuracy_index = accuracy_options.index(current_accuracy) if current_accuracy in accuracy_options else 0
+                                accuracy = st.selectbox(
+                                    "Basecalling Accuracy",
+                                    accuracy_options,
+                                    index=accuracy_index,
+                                    help="Model accuracy: sup=super accurate, hac=high accuracy, fast=fast mode"
+                                )
                         
                         st.divider()
                         
@@ -1464,23 +1656,38 @@ def render_block_part1(
                         if submit_approve:
                             # Build edited params
                             edited_params = {
+                                "workflow_key": _workflow_key,
                                 "sample_name": sample_name,
-                                "mode": mode,
                                 "input_type": input_type,
-                                "entry_point": entry_point if entry_point != "(auto)" else None,
                                 "input_directory": input_directory,
                                 "reference_genome": reference_genomes,
-                                "modifications": modifications if modifications else None,
-                                # Advanced parameters
-                                "modkit_filter_threshold": modkit_threshold,
-                                "min_cov": min_cov,
-                                "per_mod": per_mod,
-                                "accuracy": accuracy,
-                                "max_gpu_tasks": max_gpu_tasks,
                                 "custom_dogme_profile": (custom_dogme_profile_value.strip() or None) if allow_custom_dogme_profile else None,
                                 "custom_dogme_bind_paths": _text_to_paths(custom_dogme_bind_paths_text) if allow_custom_dogme_profile else [],
                                 "execution_mode": execution_mode,
                             }
+                            if _workflow_key == "wf_pore_c":
+                                edited_params.update({
+                                    "mode": None,
+                                    "reference_fasta": reference_fasta or None,
+                                    "vcf": vcf or None,
+                                    "sample_sheet": sample_sheet or None,
+                                    "cutter": cutter or _WF_PORE_C_DEFAULT_CUTTER,
+                                    "output_flags": output_flags,
+                                    "workflow_repo": extracted_params.get("workflow_repo") or None,
+                                    "workflow_version": extracted_params.get("workflow_version") or None,
+                                    "report_filename": extracted_params.get("report_filename") or None,
+                                })
+                            else:
+                                edited_params.update({
+                                    "mode": mode,
+                                    "entry_point": entry_point if entry_point != "(auto)" else None,
+                                    "modifications": modifications if modifications else None,
+                                    "modkit_filter_threshold": modkit_threshold,
+                                    "min_cov": min_cov,
+                                    "per_mod": per_mod,
+                                    "accuracy": accuracy,
+                                    "max_gpu_tasks": max_gpu_tasks,
+                                })
                             if execution_mode == "slurm":
                                 edited_params.update({
                                     "local_max_task_cpus": None,

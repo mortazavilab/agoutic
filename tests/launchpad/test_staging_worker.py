@@ -16,6 +16,17 @@ class _FakeConn:
         return None
 
 
+class _NoopWorkflowExecutor:
+    def remote_validate_submission(self, *, request):
+        return None
+
+    async def remote_stage_inputs(self, **kwargs):
+        return {}
+
+    async def remote_reference_assets(self, **kwargs):
+        return {}
+
+
 @pytest.fixture(autouse=True)
 def clear_staging_tasks():
     staging_worker_module.get_staging_tasks().clear()
@@ -30,6 +41,7 @@ async def test_run_staging_uses_current_backend_and_path_validator(monkeypatch):
     class _FakeSlurmBackend:
         def __init__(self):
             self._ssh_manager = SimpleNamespace(connect=self._connect)
+            self._workflow_executor = _NoopWorkflowExecutor()
 
         async def _connect(self, profile):
             return conn
@@ -65,6 +77,9 @@ async def test_run_staging_uses_current_backend_and_path_validator(monkeypatch):
         ):
             return ({"GRCh38": {"all_required_present": True}}, reference_statuses)
 
+        def _resolve_workflow_executor(self, params):
+            return self._workflow_executor
+
     async def _validate_remote_paths(conn, paths):
         return {name: SimpleNamespace(error=None, exists=True, writable=True) for name in paths}
 
@@ -98,6 +113,7 @@ async def test_run_staging_uses_current_backend_and_path_validator(monkeypatch):
     assert task.progress["file_percent"] == 25
     assert task.result == {
         "sample_name": "ENCFF433WOA",
+        "workflow_key": "dogme",
         "ssh_profile_id": "profile-1",
         "ssh_profile_nickname": "hpc3",
         "remote_base_path": "/remote/base",
@@ -121,6 +137,7 @@ async def test_run_staging_routes_remote_input_path_to_reuse(monkeypatch):
     class _FakeSlurmBackend:
         def __init__(self):
             self._ssh_manager = SimpleNamespace(connect=self._connect)
+            self._workflow_executor = _NoopWorkflowExecutor()
 
         async def _connect(self, profile):
             return conn
@@ -161,6 +178,9 @@ async def test_run_staging_routes_remote_input_path_to_reuse(monkeypatch):
             reference_statuses,
         ):
             return ({"mm39": {"all_required_present": True}}, reference_statuses)
+
+        def _resolve_workflow_executor(self, params):
+            return self._workflow_executor
 
     async def _validate_remote_paths(conn, paths):
         return {name: SimpleNamespace(error=None, exists=True, writable=True) for name in paths}
@@ -209,6 +229,7 @@ async def test_run_staging_persists_state_transitions(monkeypatch):
     class _FakeSlurmBackend:
         def __init__(self):
             self._ssh_manager = SimpleNamespace(connect=self._connect)
+            self._workflow_executor = _NoopWorkflowExecutor()
 
         async def _connect(self, profile):
             return conn
@@ -243,6 +264,9 @@ async def test_run_staging_persists_state_transitions(monkeypatch):
             reference_statuses,
         ):
             return ({"GRCh38": {"all_required_present": True}}, reference_statuses)
+
+        def _resolve_workflow_executor(self, params):
+            return self._workflow_executor
 
     async def _validate_remote_paths(conn, paths):
         return {name: SimpleNamespace(error=None, exists=True, writable=True) for name in paths}
@@ -479,6 +503,9 @@ async def test_run_staging_requeues_when_auth_becomes_unavailable_during_start(m
                 "data_root": "/remote/base/data",
             }
 
+        def _resolve_workflow_executor(self, params):
+            return _NoopWorkflowExecutor()
+
     async def _fake_upsert(task, session=None):
         persisted_snapshots.append(
             {
@@ -520,6 +547,111 @@ async def test_run_staging_requeues_when_auth_becomes_unavailable_during_start(m
     assert task.progress["waiting_for_auth"] is True
     assert "unlock" in task.progress["wait_reason"].lower()
     assert persisted_snapshots[-1]["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_run_staging_merges_wf_pore_c_workflow_stage_outputs(monkeypatch):
+    conn = _FakeConn()
+
+    class _WfPoreCExecutor:
+        def remote_validate_submission(self, *, request):
+            return None
+
+        async def remote_stage_inputs(self, **kwargs):
+            return {
+                "workflow_remote_input": "/remote/base/proj/workflow1/.agoutic/wf-pore-c/staged-inputs/input/sample.bam",
+                "reference_fasta_remote_path": "/remote/base/ref/wf-pore-c/abc123/reference.fa",
+                "vcf_remote_path": "/remote/base/data/wf-pore-c/vcf/def456/sample.vcf.gz",
+                "remote_nextflow_work_dir": "/remote/base/proj/.nextflow-work/wf-pore-c/workflow1",
+            }
+
+        async def remote_reference_assets(self, **kwargs):
+            return {
+                "wf_pore_c_reference_fasta": {
+                    "remote_path": "/remote/base/ref/wf-pore-c/abc123/reference.fa",
+                    "present_sidecars": {"fai": "/remote/base/ref/wf-pore-c/abc123/reference.fa.fai"},
+                }
+            }
+
+    class _FakeSlurmBackend:
+        def __init__(self):
+            self._ssh_manager = SimpleNamespace(connect=self._connect)
+            self._workflow_executor = _WfPoreCExecutor()
+
+        async def _connect(self, profile):
+            return conn
+
+        async def _load_profile(self, ssh_profile_id, user_id):
+            return SimpleNamespace(id=ssh_profile_id, nickname="hpc3")
+
+        def _derive_remote_roots(self, params, profile):
+            return {
+                "remote_base_path": "/remote/base",
+                "ref_root": "/remote/base/ref",
+                "data_root": "/remote/base/data",
+            }
+
+        async def _stage_sample_inputs(self, params, profile, conn, run_uuid=None, on_progress=None, transfer_id=None):
+            return {
+                "remote_input": "/remote/base/data/sample-cache.bam",
+                "remote_reference_paths": {"GRCh38": "/remote/base/ref/GRCh38"},
+                "data_cache_status": "staged",
+                "reference_cache_statuses": {"GRCh38": "staged"},
+                "detected_input_type": "bam",
+            }
+
+        async def _ensure_reference_assets_present(
+            self,
+            *,
+            params,
+            profile,
+            conn,
+            remote_reference_paths,
+            reference_statuses,
+        ):
+            return ({"GRCh38": {"all_required_present": True}}, reference_statuses)
+
+        def _resolve_workflow_executor(self, params):
+            return self._workflow_executor
+
+    async def _validate_remote_paths(conn, paths):
+        return {name: SimpleNamespace(error=None, exists=True, writable=True) for name in paths}
+
+    from launchpad.backends import path_validator as path_validator_module
+    from launchpad.backends import slurm_backend as slurm_backend_module
+
+    monkeypatch.setattr(slurm_backend_module, "SlurmBackend", _FakeSlurmBackend)
+    monkeypatch.setattr(slurm_backend_module, "SubmitParams", SubmitParams)
+    monkeypatch.setattr(path_validator_module, "validate_remote_paths", _validate_remote_paths)
+    monkeypatch.setattr(path_validator_module, "check_all_paths_ok", lambda results: (True, []))
+
+    task = StagingTaskState(
+        task_id="task-wf-pore-c-1",
+        params={
+            "project_id": "proj-1",
+            "user_id": "user-1",
+            "username": "eli",
+            "project_slug": "proj",
+            "workflow_key": "wf_pore_c",
+            "sample_name": "POREC_A",
+            "mode": None,
+            "input_type": "bam",
+            "input_directory": "/tmp/porec.bam",
+            "reference_fasta": "/tmp/reference.fa",
+            "reference_genome": ["GRCh38"],
+            "ssh_profile_id": "profile-1",
+            "remote_base_path": "/remote/base",
+        },
+    )
+
+    await run_staging(task)
+
+    assert task.status == "completed"
+    assert task.result["workflow_key"] == "wf_pore_c"
+    assert task.result["workflow_remote_input"].endswith("/.agoutic/wf-pore-c/staged-inputs/input/sample.bam")
+    assert task.result["reference_fasta_remote_path"] == "/remote/base/ref/wf-pore-c/abc123/reference.fa"
+    assert task.result["remote_nextflow_work_dir"] == "/remote/base/proj/.nextflow-work/wf-pore-c/workflow1"
+    assert "wf_pore_c_reference_fasta" in task.result["reference_asset_evidence"]
 
 
 @pytest.mark.asyncio

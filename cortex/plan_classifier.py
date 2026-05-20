@@ -10,6 +10,7 @@ import re
 from typing import TYPE_CHECKING
 
 from common.logging_config import get_logger
+from cortex.config import WF_PORE_C_ENABLED
 from cortex.skill_manifest import compiled_triggers
 
 if TYPE_CHECKING:
@@ -217,6 +218,8 @@ _XGENEPY_PATTERNS = [
 def _detect_plan_type_from_manifests(message: str) -> str | None:
     """Return a plan type from manifest trigger metadata, if any."""
     for manifest, patterns in compiled_triggers():
+        if manifest.key == "run_wf_pore_c" and not WF_PORE_C_ENABLED:
+            continue
         for pattern in patterns:
             if pattern.search(message):
                 return manifest.plan_type or None
@@ -284,6 +287,6 @@ def _detect_plan_type(message: str) -> str | None:
 
 def _is_summarize_results_request(message: str, conv_state: "ConversationState") -> bool:
     return bool(
-        conv_state.work_dir
+        getattr(conv_state, "work_dir", None)
         and re.search(r"(?:summarize|interpret|explain)\s+(?:the\s+)?(?:results?|output|qc)", message, re.I)
     )

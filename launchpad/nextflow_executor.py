@@ -38,6 +38,16 @@ from launchpad.config import (
 
 logger = get_logger(__name__)
 
+
+def _json_safe(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
 _MINIMAL_DOGME_PROFILE = "# Dogme environment profile\n# Add environment variables here if needed\n"
 _DEFAULT_LOCAL_MAX_TASK_CPUS = 12
 _DEFAULT_LOCAL_MAX_TASK_MEMORY_GB = LOCAL_DEFAULT_MAX_TASK_MEMORY_GB
@@ -820,12 +830,194 @@ class NextflowExecutor:
                 marker_path.unlink()
 
         return archived
+
+    def _resolve_local_work_dir(
+        self,
+        *,
+        run_uuid: str,
+        sample_name: str,
+        workflow_index: Optional[int],
+        rerun_in_place: bool,
+        archive_sample_names: Optional[list[str]],
+        user_id: Optional[str],
+        project_id: Optional[str],
+        username: Optional[str],
+        project_slug: Optional[str],
+        resume_from_dir: Optional[str],
+    ) -> tuple[Path, bool]:
+        is_resume = False
+        if resume_from_dir:
+            resume_path = Path(resume_from_dir)
+            if resume_path.exists() and resume_path.is_dir():
+                work_dir = resume_path
+                is_resume = True
+                if rerun_in_place:
+                    archived = self.prepare_rerun_directory(work_dir, archive_sample_names or [sample_name])
+                    logger.info(
+                        "Preparing rerun in existing workflow directory",
+                        work_dir=str(work_dir),
+                        run_uuid=run_uuid,
+                        archived=list(archived.items()),
+                    )
+                else:
+                    for marker in (".nextflow_cancelled", ".nextflow_failed", ".nextflow_running"):
+                        marker_file = work_dir / marker
+                        if marker_file.exists():
+                            marker_file.unlink()
+                logger.info("Resuming in existing workflow directory", work_dir=str(work_dir), run_uuid=run_uuid)
+                return work_dir, is_resume
+
+            logger.warning("resume_from_dir does not exist, creating new workflow dir", resume_from_dir=resume_from_dir)
+
+        if username and project_slug:
+            project_dir = AGOUTIC_DATA / "users" / username / project_slug
+            project_dir.mkdir(parents=True, exist_ok=True)
+            next_n = workflow_index or self._next_workflow_number(project_dir)
+            work_dir = project_dir / self.workflow_dir_name(next_n)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(
+                "Using workflow directory",
+                work_dir=str(work_dir),
+                username=username,
+                project_slug=project_slug,
+                workflow_n=next_n,
+            )
+            return work_dir, is_resume
+
+        if user_id and project_id:
+            work_dir = AGOUTIC_DATA / "users" / user_id / project_id / run_uuid
+            work_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(
+                "Using jailed work directory (legacy UUID)",
+                work_dir=str(work_dir),
+                user_id=user_id,
+                project_id=project_id,
+            )
+            return work_dir, is_resume
+
+        work_dir = self.work_dir / run_uuid
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return work_dir, is_resume
+
+    async def _launch_command(self, *, run_uuid: str, work_dir: Path, cmd: list[str]) -> tuple[str, Path]:
+        launch_cmd = list(cmd)
+        if launch_cmd and launch_cmd[0] == "nextflow":
+            launch_cmd[0] = str(self.nextflow_bin)
+
+        stdout_file = self.logs_dir / f"{run_uuid}_stdout.log"
+        stderr_file = self.logs_dir / f"{run_uuid}_stderr.log"
+
+        running_marker = work_dir / ".nextflow_running"
+        running_marker.write_text(f"Started at {datetime.utcnow().isoformat()}\n")
+
+        if not self.nextflow_bin.exists():
+            raise RuntimeError(f"Nextflow binary not found at: {self.nextflow_bin}")
+
+        try:
+            stdout_file.parent.mkdir(parents=True, exist_ok=True)
+            stderr_file.parent.mkdir(parents=True, exist_ok=True)
+
+            stdout_fd = open(stdout_file, "w", buffering=1)
+            stderr_fd = open(stderr_file, "w", buffering=1)
+
+            launch_marker = work_dir / ".launch_command"
+            launch_marker.write_text(" ".join(launch_cmd) + "\n")
+
+            process = await asyncio.create_subprocess_exec(
+                *launch_cmd,
+                stdout=stdout_fd,
+                stderr=stderr_fd,
+                cwd=work_dir,
+            )
+
+            pid_file = work_dir / ".nextflow_pid"
+            pid_file.write_text(str(process.pid))
+
+            logger.info(
+                "Job submitted",
+                run_uuid=run_uuid,
+                pid=process.pid,
+                command=" ".join(launch_cmd),
+                work_dir=str(work_dir),
+                stdout_log=str(stdout_file),
+                stderr_log=str(stderr_file),
+            )
+
+            asyncio.create_task(self._monitor_process(process, run_uuid, work_dir, stdout_fd, stderr_fd))
+
+            return run_uuid, work_dir
+        except Exception as e:
+            if running_marker.exists():
+                running_marker.unlink()
+
+            error_marker = work_dir / ".launch_error"
+            error_marker.write_text(f"Launch failed: {str(e)}\n{type(e).__name__}")
+
+            raise RuntimeError(f"Failed to submit Nextflow job: {e}")
+
+    async def _submit_generic_workflow(
+        self,
+        *,
+        run_uuid: str,
+        work_dir: Path,
+        workflow_key: str,
+        workflow_executor,
+        request,
+    ) -> tuple[str, Path]:
+        if workflow_executor is None or request is None:
+            raise ValueError(f"workflow_key '{workflow_key}' requires a workflow executor and request context")
+
+        validated_inputs = workflow_executor.validate_inputs(request=request)
+        staged_inputs = workflow_executor.stage_inputs(
+            request=request,
+            work_dir=work_dir,
+            validated_inputs=validated_inputs,
+        )
+        rendered_config = workflow_executor.render_nextflow_config(
+            request=request,
+            work_dir=work_dir,
+            staged_inputs=staged_inputs,
+            validated_inputs=validated_inputs,
+        )
+        rendered_files: dict[str, Path] = {}
+        for relative_path, content in rendered_config.items():
+            file_path = work_dir / relative_path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content)
+            rendered_files[relative_path] = file_path
+
+        metadata_path = work_dir / ".agoutic.workflow.json"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "workflow_key": workflow_key,
+                    "validated_inputs": _json_safe(validated_inputs),
+                    "result_sync_spec": _json_safe(
+                        workflow_executor.result_sync_spec(request=request, validated_inputs=validated_inputs)
+                    ),
+                    "summary_contract": _json_safe(
+                        workflow_executor.summary_contract(request=request, validated_inputs=validated_inputs)
+                    ),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+
+        cmd = workflow_executor.build_command(
+            request=request,
+            work_dir=work_dir,
+            staged_inputs=staged_inputs,
+            rendered_files=rendered_files,
+            validated_inputs=validated_inputs,
+        )
+        return await self._launch_command(run_uuid=run_uuid, work_dir=work_dir, cmd=cmd)
     
     async def submit_job(
         self,
         run_uuid: str,
         sample_name: str,
-        mode: str,
+        mode: str | None,
         input_type: str,
         input_dir: str,
         reference_genome: list,
@@ -847,6 +1039,16 @@ class NextflowExecutor:
         username: Optional[str] = None,
         project_slug: Optional[str] = None,
         resume_from_dir: Optional[str] = None,
+        workflow_key: str = "dogme",
+        workflow_executor=None,
+        request=None,
+        reference_fasta: Optional[str] = None,
+        vcf: Optional[str] = None,
+        sample_sheet: Optional[str] = None,
+        cutter: Optional[str] = None,
+        workflow_repo: Optional[str] = None,
+        workflow_version: Optional[str] = None,
+        output_flags: Optional[dict[str, bool]] = None,
     ) -> tuple[str, Path]:
         """
         Submit a Dogme/Nextflow job.
@@ -866,55 +1068,27 @@ class NextflowExecutor:
         Returns:
             Tuple of (run_uuid, work_directory)
         """
-        # Determine work directory:
-        #   Resume: reuse the previous workflow directory (with -resume flag)
-        #   New: AGOUTIC_DATA/users/{username}/{project_slug}/workflow{N}/
-        #   Fallback (legacy): AGOUTIC_DATA/users/{user_id}/{project_id}/{run_uuid}/
-        #   Fallback (flat):   LAUNCHPAD_WORK_DIR/{run_uuid}/
-        is_resume = False
-        if resume_from_dir:
-            resume_path = Path(resume_from_dir)
-            if resume_path.exists() and resume_path.is_dir():
-                work_dir = resume_path
-                is_resume = True
-                if rerun_in_place:
-                    archived = self.prepare_rerun_directory(work_dir, archive_sample_names or [sample_name])
-                    logger.info(
-                        "Preparing rerun in existing workflow directory",
-                        work_dir=str(work_dir),
-                        run_uuid=run_uuid,
-                        archived=list(archived.items()),
-                    )
-                else:
-                    # Clean up old cancellation/failure markers so the run starts fresh
-                    for marker in (".nextflow_cancelled", ".nextflow_failed", ".nextflow_running"):
-                        marker_file = work_dir / marker
-                        if marker_file.exists():
-                            marker_file.unlink()
-                logger.info("Resuming in existing workflow directory",
-                           work_dir=str(work_dir), run_uuid=run_uuid)
-            else:
-                logger.warning("resume_from_dir does not exist, creating new workflow dir",
-                              resume_from_dir=resume_from_dir)
+        work_dir, is_resume = self._resolve_local_work_dir(
+            run_uuid=run_uuid,
+            sample_name=sample_name,
+            workflow_index=workflow_index,
+            rerun_in_place=rerun_in_place,
+            archive_sample_names=archive_sample_names,
+            user_id=user_id,
+            project_id=project_id,
+            username=username,
+            project_slug=project_slug,
+            resume_from_dir=resume_from_dir,
+        )
 
-        if not is_resume:
-            if username and project_slug:
-                # Human-readable path — compute next workflow number
-                project_dir = AGOUTIC_DATA / "users" / username / project_slug
-                project_dir.mkdir(parents=True, exist_ok=True)
-                next_n = workflow_index or self._next_workflow_number(project_dir)
-                work_dir = project_dir / self.workflow_dir_name(next_n)
-                work_dir.mkdir(parents=True, exist_ok=True)
-                logger.info("Using workflow directory", work_dir=str(work_dir),
-                           username=username, project_slug=project_slug, workflow_n=next_n)
-            elif user_id and project_id:
-                work_dir = AGOUTIC_DATA / "users" / user_id / project_id / run_uuid
-                work_dir.mkdir(parents=True, exist_ok=True)
-                logger.info("Using jailed work directory (legacy UUID)", work_dir=str(work_dir),
-                           user_id=user_id, project_id=project_id)
-            else:
-                work_dir = self.work_dir / run_uuid
-                work_dir.mkdir(parents=True, exist_ok=True)
+        if workflow_key != "dogme":
+            return await self._submit_generic_workflow(
+                run_uuid=run_uuid,
+                work_dir=work_dir,
+                workflow_key=workflow_key,
+                workflow_executor=workflow_executor,
+                request=request,
+            )
         
         # Setup input files based on entry point and input type
         if entry_point == "basecall":
@@ -1090,14 +1264,6 @@ class NextflowExecutor:
         config_path = work_dir / "nextflow.config"
         NextflowConfig.write_config_file(config_string, config_path)
         
-        # Log files for stdout/stderr
-        stdout_file = self.logs_dir / f"{run_uuid}_stdout.log"
-        stderr_file = self.logs_dir / f"{run_uuid}_stderr.log"
-        
-        # Create running marker
-        running_marker = work_dir / ".nextflow_running"
-        running_marker.write_text(f"Started at {datetime.utcnow().isoformat()}\n")
-        
         # Build Nextflow command
         # Note: Nextflow automatically creates .nextflow.log in the working directory
         cmd = [
@@ -1130,57 +1296,10 @@ class NextflowExecutor:
             cmd.append(rerun_flag)
             logger.info("Adding workflow reuse flag", flag=rerun_flag, work_dir=str(work_dir))
         
-        # Validate prerequisites before attempting launch
-        if not self.nextflow_bin.exists():
-            raise RuntimeError(f"Nextflow binary not found at: {self.nextflow_bin}")
-        
         if not (DOGME_REPO / "dogme.nf").exists():
             raise RuntimeError(f"Dogme dogme.nf not found at: {DOGME_REPO / 'dogme.nf'}")
-        
-        # Submit job as background process
-        try:
-            # Create log files and open for writing
-            stdout_file.parent.mkdir(parents=True, exist_ok=True)
-            stderr_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Open file descriptors
-            stdout_fd = open(stdout_file, "w", buffering=1)  # Line buffered
-            stderr_fd = open(stderr_file, "w", buffering=1)
-            
-            # Also write a launch marker with the command
-            launch_marker = work_dir / ".launch_command"
-            launch_marker.write_text(" ".join(cmd) + "\n")
-            
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=stdout_fd,
-                stderr=stderr_fd,
-                cwd=work_dir,  # Run in work directory so launchDir is correct
-            )
-            
-            # Store PID for tracking
-            pid_file = work_dir / ".nextflow_pid"
-            pid_file.write_text(str(process.pid))
-            
-            logger.info("Job submitted", run_uuid=run_uuid, pid=process.pid,
-                        command=" ".join(cmd), work_dir=str(work_dir),
-                        stdout_log=str(stdout_file), stderr_log=str(stderr_file))
-            
-            # Start background task to monitor process completion
-            asyncio.create_task(self._monitor_process(process, run_uuid, work_dir, stdout_fd, stderr_fd))
-            
-            return run_uuid, work_dir
-            
-        except Exception as e:
-            # Clean up running marker on failure
-            if running_marker.exists():
-                running_marker.unlink()
-            
-            # Write error to marker file
-            error_marker = work_dir / ".launch_error"
-            error_marker.write_text(f"Launch failed: {str(e)}\n{type(e).__name__}")
-            
-            raise RuntimeError(f"Failed to submit Nextflow job: {e}")
+
+        return await self._launch_command(run_uuid=run_uuid, work_dir=work_dir, cmd=cmd)
     
     async def _monitor_process(self, process, run_uuid: str, work_dir: Path, stdout_f, stderr_f):
         """Background task to monitor process completion and create marker files."""

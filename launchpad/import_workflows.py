@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import re
 import shlex
@@ -9,14 +10,28 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from common.logging_config import get_logger
+from launchpad import config as launchpad_config
 from launchpad.config import REFERENCE_GENOMES
 
 
 logger = get_logger(__name__)
 
 
-RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "kallisto", "openChromatin", "stats")
-RESULT_SYNC_FILE_PATTERNS = ("*.config", "*.html", "*.txt", "*.csv", "*.tsv")
+_DOGME_RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "kallisto", "openChromatin", "stats")
+_WF_PORE_C_RESULT_SYNC_DIRS = (
+    "pairs",
+    "cooler",
+    "hi-c",
+    "ingress_results",
+    "paired_end",
+    "paireds",
+    "chromunity",
+    "filtered_out",
+)
+_DOGME_RESULT_SYNC_FILE_PATTERNS = ("*.config", "*.html", "*.txt", "*.csv", "*.tsv")
+_WF_PORE_C_RESULT_SYNC_FILE_PATTERNS = ("wf-pore-c-report.html", ".agoutic.workflow.json", "*.html", "*.txt", "*.csv", "*.tsv")
+RESULT_SYNC_DIRS = _DOGME_RESULT_SYNC_DIRS
+RESULT_SYNC_FILE_PATTERNS = _DOGME_RESULT_SYNC_FILE_PATTERNS
 
 _CONFIG_ASSIGNMENT_RE = r"^\s*{name}\s*=\s*(['\"])(.*?)\1\s*$"
 _GENOME_NAME_RE = re.compile(r"\[name:\s*'([^']+)'", re.IGNORECASE)
@@ -32,6 +47,7 @@ _PARTIAL_MARKERS = (
 
 @dataclass(frozen=True)
 class WorkflowImportMetadata:
+    workflow_key: str
     sample_name: str | None
     mode: str | None
     reference_genome: list[str]
@@ -70,6 +86,13 @@ def parse_dogme_nextflow_config_text(config_text: str) -> dict[str, object]:
 
 
 def infer_local_workflow_metadata(workflow_dir: Path) -> WorkflowImportMetadata:
+    workflow_metadata = _infer_local_workflow_metadata_json(workflow_dir)
+    if workflow_metadata is not None:
+        return workflow_metadata
+
+    # TODO(Phase 3): Add file-tree pattern fallback detection for foreign or
+    # pre-metadata wf-pore-c output trees that do not carry .agoutic.workflow.json.
+
     config_path = find_local_workflow_config(workflow_dir)
     if config_path is None:
         raise ValueError(
@@ -79,6 +102,7 @@ def infer_local_workflow_metadata(workflow_dir: Path) -> WorkflowImportMetadata:
 
     parsed = parse_dogme_nextflow_config_text(config_path.read_text(encoding="utf-8", errors="ignore"))
     return WorkflowImportMetadata(
+        workflow_key="dogme",
         sample_name=_clean_optional_text(parsed.get("sample_name")),
         mode=_clean_optional_text(parsed.get("mode")),
         reference_genome=_normalize_reference_genome_list(parsed.get("reference_genome")),
@@ -90,6 +114,10 @@ def infer_local_workflow_metadata(workflow_dir: Path) -> WorkflowImportMetadata:
 
 
 async def infer_remote_workflow_metadata(conn, workflow_dir: str) -> WorkflowImportMetadata:
+    workflow_metadata = await _infer_remote_workflow_metadata_json(conn, workflow_dir)
+    if workflow_metadata is not None:
+        return workflow_metadata
+
     config_path = await find_remote_workflow_config(conn, workflow_dir)
     if not config_path:
         raise ValueError(
@@ -100,6 +128,7 @@ async def infer_remote_workflow_metadata(conn, workflow_dir: str) -> WorkflowImp
     result = await conn.run(f"cat {shlex.quote(config_path)}", check=True)
     parsed = parse_dogme_nextflow_config_text(result.stdout or "")
     return WorkflowImportMetadata(
+        workflow_key="dogme",
         sample_name=_clean_optional_text(parsed.get("sample_name")),
         mode=_clean_optional_text(parsed.get("mode")),
         reference_genome=_normalize_reference_genome_list(parsed.get("reference_genome")),
@@ -152,7 +181,7 @@ async def find_remote_workflow_config(conn, workflow_dir: str) -> str | None:
     return nextflow_candidates[0] if nextflow_candidates else candidates[0]
 
 
-def discover_local_result_artifacts(source_dir: Path, *, full_copy: bool) -> dict[str, list[str]]:
+def discover_local_result_artifacts(source_dir: Path, *, full_copy: bool, workflow_key: str | None = None) -> dict[str, list[str]]:
     if full_copy:
         directories = sorted(
             child.name
@@ -166,17 +195,28 @@ def discover_local_result_artifacts(source_dir: Path, *, full_copy: bool) -> dic
         )
         return {"directories": directories, "files": files}
 
-    directories = [dirname for dirname in RESULT_SYNC_DIRS if (source_dir / dirname).exists()]
+    effective_workflow_key = _infer_local_result_workflow_key(source_dir, workflow_key=workflow_key)
+    directories = [
+        dirname
+        for dirname in result_sync_dirs_for_workflow(effective_workflow_key)
+        if (source_dir / dirname).exists()
+    ]
     files = [
         child.name
         for child in sorted(source_dir.iterdir(), key=lambda item: item.name.lower())
-        if (child.is_file() or child.is_symlink()) and _matches_result_file_pattern(child.name)
+        if (child.is_file() or child.is_symlink()) and _matches_result_file_pattern(child.name, workflow_key=effective_workflow_key)
     ]
     return {"directories": directories, "files": files}
 
 
-def copy_local_results_to_workflow(source_dir: Path, destination_dir: Path, *, full_copy: bool) -> dict[str, list[str]]:
-    artifacts = discover_local_result_artifacts(source_dir, full_copy=full_copy)
+def copy_local_results_to_workflow(
+    source_dir: Path,
+    destination_dir: Path,
+    *,
+    full_copy: bool,
+    workflow_key: str | None = None,
+) -> dict[str, list[str]]:
+    artifacts = discover_local_result_artifacts(source_dir, full_copy=full_copy, workflow_key=workflow_key)
     destination_dir.mkdir(parents=True, exist_ok=True)
 
     if full_copy:
@@ -270,8 +310,107 @@ def _clean_optional_text(value, *, preserve_empty: bool = False) -> str | None:
     return cleaned
 
 
-def _matches_result_file_pattern(filename: str) -> bool:
-    return any(fnmatch.fnmatch(filename, pattern) for pattern in RESULT_SYNC_FILE_PATTERNS)
+def _infer_local_workflow_metadata_json(workflow_dir: Path) -> WorkflowImportMetadata | None:
+    metadata_path = workflow_dir / ".agoutic.workflow.json"
+    if not metadata_path.is_file():
+        return None
+
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Failed to parse local workflow metadata", path=str(metadata_path), exc_info=True)
+        return None
+
+    summary_contract = payload.get("summary_contract") if isinstance(payload, dict) else {}
+    if not isinstance(summary_contract, dict):
+        summary_contract = {}
+    validated_inputs = payload.get("validated_inputs") if isinstance(payload, dict) else {}
+    if not isinstance(validated_inputs, dict):
+        validated_inputs = {}
+
+    workflow_key = _clean_optional_text(payload.get("workflow_key")) or _clean_optional_text(summary_contract.get("workflow_key"))
+    if workflow_key != "wf_pore_c":
+        return None
+
+    return WorkflowImportMetadata(
+        workflow_key="wf_pore_c",
+        sample_name=_clean_optional_text(summary_contract.get("sample_name")) or _clean_optional_text(validated_inputs.get("sample_name")),
+        mode=None,
+        reference_genome=_infer_reference_genomes_from_paths(json.dumps(validated_inputs, sort_keys=True)),
+        modifications=None,
+        config_path=str(metadata_path),
+        source_complete=_infer_local_workflow_complete(workflow_dir),
+        input_directory=_clean_optional_text(validated_inputs.get("input_path")),
+    )
+
+
+async def _infer_remote_workflow_metadata_json(conn, workflow_dir: str) -> WorkflowImportMetadata | None:
+    metadata_path = str(PurePosixPath(workflow_dir) / ".agoutic.workflow.json")
+    if not await conn.path_exists(metadata_path):
+        return None
+
+    try:
+        result = await conn.run(f"cat {shlex.quote(metadata_path)}", check=True)
+        payload = json.loads(result.stdout or "")
+    except Exception:
+        logger.warning("Failed to parse remote workflow metadata", path=metadata_path, exc_info=True)
+        return None
+
+    summary_contract = payload.get("summary_contract") if isinstance(payload, dict) else {}
+    if not isinstance(summary_contract, dict):
+        summary_contract = {}
+    validated_inputs = payload.get("validated_inputs") if isinstance(payload, dict) else {}
+    if not isinstance(validated_inputs, dict):
+        validated_inputs = {}
+
+    workflow_key = _clean_optional_text(payload.get("workflow_key")) or _clean_optional_text(summary_contract.get("workflow_key"))
+    if workflow_key != "wf_pore_c" or not bool(launchpad_config.WF_PORE_C_ENABLED):
+        return None
+
+    return WorkflowImportMetadata(
+        workflow_key="wf_pore_c",
+        sample_name=_clean_optional_text(summary_contract.get("sample_name")) or _clean_optional_text(validated_inputs.get("sample_name")),
+        mode=None,
+        reference_genome=_infer_reference_genomes_from_paths(json.dumps(validated_inputs, sort_keys=True)),
+        modifications=None,
+        config_path=metadata_path,
+        source_complete=await _infer_remote_workflow_complete(conn, workflow_dir),
+        input_directory=_clean_optional_text(validated_inputs.get("input_path")),
+    )
+
+
+def _infer_local_result_workflow_key(source_dir: Path, *, workflow_key: str | None) -> str | None:
+    normalized = _normalize_workflow_key(workflow_key)
+    if normalized:
+        return normalized
+    metadata = _infer_local_workflow_metadata_json(source_dir)
+    return metadata.workflow_key if metadata is not None else None
+
+
+def result_sync_dirs_for_workflow(workflow_key: str | None) -> tuple[str, ...]:
+    normalized = _normalize_workflow_key(workflow_key)
+    if normalized == "wf_pore_c" and bool(launchpad_config.WF_PORE_C_ENABLED):
+        return _WF_PORE_C_RESULT_SYNC_DIRS
+    return _DOGME_RESULT_SYNC_DIRS
+
+
+def result_sync_file_patterns_for_workflow(workflow_key: str | None) -> tuple[str, ...]:
+    normalized = _normalize_workflow_key(workflow_key)
+    if normalized == "wf_pore_c" and bool(launchpad_config.WF_PORE_C_ENABLED):
+        return tuple(dict.fromkeys(_WF_PORE_C_RESULT_SYNC_FILE_PATTERNS))
+    return _DOGME_RESULT_SYNC_FILE_PATTERNS
+
+
+def _matches_result_file_pattern(filename: str, *, workflow_key: str | None) -> bool:
+    return any(
+        fnmatch.fnmatch(filename, pattern)
+        for pattern in result_sync_file_patterns_for_workflow(workflow_key)
+    )
+
+
+def _normalize_workflow_key(value: str | None) -> str | None:
+    cleaned = str(value or "").strip().lower()
+    return cleaned or None
 
 
 def _copy_path(source: Path, destination: Path) -> None:

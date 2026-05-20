@@ -97,13 +97,18 @@ class AnalysisSummary(BaseModel):
     """Complete analysis summary for a job."""
     run_uuid: str = ""
     sample_name: str
-    mode: str  # DNA/RNA/CDNA
+    workflow_key: str = "dogme"
+    mode: Optional[str] = None
     status: str
     work_dir: str
     file_summary: JobFileSummary  # Filtered key files
     all_file_counts: Dict[str, int] = Field(default_factory=dict)  # Counts for all files
     key_results: Dict[str, Any] = Field(default_factory=dict)
     parsed_reports: Dict[str, Any] = Field(default_factory=dict)
+    summary_contract: Dict[str, Any] = Field(default_factory=dict)
+    result_sync_spec: Dict[str, Any] = Field(default_factory=dict)
+    workflow_summary: Dict[str, Any] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
 
 
 class ParsedXgenePyOutputs(BaseModel):

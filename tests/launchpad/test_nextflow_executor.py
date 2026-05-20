@@ -1,8 +1,13 @@
 """Tests for launchpad/nextflow_executor.py."""
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 import launchpad.nextflow_executor as nextflow_module
+from launchpad import config as launchpad_config
 from launchpad.config import (
     REFERENCE_GENOMES,
     DOGME_DNA_MODKITBASE,
@@ -24,6 +29,7 @@ from launchpad.nextflow_executor import (
     resolve_local_max_task_memory_gb,
     resolve_slurm_cpu_memory_gb,
 )
+from launchpad.workflow_executors import get_workflow_executor
 
 
 class TestGenerateConfig:
@@ -211,8 +217,9 @@ class TestGenerateConfig:
             execution_mode="local",
         )
 
-        assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12" in config
-        assert "withName: 'minimapTask' {\n        cpus = 12\n        memory = '64 GB'" in config
+        expected_local_cpus = resolve_local_max_task_cpus(None)
+        assert f"withName: 'modkitTask' {{\n        memory = '64 GB'\n        cpus = {expected_local_cpus}" in config
+        assert f"withName: 'minimapTask' {{\n        cpus = {expected_local_cpus}\n        memory = '64 GB'" in config
 
     def test_local_execution_caps_task_cpu_and_memory_requests(self):
         config = NextflowConfig.generate_config(
@@ -568,3 +575,208 @@ class TestNextWorkflowNumber:
         (project_dir / "workflow3.txt").write_text("not a dir")
 
         assert NextflowExecutor._next_workflow_number(project_dir) == 10
+
+
+class TestGenericWorkflowSubmission:
+    @pytest.mark.asyncio
+    async def test_submit_job_uses_workflow_executor_contract_for_wf_pore_c(self, monkeypatch, tmp_path):
+        agoutic_data = tmp_path / "agoutic-data"
+        nextflow_bin = tmp_path / "bin" / "nextflow"
+        nextflow_bin.parent.mkdir(parents=True, exist_ok=True)
+        nextflow_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        input_path = tmp_path / "inputs" / "sample.fastq.gz"
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        input_path.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        reference_fasta = tmp_path / "refs" / "reference.fa"
+        reference_fasta.parent.mkdir(parents=True, exist_ok=True)
+        reference_fasta.write_text(">chr1\nACGT\n", encoding="utf-8")
+
+        captured: dict[str, object] = {}
+
+        class _FakeProcess:
+            pid = 4321
+
+            async def wait(self):
+                return 0
+
+        async def fake_subprocess_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["cwd"] = kwargs["cwd"]
+            return _FakeProcess()
+
+        def fake_create_task(coro):
+            captured.setdefault("tasks", []).append(coro)
+            coro.close()
+            return SimpleNamespace()
+
+        monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", True)
+        monkeypatch.setattr(nextflow_module, "AGOUTIC_DATA", agoutic_data)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_subprocess_exec", fake_subprocess_exec)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_task", fake_create_task)
+
+        executor = NextflowExecutor()
+        executor.nextflow_bin = nextflow_bin
+        executor.work_dir = tmp_path / "launchpad-work"
+        executor.work_dir.mkdir(parents=True, exist_ok=True)
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        request = SimpleNamespace(
+            sample_name="POREC_A",
+            mode=None,
+            input_directory=str(input_path),
+            input_type="fastq",
+            reference_fasta=str(reference_fasta),
+            vcf=None,
+            sample_sheet=None,
+            cutter="NlaIII",
+            workflow_repo=None,
+            workflow_version=None,
+            output_flags={"pairs": True, "mcool": True},
+            output_directory=None,
+        )
+
+        workflow_executor = get_workflow_executor("wf_pore_c")
+
+        run_uuid, work_dir = await executor.submit_job(
+            run_uuid="run-pore-c",
+            workflow_key="wf_pore_c",
+            workflow_executor=workflow_executor,
+            request=request,
+            sample_name="POREC_A",
+            mode=None,
+            input_type="fastq",
+            input_dir=str(input_path),
+            reference_genome=["GRCh38"],
+            workflow_index=1,
+            username="alice",
+            project_slug="proj-1",
+        )
+
+        expected_work_dir = agoutic_data / "users" / "alice" / "proj-1" / "workflow1"
+        expected_work_path = agoutic_data / "users" / "alice" / "proj-1" / ".nextflow-work" / "wf-pore-c" / "workflow1"
+        staged_input = expected_work_dir / ".agoutic" / "wf-pore-c" / "staged-inputs" / "input" / input_path.name
+        staged_reference = expected_work_dir / ".agoutic" / "wf-pore-c" / "staged-inputs" / "reference" / reference_fasta.name
+
+        assert run_uuid == "run-pore-c"
+        assert work_dir == expected_work_dir
+        assert captured["cmd"][:5] == [
+            str(nextflow_bin),
+            "run",
+            "epi2me-labs/wf-pore-c",
+            "-r",
+            "v1.3.1",
+        ]
+        assert "--ref" in captured["cmd"]
+        assert str(staged_reference) in captured["cmd"]
+        assert "--sample" in captured["cmd"]
+        assert str(staged_input) in captured["cmd"]
+        assert "-work-dir" in captured["cmd"]
+        assert str(expected_work_path) in captured["cmd"]
+        assert expected_work_path.parent.exists()
+        assert not str(expected_work_path).startswith(str(expected_work_dir) + "/")
+        assert staged_input.is_symlink()
+        assert staged_reference.is_symlink()
+        assert not (work_dir / "dogme.profile").exists()
+        assert (work_dir / ".agoutic" / "wf-pore-c" / "submit-config.json").exists()
+        assert (work_dir / ".launch_command").exists()
+        assert (work_dir / ".nextflow_pid").read_text() == "4321"
+
+        metadata = json.loads((work_dir / ".agoutic.workflow.json").read_text())
+        assert metadata["workflow_key"] == "wf_pore_c"
+        assert metadata["summary_contract"]["workflow_key"] == "wf_pore_c"
+        assert metadata["result_sync_spec"]["report_filename"] == "wf-pore-c-report.html"
+
+    @pytest.mark.asyncio
+    async def test_submit_job_copies_staged_input_when_symlink_rejected(self, monkeypatch, tmp_path):
+        agoutic_data = tmp_path / "agoutic-data"
+        nextflow_bin = tmp_path / "bin" / "nextflow"
+        nextflow_bin.parent.mkdir(parents=True, exist_ok=True)
+        nextflow_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        input_path = tmp_path / "inputs" / "sample.fastq.gz"
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        input_path.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        reference_fasta = tmp_path / "refs" / "reference.fa"
+        reference_fasta.parent.mkdir(parents=True, exist_ok=True)
+        reference_fasta.write_text(">chr1\nACGT\n", encoding="utf-8")
+
+        captured: dict[str, object] = {}
+        symlink_attempts: list[tuple[str, str]] = []
+
+        class _FakeProcess:
+            pid = 9876
+
+            async def wait(self):
+                return 0
+
+        async def fake_subprocess_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["cwd"] = kwargs["cwd"]
+            return _FakeProcess()
+
+        def fake_create_task(coro):
+            captured.setdefault("tasks", []).append(coro)
+            coro.close()
+            return SimpleNamespace()
+
+        def rejecting_symlink(src, dst, target_is_directory=False):
+            symlink_attempts.append((src, dst))
+            raise OSError("EPERM")
+
+        monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", True)
+        monkeypatch.setattr(nextflow_module, "AGOUTIC_DATA", agoutic_data)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_subprocess_exec", fake_subprocess_exec)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_task", fake_create_task)
+        monkeypatch.setattr("launchpad.workflow_executors.wf_pore_c.os.symlink", rejecting_symlink)
+
+        executor = NextflowExecutor()
+        executor.nextflow_bin = nextflow_bin
+        executor.work_dir = tmp_path / "launchpad-work"
+        executor.work_dir.mkdir(parents=True, exist_ok=True)
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        request = SimpleNamespace(
+            sample_name="POREC_A",
+            mode=None,
+            input_directory=str(input_path),
+            input_type="fastq",
+            reference_fasta=str(reference_fasta),
+            vcf=None,
+            sample_sheet=None,
+            cutter="NlaIII",
+            workflow_repo=None,
+            workflow_version=None,
+            output_flags={"pairs": True, "mcool": True},
+            output_directory=None,
+        )
+
+        workflow_executor = get_workflow_executor("wf_pore_c")
+
+        run_uuid, work_dir = await executor.submit_job(
+            run_uuid="run-pore-c-copy",
+            workflow_key="wf_pore_c",
+            workflow_executor=workflow_executor,
+            request=request,
+            sample_name="POREC_A",
+            mode=None,
+            input_type="fastq",
+            input_dir=str(input_path),
+            reference_genome=["GRCh38"],
+            workflow_index=1,
+            username="alice",
+            project_slug="proj-1",
+        )
+
+        staged_input = work_dir / ".agoutic" / "wf-pore-c" / "staged-inputs" / "input" / input_path.name
+
+        assert run_uuid == "run-pore-c-copy"
+        assert symlink_attempts
+        assert staged_input.exists()
+        assert not staged_input.is_symlink()
+        assert staged_input.read_text(encoding="utf-8") == input_path.read_text(encoding="utf-8")
+        assert str(staged_input) in captured["cmd"]

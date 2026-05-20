@@ -60,6 +60,7 @@ from cortex.plan_templates import (  # noqa: F401 — re-exported
     _template_remote_stage_workflow,
     _template_run_de_pipeline,
     _template_run_enrichment,
+    _template_run_wf_pore_c,
     _template_run_workflow,
     _template_run_xgenepy_analysis,
     _template_search_compare_to_local,
@@ -186,6 +187,8 @@ def _deterministic_template_for_plan_type(plan_type: str, params: dict) -> dict 
         return _template_search_compare_to_local(params)
     if plan_type == "run_workflow":
         return _template_run_workflow(params)
+    if plan_type == "run_wf_pore_c":
+        return _template_run_wf_pore_c(params)
     if plan_type == "run_de_pipeline":
         return _template_run_de_pipeline(params)
     if plan_type == "run_enrichment":
@@ -239,6 +242,7 @@ _PLANNER_APPROVAL_STEP_KINDS = frozenset({
 
 _PLANNER_ALLOWED_STEP_KINDS = frozenset({
     "LOCATE_DATA",
+    "VALIDATE_INPUTS",
     "SEARCH_ENCODE",
     "DOWNLOAD_DATA",
     "SUBMIT_WORKFLOW",
@@ -702,6 +706,14 @@ def generate_plan(
     if plan_type == "run_workflow":
         plan = _apply_manifest_planning_metadata(
             _template_run_workflow(params),
+            plan_type=plan_type,
+            params=params,
+        )
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return _finalize_plan(plan, conv_state)
+    if plan_type == "run_wf_pore_c":
+        plan = _apply_manifest_planning_metadata(
+            _template_run_wf_pore_c(params),
             plan_type=plan_type,
             params=params,
         )

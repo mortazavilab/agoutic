@@ -11,7 +11,7 @@ from common import MCPHttpClient
 from common.logging_config import get_logger
 from cortex.agent_engine import AgentEngine
 from cortex.analysis_helpers import _build_auto_analysis_context, _build_static_analysis_summary
-from cortex.config import get_service_url
+from cortex.config import WF_PORE_C_ENABLED, get_service_url
 from cortex.db import SessionLocal
 from cortex.db_helpers import _create_block_internal, save_conversation_message
 from cortex.llm_validators import get_block_payload
@@ -25,6 +25,11 @@ _TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
 _JOB_STATUS_CACHE_MAX_AGE_SECONDS = 5.0
 _ACTIVE_RESULT_SYNC_STATES = {"pending_import", "downloading_outputs"}
 _latest_job_status_by_run_uuid: dict[str, dict] = {}
+
+
+def _normalized_workflow_key(value: str | None) -> str:
+    normalized = str(value or "dogme").strip().lower()
+    return normalized or "dogme"
 
 
 def _job_status_has_useful_progress(status_data: dict | None) -> bool:
@@ -377,9 +382,10 @@ async def _auto_trigger_analysis(
     mode = job_payload.get("mode", "DNA")
     model_key = job_payload.get("model", "default")
     work_directory = job_payload.get("work_directory", "")
+    workflow_key = _normalized_workflow_key(job_payload.get("workflow_key"))
 
     logger.info("Auto-triggering analysis", run_uuid=run_uuid,
-                sample_name=sample_name, mode=mode, model=model_key)
+                sample_name=sample_name, mode=mode, workflow_key=workflow_key, model=model_key)
 
     session = SessionLocal()
     try:
@@ -427,6 +433,7 @@ async def _auto_trigger_analysis(
                 )
                 if not isinstance(summary_data, dict):
                     summary_data = {}
+                workflow_key = _normalized_workflow_key(summary_data.get("workflow_key") or workflow_key)
 
                 # Parse key CSV files for the LLM
                 # Prioritise small, high-value files: final_stats, qc_summary
@@ -465,17 +472,22 @@ async def _auto_trigger_analysis(
         except Exception as e:
             logger.warning("Failed to fetch analysis summary", run_uuid=run_uuid, error=str(e))
 
-        # 3. Map mode -> Dogme analysis skill
+        # 3. Route auto-analysis by workflow identity with wf-pore-c gated.
         mode_skill_map = {
             "DNA": "run_dogme_dna",
             "RNA": "run_dogme_rna",
             "CDNA": "run_dogme_cdna",
         }
-        analysis_skill = mode_skill_map.get(mode.upper(), "analyze_job_results")
+        wf_pore_c_enabled = WF_PORE_C_ENABLED and workflow_key == "wf_pore_c"
+        if wf_pore_c_enabled:
+            analysis_skill = "analyze_job_results"
+        else:
+            analysis_skill = mode_skill_map.get(str(mode or "").upper(), "analyze_job_results")
 
         # 4. Build data context string for the LLM
         data_context = _build_auto_analysis_context(
-            sample_name, mode, run_uuid, summary_data, parsed_csvs
+            sample_name, mode, run_uuid, summary_data, parsed_csvs,
+            wf_pore_c_enabled=wf_pore_c_enabled,
         )
 
         # 5. Call the LLM for an intelligent interpretation
@@ -484,25 +496,45 @@ async def _auto_trigger_analysis(
         engine = None
         try:
             engine = AgentEngine(model_key=model_key)
-            user_prompt = (
-                f"A Dogme {mode} job for sample \"{sample_name}\" just completed.\n"
-                f"Work directory: {work_directory}\n\n"
-                f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
-                f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
-                f"Use only the supplied analysis data, and prefer concrete metrics and filenames over generalities.\n\n"
-                f"Here is the analysis summary and key result data:\n\n"
-                f"{data_context}\n\n"
-                f"Write a structured markdown report with these sections when the data support them:\n"
-                f"1. Overall Assessment\n"
-                f"2. Key Metrics\n"
-                f"3. Reference-Specific Findings (separate subsections if multiple genomes are present)\n"
-                f"4. QC Concerns or Limitations\n"
-                f"5. Recommended Next Steps\n"
-                f"6. Notable Output Files\n\n"
-                f"Call out whether sequencing depth or yield is adequate for downstream interpretation, "
-                f"name any obvious failure modes, and mention the most relevant QC/statistics files explicitly. "
-                f"If the data are sparse, say that clearly, but still explain what can and cannot be concluded."
-            )
+            if wf_pore_c_enabled:
+                user_prompt = (
+                    f"A wf-pore-c job for sample \"{sample_name}\" just completed.\n"
+                    f"Work directory: {work_directory}\n\n"
+                    f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                    f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                    f"Use only the supplied analysis data, and prefer concrete metrics, artifact presence, warnings, and filenames over generalities.\n\n"
+                    f"Here is the analysis summary and key result data:\n\n"
+                    f"{data_context}\n\n"
+                    f"Write a structured markdown report with these sections when the data support them:\n"
+                    f"1. Overall Assessment\n"
+                    f"2. Contact Map Outputs\n"
+                    f"3. pairs.stats.txt Metrics\n"
+                    f"4. Missing Outputs or Warnings\n"
+                    f"5. Recommended Next Steps\n"
+                    f"6. Notable Output Files\n\n"
+                    f"Be explicit about requested outputs that are present or missing, mention the revision, reference, cutter, and sample alias when available, "
+                    f"and clearly state when metrics are sparse or incomplete."
+                )
+            else:
+                user_prompt = (
+                    f"A Dogme {mode} job for sample \"{sample_name}\" just completed.\n"
+                    f"Work directory: {work_directory}\n\n"
+                    f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                    f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                    f"Use only the supplied analysis data, and prefer concrete metrics and filenames over generalities.\n\n"
+                    f"Here is the analysis summary and key result data:\n\n"
+                    f"{data_context}\n\n"
+                    f"Write a structured markdown report with these sections when the data support them:\n"
+                    f"1. Overall Assessment\n"
+                    f"2. Key Metrics\n"
+                    f"3. Reference-Specific Findings (separate subsections if multiple genomes are present)\n"
+                    f"4. QC Concerns or Limitations\n"
+                    f"5. Recommended Next Steps\n"
+                    f"6. Notable Output Files\n\n"
+                    f"Call out whether sequencing depth or yield is adequate for downstream interpretation, "
+                    f"name any obvious failure modes, and mention the most relevant QC/statistics files explicitly. "
+                    f"If the data are sparse, say that clearly, but still explain what can and cannot be concluded."
+                )
             llm_md, llm_usage = await run_in_threadpool(
                 engine.think,
                 user_prompt,
@@ -525,23 +557,39 @@ async def _auto_trigger_analysis(
         if llm_md:
             # LLM succeeded -- prepend a header and append exploration hints
             _wf_name = work_directory.rstrip("/").rsplit("/", 1)[-1] if work_directory else ""
-            final_md = (
-                f"### 📊 Analysis: {sample_name}\n"
-                f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
-                f"**Mode:** {mode} &nbsp;|&nbsp; "
-                f"**Status:** COMPLETED\n\n"
-                f"{llm_md}\n\n"
-                f"💡 *You can ask me to dive deeper -- for example:*\n"
-                f"- \"Show me the modification summary\"\n"
-                f"- \"Parse the CSV results\"\n"
-                f"- \"Give me a QC report\"\n"
-            )
+            if wf_pore_c_enabled:
+                workflow_version = ((summary_data.get("workflow_summary") or {}).get("metadata") or {}).get("workflow_version") or "unknown"
+                final_md = (
+                    f"### Contact Map Analysis: {sample_name}\n"
+                    f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
+                    f"**Workflow key:** wf_pore_c &nbsp;|&nbsp; "
+                    f"**Revision:** {workflow_version} &nbsp;|&nbsp; "
+                    f"**Status:** COMPLETED\n\n"
+                    f"{llm_md}\n\n"
+                    f"💡 *You can ask me to dive deeper -- for example:*\n"
+                    f"- \"Show me the pairs stats\"\n"
+                    f"- \"Summarize the contact map outputs\"\n"
+                    f"- \"Which requested outputs are missing?\"\n"
+                )
+            else:
+                final_md = (
+                    f"### 📊 Analysis: {sample_name}\n"
+                    f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
+                    f"**Mode:** {mode} &nbsp;|&nbsp; "
+                    f"**Status:** COMPLETED\n\n"
+                    f"{llm_md}\n\n"
+                    f"💡 *You can ask me to dive deeper -- for example:*\n"
+                    f"- \"Show me the modification summary\"\n"
+                    f"- \"Parse the CSV results\"\n"
+                    f"- \"Give me a QC report\"\n"
+                )
             _model_name = engine.model_name if engine else "system"
         else:
             # Fallback: static template (same as before)
             final_md = _build_static_analysis_summary(
                 sample_name, mode, run_uuid, summary_data,
                 work_directory=work_directory,
+                wf_pore_c_enabled=wf_pore_c_enabled,
             )
             _model_name = "system"
             llm_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}

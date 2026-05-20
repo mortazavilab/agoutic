@@ -31,12 +31,18 @@ if TYPE_CHECKING:
     from launchpad.backends.staging_worker import StagingTaskState
 
 
+def _effective_workflow_key(value: str | None) -> str:
+    cleaned = str(value or "").strip().lower()
+    return cleaned or "dogme"
+
+
 def job_to_dict(job: DogmeJob) -> dict:
     """Convert DogmeJob row to dictionary."""
     imported_source_complete = getattr(job, "imported_source_complete", None)
     return {
         "run_uuid": job.run_uuid,
         "project_id": job.project_id,
+        "workflow_key": _effective_workflow_key(getattr(job, "workflow_key", None)),
         "workflow_index": job.workflow_index,
         "workflow_alias": job.workflow_alias,
         "workflow_folder_name": job.workflow_folder_name,
@@ -77,12 +83,13 @@ async def create_job(
     run_uuid: str,
     project_id: str,
     sample_name: str,
-    mode: str,
+    mode: str | None,
     input_directory: str,
     reference_genome: str | list | None = None,
     modifications: str | None = None,
     parent_block_id: str | None = None,
     user_id: str | None = None,
+    workflow_key: str | None = None,
     workflow_index: int | None = None,
     workflow_alias: str | None = None,
     workflow_folder_name: str | None = None,
@@ -101,6 +108,7 @@ async def create_job(
         run_uuid=run_uuid,
         project_id=project_id,
         user_id=user_id,
+        workflow_key=_effective_workflow_key(workflow_key),
         workflow_index=workflow_index,
         workflow_alias=workflow_alias,
         workflow_folder_name=workflow_folder_name,

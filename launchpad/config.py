@@ -36,6 +36,7 @@ from common.database import DATABASE_URL  # noqa: E402
 
 # Internal API secret for Cortex <-> Launchpad communication
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+WF_PORE_C_ENABLED = os.getenv("WF_PORE_C_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 # --- NEXTFLOW / DOGME CONFIG (derived from AGOUTIC_CODE) ---
 # Path to Dogme pipeline repository

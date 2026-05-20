@@ -501,8 +501,12 @@ class TestUploadFiles:
         body = resp.json()
         assert body["count"] == 1
         assert body["uploaded"][0]["filename"] == "test.txt"
-        # File now lives in central data dir
-        assert (central / "test.txt").exists()
+        # File now lives under the user's central data dir in a dated upload folder.
+        uploaded_path = Path(body["uploaded"][0]["path"])
+        assert uploaded_path.exists()
+        assert uploaded_path.name == "test.txt"
+        assert uploaded_path.parent != central
+        assert uploaded_path.parent.parent == central
 
     def test_upload_no_files(self, setup, tmp_path):
         engine, SL, data, client = setup

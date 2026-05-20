@@ -51,8 +51,37 @@ class TestExtractJobContext:
         ctx = _extract_job_context_from_history(None, history_blocks=blocks)
         assert ctx["work_dir"] == "/data/proj/workflow1"
         assert ctx["run_uuid"] == "abc-123"
+        assert ctx["workflow_key"] == "dogme"
         assert len(ctx["workflows"]) == 1
         assert ctx["workflows"][0]["sample_name"] == "sample1"
+        assert ctx["workflows"][0]["workflow_key"] == "dogme"
+
+    def test_legacy_mode_only_execution_job_defaults_to_dogme_workflow_key(self):
+        blocks = [_make_block("EXECUTION_JOB", {
+            "work_directory": "/data/proj/workflow3",
+            "run_uuid": "legacy-uuid",
+            "sample_name": "legacy_sample",
+            "mode": "RNA",
+        })]
+
+        ctx = _extract_job_context_from_history(None, history_blocks=blocks)
+
+        assert ctx["workflow_key"] == "dogme"
+        assert ctx["workflows"][0]["workflow_key"] == "dogme"
+
+    def test_wf_pore_c_execution_job_keeps_workflow_key(self):
+        blocks = [_make_block("EXECUTION_JOB", {
+            "work_directory": "/data/proj/workflow8",
+            "run_uuid": "wf-uuid",
+            "sample_name": "POREC_A",
+            "workflow_key": "wf_pore_c",
+            "mode": None,
+        })]
+
+        ctx = _extract_job_context_from_history(None, history_blocks=blocks)
+
+        assert ctx["workflow_key"] == "wf_pore_c"
+        assert ctx["workflows"][0]["workflow_key"] == "wf_pore_c"
 
     def test_multiple_workflows(self):
         blocks = [
@@ -211,6 +240,44 @@ class TestBuildConvStateSlowPath:
         assert state.work_dir == "/data/proj/workflow1"
         assert state.sample_name == "s1"
         assert state.sample_type == "DNA"
+        assert state.workflow_key == "dogme"
+        assert state.workflows[0]["workflow_key"] == "dogme"
+
+    def test_legacy_cached_state_backfills_dogme_workflow_key(self):
+        cached = {
+            "active_skill": "analyze_job_results",
+            "work_dir": "/data/proj/workflow4",
+            "sample_name": "legacy_sample",
+            "sample_type": "DNA",
+            "workflows": [{
+                "work_dir": "/data/proj/workflow4",
+                "sample_name": "legacy_sample",
+                "mode": "DNA",
+                "run_uuid": "legacy-uuid",
+            }],
+        }
+        blocks = [TestBuildConvStateFastPath()._cached_state_block(cached)]
+
+        state = _build_conversation_state("analyze_job_results", None, history_blocks=blocks)
+
+        assert state.workflow_key == "dogme"
+        assert state.workflows[0]["workflow_key"] == "dogme"
+
+    def test_wf_pore_c_state_tracks_workflow_key(self):
+        blocks = [
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow8",
+                "run_uuid": "wf-uuid",
+                "sample_name": "POREC_A",
+                "workflow_key": "wf_pore_c",
+                "mode": None,
+            }),
+        ]
+
+        state = _build_conversation_state("analyze_job_results", None, history_blocks=blocks)
+
+        assert state.workflow_key == "wf_pore_c"
+        assert state.workflows[0]["workflow_key"] == "wf_pore_c"
 
     def test_extracts_accessions_from_history(self):
         history = _history([
@@ -348,8 +415,9 @@ class TestBuildConvStateFastPath:
         cached = {
             "active_skill": "old_skill",
             "work_dir": "/data/proj/wf1",
+            "workflow_key": "dogme",
             "sample_name": "cached_sample",
-            "workflows": [{"work_dir": "/data/proj/wf1", "sample_name": "cached_sample"}],
+            "workflows": [{"work_dir": "/data/proj/wf1", "sample_name": "cached_sample", "workflow_key": "dogme"}],
         }
         blocks = [self._cached_state_block(cached)]
         state = _build_conversation_state("ENCODE_Search", None, history_blocks=blocks)
@@ -358,6 +426,7 @@ class TestBuildConvStateFastPath:
         # Other fields come from cache
         assert state.work_dir == "/data/proj/wf1"
         assert state.sample_name == "cached_sample"
+        assert state.workflow_key == "dogme"
 
     def test_fast_path_patches_latest_df(self):
         cached = {

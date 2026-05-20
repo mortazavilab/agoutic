@@ -114,6 +114,41 @@ async def test_get_staging_task_status_falls_back_to_persisted_row(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_staging_task_status_preserves_wf_pore_c_result_metadata(monkeypatch):
+    monkeypatch.setattr("launchpad.backends.staging_worker.get_staging_tasks", lambda: {})
+    monkeypatch.setattr(
+        "launchpad.backends.staging_worker.hydrate_incomplete_staging_tasks",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        launchpad_app,
+        "get_staging_task_record",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                task_id="stg-wf-pore-c",
+                status="completed",
+                progress_json={"file_percent": 100},
+                result_json={
+                    "workflow_key": "wf_pore_c",
+                    "reference_fasta_remote_path": "/remote/base/ref/wf-pore-c/abc123/reference.fa",
+                    "workflow_remote_input": "/remote/base/proj/workflow1/.agoutic/wf-pore-c/staged-inputs/input/sample.bam",
+                },
+                error=None,
+                created_at=100.0,
+                updated_at=105.0,
+                params_json={"sample_name": "POREC_A"},
+            )
+        ),
+    )
+
+    payload = await launchpad_app.get_staging_task_status("stg-wf-pore-c")
+
+    assert payload.status == "completed"
+    assert payload.result["workflow_key"] == "wf_pore_c"
+    assert payload.result["reference_fasta_remote_path"].endswith("reference.fa")
+
+
+@pytest.mark.asyncio
 async def test_get_staging_task_status_attempts_resume_for_queued_task(monkeypatch):
     queued_task = SimpleNamespace(
         task_id="stg-queued",

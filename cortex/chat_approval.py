@@ -291,7 +291,8 @@ async def _ensure_workflow_plan_approval_gate(
         return existing_gate
 
     plan_specific_context = (
-        _build_reconcile_plan_approval_context(workflow_block)
+        _build_wf_pore_c_plan_approval_context(workflow_block)
+        or _build_reconcile_plan_approval_context(workflow_block)
         or _build_compare_region_overlap_approval_context(workflow_block)
     )
     if plan_specific_context is not None:
@@ -529,6 +530,38 @@ def _advance_workflow_plan_to_step_kind(
             step["approval_gate_id"] = approval_gate_id
         _persist_workflow_plan(session, workflow_block, payload)
         return
+
+
+def _build_wf_pore_c_plan_approval_context(workflow_block: ProjectBlock) -> dict | None:
+    """Build a wf-pore-c dry-run approval payload directly from plan state."""
+    payload = get_block_payload(workflow_block)
+    if payload.get("plan_type") != "run_wf_pore_c":
+        return None
+
+    extracted_params = {
+        "workflow_key": "wf_pore_c",
+        "workflow_repo": payload.get("workflow_repo") or "epi2me-labs/wf-pore-c",
+        "workflow_version": payload.get("workflow_version") or "v1.3.1",
+        "report_filename": payload.get("report_filename") or "wf-pore-c-report.html",
+        "preview_only": True,
+        "sample_name": payload.get("sample_name") or "pore_c_sample",
+        "sample": payload.get("sample") or payload.get("sample_name") or "pore_c_sample",
+        "input_type": payload.get("input_type") or "",
+        "file_path": payload.get("file_path") or payload.get("source_path") or payload.get("input_directory") or "",
+        "input_directory": payload.get("input_directory") or payload.get("source_path") or payload.get("file_path") or "",
+        "reference_fasta": payload.get("reference_fasta") or "",
+        "vcf": payload.get("vcf") or "",
+        "sample_sheet": payload.get("sample_sheet") or "",
+        "cutter": payload.get("cutter") or "NlaIII",
+        "output_directory": payload.get("output_directory") or "",
+        "output_flags": dict(payload.get("output_flags") or {}),
+    }
+    return {
+        "label": "Do you want to generate the wf-pore-c dry-run preview?",
+        "gate_action": "workflow_dry_run_preview",
+        "skill": "run_wf_pore_c",
+        "extracted_params": extracted_params,
+    }
 
 
 def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict | None:

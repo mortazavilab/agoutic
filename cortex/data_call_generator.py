@@ -699,12 +699,12 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                     "params": {"direction": direction},
                 })
 
-    # --- Dogme / Analyzer file-parsing patterns ---
-    # When in a Dogme analysis skill and user asks to parse/show a file,
+    # --- Workflow-result file-parsing patterns ---
+    # When in a workflow analysis skill and user asks to parse/show a file,
     # auto-generate find_file + parse/read calls so the LLM gets real data.
-    dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
-                    "analyze_job_results"}
-    if not calls and skill_key in dogme_skills:
+    workflow_analysis_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
+                                "analyze_job_results"}
+    if not calls and skill_key in workflow_analysis_skills:
         # job_context, work_dir, run_uuid, workflows already extracted above
         # (browsing block at the top of this function).
 

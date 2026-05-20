@@ -8,6 +8,8 @@
 
 - **The reference-genome config API now returns alias and asset metadata, and Dogme approval gates render alias-aware genome labels from that server payload so future client-side UIs can discover the same catalog without importing backend code**
 
+- **wf-pore-c Phase 3 is now feature-complete behind `WF_PORE_C_ENABLED`, including local preview, local execution, remote SLURM staging/submission, Analyzer recognition, automatic summary generation, and workflow-aware UI approval/run cards**
+
 ### Bug Fixes
 
 - **Workflow quick-delete now removes immediate-child untracked `workflow*` folders from the active project root when no Launchpad job row exists, instead of failing outright for visible but untracked workflow directories**
@@ -30,11 +32,33 @@
 
 - **Chat now supports `/commands` to list slash commands by category, and both the welcome card and sidebar help surface point users to that command for the full slash-command catalog**
 
+- **wf-pore-c execution cards and approval editors no longer rely on a production AST-test fallback in `ui/appui_block_part2.py`, so missing helper wiring now raises loudly instead of silently degrading to stale Dogme metadata**
+
+- **Legacy Cortex conversation and job state that only stored `mode` is now normalized on both the slow history rebuild path and the fast cached-state restore path, so old Dogme chats still reconstruct with `workflow_key="dogme"` and `analyze_job_results` no longer depends on an implicit Dogme grouping**
+
+- **Launchpad and Cortex persistence now tolerate legacy rows with missing `workflow_key`/`mode` through an Alembic backfill migration plus runtime normalization, preventing pre-migration jobs and conversation state from failing validation during submit/poll/rehydrate paths**
+
 ### Tests
 
 - **Added regression coverage for tracked Launchpad workflow listing, untracked workflow-folder deletion, and quick-exit project-directory resolution before context prep**
 
 - **Added regression coverage for Dogme multi-genome extraction with `mm39` plus `mad1`, and for future configured genome names so they are recognized as reference genomes instead of sample names**
+
+- **Added focused wf-pore-c Phase 3 regression coverage for Launchpad workflow preview/submission gating, remote SLURM command/staging/sync behavior, Analyzer summary routing, UI helper rendering, legacy mode-only conversation-state normalization, and workflow-aware job-context injection**
+
+- **Closed the full Phase 3 sweep with `1988 passed, 30 warnings` under `WF_PORE_C_ENABLED=false` and `1988 passed, 29 warnings` under `WF_PORE_C_ENABLED=true` across `tests/cortex tests/launchpad tests/analyzer tests/ui`, confirming identical test counts in both flag states and no Dogme-path regression drift**
+
+- **Added Launchpad migration regression coverage for `workflow_key` backfill and nullable legacy `mode` handling, plus submit-script persistence checks to ensure new jobs store and round-trip workflow identity cleanly**
+
+### Documentation
+
+- **Updated `README.md` with wf-pore-c Phase 3 status, default-off flag behavior, validation counts, and links to the plan plus local/remote smoke guides**
+
+- **Updated `docs/wf_pore_c_plan.md` to mark Phase 3 complete, record the `1988 > 1839` closure gate, and call out the production fallback removal plus dual-path backward-compat normalization**
+
+- **Added `docs/wf_pore_c_remote_smoke_test.md` with the real-cluster SLURM validation path, including remote staging, Apptainer cache verification, sbatch polling, manual `/jobs/{run_uuid}/sync-results` copy-back, and retry guidance**
+
+- **Added `docs/wf_pore_c_smoke_test.md` with the local end-to-end validation checklist for wf-pore-c preview, approval, submission, completion, and analyzer follow-up behavior**
 
 ## [3.6.8] - 2026-05-11
 

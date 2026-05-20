@@ -21,9 +21,11 @@ class TestConversationStateInit:
             active_skill="run_dogme_dna",
             sample_name="C2C12r1",
             work_dir="/tmp/work",
+            workflow_key="dogme",
         )
         assert state.active_skill == "run_dogme_dna"
         assert state.sample_name == "C2C12r1"
+        assert state.workflow_key == "dogme"
 
 
 class TestToDict:
@@ -76,6 +78,7 @@ class TestFromDict:
             active_skill="run_dogme_dna",
             sample_name="C2C12r1",
             work_dir="/tmp",
+            workflow_key="dogme",
             reference_genome="mm39",
             known_dataframes=["DF1 (10 files)"],
             latest_dataframe="DF1",
@@ -84,6 +87,7 @@ class TestFromDict:
         restored = ConversationState.from_dict(d)
         assert restored.active_skill == "run_dogme_dna"
         assert restored.sample_name == "C2C12r1"
+        assert restored.workflow_key == "dogme"
         assert restored.latest_dataframe == "DF1"
 
     def test_ignores_extra_keys(self):

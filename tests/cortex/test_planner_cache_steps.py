@@ -1,5 +1,7 @@
 """Planner tests for local and remote staging workflow plan steps."""
 
+import pytest
+
 from cortex.schemas import ConversationState
 from cortex.plan_params import build_de_group_clarification
 from cortex.planner import (
@@ -7,6 +9,7 @@ from cortex.planner import (
     _extract_plan_params,
     _template_compare_region_overlaps,
     _template_run_de_pipeline,
+    _template_run_wf_pore_c,
     _template_reconcile_bams,
     _template_remote_stage_workflow,
     _template_run_workflow,
@@ -76,6 +79,14 @@ def test_detect_plan_type_matches_region_overlap_request():
     )
 
 
+def test_detect_plan_type_respects_wf_pore_c_feature_flag(monkeypatch):
+    monkeypatch.setattr("cortex.plan_classifier.WF_PORE_C_ENABLED", False)
+    assert _detect_plan_type("run wf-pore-c on ./reads.fastq with ./ref.fa") is None
+
+    monkeypatch.setattr("cortex.plan_classifier.WF_PORE_C_ENABLED", True)
+    assert _detect_plan_type("run wf-pore-c on ./reads.fastq with ./ref.fa") == "run_wf_pore_c"
+
+
 def test_generate_plan_uses_deterministic_region_overlap_template():
     class _Engine:
         def plan(self, *_args, **_kwargs):
@@ -104,6 +115,131 @@ def test_generate_plan_uses_deterministic_region_overlap_template():
         "PARSE_OUTPUT_FILE",
         "GENERATE_PLOT",
     ]
+
+
+def test_extract_plan_params_run_wf_pore_c_sets_preview_defaults(tmp_path, monkeypatch):
+    agoutic_root = tmp_path / "agoutic-data"
+    project_dir = agoutic_root / "users" / "alice" / "proj-1"
+    project_dir.mkdir(parents=True)
+
+    input_bam = project_dir / "sample.concatemers.bam"
+    input_bam.write_text("bam")
+    reference = project_dir / "reference.fa"
+    reference.write_text(">chr1\nACGT\n")
+    vcf = project_dir / "sample.vcf.gz"
+    vcf.write_text("vcf")
+
+    monkeypatch.setattr("cortex.user_jail.AGOUTIC_DATA", agoutic_root)
+
+    params = _extract_plan_params(
+        (
+            f"run wf-pore-c on {input_bam} with reference {reference} "
+            f"and vcf {vcf} sample name POREC_A no hi-c chromunity coverage"
+        ),
+        ConversationState(active_skill="run_wf_pore_c", active_project="proj-1", work_dir=str(project_dir)),
+        "run_wf_pore_c",
+        project_dir=str(project_dir),
+    )
+
+    assert params["workflow_key"] == "wf_pore_c"
+    assert params["file_path"] == str(input_bam)
+    assert params["input_type"] == "bam"
+    assert params["reference_fasta"] == str(reference)
+    assert params["vcf"] == str(vcf)
+    assert params["sample_name"] == "POREC_A"
+    assert params["workflow_version"] == "v1.3.1"
+    assert params["report_filename"] == "wf-pore-c-report.html"
+    assert params["output_flags"]["pairs"] is True
+    assert params["output_flags"]["mcool"] is True
+    assert params["output_flags"]["hi_c"] is False
+    assert params["output_flags"]["chromunity"] is True
+    assert params["output_flags"]["coverage"] is True
+
+
+def test_extract_plan_params_run_wf_pore_c_rejects_paths_outside_user_jail(tmp_path, monkeypatch):
+    agoutic_root = tmp_path / "agoutic-data"
+    project_dir = agoutic_root / "users" / "alice" / "proj-1"
+    project_dir.mkdir(parents=True)
+    monkeypatch.setattr("cortex.user_jail.AGOUTIC_DATA", agoutic_root)
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    input_bam = outside_dir / "sample.concatemers.bam"
+    input_bam.write_text("bam")
+    reference = outside_dir / "reference.fa"
+    reference.write_text(">chr1\nACGT\n")
+
+    with pytest.raises(ValueError, match="user jail"):
+        _extract_plan_params(
+            f"run wf-pore-c on {input_bam} with reference {reference}",
+            ConversationState(active_skill="run_wf_pore_c", active_project="proj-1", work_dir=str(project_dir)),
+            "run_wf_pore_c",
+            project_dir=str(project_dir),
+        )
+
+
+def test_run_wf_pore_c_template_is_preview_only():
+    plan = _template_run_wf_pore_c(
+        {
+            "sample_name": "POREC_A",
+            "file_path": "/data/porec/sample.concatemers.bam",
+            "input_type": "bam",
+            "reference_fasta": "/refs/reference.fa",
+            "output_directory": "/projects/demo/workflow4",
+            "output_flags": {
+                "pairs": True,
+                "mcool": True,
+                "hi_c": False,
+                "bed": False,
+                "chromunity": False,
+                "coverage": False,
+                "paired_end": False,
+            },
+        }
+    )
+
+    assert plan["plan_type"] == "run_wf_pore_c"
+    assert plan["workflow_key"] == "wf_pore_c"
+    assert plan["preview_only"] is True
+    assert [step["kind"] for step in plan["steps"]] == ["VALIDATE_INPUTS", "REQUEST_APPROVAL"]
+    assert plan["steps"][0]["id"] == "validate_wf_pore_c_inputs"
+    assert plan["steps"][1]["id"] == "approve_wf_pore_c_preview"
+
+
+def test_generate_plan_uses_deterministic_wf_pore_c_template(monkeypatch, tmp_path):
+    monkeypatch.setattr("cortex.plan_classifier.WF_PORE_C_ENABLED", True)
+    agoutic_root = tmp_path / "agoutic-data"
+    project_dir = agoutic_root / "users" / "alice" / "proj-1"
+    project_dir.mkdir(parents=True)
+    monkeypatch.setattr("cortex.user_jail.AGOUTIC_DATA", agoutic_root)
+
+    input_fastq = project_dir / "reads.fastq"
+    input_fastq.write_text("fastq")
+    reference = project_dir / "reference.fa"
+    reference.write_text(">chr1\nACGT\n")
+
+    class _Engine:
+        def plan(self, *_args, **_kwargs):
+            raise AssertionError("wf-pore-c preview plans should not fall through to engine.plan")
+
+    state = ConversationState(
+        active_skill="run_wf_pore_c",
+        active_project="proj-1",
+        work_dir=str(project_dir),
+    )
+
+    plan = generate_plan(
+        f"run wf-pore-c on {input_fastq} with {reference}",
+        "run_wf_pore_c",
+        state,
+        _Engine(),
+        project_dir=str(project_dir),
+    )
+
+    assert plan is not None
+    assert plan["plan_type"] == "run_wf_pore_c"
+    assert plan["workflow_key"] == "wf_pore_c"
+    assert [step["kind"] for step in plan["steps"]] == ["VALIDATE_INPUTS", "REQUEST_APPROVAL"]
 
 
 def test_detect_plan_type_matches_grouped_de_compare_request():

@@ -243,6 +243,63 @@ def _template_run_workflow(params: dict) -> dict:
     }
 
 
+def _template_run_wf_pore_c(params: dict) -> dict:
+    """Deterministic Phase 1 plan for a wf-pore-c dry-run preview."""
+    sample_name = params.get("sample_name", "pore_c_sample")
+    input_path = params.get("file_path") or params.get("input_directory") or params.get("work_dir", "")
+
+    steps = []
+    idx = 0
+
+    s_validate = _make_step(
+        "VALIDATE_INPUTS",
+        f"Validate wf-pore-c inputs for {sample_name}",
+        idx,
+    )
+    s_validate["id"] = "validate_wf_pore_c_inputs"
+    steps.append(s_validate)
+    idx += 1
+
+    s_approve = _make_step(
+        "REQUEST_APPROVAL",
+        f"Approve wf-pore-c dry-run preview for {sample_name}",
+        idx,
+        requires_approval=True,
+        depends_on=[s_validate["id"]],
+    )
+    s_approve["id"] = "approve_wf_pore_c_preview"
+    steps.append(s_approve)
+
+    return {
+        "plan_type": "run_wf_pore_c",
+        "title": f"Prepare wf-pore-c dry-run for {sample_name}",
+        "goal": params.get("goal", f"Prepare a wf-pore-c dry-run preview for {sample_name}"),
+        "workflow_type": "local_sample_intake",
+        "workflow_key": "wf_pore_c",
+        "workflow_repo": params.get("workflow_repo") or "epi2me-labs/wf-pore-c",
+        "workflow_version": params.get("workflow_version") or "v1.3.1",
+        "report_filename": params.get("report_filename") or "wf-pore-c-report.html",
+        "preview_only": True,
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "sample_name": sample_name,
+        "sample": params.get("sample") or sample_name,
+        "source_path": input_path,
+        "file_path": input_path,
+        "input_directory": input_path,
+        "input_type": params.get("input_type", ""),
+        "reference_fasta": params.get("reference_fasta", ""),
+        "vcf": params.get("vcf", ""),
+        "sample_sheet": params.get("sample_sheet", ""),
+        "cutter": params.get("cutter") or "NlaIII",
+        "output_directory": params.get("output_directory", ""),
+        "output_flags": dict(params.get("output_flags") or {}),
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
 def _template_compare_samples(params: dict) -> dict:
     """
     Deterministic plan for comparing two samples.

@@ -67,11 +67,27 @@ class TestCreateJob:
         )
 
         assert job.run_uuid == "run-1"
+        assert job.workflow_key == "dogme"
         assert job.reference_genome == json.dumps(["GRCh38", "mm39"])
         loaded = await get_job(async_session, "run-1")
         assert loaded is not None
         assert loaded.parent_block_id == "block-1"
         assert loaded.user_id == "user-1"
+
+    @pytest.mark.asyncio
+    async def test_allows_nullable_mode_for_non_dogme_workflow(self, async_session):
+        job = await create_job(
+            session=async_session,
+            run_uuid="run-pore-c",
+            project_id="proj-1",
+            sample_name="sample-a",
+            workflow_key="wf_pore_c",
+            mode=None,
+            input_directory="/data/input.fastq.gz",
+        )
+
+        assert job.workflow_key == "wf_pore_c"
+        assert job.mode is None
 
     @pytest.mark.asyncio
     async def test_persists_workflow_identity_fields(self, async_session):
@@ -171,6 +187,7 @@ class TestJobToDict:
         result = job_to_dict(job)
 
         assert result["run_uuid"] == "run-4"
+        assert result["workflow_key"] == "dogme"
         assert result["submitted_at"] == submitted.isoformat()
         assert result["started_at"] == started.isoformat()
         assert result["completed_at"] == completed.isoformat()

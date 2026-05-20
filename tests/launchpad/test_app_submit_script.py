@@ -3,12 +3,26 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import launchpad.app as launchpad_app
+from launchpad import config as launchpad_config
+from common.database import Base
+from launchpad.models import DogmeJob
 from launchpad.schemas import SubmitJobRequest
 
 
 class _FakeSession:
+    def __init__(self):
+        self.close_calls = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
     async def commit(self):
         return None
 
@@ -16,12 +30,44 @@ class _FakeSession:
         return None
 
     async def close(self):
+        self.close_calls += 1
         return None
 
 
 class _FakeProcess:
     def __init__(self, pid: int = 4321):
         self.pid = pid
+
+
+class _ScalarResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return list(self._rows)
+
+
+class _ExecuteResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return _ScalarResult(self._rows)
+
+
+@pytest.fixture()
+async def async_session_factory(tmp_path):
+    db_path = tmp_path / "launchpad-app-submit.sqlite"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", echo=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+    yield session_factory
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -548,6 +594,240 @@ async def test_submit_dogme_job_forwards_local_resource_caps(monkeypatch, tmp_pa
     assert result["run_uuid"] == "run-dogme"
     assert executor_kwargs["local_max_task_cpus"] == 8
     assert executor_kwargs["local_max_task_memory_gb"] == 48
+
+
+@pytest.mark.asyncio
+async def test_submit_wf_pore_c_job_persists_workflow_key_and_null_mode(
+    monkeypatch,
+    tmp_path,
+    async_session_factory,
+):
+    work_dir = tmp_path / "workflow1"
+    work_dir.mkdir()
+    input_path = tmp_path / "inputs" / "sample.fastq.gz"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+    reference_fasta = tmp_path / "refs" / "reference.fa"
+    reference_fasta.parent.mkdir(parents=True, exist_ok=True)
+    reference_fasta.write_text(">chr1\nACGT\n", encoding="utf-8")
+    create_task_calls = []
+    executor_kwargs = {}
+
+    async def fake_submit_job(**kwargs):
+        executor_kwargs.update(kwargs)
+        return (kwargs["run_uuid"], work_dir)
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    def fake_create_task(coro):
+        create_task_calls.append(coro)
+        coro.close()
+        return SimpleNamespace()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", async_session_factory)
+    monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", True)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app.executor, "submit_job", fake_submit_job)
+    monkeypatch.setattr(launchpad_app.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(launchpad_app.uuid, "uuid4", lambda: "run-pore-c")
+
+    req = SubmitJobRequest(
+        project_id="proj-1",
+        user_id="user-1",
+        username="alice",
+        project_slug="proj-1",
+        sample_name="POREC_A",
+        workflow_key="wf_pore_c",
+        mode=None,
+        input_directory=str(input_path),
+        input_type="fastq",
+        reference_fasta=str(reference_fasta),
+        reference_genome=["GRCh38"],
+        execution_mode="local",
+    )
+
+    result = await launchpad_app.submit_job(req)
+
+    assert result["run_uuid"] == "run-pore-c"
+    assert result["status"] == launchpad_app.JobStatus.RUNNING
+    assert result["work_directory"] == str(work_dir)
+    assert executor_kwargs["workflow_key"] == "wf_pore_c"
+    assert executor_kwargs["mode"] is None
+    assert executor_kwargs["sample_name"] == "POREC_A"
+    assert len(create_task_calls) == 1
+
+    session = async_session_factory()
+    try:
+        row = await session.scalar(select(DogmeJob).where(DogmeJob.run_uuid == "run-pore-c"))
+    finally:
+        await session.close()
+
+    assert row is not None
+    assert row.workflow_key == "wf_pore_c"
+    assert row.mode is None
+    assert row.workflow_index == 1
+    assert row.workflow_alias == "workflow1"
+    assert row.workflow_folder_name == "workflow1"
+
+
+@pytest.mark.asyncio
+async def test_submit_wf_pore_c_job_rejects_when_flag_disabled(monkeypatch):
+    fake_session = _FakeSession()
+    create_called = False
+
+    async def fake_create_job(*_args, **_kwargs):
+        nonlocal create_called
+        create_called = True
+        return SimpleNamespace()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", False)
+    monkeypatch.setattr(launchpad_app, "create_job", fake_create_job)
+
+    req = SubmitJobRequest(
+        project_id="proj-1",
+        sample_name="POREC_A",
+        workflow_key="wf_pore_c",
+        mode=None,
+        input_directory="/data/pore-c.concatemers.bam",
+        input_type="bam",
+        reference_fasta="/refs/reference.fa",
+        reference_genome=["GRCh38"],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await launchpad_app.submit_job(req)
+
+    assert exc_info.value.status_code == 400
+    assert "WF_PORE_C_ENABLED" in exc_info.value.detail
+    assert create_called is False
+
+
+@pytest.mark.asyncio
+async def test_submit_wf_pore_c_job_closes_session_on_success(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    fake_job = _fake_dogme_job()
+    work_dir = tmp_path / "workflow1"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    async def fake_create_job(*_args, **_kwargs):
+        return fake_job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_get_workflow_identity_for_path(*_args, **_kwargs):
+        return (None, None, None)
+
+    async def fake_get_next_workflow_index(*_args, **_kwargs):
+        return 1
+
+    async def fake_submit_job(**_kwargs):
+        return ("run-pore-c", work_dir)
+
+    def fake_create_task(coro):
+        coro.close()
+        return SimpleNamespace()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "create_job", fake_create_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "get_workflow_identity_for_path", fake_get_workflow_identity_for_path)
+    monkeypatch.setattr(launchpad_app, "get_next_workflow_index", fake_get_next_workflow_index)
+    monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", True)
+    monkeypatch.setattr(launchpad_app.executor, "submit_job", fake_submit_job)
+    monkeypatch.setattr(launchpad_app.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(launchpad_app.uuid, "uuid4", lambda: "run-pore-c")
+
+    req = SubmitJobRequest(
+        project_id="proj-1",
+        user_id="user-1",
+        username="alice",
+        project_slug="proj-1",
+        sample_name="POREC_A",
+        workflow_key="wf_pore_c",
+        mode=None,
+        input_directory=str(tmp_path / "input.fastq"),
+        input_type="fastq",
+        reference_fasta=str(tmp_path / "reference.fa"),
+        reference_genome=["GRCh38"],
+        execution_mode="local",
+    )
+
+    result = await launchpad_app.submit_job(req)
+
+    assert result["run_uuid"] == "run-pore-c"
+    assert fake_session.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_wf_pore_c_job_closes_session_on_failure(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    fake_job = _fake_dogme_job()
+
+    async def fake_create_job(*_args, **_kwargs):
+        return fake_job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_get_workflow_identity_for_path(*_args, **_kwargs):
+        return (None, None, None)
+
+    async def fake_get_next_workflow_index(*_args, **_kwargs):
+        return 1
+
+    async def failing_submit_job(**_kwargs):
+        raise RuntimeError("launch failed")
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "create_job", fake_create_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "get_workflow_identity_for_path", fake_get_workflow_identity_for_path)
+    monkeypatch.setattr(launchpad_app, "get_next_workflow_index", fake_get_next_workflow_index)
+    monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", True)
+    monkeypatch.setattr(launchpad_app.executor, "submit_job", failing_submit_job)
+    monkeypatch.setattr(launchpad_app.uuid, "uuid4", lambda: "run-pore-c")
+
+    req = SubmitJobRequest(
+        project_id="proj-1",
+        user_id="user-1",
+        username="alice",
+        project_slug="proj-1",
+        sample_name="POREC_A",
+        workflow_key="wf_pore_c",
+        mode=None,
+        input_directory=str(tmp_path / "input.fastq"),
+        input_type="fastq",
+        reference_fasta=str(tmp_path / "reference.fa"),
+        reference_genome=["GRCh38"],
+        execution_mode="local",
+    )
+
+    with pytest.raises(HTTPException, match="Failed to submit job"):
+        await launchpad_app.submit_job(req)
+
+    assert fake_job.status == launchpad_app.JobStatus.FAILED
+    assert "launch failed" in (fake_job.error_message or "")
+    assert fake_session.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_health_check_closes_session(monkeypatch):
+    fake_session = _FakeSession()
+
+    async def fake_execute(_query):
+        return _ExecuteResult([])
+
+    fake_session.execute = fake_execute
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    result = await launchpad_app.health_check()
+
+    assert result["database_ok"] is True
+    assert result["running_jobs"] == 0
+    assert fake_session.close_calls == 1
 
 
 @pytest.mark.asyncio

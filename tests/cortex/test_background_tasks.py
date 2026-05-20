@@ -746,6 +746,60 @@ class TestSubmitJobAfterApproval:
         sess.close()
 
     @pytest.mark.asyncio
+    async def test_wf_pore_c_preview_gate_creates_preview_block_without_submission(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "gate_action": "workflow_dry_run_preview",
+            "skill": "run_wf_pore_c",
+            "model": "default",
+            "extracted_params": {
+                "workflow_key": "wf_pore_c",
+                "workflow_repo": "epi2me-labs/wf-pore-c",
+                "workflow_version": "v1.3.1",
+                "sample_name": "POREC_A",
+                "input_type": "bam",
+                "file_path": "/data/porec/sample.concatemers.bam",
+                "reference_fasta": "/refs/reference.fa",
+                "output_directory": "/projects/demo/workflow4",
+                "report_filename": "wf-pore-c-report.html",
+                "output_flags": {
+                    "pairs": True,
+                    "mcool": True,
+                    "hi_c": False,
+                    "bed": False,
+                    "chromunity": False,
+                    "coverage": False,
+                    "paired_end": False,
+                },
+            },
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.MCPHttpClient") as mock_client_cls:
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        mock_client_cls.assert_not_called()
+
+        sess = session_factory()
+        preview_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "AGENT_PLAN").all()
+        assert preview_blocks
+        preview_payload = get_block_payload(preview_blocks[-1])
+        assert preview_payload["skill"] == "run_wf_pore_c"
+        assert "wf-pore-c Dry-Run Preview" in preview_payload["markdown"]
+        assert preview_payload["workflow_preview"]["workflow_key"] == "wf_pore_c"
+        command_text = preview_payload["workflow_preview"]["command"].replace("\\\n", " ")
+        assert "nextflow" in command_text
+        assert "epi2me-labs/wf-pore-c" in command_text
+        assert "--bam" in command_text
+
+        refreshed_gate = sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one()
+        refreshed_payload = get_block_payload(refreshed_gate)
+        assert refreshed_payload["preview_block_id"] == preview_blocks[-1].id
+
+        job_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
+        assert job_blocks == []
+        sess.close()
+
+    @pytest.mark.asyncio
     async def test_non_dna_submission_keeps_custom_dogme_fields_empty(self, session_factory, seed_data):
         """Non-DNA approval payloads should submit without custom dogme override values."""
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
@@ -1830,10 +1884,7 @@ class TestSubmitJobAfterApproval:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
-        assert mock_client.call_tool.await_count == 1
-        assert mock_client.call_tool.call_args.args[0] == "stage_remote_sample"
-        submitted = mock_client.call_tool.call_args.kwargs
-        assert submitted["remote_input_path"] == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_086-04_dRNA_p2_1/pod5"
+        assert mock_client.call_tool.await_count == 0
 
         sess = session_factory()
         refreshed_gate = sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one()
@@ -2573,6 +2624,80 @@ async def test_ensure_workflow_plan_approval_gate_builds_reconcile_specific_payl
     assert gate_payload["extracted_params"]["annotation_gtf"] == "/refs/mm39.gtf"
     assert gate_payload["extracted_params"]["bam_count"] == 2
     assert gate_payload["extracted_params"]["output_directory"] == "/proj/reconcile"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_builds_wf_pore_c_preview_payload(session_factory, seed_data):
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "run_wf_pore_c",
+            "skill": "run_wf_pore_c",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_wf_pore_c_preview",
+            "workflow_key": "wf_pore_c",
+            "workflow_repo": "epi2me-labs/wf-pore-c",
+            "workflow_version": "v1.3.1",
+            "sample_name": "POREC_A",
+            "sample": "POREC_A",
+            "file_path": "/data/porec/sample.concatemers.bam",
+            "source_path": "/data/porec/sample.concatemers.bam",
+            "input_directory": "/data/porec/sample.concatemers.bam",
+            "input_type": "bam",
+            "reference_fasta": "/refs/reference.fa",
+            "vcf": "/refs/sample.vcf.gz",
+            "sample_sheet": "",
+            "cutter": "NlaIII",
+            "output_directory": "/projects/demo/workflow4",
+            "report_filename": "wf-pore-c-report.html",
+            "output_flags": {
+                "pairs": True,
+                "mcool": True,
+                "hi_c": False,
+                "bed": False,
+                "chromunity": False,
+                "coverage": False,
+                "paired_end": False,
+            },
+            "steps": [
+                {
+                    "id": "validate_wf_pore_c_inputs",
+                    "kind": "VALIDATE_INPUTS",
+                    "title": "Validate wf-pore-c inputs for POREC_A",
+                    "status": "COMPLETED",
+                },
+                {
+                    "id": "approve_wf_pore_c_preview",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve wf-pore-c dry-run preview for POREC_A",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "depends_on": ["validate_wf_pore_c_inputs"],
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["gate_action"] == "workflow_dry_run_preview"
+    assert gate_payload["skill"] == "run_wf_pore_c"
+    assert gate_payload["extracted_params"]["workflow_key"] == "wf_pore_c"
+    assert gate_payload["extracted_params"]["reference_fasta"] == "/refs/reference.fa"
+    assert gate_payload["extracted_params"]["output_flags"]["pairs"] is True
+    assert gate_payload["extracted_params"]["report_filename"] == "wf-pore-c-report.html"
     sess.close()
 
 
@@ -4450,6 +4575,105 @@ class TestAutoTriggerAnalysis:
             latest = blocks[-1]
             assert get_block_payload(latest).get("skill") == expected_skill
             sess.close()
+
+    @pytest.mark.asyncio
+    async def test_wf_pore_c_routes_auto_analysis_by_workflow_key(self, session_factory, seed_data, monkeypatch):
+        monkeypatch.setattr("cortex.job_polling.WF_PORE_C_ENABLED", True)
+
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "workflow_key": "wf_pore_c",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {"workflow_version": "v1.3.1"},
+                "artifacts": {
+                    "report_html": {"requested": True, "present": True, "matches": ["wf-pore-c-report.html"]},
+                    "pairs": {"requested": True, "present": True, "matches": ["pairs/sample.pairs.gz"]},
+                    "mcool": {"requested": True, "present": False, "matches": []},
+                    "hic": {"requested": False, "present": False, "matches": []},
+                },
+                "pairs_stats": {"total_pairs": 100, "cis_trans_ratio": 4.0, "duplicate_rate": 0.1},
+                "sample_alias": "POREC_A",
+                "requested_outputs": [{"expected": "pairs/{alias}.pairs.gz", "present": True}],
+            },
+            "warnings": ["Missing requested output: cooler/{alias}.mcool"],
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(return_value=(
+            "The contact map outputs look usable.",
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        ))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-pore-c",
+                {"sample_name": "POREC_A", "mode": None, "workflow_key": "wf_pore_c", "model": "default", "work_directory": "/work/workflow8"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        blocks = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()
+        latest = blocks[-1]
+        payload = get_block_payload(latest)
+        assert payload.get("skill") == "analyze_job_results"
+        assert "Contact Map Analysis: POREC_A" in payload.get("markdown", "")
+        prompt = mock_engine.think.call_args.args[0]
+        assert "wf-pore-c job" in prompt
+        assert "pairs.stats.txt Metrics" in prompt
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_wf_pore_c_static_summary_respects_feature_flag(self, session_factory, seed_data, monkeypatch):
+        monkeypatch.setattr("cortex.job_polling.WF_PORE_C_ENABLED", False)
+
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "workflow_key": "wf_pore_c",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {"workflow_version": "v1.3.1"},
+                "artifacts": {
+                    "report_html": {"requested": True, "present": True, "matches": ["wf-pore-c-report.html"]},
+                },
+            },
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(side_effect=RuntimeError("skip"))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-pore-c-gated",
+                {"sample_name": "POREC_A", "mode": None, "workflow_key": "wf_pore_c", "model": "default", "work_directory": "/work/workflow8"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        blocks = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()
+        latest = blocks[-1]
+        payload = get_block_payload(latest)
+        assert payload.get("skill") == "analyze_job_results"
+        assert "Contact Map Summary" not in payload.get("markdown", "")
+        sess.close()
 
     @pytest.mark.asyncio
     async def test_skips_when_analysis_is_not_next_todo(self, session_factory, seed_data):

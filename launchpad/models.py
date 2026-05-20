@@ -20,8 +20,9 @@ class DogmeJob(Base):
     workflow_alias: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
     workflow_folder_name: Mapped[str | None] = mapped_column(String, nullable=True)
     workflow_display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    workflow_key: Mapped[str] = mapped_column(String, index=True, nullable=False, default="dogme", server_default="dogme")
     sample_name: Mapped[str] = mapped_column(String, nullable=False)
-    mode: Mapped[str] = mapped_column(String, nullable=False)  # DNA, RNA, CDNA
+    mode: Mapped[str | None] = mapped_column(String, nullable=True)  # Dogme-only mode: DNA, RNA, CDNA
     
     # Input data
     input_directory: Mapped[str] = mapped_column(String, nullable=False)

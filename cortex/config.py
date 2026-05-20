@@ -42,6 +42,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8501")
 # --- SKILLS & CODE CONFIG (derived from AGOUTIC_CODE) ---
 SKILLS_DIR = AGOUTIC_CODE / "skills"
 SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+WF_PORE_C_ENABLED = os.getenv("WF_PORE_C_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 # --- LLM CONFIGURATION ---
 # Check environment variable first; fallback to localhost default if missing

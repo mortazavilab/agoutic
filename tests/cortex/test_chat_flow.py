@@ -93,6 +93,7 @@ def _make_client(session_factory, seed_user, tmp_path, think_fn):
     patches = [
         patch("cortex.db.SessionLocal", session_factory),
         patch("cortex.app.SessionLocal", session_factory),
+        patch("cortex.chat_downloads.SessionLocal", session_factory),
         patch("cortex.chat_stages.setup.SessionLocal", session_factory),
         patch("cortex.chat_stages.overrides.SessionLocal", session_factory),
         patch("cortex.dependencies.SessionLocal", session_factory),
@@ -101,6 +102,7 @@ def _make_client(session_factory, seed_user, tmp_path, think_fn):
         patch("cortex.user_jail.AGOUTIC_DATA", tmp_path),
         patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"),
         patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path / "proj"),
+        patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
         patch("cortex.app.AgentEngine", mock_engine_cls),
         patch("cortex.agent_engine.AgentEngine", mock_engine_cls),
         patch("cortex.chat_stages.context_prep.AgentEngine", mock_engine_cls),

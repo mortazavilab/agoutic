@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from common.logging_config import get_logger
 from cortex.config import GENOME_ALIASES
+from cortex import user_jail
 
 if TYPE_CHECKING:
     from cortex.schemas import ConversationState
@@ -25,6 +26,26 @@ _PROJECT_WORKFLOW_REF_RE = re.compile(
     re.IGNORECASE,
 )
 _BED_PATH_RE = re.compile(r"(?P<path>(?:/|~|\.)[^\s,;]+\.bed)\b", re.IGNORECASE)
+_PORE_C_INPUT_PATH_RE = re.compile(
+    r"(?P<path>(?:/|~|\.)[^\s,;]+?\.(?:bam|fastq|fq)(?:\.gz)?)\b",
+    re.IGNORECASE,
+)
+_PORE_C_HINTED_INPUT_RE = re.compile(
+    r"\b(?P<input_type>bam|fastq|fq)\b(?:\s+(?:file|files|input|inputs|reads?|directory|dir))?\s*(?:at|in|from|=|:)?\s*(?P<path>(?:/|~|\.)\S+)",
+    re.IGNORECASE,
+)
+_PORE_C_REFERENCE_PATH_RE = re.compile(
+    r"(?P<path>(?:/|~|\.)[^\s,;]+?\.(?:fa|fasta|fna)(?:\.gz)?)\b",
+    re.IGNORECASE,
+)
+_PORE_C_VCF_PATH_RE = re.compile(
+    r"(?P<path>(?:/|~|\.)[^\s,;]+?\.vcf(?:\.gz)?)\b",
+    re.IGNORECASE,
+)
+_PORE_C_SAMPLE_SHEET_RE = re.compile(
+    r"(?:sample[_ ]sheet|samplesheet)\s+(?:at|in|from|path)?\s*[=:]?\s*(?P<path>\S+\.(?:csv|tsv|txt))",
+    re.IGNORECASE,
+)
 
 
 def _clean_overlap_display_label(label_text: str) -> str:
@@ -116,6 +137,126 @@ def _resolve_existing_path(path_value: str, conv_state: "ConversationState", pro
     if work_dir:
         return str((Path(work_dir) / expanded).resolve())
     return expanded
+
+
+def _pore_c_allowed_root(conv_state: "ConversationState", project_dir: str) -> Path | None:
+    users_root = (user_jail.AGOUTIC_DATA / "users").resolve()
+    for raw_root in (getattr(conv_state, "work_dir", None), project_dir):
+        if not raw_root:
+            continue
+        candidate = Path(os.path.expanduser(str(raw_root))).resolve()
+        try:
+            relative = candidate.relative_to(users_root)
+        except ValueError:
+            continue
+        if relative.parts:
+            return users_root / relative.parts[0]
+    return None
+
+
+def _resolve_pore_c_jailed_path(path_value: str, conv_state: "ConversationState", project_dir: str) -> str:
+    resolved = Path(_resolve_existing_path(path_value, conv_state, project_dir)).expanduser().resolve()
+
+    try:
+        user_jail._ensure_within_jail(resolved)
+    except PermissionError as exc:
+        raise ValueError(f"Pore-C path must stay inside the user jail: {resolved}") from exc
+
+    allowed_root = _pore_c_allowed_root(conv_state, project_dir)
+    if allowed_root is not None:
+        try:
+            resolved.relative_to(allowed_root.resolve())
+        except ValueError as exc:
+            raise ValueError(f"Pore-C path must stay inside the user jail: {resolved}") from exc
+
+    return str(resolved)
+
+
+def _trim_path_token(path_value: str) -> str:
+    return str(path_value or "").strip().strip('"').strip("'").rstrip(".,;:!?")
+
+
+def _derive_sample_name_from_input_path(path_value: str) -> str:
+    file_name = Path(path_value).name
+    lowered = file_name.lower()
+    for suffix in (".fastq.gz", ".fq.gz", ".fastq", ".fq", ".bam"):
+        if lowered.endswith(suffix):
+            return file_name[: -len(suffix)] or "pore_c_sample"
+    return Path(file_name).stem or "pore_c_sample"
+
+
+def _pore_c_output_root(input_path: str, conv_state: "ConversationState", project_dir: str) -> str:
+    output_root = _project_output_root(project_dir, conv_state)
+    if output_root:
+        return output_root
+
+    normalized_input = _trim_path_token(input_path)
+    if not normalized_input:
+        return ""
+
+    input_candidate = Path(os.path.expanduser(normalized_input))
+    parent = input_candidate if input_candidate.is_dir() else input_candidate.parent
+    return str(parent)
+
+
+def _pore_c_output_flags(message: str) -> dict[str, bool]:
+    def _alias_pattern(alias: str) -> str:
+        parts = [part for part in re.split(r"[\s_-]+", alias.strip()) if part]
+        return r"[\s_-]+".join(re.escape(part) for part in parts)
+
+    def _extract_flag(default: bool, *aliases: str) -> bool:
+        if not aliases:
+            return default
+        for alias in aliases:
+            alias_pattern = _alias_pattern(alias)
+            if re.search(rf"\b(?:no|without|disable|disabled|skip)\s+{alias_pattern}\b", message, re.IGNORECASE):
+                return False
+        for alias in aliases:
+            alias_pattern = _alias_pattern(alias)
+            if re.search(rf"\b(?:with|enable|enabled|generate|include|output)?\s*{alias_pattern}\b", message, re.IGNORECASE):
+                return True
+        return default
+
+    flags = {
+        "pairs": _extract_flag(True, "pairs"),
+        "mcool": _extract_flag(True, "mcool", "cooler", "contact map"),
+        "hi_c": _extract_flag(False, "hi c", "hic"),
+        "bed": _extract_flag(False, "bed"),
+        "chromunity": _extract_flag(False, "chromunity"),
+        "coverage": _extract_flag(False, "coverage"),
+        "paired_end": _extract_flag(False, "paired end", "paired_end"),
+    }
+    if flags["bed"]:
+        flags["paired_end"] = True
+    return flags
+
+
+def _extract_pore_c_sample_name(message: str) -> str | None:
+    patterns = (
+        r"\bsample(?:\s+name)?\s+([A-Za-z0-9_.-]+)",
+        r"\bsample(?:\s+name)?\s*(?:=|:|is|called|named)\s*([A-Za-z0-9_.-]+)",
+        r"\bcalled\s+([A-Za-z0-9_.-]+)",
+        r"\bnamed\s+([A-Za-z0-9_.-]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if not match:
+            continue
+        sample_name = match.group(1).strip().strip(".,;:!?")
+        if sample_name:
+            return sample_name
+    return None
+
+
+def _extract_pore_c_cutter(message: str) -> str | None:
+    match = re.search(
+        r"\b(?:cutter|enzyme|restriction\s+enzyme)\s*(?:=|:|is)?\s*([A-Za-z0-9_.-]+)",
+        message,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.group(1).strip().strip(".,;:!?")
 
 
 def _project_output_root(project_dir: str, conv_state: "ConversationState") -> str:
@@ -495,6 +636,59 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         if plot_title:
             params["plot_title"] = plot_title
         params["min_overlap_bp"] = 1
+        return params
+
+    if plan_type == "run_wf_pore_c":
+        input_match = next(_PORE_C_INPUT_PATH_RE.finditer(message or ""), None)
+        input_path = ""
+        input_type = ""
+        if input_match is not None:
+            input_path = _resolve_pore_c_jailed_path(input_match.group("path"), conv_state, project_dir)
+            lowered = input_path.lower()
+            input_type = "bam" if lowered.endswith(".bam") else "fastq"
+        else:
+            hinted_match = _PORE_C_HINTED_INPUT_RE.search(message or "")
+            if hinted_match is not None:
+                input_path = _resolve_pore_c_jailed_path(hinted_match.group("path"), conv_state, project_dir)
+                hinted_type = hinted_match.group("input_type").lower()
+                input_type = "bam" if hinted_type == "bam" else "fastq"
+
+        reference_match = _PORE_C_REFERENCE_PATH_RE.search(message or "")
+        vcf_match = _PORE_C_VCF_PATH_RE.search(message or "")
+        sample_sheet_match = _PORE_C_SAMPLE_SHEET_RE.search(message or "")
+
+        if input_path:
+            params["file_path"] = input_path
+            params["source_path"] = input_path
+            params["input_directory"] = input_path
+        if input_type:
+            params["input_type"] = input_type
+        if reference_match is not None:
+            params["reference_fasta"] = _resolve_pore_c_jailed_path(reference_match.group("path"), conv_state, project_dir)
+        if vcf_match is not None:
+            params["vcf"] = _resolve_pore_c_jailed_path(vcf_match.group("path"), conv_state, project_dir)
+        if sample_sheet_match is not None:
+            params["sample_sheet"] = _resolve_pore_c_jailed_path(sample_sheet_match.group("path"), conv_state, project_dir)
+
+        sample_name = _extract_pore_c_sample_name(message or "")
+        if not sample_name and input_path:
+            sample_name = _derive_sample_name_from_input_path(input_path)
+        if sample_name:
+            params["sample_name"] = sample_name
+            params["sample"] = sample_name
+
+        params["cutter"] = _extract_pore_c_cutter(message or "") or "NlaIII"
+        params["workflow_key"] = "wf_pore_c"
+        params["workflow_repo"] = "epi2me-labs/wf-pore-c"
+        params["workflow_version"] = "v1.3.1"
+        params["report_filename"] = "wf-pore-c-report.html"
+        params["preview_only"] = True
+        params["output_flags"] = _pore_c_output_flags(message or "")
+
+        output_root = _pore_c_output_root(input_path, conv_state, project_dir)
+        if output_root:
+            params["output_directory"] = _next_project_workflow_dir(output_root)
+
         return params
 
     if plan_type == "run_xgenepy_analysis":

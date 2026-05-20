@@ -18,6 +18,7 @@ class ConversationState:
     work_dir: str | None = None
     sample_name: str | None = None
     sample_type: str | None = None          # DNA / RNA / CDNA
+    workflow_key: str | None = None         # dogme / wf_pore_c
     reference_genome: str | None = None
     active_experiment: str | None = None     # ENCSR accession from conversation
     active_file: str | None = None           # ENCFF accession from conversation

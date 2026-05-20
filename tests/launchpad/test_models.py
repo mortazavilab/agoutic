@@ -42,6 +42,7 @@ class TestDogmeJob:
 
         loaded = db.get(DogmeJob, "test-uuid-1")
         assert loaded.sample_name == "sample1"
+        assert loaded.workflow_key == "dogme"
         assert loaded.mode == "DNA"
         assert loaded.status == "PENDING"
         assert loaded.workflow_index is None
@@ -75,8 +76,27 @@ class TestDogmeJob:
         loaded = db.get(DogmeJob, "test-uuid-2")
         assert loaded.nextflow_process_id == 12345
         assert loaded.reference_genome == "GRCh38"
+        assert loaded.workflow_key == "dogme"
         assert loaded.workflow_alias == "workflow2"
         assert loaded.workflow_display_name == "sample2-renamed"
+
+    def test_allows_non_dogme_rows_with_nullable_mode(self, db):
+        job = DogmeJob(
+            run_uuid="test-uuid-pore-c",
+            project_id="proj-1",
+            workflow_key="wf_pore_c",
+            sample_name="sample-pore-c",
+            mode=None,
+            input_directory="/data/reads.fastq.gz",
+            status="PENDING",
+            progress_percent=0,
+        )
+        db.add(job)
+        db.commit()
+
+        loaded = db.get(DogmeJob, "test-uuid-pore-c")
+        assert loaded.workflow_key == "wf_pore_c"
+        assert loaded.mode is None
 
     def test_status_update(self, db):
         job = DogmeJob(

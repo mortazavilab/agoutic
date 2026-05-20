@@ -628,6 +628,25 @@ class TestAnalyzeJobResultsCatchAll:
         assert len(summary_calls) == 1
         assert summary_calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1"
 
+    def test_auto_generates_summary_for_wf_pore_c_without_mode(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow8",
+                "run_uuid": "wf-uuid",
+                "sample_name": "POREC_A",
+                "workflow_key": "wf_pore_c",
+                "mode": None,
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "Analyze the results", "analyze_job_results",
+            history_blocks=blocks,
+        )
+
+        summary_calls = [c for c in calls if c["tool"] == "get_analysis_summary"]
+        assert len(summary_calls) == 1
+        assert summary_calls[0]["params"]["work_dir"] == "/tmp/proj/workflow8"
+
     def test_no_catch_all_when_file_parse_matches(self):
         blocks = _make_blocks([
             {"type": "EXECUTION_JOB", "payload": {

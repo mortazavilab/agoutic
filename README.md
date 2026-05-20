@@ -43,6 +43,21 @@ Remote execution features:
 - **Run and staging status tracking** — dedicated staging tasks plus remote execution stage labels through `completed`, including byte-level transfer progress, current-file details, and faster live refresh while transfers are active
 - **Scheduler integration** — SLURM job ID tracking, state polling via sacct/squeue, cancellation via scancel
 
+### wf-pore-c Status
+
+AGOUTIC now supports the `wf_pore_c` workflow family end to end behind `WF_PORE_C_ENABLED`. Phase 3 is feature-complete across local preview, local execution, remote SLURM staging/submission, Analyzer recognition, automatic summary generation, UI approval/run cards, and backward-compatible conversation/job reconstruction. The flag still defaults to off in both Launchpad and Cortex configs, so existing Dogme behavior remains the default until operators explicitly enable wf-pore-c.
+
+Current validation status:
+- Full closure sweeps passed in both flag states: `1988 passed` with `WF_PORE_C_ENABLED=false` and `1988 passed` with `WF_PORE_C_ENABLED=true` across Cortex, Launchpad, Analyzer, and UI.
+- The identical pass count in both states confirms the flag changes runtime behavior, not test inclusion.
+- Production UI rendering no longer carries the earlier AST-harness fallback branch; missing wf-pore-c helper wiring now fails loudly instead of silently degrading to Dogme metadata.
+- Legacy chats and jobs that only stored `mode` still normalize to `workflow_key="dogme"` on both the slow history-rebuild path and the fast cached-state restore path.
+
+Manual cluster validation is still required before operational rollout. Use these docs for the wf-pore-c validation path:
+- [`docs/wf_pore_c_plan.md`](docs/wf_pore_c_plan.md) — phased implementation record and closure notes
+- [`docs/wf_pore_c_smoke_test.md`](docs/wf_pore_c_smoke_test.md) — local Phase 2 smoke path
+- [`docs/wf_pore_c_remote_smoke_test.md`](docs/wf_pore_c_remote_smoke_test.md) — real-cluster Phase 3 SLURM smoke path
+
 ### Import Completed Workflows From Chat
 
 In any existing project, you can import a workflow that Dogme already ran earlier:
