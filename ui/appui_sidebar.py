@@ -43,7 +43,18 @@ def render_sidebar(
             st.caption("🔑 Admin")
 
         with st.expander("❓ Help", expanded=False):
-            st.caption("Use `/commands` to list all slash commands by category.")
+            st.caption("Use `/commands` to list all slash commands by category and `/help <topic>` for prompt recipes.")
+            st.caption("**Prompt Coach**")
+            if st.button("/help", key="help_prompt_help_command", width="stretch"):
+                st.session_state["_help_prompt"] = "/help"
+                st.rerun()
+            if st.button("/help remote slurm", key="help_prompt_help_remote_slurm", width="stretch"):
+                st.session_state["_help_prompt"] = "/help remote slurm"
+                st.rerun()
+            if st.button("/help /list files", key="help_prompt_help_list_files", width="stretch"):
+                st.session_state["_help_prompt"] = "/help /list files"
+                st.rerun()
+            st.caption("Ask naturally too: `How do I stage a sample on hpc3?`, `How do I run Dogme with a staged sample?`, `How do I sync workflow12?`")
             st.caption("**Inventory**")
             if st.button("/list samples", key="help_prompt_list_samples", width="stretch"):
                 st.session_state["_help_prompt"] = "/list samples"
@@ -71,6 +82,9 @@ def render_sidebar(
                 st.rerun()
             if st.button("how do I use remote slurm", key="help_prompt_slurm", width="stretch"):
                 st.session_state["_help_prompt"] = "how do i use remote slurm"
+                st.rerun()
+            if st.button("how do I stage on hpc3", key="help_prompt_stage_hpc3", width="stretch"):
+                st.session_state["_help_prompt"] = "how do i stage a sample on hpc3"
                 st.rerun()
             st.caption("**Skills**")
             if st.button("/skills", key="help_prompt_skills", width="stretch"):

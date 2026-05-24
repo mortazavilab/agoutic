@@ -127,13 +127,21 @@ def render_run_status(status: dict) -> None:
     workflow_usage = status.get("workflow_usage") or {}
     usage_message = ""
     if isinstance(workflow_usage, dict):
-        cpu_time = _format_usage_duration(workflow_usage.get("cpu_seconds"))
-        if cpu_time:
-            _common_meta["CPU Time"] = cpu_time
-        actual_gpu_seconds = workflow_usage.get("gpu_seconds")
-        gpu_time = _format_usage_duration(actual_gpu_seconds if actual_gpu_seconds not in (None, "") else workflow_usage.get("estimated_gpu_task_seconds"))
-        if gpu_time:
-            _common_meta["GPU Time" if actual_gpu_seconds not in (None, "") else "GPU Task Time"] = gpu_time
+        cpu_queue_time = _format_usage_duration(workflow_usage.get("cpu_queue_seconds"))
+        if cpu_queue_time:
+            _common_meta["CPU Queue Time"] = cpu_queue_time
+        else:
+            cpu_time = _format_usage_duration(workflow_usage.get("cpu_seconds"))
+            if cpu_time:
+                _common_meta["CPU Time"] = cpu_time
+        gpu_queue_time = _format_usage_duration(workflow_usage.get("gpu_queue_seconds"))
+        if gpu_queue_time:
+            _common_meta["GPU Queue Time"] = gpu_queue_time
+        else:
+            actual_gpu_seconds = workflow_usage.get("gpu_seconds")
+            gpu_time = _format_usage_duration(actual_gpu_seconds if actual_gpu_seconds not in (None, "") else workflow_usage.get("estimated_gpu_task_seconds"))
+            if gpu_time:
+                _common_meta["GPU Time" if actual_gpu_seconds not in (None, "") else "GPU Task Time"] = gpu_time
         peak_rss = _format_usage_memory_mb(workflow_usage.get("max_rss_mb"))
         if peak_rss:
             _common_meta["Peak RSS"] = peak_rss

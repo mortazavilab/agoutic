@@ -6,7 +6,7 @@ from common.logging_config import get_logger
 from cortex.config import AGOUTIC_DATA, GENOME_ALIASES
 from cortex.llm_validators import get_block_payload
 from cortex.models import Project, ProjectBlock, User
-from cortex.remote_orchestration import _prepare_remote_execution_params
+from cortex.remote_orchestration import _extract_remote_profile_nickname, _prepare_remote_execution_params
 from cortex.user_jail import get_user_data_dir
 
 logger = get_logger(__name__)
@@ -30,6 +30,44 @@ _REMOTE_INPUT_PATTERNS = [
         re.IGNORECASE,
     ),
 ]
+
+_RELATIVE_INPUT_PATH_PATTERN = r'(?<!/)\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq|fq|fast5))\b'
+_ABSOLUTE_INPUT_PATH_PATTERN = r'(?:(?<=^)|(?<=[\s"\'(]))(/[^\s,]+(?:/[^\s,]+)*)'
+
+
+def _looks_like_slash_command_message(user_text: str) -> bool:
+    stripped = str(user_text or "").strip()
+    if not stripped.startswith("/"):
+        return False
+
+    token = stripped.split(None, 1)[0]
+    if "/" in token[1:]:
+        return False
+    return bool(re.match(r"^/[a-zA-Z][a-zA-Z0-9-]*$", token))
+
+
+def _extract_explicit_input_candidate(
+    user_messages: list[str],
+    *,
+    remote_input_path: str | None,
+) -> tuple[str, bool] | None:
+    for message in reversed(user_messages):
+        if _looks_like_slash_command_message(message):
+            continue
+
+        rel_paths = re.findall(_RELATIVE_INPUT_PATH_PATTERN, message)
+        abs_paths = re.findall(_ABSOLUTE_INPUT_PATH_PATTERN, message)
+        filtered_abs_paths = [
+            candidate for candidate in abs_paths
+            if not remote_input_path or candidate.rstrip('.,;:!?') != remote_input_path
+        ]
+
+        if filtered_abs_paths:
+            return filtered_abs_paths[0].rstrip('.,;:!?'), False
+        if rel_paths:
+            return rel_paths[0].rstrip('.,;:!?'), True
+
+    return None
 
 
 def _extract_remote_input_path(user_text: str) -> str | None:
@@ -210,17 +248,13 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         params["execution_mode"] = "slurm"
         params["remote_input_path"] = remote_input_path
 
-    profile_target_match = re.search(
-        r"\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)([a-zA-Z0-9_-]+)(?:\s+profile)?(?:[?.!,]|$)|(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile)\b",
-        all_user_text_original,
-        re.IGNORECASE,
-    )
-    if profile_target_match:
+    profile_target_nickname = _extract_remote_profile_nickname(all_user_text_original)
+    if profile_target_nickname:
         params["execution_mode"] = "slurm"
-        params["ssh_profile_nickname"] = profile_target_match.group(1) or profile_target_match.group(2)
+        params["ssh_profile_nickname"] = profile_target_nickname
 
     if re.search(r"\bstage(?:\s+only)?\b", all_user_text) and (
-        re.search(r"\b(slurm|cluster|remote)\b", all_user_text) or profile_target_match
+        re.search(r"\b(slurm|cluster|remote)\b", all_user_text) or profile_target_nickname
     ):
         params["execution_mode"] = "slurm"
         params["remote_action"] = "stage_only"
@@ -351,26 +385,17 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     else:
         params["mode"] = "DNA"  # Default to DNA
 
-    # Look for paths in user messages (use ORIGINAL case to preserve path)
-    # First try: relative paths with known sequencing extensions (data/ENCFF921XAH.bam)
-    _rel_path_pattern = r'(?<!/)\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq|fq|fast5))\b'
-    _rel_paths = re.findall(_rel_path_pattern, all_user_text_original)
-    # Second try: absolute paths
-    # Avoid false positives like "account/partition" by requiring a sensible prefix.
-    _abs_path_pattern = r'(?:(?<=^)|(?<=[\s"\'(]))(/[^\s,]+(?:/[^\s,]+)*)'
-    _abs_paths = re.findall(_abs_path_pattern, all_user_text_original)
+    explicit_input_candidate = _extract_explicit_input_candidate(
+        user_messages,
+        remote_input_path=remote_input_path,
+    )
 
-    filtered_abs_paths = [
-        candidate for candidate in _abs_paths
-        if not remote_input_path or candidate.rstrip('.,;:!?') != remote_input_path
-    ]
-
-    if filtered_abs_paths:
-        cleaned_path = filtered_abs_paths[0].rstrip('.,;:!?')
+    if explicit_input_candidate and not explicit_input_candidate[1]:
+        cleaned_path = explicit_input_candidate[0]
         params["input_directory"] = cleaned_path
         params["input_directory_explicit"] = True
-    elif _rel_paths:
-        cleaned_path = _rel_paths[0].rstrip('.,;:!?')
+    elif explicit_input_candidate and explicit_input_candidate[1]:
+        cleaned_path = explicit_input_candidate[0]
         params["input_directory_explicit"] = True
         # Resolve relative path against project directory
         _proj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()

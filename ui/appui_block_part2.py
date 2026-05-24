@@ -93,14 +93,22 @@ def _workflow_usage_metrics(workflow_usage: dict | None) -> dict[str, str | int 
         return {}
 
     metrics: dict[str, str | int | float] = {}
-    cpu_time = _format_usage_duration(workflow_usage.get("cpu_seconds"))
-    if cpu_time:
-        metrics["CPU Time"] = cpu_time
+    cpu_queue_time = _format_usage_duration(workflow_usage.get("cpu_queue_seconds"))
+    if cpu_queue_time:
+        metrics["CPU Queue Time"] = cpu_queue_time
+    else:
+        cpu_time = _format_usage_duration(workflow_usage.get("cpu_seconds"))
+        if cpu_time:
+            metrics["CPU Time"] = cpu_time
 
-    actual_gpu_seconds = workflow_usage.get("gpu_seconds")
-    gpu_time = _format_usage_duration(actual_gpu_seconds if actual_gpu_seconds not in (None, "") else workflow_usage.get("estimated_gpu_task_seconds"))
-    if gpu_time:
-        metrics["GPU Time" if actual_gpu_seconds not in (None, "") else "GPU Task Time"] = gpu_time
+    gpu_queue_time = _format_usage_duration(workflow_usage.get("gpu_queue_seconds"))
+    if gpu_queue_time:
+        metrics["GPU Queue Time"] = gpu_queue_time
+    else:
+        actual_gpu_seconds = workflow_usage.get("gpu_seconds")
+        gpu_time = _format_usage_duration(actual_gpu_seconds if actual_gpu_seconds not in (None, "") else workflow_usage.get("estimated_gpu_task_seconds"))
+        if gpu_time:
+            metrics["GPU Time" if actual_gpu_seconds not in (None, "") else "GPU Task Time"] = gpu_time
 
     peak_rss = _format_usage_memory_mb(workflow_usage.get("max_rss_mb"))
     if peak_rss:

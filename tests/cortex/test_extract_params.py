@@ -445,6 +445,20 @@ class TestRemoteExecutionDetection:
         assert result["ssh_profile_nickname"] == "hpc3"
 
     @pytest.mark.asyncio
+    async def test_detects_hpc3_profile_nickname_with_follow_on_phrase(self):
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {"text": "run dogme rna on hpc3 using staged sample igvfr_698-04 with mm39"},
+        )
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+        assert result["execution_mode"] == "slurm"
+        assert result["ssh_profile_nickname"] == "hpc3"
+
+    @pytest.mark.asyncio
     async def test_detects_arbitrary_profile_nickname(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Run the mouse cDNA sample Jamshid3 at /data/pod5 on mycluster"})
         sess = self.sf()
@@ -677,8 +691,54 @@ class TestRemoteExecutionDetection:
              }])):
             result = await extract_job_parameters_from_conversation(sess, "proj-1")
         sess.close()
+        assert result["input_directory"] == "/data/pod5"
         assert result["staged_remote_input_path"] == "/remote/jdoe/agoutic/data/fp-1"
         assert result["remote_staged_sample"]["sample_name"] == "Jamshid"
+
+    @pytest.mark.asyncio
+    async def test_ignores_prior_slash_command_when_reusing_staged_sample(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "/list staged"}, seq=1)
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {"text": "run dogme rna on hpc3 using staged sample igvfr_698-04 with mm39"},
+            seq=2,
+        )
+        sess = self.sf()
+        staged = RemoteStagedSample(
+            id="stage-2",
+            user_id="u1",
+            ssh_profile_id="profile-123",
+            ssh_profile_nickname="hpc3",
+            sample_name="igvfr_698-04",
+            sample_slug="igvfr-698-04",
+            mode="RNA",
+            reference_genome_json=["mm39"],
+            source_path="/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+            input_fingerprint="fp-2",
+            remote_base_path="/share/crsp/lab/seyedam/share/agoutic/seyedam",
+            remote_data_path="/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2",
+            remote_reference_paths_json={"mm39": "/share/crsp/lab/seyedam/share/agoutic/seyedam/ref/mm39"},
+            status="READY",
+        )
+        sess.add(staged)
+        sess.commit()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+                 "id": "profile-123",
+                 "nickname": "hpc3",
+                 "ssh_username": "seyedam",
+                 "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+             }])):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["execution_mode"] == "slurm"
+        assert result["sample_name"] == "igvfr_698-04"
+        assert result["input_directory"] == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip"
+        assert result["input_directory"] != "/list"
+        assert result["staged_remote_input_path"] == "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2"
 
     @pytest.mark.asyncio
     async def test_ignores_account_partition_phrase_when_extracting_path_and_partition(self):

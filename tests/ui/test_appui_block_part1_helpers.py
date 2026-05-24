@@ -22,6 +22,11 @@ def _load_part1_namespace() -> dict:
         "_prime_post_approval_refresh_state",
         "_wf_pore_c_ui_enabled",
         "_approval_workflow_key",
+        "_workflow_input_path_label",
+        "_path_looks_like_file",
+        "_approval_input_path_label",
+        "_approval_input_path_help",
+        "_approval_path_summary_rows",
         "_wf_pore_c_output_flag_values",
         "_approval_gate_field_visibility",
         "_split_cluster_modkit_paths",
@@ -297,6 +302,62 @@ def test_approval_gate_field_visibility_switches_to_wf_pore_c_controls(monkeypat
         "show_sample_sheet": True,
         "show_cutter": True,
         "show_output_flags": True,
+    }
+
+
+def test_approval_input_path_label_marks_reused_staged_sample_paths():
+    namespace = _load_part1_namespace()
+
+    label = namespace["_approval_input_path_label"](
+        {
+            "workflow_key": "dogme",
+            "input_directory": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+            "staged_remote_input_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2",
+        },
+        gate_action="job",
+    )
+    help_text = namespace["_approval_input_path_help"](
+        {
+            "workflow_key": "dogme",
+            "input_directory": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+            "staged_remote_input_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2",
+        },
+        gate_action="job",
+    )
+
+    assert label == "Staged Sample Source Directory"
+    assert "reused staged sample" in help_text.lower()
+
+
+def test_approval_input_path_label_marks_file_inputs():
+    namespace = _load_part1_namespace()
+
+    label = namespace["_approval_input_path_label"](
+        {
+            "workflow_key": "dogme",
+            "input_directory": "/media/backup_disk/agoutic_root/users/elnaz-a/data/ENCFF921XAH.bam",
+        },
+        gate_action="job",
+    )
+
+    assert label == "Input File"
+
+
+def test_approval_path_summary_rows_include_staged_remote_path():
+    namespace = _load_part1_namespace()
+
+    rows = namespace["_approval_path_summary_rows"](
+        {
+            "workflow_key": "dogme",
+            "input_directory": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+            "staged_remote_input_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2",
+        },
+        gate_action="job",
+    )
+
+    assert rows == {
+        "Staged Sample Source Directory": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+        "Staged Remote Path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2",
     }
 
 

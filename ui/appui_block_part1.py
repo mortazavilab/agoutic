@@ -139,6 +139,87 @@ def _workflow_input_path_label(workflow_key: str) -> str:
     return "Input Directory"
 
 
+def _path_looks_like_file(path_value: str | None) -> bool:
+    cleaned = str(path_value or "").strip()
+    if not cleaned or cleaned.endswith("/"):
+        return False
+    if cleaned.lower().startswith("remote:"):
+        cleaned = cleaned[7:].strip()
+    lower = cleaned.lower()
+    return lower.endswith(
+        (
+            ".bam",
+            ".fastq",
+            ".fq",
+            ".fast5",
+            ".pod5",
+            ".bed",
+            ".vcf",
+            ".vcf.gz",
+            ".fa",
+            ".fasta",
+            ".fa.gz",
+            ".fasta.gz",
+            ".txt",
+            ".csv",
+            ".tsv",
+        )
+    )
+
+
+def _approval_input_path_label(extracted_params: dict | None, *, gate_action: str) -> str:
+    workflow_key = _approval_workflow_key(extracted_params)
+    if workflow_key == "wf_pore_c":
+        return _workflow_input_path_label(workflow_key)
+
+    params = extracted_params or {}
+    is_file = _path_looks_like_file(params.get("input_directory"))
+    normalized_gate_action = str(gate_action or "").strip().lower()
+
+    if params.get("staged_remote_input_path") or params.get("remote_staged_sample"):
+        return "Staged Sample Source File" if is_file else "Staged Sample Source Directory"
+    if normalized_gate_action == "remote_stage":
+        return "Local Source File" if is_file else "Local Source Directory"
+    return "Input File" if is_file else "Input Directory"
+
+
+def _approval_input_path_help(extracted_params: dict | None, *, gate_action: str) -> str:
+    workflow_key = _approval_workflow_key(extracted_params)
+    if workflow_key == "wf_pore_c":
+        return "Path to the BAM or FASTQ input for wf-pore-c."
+
+    params = extracted_params or {}
+    is_file = _path_looks_like_file(params.get("input_directory"))
+    normalized_gate_action = str(gate_action or "").strip().lower()
+
+    if params.get("staged_remote_input_path") or params.get("remote_staged_sample"):
+        return "Original source path recorded for the reused staged sample. The staged remote cache path is shown separately below."
+    if normalized_gate_action == "remote_stage":
+        return "Local source path that will be copied into the remote staging cache."
+    if is_file:
+        return "Full path to the input file."
+    return "Full path to the input directory."
+
+
+def _approval_path_summary_rows(extracted_params: dict | None, *, gate_action: str) -> dict[str, str]:
+    params = extracted_params or {}
+    rows: dict[str, str] = {}
+
+    remote_input_path = str(params.get("remote_input_path") or "").strip()
+    staged_remote_input_path = str(params.get("staged_remote_input_path") or "").strip()
+    input_directory = params.get("input_directory")
+
+    if remote_input_path:
+        rows["Remote Input File" if _path_looks_like_file(remote_input_path) else "Remote Input Path"] = remote_input_path
+    elif input_directory not in (None, "", [], {}):
+        rows[_approval_input_path_label(params, gate_action=gate_action)] = str(input_directory)
+
+    if staged_remote_input_path:
+        rows["Staged Remote File" if _path_looks_like_file(staged_remote_input_path) else "Staged Remote Path"] = staged_remote_input_path
+
+    return rows
+
+
 def _approval_gate_reference_genome_catalog(api_url: str, request_fn, raw_value=None) -> dict:
     fallback: list[str] = []
     if isinstance(raw_value, str):
@@ -523,12 +604,12 @@ def render_block_part1(
 
             _summary = {}
             _src_params = approved_params if isinstance(approved_params, dict) else extracted_params
+            _summary_gate_action = extracted_params.get("gate_action") or content.get("gate_action", "job")
             if isinstance(_src_params, dict):
                 for _k in [
                     "sample_name",
                     "mode",
                     "input_type",
-                    "input_directory",
                     "execution_mode",
                     "entry_point",
                     "result_destination",
@@ -538,7 +619,8 @@ def render_block_part1(
                     _v = _src_params.get(_k)
                     if _v not in (None, "", [], {}):
                         _summary[_k.replace("_", " ").title()] = _v
-                _summary["Gate Action"] = extracted_params.get("gate_action") or content.get("gate_action", "job")
+                _summary.update(_approval_path_summary_rows(_src_params, gate_action=_summary_gate_action))
+                _summary["Gate Action"] = _summary_gate_action
                 if (extracted_params.get("gate_action") or content.get("gate_action")) == "compare_region_overlaps":
                     if _src_params.get("sample_a_label"):
                         _summary["Sample A"] = _src_params.get("sample_a_label")
@@ -687,9 +769,9 @@ def render_block_part1(
                             st.caption("Workflow: `wf-pore-c`")
 
                         input_directory = st.text_input(
-                            _workflow_input_path_label(_workflow_key),
+                            _approval_input_path_label(extracted_params, gate_action="remote_stage"),
                             value=extracted_params.get("input_directory", ""),
-                            help="Local source folder that will be staged to the remote data cache."
+                            help=_approval_input_path_help(extracted_params, gate_action="remote_stage")
                         )
 
                         input_type = extracted_params.get("input_type", "pod5")
@@ -1247,11 +1329,15 @@ def render_block_part1(
                                 help="main=(auto) full pipeline, basecall=only basecalling, remap=from unmapped BAM, modkit=modifications only, annotateRNA=transcript annotation, reports=generate reports"
                             )
                         
+                        _staged_remote_input_path = extracted_params.get("staged_remote_input_path") or ""
+                        if _staged_remote_input_path:
+                            st.caption(f"Reusing staged remote path: `{_staged_remote_input_path}`")
+
                         # Input directory
                         input_directory = st.text_input(
-                            _workflow_input_path_label(_workflow_key),
+                            _approval_input_path_label(extracted_params, gate_action=_gate_action),
                             value=extracted_params.get("input_directory", ""),
-                            help="Full path to input files"
+                            help=_approval_input_path_help(extracted_params, gate_action=_gate_action)
                         )
 
                         if _workflow_key == "wf_pore_c":

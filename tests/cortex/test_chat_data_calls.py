@@ -10,6 +10,8 @@ import contextlib
 import datetime
 import json
 import re
+import sys
+import types
 import uuid
 from pathlib import Path
 
@@ -19,6 +21,26 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
+
+class _FakeEncoding:
+    def encode(self, text: str):
+        return list(text or "")
+
+
+if "pandas" not in sys.modules:
+    sys.modules["pandas"] = types.SimpleNamespace(
+        DataFrame=object,
+        Series=object,
+        read_csv=lambda *_args, **_kwargs: None,
+    )
+
+
+if "tiktoken" not in sys.modules:
+    sys.modules["tiktoken"] = types.SimpleNamespace(
+        get_encoding=lambda _name: _FakeEncoding(),
+        Encoding=_FakeEncoding,
+    )
 
 from common.database import Base
 from cortex.memory_service import list_memories
@@ -3163,6 +3185,212 @@ class TestBrowsingToolBypass:
         assert extracted.get("gate_action") == "job"
         assert extracted.get("slurm_account") == "SEYEDAM_LAB"
         assert extracted.get("slurm_partition") == "standard"
+
+    def test_remote_run_with_follow_on_profile_phrase_creates_job_approval(self, SL, seed, tmp_path):
+        """Continuing the prompt after `on hpc3` should still produce the remote approval gate."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            if tool_name == "list_ssh_profiles":
+                return [
+                    {
+                        "id": "profile-123",
+                        "nickname": "hpc3",
+                        "ssh_username": "agoutic",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                        "default_slurm_gpu_account": "SEYEDAM_LAB",
+                        "default_slurm_gpu_partition": "gpu",
+                    }
+                ]
+            if tool_name == "get_slurm_defaults":
+                return {
+                    "found": True,
+                    "source": "ssh_profile_defaults",
+                    "account": "SEYEDAM_LAB",
+                    "partition": "standard",
+                    "selected_profile_defaults": {
+                        "ssh_profile_id": "profile-123",
+                        "nickname": "hpc3",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                    },
+                }
+            raise AssertionError(f"unexpected tool: {tool_name}")
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "I found the saved remote defaults needed for this run.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch(
+                "cortex.remote_orchestration._resolve_ssh_profile_reference",
+                new=AsyncMock(return_value=("profile-123", "hpc3")),
+            ),
+            patch(
+                "cortex.remote_orchestration._list_user_ssh_profiles",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "profile-123",
+                            "nickname": "hpc3",
+                            "ssh_username": "agoutic",
+                            "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                            "default_slurm_account": "SEYEDAM_LAB",
+                            "default_slurm_partition": "standard",
+                            "default_slurm_gpu_account": "SEYEDAM_LAB",
+                            "default_slurm_gpu_partition": "gpu",
+                        }
+                    ]
+                ),
+            ),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "run dogme rna on hpc3 using staged sample igvfr_698-04 with mm39",
+            skill="welcome",
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        assert payload.get("skill") == "remote_execution"
+
+        gate = data.get("gate_block") or {}
+        gate_payload = gate.get("payload") or {}
+        assert gate_payload.get("skill") == "remote_execution"
+        assert gate_payload.get("gate_action") == "job"
+        extracted = gate_payload.get("extracted_params") or {}
+        assert extracted.get("execution_mode") == "slurm"
+        assert extracted.get("ssh_profile_nickname") == "hpc3"
+        assert extracted.get("sample_name") == "igvfr_698-04"
+
+    def test_remote_run_with_reused_staged_sample_prefers_staged_remote_path_in_summary(self, SL, seed, tmp_path):
+        """Reused staged samples should show the staged remote path in the summary and preserve the saved source path in the gate."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            if tool_name == "list_ssh_profiles":
+                return [
+                    {
+                        "id": "profile-123",
+                        "nickname": "hpc3",
+                        "ssh_username": "seyedam",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                        "default_slurm_gpu_account": "BIOD132_CLASS_GPU",
+                        "default_slurm_gpu_partition": "gpu",
+                    }
+                ]
+            if tool_name == "get_slurm_defaults":
+                return {
+                    "found": True,
+                    "source": "ssh_profile_defaults",
+                    "account": "SEYEDAM_LAB",
+                    "partition": "standard",
+                    "selected_profile_defaults": {
+                        "ssh_profile_id": "profile-123",
+                        "nickname": "hpc3",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                        "default_slurm_gpu_account": "BIOD132_CLASS_GPU",
+                        "default_slurm_gpu_partition": "gpu",
+                    },
+                }
+            raise AssertionError(f"unexpected tool: {tool_name}")
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "I found the saved remote defaults needed for this run.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch(
+                "cortex.remote_orchestration._resolve_ssh_profile_reference",
+                new=AsyncMock(return_value=("profile-123", "hpc3")),
+            ),
+            patch(
+                "cortex.remote_orchestration._list_user_ssh_profiles",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "profile-123",
+                            "nickname": "hpc3",
+                            "ssh_username": "seyedam",
+                            "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                            "default_slurm_account": "SEYEDAM_LAB",
+                            "default_slurm_partition": "standard",
+                            "default_slurm_gpu_account": "BIOD132_CLASS_GPU",
+                            "default_slurm_gpu_partition": "gpu",
+                        }
+                    ]
+                ),
+            ),
+            patch(
+                "cortex.job_parameters.extract_job_parameters_from_conversation",
+                new=AsyncMock(
+                    return_value={
+                        "sample_name": "igvfr_698-04",
+                        "input_directory": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+                        "mode": "RNA",
+                        "reference_genome": ["mm39"],
+                        "ssh_profile_nickname": "hpc3",
+                        "execution_mode": "slurm",
+                        "staged_remote_input_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2",
+                        "remote_staged_sample": {
+                            "sample_name": "igvfr_698-04",
+                            "source_path": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+                            "remote_data_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2",
+                            "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                            "reference_genome": ["mm39"],
+                        },
+                    }
+                ),
+            ),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "run dogme rna on hpc3 using staged sample igvfr_698-04 with mm39",
+            skill="welcome",
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        assert payload.get("skill") == "remote_execution"
+        assert "Staged Remote Path" in md
+        assert "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2" in md
+        assert "/list" not in md
+
+        gate = data.get("gate_block") or {}
+        gate_payload = gate.get("payload") or {}
+        extracted = gate_payload.get("extracted_params") or {}
+        assert extracted.get("input_directory") == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip"
+        assert extracted.get("staged_remote_input_path") == "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2"
 
     def test_remote_run_with_encff_like_local_filename_keeps_launchpad_calls_and_creates_approval(self, SL, seed, tmp_path):
         """Remote execution requests with ENCFF-like local filenames should not reroute launchpad calls to ENCODE."""

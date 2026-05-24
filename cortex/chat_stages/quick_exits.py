@@ -19,6 +19,7 @@ from cortex.chat_sync_handler import (
 from cortex.db import row_to_dict
 from cortex.db_helpers import _create_block_internal, _resolve_project_dir, save_conversation_message
 from cortex.file_commands import execute_file_command, parse_file_command
+from cortex.help_commands import detect_help_intent, execute_help_command, parse_help_command, render_slash_commands_markdown
 from cortex.list_commands import detect_list_intent, execute_list_command, parse_list_command
 from cortex.memory_commands import (
     detect_memory_intent,
@@ -39,44 +40,7 @@ logger = get_logger(__name__)
 
 
 def _slash_commands_markdown() -> str:
-    return (
-        "### Slash Commands\n\n"
-        "Use `/commands` any time to reopen this list.\n\n"
-        "**Skills**\n"
-        "- `/skills`\n"
-        "- `/skill <skill_key>`\n"
-        "- `/use-skill <skill_key>`\n\n"
-        "**Inventory**\n"
-        "- `/list samples`\n"
-        "- `/list staged [--profile NAME]`\n"
-        "- `/list imported`\n"
-        "- `/list dfs`\n"
-        "- `/list workflows`\n"
-        "- `/list files [target] [--project] [--depth N]`\n\n"
-        "**Workflows**\n"
-        "- `/use <workflow>`\n"
-        "- `/reanalyze [workflow[, workflow2, ...]]` — omit the workflow to use the active workflow\n"
-        "- `/rerun [workflow[, workflow2, ...]]` — omit the workflow to use the active workflow\n"
-        "- `/delete [workflow[, workflow2, ...]]` — omit the workflow to use the active workflow\n"
-        "- `/sync-workflow [workflow[, workflow2, ...]]` — omit the workflow to use the active workflow\n"
-        "- `/cancel-sync <workflow[, workflow2, ...]>`\n"
-        "- `/rename <workflow> <new_name>`\n"
-        "- `/import-workflow <path> [--remote] [--profile NAME] [--full-copy] [--sample-name NAME] [--mode DNA|RNA|CDNA] [--reference GRCh38,mm39] [--modifications MODS]`\n"
-        "- `/list-launchpad-workflows`\n\n"
-        "**Files**\n"
-        "- `/read-file <path> [--lines N] [--mode auto|plain|markdown|html_text|html_raw]`\n\n"
-        "**Differential Expression**\n"
-        "- `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`\n\n"
-        "**Memory**\n"
-        "- `/memories`\n"
-        "- `/remember <text>`\n"
-        "- `/remember-global <text>`\n"
-        "- `/remember-df DF5 as <name>`\n"
-        "- `/pin #<id>` · `/unpin #<id>` · `/restore #<id>`\n"
-        "- `/annotate <sample> key=value`\n"
-        "- `/search-memories <query>`\n"
-        "- `/upgrade-to-global #<id>`\n"
-    )
+    return render_slash_commands_markdown()
 
 
 def _is_slash_commands_request(message: str) -> bool:
@@ -90,6 +54,17 @@ def _is_slash_commands_request(message: str) -> bool:
         "show slash commands",
         "list slash commands",
         "what slash commands are available",
+    }
+
+
+def _is_capabilities_request(message: str) -> bool:
+    msg = str(message or "").strip().lower()
+    return msg in {
+        "what can you do",
+        "what are your capabilities",
+        "what can i do",
+        "list features",
+        "show capabilities",
     }
 
 
@@ -111,11 +86,7 @@ class CapabilitiesStage:
     priority = 200
 
     async def should_run(self, ctx: ChatContext) -> bool:
-        phrases = [
-            "what can you do", "what are your capabilities", "help",
-            "what can i do", "list features", "show capabilities",
-        ]
-        return any(p in ctx.user_msg_lower for p in phrases)
+        return _is_capabilities_request(ctx.message)
 
     async def run(self, ctx: ChatContext) -> None:
         capabilities_text = (
@@ -136,15 +107,17 @@ class CapabilitiesStage:
             "from DE results or custom gene sets\n"
             "7. **Search IGVF data** — Browse IGVF datasets, files, samples, and "
             "genes from the IGVF portal\n\n"
-            "Use `/commands` to list all slash commands by category.\n\n"
+            "Use `/commands` to list all slash commands by category and `/help <topic>` to ask how to prompt AGOUTIC for a task, skill, or slash command.\n\n"
             "Useful slash commands:\n"
             "- `/commands`\n"
+            "- Help: `/help`, `/help remote slurm`, `/help /list files`, `/help remote_execution`\n"
             "- Inventory: `/list samples`, `/list staged [--profile NAME]`, `/list imported`, `/list dfs`, `/list workflows`, `/list files [target] [--project] [--depth N]`\n"
             "- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`\n"
             "- Workflows: `/use <workflow>`, `/reanalyze [workflow[, workflow2, ...]]`, `/rerun [workflow[, workflow2, ...]]`, `/delete [workflow[, workflow2, ...]]`, `/sync-workflow [workflow[, workflow2, ...]]`\n"
             "- Files: `/read-file <path> [--lines N] [--mode auto|plain|markdown|html_text|html_raw]`\n"
             "- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`\n"
             "- Memory: `/remember <text>`, `/remember-global <text>`, `/remember-df DF5 as <name>`, `/memories`, `/pin #<id>`, `/unpin #<id>`, `/restore #<id>`, `/annotate <sample> key=value`, `/search-memories <query>`, `/upgrade-to-global #<id>`\n\n"
+            "Try asking things like `How do I stage a sample on hpc3?`, `How do I prompt you to run Dogme with a staged sample?`, or `How do I use /list files?`\n\n"
             "What would you like to do?\n"
         )
         agent_block = _create_block_internal(
@@ -168,6 +141,32 @@ class CapabilitiesStage:
 
 
 register_stage(CapabilitiesStage())
+
+
+class HelpCommandStage:
+    name = "help_command"
+    priority = 204
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return parse_help_command(ctx.message) is not None or detect_help_intent(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        command = parse_help_command(ctx.message) or detect_help_intent(ctx.message)
+        markdown = execute_help_command(command, active_skill=ctx.active_skill or ctx.skill or "welcome")
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="help_command",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(HelpCommandStage())
 
 
 class CommandsCatalogStage:

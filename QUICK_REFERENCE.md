@@ -157,8 +157,24 @@ mkdir -p $AGOUTIC_DATA/database $AGOUTIC_DATA/launchpad_work $AGOUTIC_DATA/launc
 
 Slash commands currently fall into two buckets:
 
-- **Deterministic quick exits** — skill commands, workflow commands, and all memory commands are handled by the backend without calling the LLM.
+- **Deterministic quick exits** — help commands, skill commands, workflow commands, inventory commands, and all memory commands are handled by the backend without calling the LLM.
 - **Planner-routed commands** — `/de` enters the differential-expression planning flow and can still ask follow-up questions when required inputs are missing.
+
+### Help Commands
+
+| Command | Syntax | Description |
+|---|---|---|
+| `/help` | `/help remote slurm` | Explain how to ask AGOUTIC for a task, slash command, or skill, with concrete prompt examples and required details |
+| `/commands` | `/commands` | List slash commands by category |
+
+Natural-language prompt coaching is also supported for common AGOUTIC tasks, for example:
+
+- `how do I stage a sample on hpc3`
+- `how do I prompt you to run Dogme with a staged sample`
+- `how do I sync workflow12 back from the cluster`
+- `how do I use /list files`
+
+Prompt-coach coverage currently includes slash commands, skills, workflow import, remote SLURM stage/run/sync flows, differential expression, and dataframe/plotting workflows.
 
 ### Skill Commands
 

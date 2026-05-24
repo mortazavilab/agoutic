@@ -207,3 +207,36 @@ def test_workflow_usage_metrics_show_billing_by_account(monkeypatch):
     assert metrics["CPU Billing Hours (cpu-default)"] == 0.019
     assert metrics["GPU Billing Hours (gpu-default)"] == 0.031
     assert "SLURM Billing Hours" not in metrics
+
+
+def test_workflow_usage_metrics_prefer_queue_time_labels_for_slurm(monkeypatch):
+    monkeypatch.delenv("WF_PORE_C_ENABLED", raising=False)
+    namespace = _load_part2_namespace()
+
+    metrics = namespace["_workflow_usage_metrics"](
+        {
+            "cpu_seconds": 170.0,
+            "cpu_queue_seconds": 100.0,
+            "gpu_seconds": 55.0,
+            "gpu_queue_seconds": 55.0,
+            "billing_entries": [
+                {
+                    "resource_type": "CPU",
+                    "account": "cpu-default",
+                    "billing_hours": 0.028,
+                },
+                {
+                    "resource_type": "GPU",
+                    "account": "gpu-default",
+                    "billing_hours": 0.031,
+                },
+            ],
+        }
+    )
+
+    assert metrics["CPU Queue Time"] == "1m 40s"
+    assert metrics["GPU Queue Time"] == "55s"
+    assert "CPU Time" not in metrics
+    assert "GPU Time" not in metrics
+    assert metrics["CPU Billing Hours (cpu-default)"] == 0.028
+    assert metrics["GPU Billing Hours (gpu-default)"] == 0.031

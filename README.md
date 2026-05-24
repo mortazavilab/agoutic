@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Release:** 3.6.8
+**Release:** 3.6.9
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -298,7 +298,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   AGOUTIC System v3.6.8                     │
+│                   AGOUTIC System v3.6.9                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -947,7 +947,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.6.8 — durable reconcile script jobs now clean up full process trees, completion snapshots persist the final workflow directory atomically, reconcile summaries ingest `reconciled_summary.txt`, and `/read-file` plus natural-language file reads can open txt/markdown/HTML reports
+- **Release**: 3.6.9 — prompt-coach `/help` guidance, unified inventory/My Data discovery, reference-catalog approval options, wf-pore-c Phase 3 completion, and remote SLURM defaults/approval fixes now ship together in the current AGOUTIC release
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

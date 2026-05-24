@@ -95,6 +95,8 @@ class TestWorkflowAccounting:
 
         assert summary["source"] == "slurm_sacct+nextflow_trace"
         assert summary["cpu_seconds"] == 170.0
+        assert summary["cpu_queue_seconds"] == 100.0
+        assert summary["gpu_queue_seconds"] == 55.0
         assert summary["task_realtime_seconds"] == 155.0
         assert summary["billing_units"] == 0.058
         assert summary["billing_hours_by_account"] == {

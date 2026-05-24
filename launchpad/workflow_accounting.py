@@ -381,6 +381,8 @@ def summarize_slurm_workflow_usage(
 
     slurm_cpu_seconds = 0.0
     slurm_elapsed_seconds = 0.0
+    slurm_cpu_queue_seconds = 0.0
+    slurm_gpu_queue_seconds = 0.0
     slurm_gpu_seconds = 0.0
     slurm_billing_hours = 0.0
     slurm_billing_hours_by_account: dict[str, float] = {}
@@ -415,10 +417,18 @@ def summarize_slurm_workflow_usage(
         total_cpu_seconds = parse_trace_duration_seconds(parts[4])
         max_rss_mb = parse_trace_memory_mb(parts[5])
         alloc_tres = _parse_slurm_alloc_tres(parts[6])
+        job_details = jobs_by_native_id.get(job_id) or {}
+        gpu_count = _allocated_gpu_count(alloc_tres)
         resource_type = _billing_resource_type_for_alloc_tres(alloc_tres)
+        if resource_type != "GPU" and job_details.get("is_gpu_task"):
+            resource_type = "GPU"
 
         if elapsed_seconds is not None:
             slurm_elapsed_seconds += elapsed_seconds
+            if resource_type == "GPU":
+                slurm_gpu_queue_seconds += elapsed_seconds
+            else:
+                slurm_cpu_queue_seconds += elapsed_seconds
             billing_rate = alloc_tres.get("billing")
             if billing_rate is not None:
                 billing_hours = float(billing_rate) * (elapsed_seconds / 3600.0)
@@ -431,7 +441,6 @@ def summarize_slurm_workflow_usage(
                 slurm_billing_entries_by_key[billing_key] = (
                     slurm_billing_entries_by_key.get(billing_key, 0.0) + billing_hours
                 )
-            gpu_count = _allocated_gpu_count(alloc_tres)
             if gpu_count > 0:
                 slurm_gpu_seconds += elapsed_seconds * gpu_count
 
@@ -455,6 +464,10 @@ def summarize_slurm_workflow_usage(
         summary["cpu_seconds"] = _round_metric(slurm_cpu_seconds)
     if slurm_elapsed_seconds > 0:
         summary["task_realtime_seconds"] = _round_metric(slurm_elapsed_seconds)
+    if slurm_cpu_queue_seconds > 0:
+        summary["cpu_queue_seconds"] = _round_metric(slurm_cpu_queue_seconds)
+    if slurm_gpu_queue_seconds > 0:
+        summary["gpu_queue_seconds"] = _round_metric(slurm_gpu_queue_seconds)
     if slurm_gpu_seconds > 0:
         rounded_gpu_seconds = _round_metric(slurm_gpu_seconds)
         summary["gpu_seconds"] = rounded_gpu_seconds

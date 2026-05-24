@@ -36,6 +36,58 @@ _WORKFLOW_PLAN_TYPE = "WORKFLOW_PLAN"
 _LOCAL_SAMPLE_WORKFLOW = "local_sample_intake"
 _REMOTE_SAMPLE_WORKFLOW = "remote_sample_intake"
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+_REMOTE_PROFILE_STOPWORDS = {"the", "slurm", "remote", "local", "my", "your", "this", "that"}
+_REMOTE_PROFILE_CONTINUATIONS = {
+    "using",
+    "with",
+    "from",
+    "for",
+    "to",
+    "then",
+    "and",
+    "in",
+    "under",
+    "at",
+    "of",
+    "please",
+}
+
+
+def _extract_remote_profile_nickname(user_message: str) -> str | None:
+    msg = (user_message or "").strip()
+    if not msg:
+        return None
+
+    explicit_match = re.search(
+        r"\b(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile\b",
+        msg,
+        re.IGNORECASE,
+    )
+    if explicit_match:
+        return explicit_match.group(1)
+
+    on_match = re.search(
+        r"\bon\s+([a-zA-Z0-9_-]+)(?:\s+profile)?\b",
+        msg,
+        re.IGNORECASE,
+    )
+    if not on_match:
+        return None
+
+    nickname = on_match.group(1)
+    if str(nickname or "").strip().lower() in _REMOTE_PROFILE_STOPWORDS:
+        return None
+
+    remainder = msg[on_match.end():].lstrip()
+    if not remainder or remainder[0] in ".,;:!?":
+        return nickname
+
+    next_token_match = re.match(r"([a-zA-Z0-9_-]+)", remainder)
+    next_token = next_token_match.group(1).lower() if next_token_match else ""
+    if next_token in _REMOTE_PROFILE_CONTINUATIONS:
+        return nickname
+
+    return None
 
 
 def _remote_path_fingerprint(remote_path: str) -> str:
@@ -232,16 +284,16 @@ def _extract_remote_browse_request(user_message: str) -> dict | None:
     ):
         return None
 
-    profile_pattern = re.compile(
-        r"\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)([a-zA-Z0-9_-]+)(?:\s+profile)?(?:[?.!,]|$)|(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile)\b",
-        re.IGNORECASE,
-    )
-    profile_match = profile_pattern.search(msg)
-    nickname = None
-    if profile_match:
-        nickname = profile_match.group(1) or profile_match.group(2)
-
-    msg_wo_profile = profile_pattern.sub("", msg).strip()
+    nickname = _extract_remote_profile_nickname(msg)
+    msg_wo_profile = msg
+    if nickname:
+        msg_wo_profile = re.sub(
+            rf"\b(?:on\s+{re.escape(nickname)}(?:\s+profile)?|(?:using|via)\s+(?:the\s+)?{re.escape(nickname)}\s+profile)\b",
+            "",
+            msg,
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip()
     path_match = re.search(
         r"\b(?:list|show|browse|what)\s+(?:the\s+)?(?:top\s+)?(?:files?|folders?|directories?)\s+(?:in|under|at|of)\s+(.+?)\s*$",
         msg_wo_profile,
@@ -272,15 +324,7 @@ def _extract_remote_execution_request(user_message: str) -> dict | None:
     if not has_remote_intent:
         return None
 
-    profile_pattern = re.compile(
-        r"\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)([a-zA-Z0-9_-]+)(?:\s+profile)?(?:[?.!,]|$)|(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile)\b",
-        re.IGNORECASE,
-    )
-    profile_match = profile_pattern.search(msg)
-    if not profile_match:
-        return None
-
-    nickname = profile_match.group(1) or profile_match.group(2)
+    nickname = _extract_remote_profile_nickname(msg)
     if not nickname:
         return None
 
@@ -423,6 +467,12 @@ async def _build_remote_stage_approval_context(
     mode = prepared.get("mode") or "DNA"
     input_directory = prepared.get("input_directory") or ""
     remote_input_path = prepared.get("remote_input_path") or ""
+    remote_staged_sample = prepared.get("remote_staged_sample") or {}
+    staged_remote_path = (
+        remote_staged_sample.get("remote_data_path")
+        or prepared.get("staged_remote_input_path")
+        or ""
+    )
     reference_genome = prepared.get("reference_genome") or ["mm39"]
     if isinstance(reference_genome, str):
         reference_genome = [reference_genome]
@@ -439,7 +489,11 @@ async def _build_remote_stage_approval_context(
     data_path_line = (
         f"📂 **Remote Input Path:** {remote_input_path}\n"
         if remote_input_path
-        else f"📁 **Data Path:** {input_directory}\n"
+        else (
+            f"📂 **Staged Remote Path:** {staged_remote_path}\n"
+            if staged_remote_path
+            else f"📁 **Data Path:** {input_directory}\n"
+        )
     )
     has_saved_defaults = bool(
         defaults_data.get("found")
@@ -962,6 +1016,12 @@ async def _prepare_remote_execution_params(
             normalized["staged_remote_input_path"] = staged_payload["remote_data_path"]
             normalized["remote_staged_sample"] = staged_payload
             normalized["remote_base_path"] = normalized.get("remote_base_path") or staged_payload["remote_base_path"]
+            if not normalized.get("input_directory_explicit"):
+                normalized["input_directory"] = (
+                    staged_payload.get("source_path")
+                    or normalized.get("input_directory")
+                    or f"remote:{staged_payload['remote_data_path']}"
+                )
             preflight = normalized.get("cache_preflight") or {}
             if isinstance(preflight, dict):
                 preflight["status"] = "ready"
@@ -1014,6 +1074,27 @@ def _hydrate_request_placeholders(value, *, user_id: str, project_id: str):
     return value
 
 
+def _looks_like_example_scope_id(value: str | None, *, scope: str, actual_value: str | None = None) -> bool:
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if actual_value and stripped == actual_value:
+        return False
+    if stripped.startswith("<") and stripped.endswith(">"):
+        return True
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return True
+
+    lowered = stripped.lower()
+    if scope == "user":
+        return bool(re.fullmatch(r"user(?:_id)?_[a-z0-9-]+", lowered))
+    if scope == "project":
+        return bool(re.fullmatch(r"(?:proj|project)(?:_id)?_[a-z0-9-]+", lowered))
+    return False
+
+
 def _inject_launchpad_context_params(
     tool_name: str,
     params: dict,
@@ -1022,7 +1103,11 @@ def _inject_launchpad_context_params(
     project_id: str,
 ) -> dict:
     """Best-effort context hydration for Launchpad tools that require identity scope."""
-    hydrated = dict(params or {})
+    hydrated = _hydrate_request_placeholders(
+        dict(params or {}),
+        user_id=user_id,
+        project_id=project_id,
+    )
 
     # Remote profile/default/listing tools require user scope in Launchpad MCP.
     if tool_name in {
@@ -1032,11 +1117,18 @@ def _inject_launchpad_context_params(
         "test_ssh_connection",
         "submit_dogme_job",
     }:
-        if not hydrated.get("user_id"):
+        if not hydrated.get("user_id") or _looks_like_example_scope_id(
+            hydrated.get("user_id"), scope="user", actual_value=user_id,
+        ):
             hydrated["user_id"] = user_id
 
     # Defaults lookups are usually project-scoped in chat flows.
-    if tool_name in {"get_slurm_defaults", "submit_dogme_job"} and project_id and not hydrated.get("project_id"):
+    if tool_name in {"get_slurm_defaults", "submit_dogme_job"} and project_id and (
+        not hydrated.get("project_id")
+        or _looks_like_example_scope_id(
+            hydrated.get("project_id"), scope="project", actual_value=project_id,
+        )
+    ):
         hydrated["project_id"] = project_id
 
     return hydrated

@@ -79,20 +79,18 @@ def _render_profile_path_template(template: str | None, context: dict[str, str])
 
 
 def _is_help_intent(message: str) -> bool:
+    import re as _re
+
     q = (message or "").strip().lower()
     if not q:
         return False
+    q = _re.sub(r"[?.!,]+$", "", q)
+    q = _re.sub(r"\s+", " ", q)
     deterministic = {
-        "help",
-        "what can you do",
-        "show commands",
-        "show slash commands",
-        "what slash commands are available",
-        "how do i run a workflow",
-        "how do i use remote slurm",
-        "how do i use dataframes",
-        "how do i compare reconcile samples",
-        "show dataframe commands",
+        "show local help",
+        "open local help",
+        "local help",
+        "local quick reference",
     }
     return q in deterministic
 
@@ -104,17 +102,25 @@ def _render_local_help_response() -> None:
         st.divider()
         with st.expander("Getting Started", expanded=True):
             st.markdown("1. Pick or create a project in the sidebar.")
-            st.markdown("2. Ask for a workflow run using natural language.")
+            st.markdown("2. Ask for a workflow run using natural language, or use `/help <topic>` to ask how to phrase a request first.")
             st.markdown("3. Review approval parameters and approve to execute.")
+        with st.expander("Prompt Coach", expanded=False):
+            st.markdown("- Use `/help` for an overview of AGOUTIC prompting patterns.")
+            st.markdown("- Use `/help <topic>` for task-specific guidance such as `/help remote slurm`, `/help /list files`, or `/help remote_execution`.")
+            st.markdown("- Natural language also works: `how do I stage a sample on hpc3`, `how do I prompt you to run Dogme with a staged sample`, `how do I sync workflow12 back from the cluster`.")
+            st.markdown("- Prompt-coach answers include what to provide, example prompts, useful slash commands, and what AGOUTIC will do internally.")
         with st.expander("Common Actions", expanded=False):
             st.markdown("- run dna workflow for sample X from /path")
             st.markdown("- stage sample to remote slurm profile hpc3")
+            st.markdown("- run Dogme on hpc3 using a staged sample and sync results locally")
+            st.markdown("- sync workflow12 back from the cluster or resume a previous sync")
             st.markdown("- show my local samples, staged samples, or imported workflows")
             st.markdown("- list workflows or files for the active project")
             st.markdown("- show job status and next steps")
             st.markdown("- parse results for run UUID")
             st.markdown("- compare reconcile abundance samples with edgePython")
         with st.expander("Slash Commands", expanded=False):
+            st.markdown("- Help: `/help`, `/help <topic>`, `/commands`")
             st.markdown("- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`")
             st.markdown("- Inventory: `/list samples`, `/list staged [--profile NAME]`, `/list imported`, `/list dfs`, `/list workflows`, `/list files [target] [--project] [--depth N]`")
             st.markdown("- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`")
@@ -125,6 +131,7 @@ def _render_local_help_response() -> None:
         with st.expander("Execution Modes", expanded=False):
             st.markdown("- Local: run on AGOUTIC host")
             st.markdown("- SLURM: submit via remote profile and queue")
+            st.markdown("- Ask `/help remote slurm` for prompting guidance on stage-only prep, full remote submission, and result sync workflows")
         with st.expander("Dataframe Commands", expanded=False):
             st.markdown("- `list dfs` lists the dataframes currently available in the chat")
             st.markdown("- `head DF5` or `head DF5 20` previews the first rows of a dataframe")

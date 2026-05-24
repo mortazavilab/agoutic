@@ -1,8 +1,12 @@
 ## [Unreleased]
 
+## [3.6.9] - 2026-05-24
+
 ### Features
 
 - **Chat workflow commands now support `list launchpad workflows` / `/list-launchpad-workflows` to show the non-deleted Launchpad workflow rows tracked for the active project**
+
+- **Chat now supports deterministic `/help` prompt coaching plus natural-language “how do I ask AGOUTIC to…” requests, with curated guidance for slash commands, skills, workflow import, dataframes, differential expression, and remote SLURM stage/run/sync flows; `/help <skill>` now incorporates per-skill manifest facts plus direct `SKILL.md` instruction highlights and routing boundaries**
 
 - **AGOUTIC now supports unified inventory discovery across chat and the UI: deterministic `/list samples`, `/list staged`, `/list imported`, `/list dfs`, `/list workflows`, and `/list files` commands plus matching natural-language requests all route through one shared Cortex inventory layer**
 
@@ -21,6 +25,14 @@
 - **Remote SLURM workflow status now derives live usage from Nextflow trace data plus `sacct` child-job accounting, persists CPU/GPU/billing summaries on the job row for new runs, and backfills older jobs from a local trace when available or shows `usage statistics not available` instead of erroring**
 
 ### Bug Fixes
+
+- **Remote SLURM approval-gate routing now recognizes profile phrases like `run ... on hpc3 using staged sample ...`, so continuing the sentence after the SSH-profile nickname no longer prevents the staged-sample job request from producing the structured approval gate**
+
+- **Reused staged-sample approvals now ignore earlier slash commands like `/list staged` when extracting input paths, so stale `/list` tokens no longer leak into remote Dogme submissions, and the approval summary/editor now label staged source paths, staged remote paths, and direct file inputs explicitly instead of showing a generic `Input Directory`**
+
+- **Bare `help` and similar prompt-coach requests no longer get swallowed by the older capabilities/local-help shortcuts; they now reach the new prompt coach so chat and the sidebar both open the curated `/help` overview instead of a stale generic help panel**
+
+- **Remote SLURM profile/default discovery now rewrites copied example scope IDs such as `user_1234` and `proj_5678` to the real current user/project before Launchpad MCP execution, so requests like `run ... on hpc3 using staged sample ...` no longer miss saved SSH profiles and defaults just because the model echoed literal example params**
 
 - **Launchpad now defaults `NXF_SYNTAX_PARSER=v1` for local Nextflow launches and generated SLURM submit scripts, preserving Dogme compatibility with newer Nextflow releases that enable the stricter parser by default**
 
@@ -58,6 +70,8 @@
 
 - **Added focused regression coverage for the local Nextflow subprocess environment and generated SLURM submit script so the legacy parser override stays in place**
 
+- **Added focused regression coverage for prompt-coach help parsing, per-skill instruction rendering, second-pass prompt fallback hints, and lightweight quick-exit routing so `/help` and natural-language prompt-help requests stay on the deterministic chat path without depending on full app imports in constrained local environments**
+
 - **Added focused regression coverage for `/list` inventory command parsing/rendering and the new Cortex inventory route layer that backs the revised My Data inventory tabs**
 
 - **Added regression coverage for tracked Launchpad workflow listing, untracked workflow-folder deletion, and quick-exit project-directory resolution before context prep**
@@ -78,7 +92,7 @@
 
 - **Updated `README.md` with wf-pore-c Phase 3 status, default-off flag behavior, validation counts, and links to the plan plus local/remote smoke guides**
 
-- **Updated the quick reference, `/commands` catalog, sidebar help, and local help surfaces to document the new inventory commands, natural-language inventory lookups, and the expanded My Data page**
+- **Updated the quick reference, `/commands` catalog, welcome/help surfaces, and local help guidance to document the new prompt-coach `/help` flow, natural-language prompt-help requests, SLURM stage/run/sync prompting examples, and the earlier inventory/My Data additions**
 
 - **Updated `docs/wf_pore_c_plan.md` to mark Phase 3 complete, record the `1988 > 1839` closure gate, and call out the production fallback removal plus dual-path backward-compat normalization**
 
