@@ -251,6 +251,9 @@ st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 for idx, profile in enumerate(profiles):
     pid = profile.get("id", "")
     nick = profile.get("nickname", f"Profile {idx}")
+    test_result: dict | None = None
+    test_error: str | None = None
+    test_warning: str | None = None
 
     with st.container():
         st.markdown(f"---\n**{nick}** (`{profile.get('ssh_host', profile.get('host', ''))}`)")
@@ -317,7 +320,7 @@ for idx, profile in enumerate(profiles):
 
             if st.button("🔌 Test Connection", key=f"test_{idx}"):
                 if needs_password and not (local_auth_pwd or session_info.get("active")):
-                    st.warning("Unlock the local auth session first, or enter the password for a one-off test")
+                    test_warning = "Unlock the local auth session first, or enter the password for a one-off test"
                 else:
                     try:
                         resp = _run_request_with_elapsed(
@@ -330,18 +333,35 @@ for idx, profile in enumerate(profiles):
                             timeout=REMOTE_PROFILE_TEST_TIMEOUT_SECONDS,
                         )
                         if resp.status_code == 200:
-                            result = resp.json()
-                            if result.get("success", result.get("ok", False)):
-                                msg = result.get("message", "")
-                                if result.get("session_started") and result.get("session_expires_at"):
-                                    msg = f"{msg} Session unlocked until {_fmt_datetime(result['session_expires_at'])}".strip()
-                                st.success(f"✅ Connection successful! {msg}")
-                            else:
-                                st.warning(f"⚠️ Test returned: {result.get('message', result)}")
+                            test_result = resp.json()
                         else:
-                            st.error(f"Test failed ({resp.status_code}): {_response_error_text(resp)}")
+                            test_error = f"Test failed ({resp.status_code}): {_response_error_text(resp)}"
                     except Exception as e:
-                        st.error(f"Connection test error: {e}")
+                        test_error = f"Connection test error: {e}"
+
+        if test_warning:
+            st.warning(test_warning)
+        elif test_error:
+            st.error(test_error)
+        elif isinstance(test_result, dict):
+            if test_result.get("success", test_result.get("ok", False)):
+                msg = test_result.get("message", "")
+                if test_result.get("session_started") and test_result.get("session_expires_at"):
+                    msg = f"{msg} Session unlocked until {_fmt_datetime(test_result['session_expires_at'])}".strip()
+                st.success(f"✅ Connection successful! {msg}")
+                balance_rows = test_result.get("slurm_balance_rows") or []
+                balance_raw = test_result.get("slurm_balance_raw")
+                balance_error = test_result.get("slurm_balance_error")
+                if balance_rows:
+                    st.caption("Current SLURM account balances")
+                    st.dataframe(pd.DataFrame(balance_rows), use_container_width=True, hide_index=True)
+                elif balance_raw:
+                    st.caption("Current SLURM account balances")
+                    st.code(balance_raw, language="text")
+                elif balance_error:
+                    st.info(f"Connected, but could not load SLURM balances: {balance_error}")
+            else:
+                st.warning(f"⚠️ Test returned: {test_result.get('message', test_result)}")
 
         # ── Delete ───────────────────────────────────────────────────
         with act_col3:

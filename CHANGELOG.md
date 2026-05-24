@@ -10,6 +10,8 @@
 
 - **wf-pore-c Phase 3 is now feature-complete behind `WF_PORE_C_ENABLED`, including local preview, local execution, remote SLURM staging/submission, Analyzer recognition, automatic summary generation, and workflow-aware UI approval/run cards**
 
+- **Remote profile connection tests now show the connected user's current SLURM account balances from `sbank balance statement <username>`, with parsed balance columns and full-width rendering in the UI**
+
 ### Bug Fixes
 
 - **Workflow quick-delete now removes immediate-child untracked `workflow*` folders from the active project root when no Launchpad job row exists, instead of failing outright for visible but untracked workflow directories**
@@ -49,6 +51,8 @@
 - **Closed the full Phase 3 sweep with `1988 passed, 30 warnings` under `WF_PORE_C_ENABLED=false` and `1988 passed, 29 warnings` under `WF_PORE_C_ENABLED=true` across `tests/cortex tests/launchpad tests/analyzer tests/ui`, confirming identical test counts in both flag states and no Dogme-path regression drift**
 
 - **Added Launchpad migration regression coverage for `workflow_key` backfill and nullable legacy `mode` handling, plus submit-script persistence checks to ensure new jobs store and round-trip workflow identity cleanly**
+
+- **Added SSH-manager regression coverage for `sbank` balance parsing, strict username-only filtering including starred user rows, and raw-output fallback trimming during remote profile connection tests**
 
 ### Documentation
 

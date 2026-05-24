@@ -494,6 +494,9 @@ class SSHProfileTestResult(BaseModel):
     message: str
     hostname: Optional[str] = None
     remote_user: Optional[str] = None
+    slurm_balance_rows: List[dict[str, str]] = Field(default_factory=list)
+    slurm_balance_raw: Optional[str] = None
+    slurm_balance_error: Optional[str] = None
     session_started: bool = False
     session_expires_at: Optional[str] = None
 

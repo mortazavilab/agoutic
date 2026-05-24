@@ -10,6 +10,8 @@ import asyncio
 import json
 import os
 import pwd
+import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,10 @@ from launchpad.backends.local_auth_sessions import get_local_auth_session_manage
 from launchpad.config import LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS, SSH_AGENT_FORWARDING, SSH_CONNECT_TIMEOUT_SECONDS, SSH_KNOWN_HOSTS
 
 logger = get_logger(__name__)
+_SBANK_UNAVAILABLE_SENTINEL = "__AGOUTIC_SBANK_UNAVAILABLE__"
+_TABLE_SPLIT_RE = re.compile(r"\s{2,}|\t+")
+_PIPE_SPLIT_RE = re.compile(r"\s*\|\s*")
+_NUMBER_TOKEN_RE = re.compile(r"^[\d,]+(?:\.\d+)?$")
 
 
 @dataclass
@@ -46,6 +52,163 @@ class SSHProfileData:
     default_slurm_partition: str | None = None
     default_slurm_gpu_account: str | None = None
     default_slurm_gpu_partition: str | None = None
+
+
+def _is_separator_line(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and re.fullmatch(r"[\s\-=+|]+", stripped) is not None
+
+
+def _split_tabular_line(line: str) -> list[str]:
+    stripped = line.strip().strip("|").strip()
+    if not stripped:
+        return []
+    if "|" in stripped:
+        return [cell.strip() for cell in _PIPE_SPLIT_RE.split(stripped) if cell.strip()]
+    return [cell.strip() for cell in _TABLE_SPLIT_RE.split(stripped) if cell.strip()]
+
+
+def _filter_balance_output(raw_output: str, username: str) -> str:
+    lines = [line.rstrip() for line in raw_output.splitlines() if line.strip()]
+    username_text = (username or "").strip()
+    if not lines:
+        return ""
+    if not username_text:
+        return "\n".join(lines)
+
+    leading_username_re = re.compile(rf"^\s*\|?\s*{re.escape(username_text)}(?:\s+\*)?(?:\s|\||$)", re.IGNORECASE)
+    matching_lines = [line for line in lines if leading_username_re.search(line)]
+    if not matching_lines:
+        username_re = re.compile(rf"\b{re.escape(username_text)}\b", re.IGNORECASE)
+        matching_lines = [line for line in lines if username_re.search(line)]
+    if matching_lines:
+        return "\n".join(matching_lines)
+    return "\n".join(lines)
+
+
+def _normalize_balance_user(value: str) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+
+    tokens = text.split()
+    while tokens and _NUMBER_TOKEN_RE.fullmatch(tokens[-1]):
+        tokens.pop()
+    text = " ".join(tokens)
+    text = re.sub(r"\s*\*+\s*$", "", text)
+    return text.strip().lower()
+
+
+def _split_suffix_number(value: str) -> tuple[str, str] | None:
+    tokens = str(value or "").split()
+    if len(tokens) < 2 or not _NUMBER_TOKEN_RE.fullmatch(tokens[-1]):
+        return None
+    return " ".join(tokens[:-1]).strip(), tokens[-1]
+
+
+def _split_two_number_values(value: str) -> tuple[str, str] | None:
+    tokens = str(value or "").split()
+    if len(tokens) != 2 or not all(_NUMBER_TOKEN_RE.fullmatch(token) for token in tokens):
+        return None
+    return tokens[0], tokens[1]
+
+
+def _expand_balance_cell(header: str, value: str) -> dict[str, str]:
+    header_text = " ".join(str(header or "").split())
+    header_key = header_text.lower()
+
+    if header_key == "user usage":
+        split_value = _split_suffix_number(value)
+        if split_value:
+            return {"User": split_value[0], "Usage": split_value[1]}
+    elif header_key in {"account usage", "account remaining"}:
+        split_value = _split_suffix_number(value)
+        if split_value:
+            metric_name = "Account Usage" if header_key == "account usage" else "Remaining"
+            return {"Account": split_value[0], metric_name: split_value[1]}
+    elif header_key == "account limit available (sus)":
+        split_value = _split_two_number_values(value)
+        if split_value:
+            return {"Account Limit": split_value[0], "Available (SUs)": split_value[1]}
+
+    return {header_text: str(value or "").strip()}
+
+
+def _filter_balance_rows(rows: list[dict[str, str]], username: str) -> list[dict[str, str]]:
+    username_text = (username or "").strip().lower()
+    if not username_text or not rows:
+        return rows
+
+    keys = list(rows[0].keys())
+    user_keys = [key for key in keys if any(token in key.lower() for token in ("user", "login", "owner"))]
+    if user_keys:
+        exact_rows = [
+            row
+            for row in rows
+            if any(_normalize_balance_user(str(row.get(key, "")) or "") == username_text for key in user_keys)
+        ]
+        return exact_rows
+
+    matching_rows = [
+        row
+        for row in rows
+        if any(username_text in (str(value or "").strip().lower()) for value in row.values())
+    ]
+    return matching_rows or rows
+
+
+def _parse_sbank_balance_rows(raw_output: str, username: str) -> list[dict[str, str]]:
+    lines = [line.rstrip() for line in raw_output.splitlines() if line.strip()]
+    if not lines:
+        return []
+
+    header_index: int | None = None
+    headers: list[str] = []
+    for index, line in enumerate(lines):
+        if _is_separator_line(line):
+            continue
+        cells = _split_tabular_line(line)
+        if len(cells) < 2:
+            continue
+        header_text = " ".join(cells).lower()
+        if not any(token in header_text for token in ("account", "user", "balance", "credit", "allocation")):
+            continue
+
+        has_following_row = False
+        for next_line in lines[index + 1:]:
+            if _is_separator_line(next_line):
+                continue
+            if len(_split_tabular_line(next_line)) >= 2:
+                has_following_row = True
+            break
+        if has_following_row:
+            header_index = index
+            headers = cells
+            break
+
+    if header_index is None or not headers:
+        return []
+
+    rows: list[dict[str, str]] = []
+    for line in lines[header_index + 1:]:
+        if _is_separator_line(line):
+            continue
+        cells = _split_tabular_line(line)
+        if len(cells) < 2:
+            if rows:
+                break
+            continue
+        if len(cells) > len(headers):
+            cells = cells[: len(headers) - 1] + [" ".join(cells[len(headers) - 1 :])]
+        elif len(cells) < len(headers):
+            cells = cells + [""] * (len(headers) - len(cells))
+
+        expanded_row: dict[str, str] = {}
+        for header, cell in zip(headers, cells):
+            expanded_row.update(_expand_balance_cell(header, cell))
+        rows.append(expanded_row)
+
+    return _filter_balance_rows(rows, username)
 
 
 class SSHConnectionManager:
@@ -112,15 +275,51 @@ class SSHConnectionManager:
             connect_kwargs["known_hosts"] = str(Path(SSH_KNOWN_HOSTS).expanduser())
         return connect_kwargs
 
+    async def _load_slurm_balance_info(self, conn: "SSHConnection | LocalBrokerSSHConnection", remote_user: str) -> dict[str, Any]:
+        username = (remote_user or "").strip()
+        if not username:
+            return {}
+
+        balance_command = (
+            "if command -v sbank >/dev/null 2>&1; then "
+            f"sbank balance statement {shlex.quote(username)}; "
+            f"else printf '{_SBANK_UNAVAILABLE_SENTINEL}\\n'; fi"
+        )
+        result = await conn.run(balance_command, timeout_seconds=float(SSH_CONNECT_TIMEOUT_SECONDS))
+        stdout_text = (getattr(result, "stdout", "") or "").strip()
+        stderr_text = (getattr(result, "stderr", "") or "").strip()
+        exit_status = int(getattr(result, "exit_status", 1))
+
+        if stdout_text == _SBANK_UNAVAILABLE_SENTINEL:
+            return {}
+
+        if exit_status != 0:
+            if stdout_text:
+                return {"slurm_balance_raw": stdout_text, "slurm_balance_error": stderr_text or f"sbank exited with status {exit_status}"}
+            if stderr_text:
+                return {"slurm_balance_error": stderr_text}
+            return {"slurm_balance_error": f"sbank exited with status {exit_status}"}
+
+        if not stdout_text:
+            return {}
+
+        rows = _parse_sbank_balance_rows(stdout_text, username)
+        if rows:
+            return {"slurm_balance_rows": rows}
+        filtered_output = _filter_balance_output(stdout_text, username)
+        if filtered_output:
+            return {"slurm_balance_raw": filtered_output}
+        return {}
+
     async def test_connection(self, profile: SSHProfileData, local_password: str = "") -> dict[str, Any]:
         """Test SSH connectivity. Returns {ok: bool, message: str, detail: ...}."""
+        conn: SSHConnection | LocalBrokerSSHConnection | None = None
         try:
             conn = await asyncio.wait_for(self.connect(profile, local_password), timeout=float(SSH_CONNECT_TIMEOUT_SECONDS))
             result = await conn.run(
                 "echo AGOUTIC_SSH_OK && hostname && whoami",
                 timeout_seconds=float(SSH_CONNECT_TIMEOUT_SECONDS),
             )
-            await conn.close()
 
             exit_status = getattr(result, "exit_status", 0)
             stderr_text = (getattr(result, "stderr", "") or "").strip()
@@ -131,16 +330,27 @@ class SSHConnectionManager:
 
             lines = result.stdout.strip().split("\n") if result.stdout else []
             ok = len(lines) >= 1 and lines[0] == "AGOUTIC_SSH_OK"
-            return {
+            remote_user = lines[2] if len(lines) > 2 else None
+            response: dict[str, Any] = {
                 "ok": ok,
                 "message": "Connection successful" if ok else "Unexpected response",
                 "hostname": lines[1] if len(lines) > 1 else None,
-                "remote_user": lines[2] if len(lines) > 2 else None,
+                "remote_user": remote_user,
+                "slurm_balance_rows": [],
             }
+            if ok:
+                response.update(await self._load_slurm_balance_info(conn, remote_user or profile.ssh_username))
+            return response
         except asyncio.TimeoutError:
             return {"ok": False, "message": f"Connection timed out ({SSH_CONNECT_TIMEOUT_SECONDS}s)"}
         except Exception as e:
             return {"ok": False, "message": f"Connection failed: {e}"}
+        finally:
+            if conn is not None:
+                try:
+                    await conn.close()
+                except Exception as close_error:
+                    logger.warning(f"Failed to close SSH test connection cleanly: {close_error}")
 
 
 def resolve_key_file_path(profile: SSHProfileData) -> str:
