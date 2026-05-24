@@ -123,8 +123,24 @@ class TestSubmitJobRequest:
         )
         assert req.modkit_filter_threshold == 0.9
         assert req.per_mod == 5
-        assert req.accuracy == "sup"
+        assert req.accuracy == "hac"
         assert req.max_gpu_tasks is None
+
+    def test_rna_default_accuracy_is_sup(self):
+        req = SubmitJobRequest(
+            project_id="p", sample_name="s", mode="RNA",
+            input_directory="/d",
+        )
+
+        assert req.accuracy == "sup"
+
+    def test_cdna_default_accuracy_is_hac(self):
+        req = SubmitJobRequest(
+            project_id="p", sample_name="s", mode="CDNA",
+            input_directory="/d",
+        )
+
+        assert req.accuracy == "hac"
 
     def test_max_gpu_tasks_range_validation(self):
         with pytest.raises(ValidationError):

@@ -12,8 +12,11 @@ def _load_part2_namespace() -> dict:
     include_names = {
         "_WF_PORE_C_OUTPUT_FLAG_ORDER",
         "_WF_PORE_C_OUTPUT_FLAG_LABELS",
+        "_format_usage_duration",
+        "_format_usage_memory_mb",
         "_wf_pore_c_ui_enabled",
         "_workflow_key_from_payload",
+        "_workflow_usage_metrics",
         "_wf_pore_c_output_flag_values",
         "_workflow_path_label",
         "_wf_pore_c_output_flag_summary",
@@ -138,3 +141,69 @@ def test_execution_run_metadata_uses_workflow_identity_for_wf_pore_c(monkeypatch
         "Run UUID": "run-2",
         "Folder": "workflow9",
     }
+
+
+def test_completed_execution_branch_renders_workflow_usage_section():
+    source = PART2_PATH.read_text()
+    tree = ast.parse(source, filename=str(PART2_PATH))
+    render_fn = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_block_part2"
+    )
+
+    completed_branch = None
+    for node in ast.walk(render_fn):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if not isinstance(test, ast.Compare):
+            continue
+        if not isinstance(test.left, ast.Name) or test.left.id != "status_str":
+            continue
+        if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+            continue
+        if len(test.comparators) != 1:
+            continue
+        comparator = test.comparators[0]
+        if isinstance(comparator, ast.Constant) and comparator.value == "COMPLETED":
+            completed_branch = ast.get_source_segment(source, node)
+            break
+
+    assert completed_branch is not None
+    assert "_workflow_usage_metrics(workflow_usage)" in completed_branch
+    assert 'st.caption("Workflow usage")' in completed_branch
+
+
+def test_workflow_usage_metrics_show_billing_by_account(monkeypatch):
+    monkeypatch.delenv("WF_PORE_C_ENABLED", raising=False)
+    namespace = _load_part2_namespace()
+
+    metrics = namespace["_workflow_usage_metrics"](
+        {
+            "cpu_seconds": 124.0,
+            "gpu_seconds": 55.0,
+            "billing_units": 9.999,
+            "billing_entries": [
+                {
+                    "resource_type": "CPU",
+                    "account": "cpu-default",
+                    "billing_hours": 0.019,
+                },
+                {
+                    "resource_type": "GPU",
+                    "account": "gpu-default",
+                    "billing_hours": 0.031,
+                },
+            ],
+            "billing_hours_by_account": {
+                "cpu-default": 0.019,
+                "gpu-default": 0.031,
+            },
+        }
+    )
+
+    assert metrics["CPU Time"] == "2m 4s"
+    assert metrics["GPU Time"] == "55s"
+    assert metrics["CPU Billing Hours (cpu-default)"] == 0.019
+    assert metrics["GPU Billing Hours (gpu-default)"] == 0.031
+    assert "SLURM Billing Hours" not in metrics

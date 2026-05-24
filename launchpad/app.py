@@ -54,7 +54,7 @@ from launchpad.db import (
     staging_task_record_to_dict,
 )
 from launchpad.models import DogmeJob, SSHProfile
-from launchpad.nextflow_executor import NextflowExecutor
+from launchpad.nextflow_executor import NextflowExecutor, _find_nextflow_trace_file
 from launchpad.schemas import (
     ImportWorkflowRequest,
     ImportWorkflowResponse,
@@ -86,6 +86,7 @@ from launchpad.schemas import (
 from launchpad.backends import get_backend, SubmitParams
 from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
 from launchpad.backends.ssh_manager import SSHConnectionManager, SSHProfileData
+from launchpad.workflow_accounting import build_unavailable_workflow_usage, summarize_nextflow_trace_file
 from launchpad.workflow_executors import get_workflow_executor
 from launchpad.workflow_executors.base import UnknownWorkflowKeyError
 from launchpad.import_workflows import (
@@ -186,6 +187,42 @@ def _job_timing_payload(job) -> dict[str, str | int | None]:
         "completed_at": completed_at,
         "duration_seconds": duration_seconds,
     }
+
+
+def _workflow_usage_payload(job) -> dict[str, object | None]:
+    synced_at = getattr(job, "workflow_usage_synced_at", None)
+    return {
+        "workflow_usage": getattr(job, "workflow_usage_json", None),
+        "workflow_usage_synced_at": synced_at.isoformat() if synced_at else None,
+    }
+
+
+async def _backfill_terminal_slurm_workflow_usage(session, job) -> None:
+    if getattr(job, "workflow_usage_json", None) is not None:
+        return
+
+    workflow_usage = None
+    local_work_dir = getattr(job, "nextflow_work_dir", None)
+    if local_work_dir:
+        try:
+            trace_file = _find_nextflow_trace_file(Path(local_work_dir))
+        except Exception:
+            trace_file = None
+        if trace_file:
+            workflow_usage = summarize_nextflow_trace_file(trace_file, accounting_mode="slurm")
+            if workflow_usage is not None:
+                workflow_usage = {
+                    **workflow_usage,
+                    "usage_status": "partial",
+                    "usage_message": "Using Nextflow trace only; scheduler accounting unavailable.",
+                }
+
+    if workflow_usage is None:
+        workflow_usage = build_unavailable_workflow_usage(accounting_mode="slurm")
+
+    job.workflow_usage_json = workflow_usage
+    job.workflow_usage_synced_at = datetime.utcnow()
+    await session.commit()
 
 
 def _normalize_reference_genome(raw_value: str | list[str] | None) -> list[str]:
@@ -1154,6 +1191,7 @@ async def monitor_job(run_uuid: str, work_dir):
                 job_status = status_info["status"]
                 progress = status_info["progress_percent"]
                 message = status_info["message"]
+                workflow_usage = status_info.get("workflow_usage")
                 
                 # Update database
                 await update_job_status(
@@ -1161,6 +1199,8 @@ async def monitor_job(run_uuid: str, work_dir):
                     run_uuid,
                     job_status,
                     progress=progress,
+                    workflow_usage=workflow_usage,
+                    workflow_usage_synced_at=datetime.utcnow() if workflow_usage is not None else None,
                 )
                 
                 # Log the update
@@ -1858,10 +1898,13 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "transfer_detail": transfer_message,
                 "result_destination": job.result_destination,
                 "work_directory": _effective_job_work_directory(job),
+                **_workflow_usage_payload(job),
                 **_import_status_payload(job),
                 **_job_timing_payload(job),
             }
         if job.status in terminal_statuses:
+            if job.execution_mode == "slurm":
+                await _backfill_terminal_slurm_workflow_usage(session, job)
             warning_message = import_warning_message(getattr(job, "imported_source_complete", None))
             work_directory = _effective_job_work_directory(job)
             base_payload = {
@@ -1871,6 +1914,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "message": job.error_message or warning_message or f"Job {job.status.lower()}.",
                 "tasks": {},
                 "work_directory": work_directory,
+                **_workflow_usage_payload(job),
                 **_import_status_payload(job),
                 **_job_timing_payload(job),
             }
@@ -1891,6 +1935,13 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         if job.execution_mode == "slurm":
             backend = get_backend("slurm")
             status_data = await backend.check_status(run_uuid)
+            workflow_usage = getattr(status_data, "workflow_usage", None)
+            workflow_usage_synced_at = None
+            if workflow_usage is not None:
+                job.workflow_usage_json = workflow_usage
+                job.workflow_usage_synced_at = datetime.utcnow()
+                workflow_usage_synced_at = job.workflow_usage_synced_at.isoformat()
+                await session.commit()
             return {
                 "run_uuid": run_uuid,
                 "status": status_data.status,
@@ -1906,6 +1957,8 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "result_destination": status_data.result_destination,
                 "ssh_profile_nickname": status_data.ssh_profile_nickname,
                 "work_directory": status_data.work_directory,
+                "workflow_usage": workflow_usage if workflow_usage is not None else getattr(job, "workflow_usage_json", None),
+                "workflow_usage_synced_at": workflow_usage_synced_at or (job.workflow_usage_synced_at.isoformat() if getattr(job, "workflow_usage_synced_at", None) else None),
                 **_import_status_payload(job),
                 **_job_timing_payload(job),
             }
@@ -1916,6 +1969,13 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         effective_work_directory = _effective_job_work_directory(job)
         work_dir = Path(effective_work_directory) if effective_work_directory else executor.work_dir / run_uuid
         status_data = await executor.check_status(run_uuid, work_dir)
+        workflow_usage = status_data.get("workflow_usage")
+        workflow_usage_synced_at = None
+        if workflow_usage is not None:
+            job.workflow_usage_json = workflow_usage
+            job.workflow_usage_synced_at = datetime.utcnow()
+            workflow_usage_synced_at = job.workflow_usage_synced_at.isoformat()
+            await session.commit()
         
         return {
             "run_uuid": run_uuid,
@@ -1925,6 +1985,8 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             "tasks": status_data.get("tasks", {}),
             "execution_mode": "local",
             "work_directory": effective_work_directory,
+            "workflow_usage": workflow_usage if workflow_usage is not None else getattr(job, "workflow_usage_json", None),
+            "workflow_usage_synced_at": workflow_usage_synced_at or (job.workflow_usage_synced_at.isoformat() if getattr(job, "workflow_usage_synced_at", None) else None),
             **_job_timing_payload(job),
         }
     

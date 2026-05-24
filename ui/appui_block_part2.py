@@ -60,6 +60,99 @@ def _workflow_path_label(value) -> str:
     return os.path.basename(cleaned) or cleaned
 
 
+def _format_usage_duration(seconds) -> str:
+    try:
+        total_seconds = int(round(float(seconds or 0)))
+    except (TypeError, ValueError):
+        return ""
+    if total_seconds <= 0:
+        return ""
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _format_usage_memory_mb(megabytes) -> str:
+    try:
+        value = float(megabytes or 0)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    if value >= 1024.0:
+        return f"{value / 1024.0:.1f} GB"
+    return f"{value:.0f} MB"
+
+
+def _workflow_usage_metrics(workflow_usage: dict | None) -> dict[str, str | int | float]:
+    if not isinstance(workflow_usage, dict):
+        return {}
+
+    metrics: dict[str, str | int | float] = {}
+    cpu_time = _format_usage_duration(workflow_usage.get("cpu_seconds"))
+    if cpu_time:
+        metrics["CPU Time"] = cpu_time
+
+    actual_gpu_seconds = workflow_usage.get("gpu_seconds")
+    gpu_time = _format_usage_duration(actual_gpu_seconds if actual_gpu_seconds not in (None, "") else workflow_usage.get("estimated_gpu_task_seconds"))
+    if gpu_time:
+        metrics["GPU Time" if actual_gpu_seconds not in (None, "") else "GPU Task Time"] = gpu_time
+
+    peak_rss = _format_usage_memory_mb(workflow_usage.get("max_rss_mb"))
+    if peak_rss:
+        metrics["Peak RSS"] = peak_rss
+
+    peak_vmem = _format_usage_memory_mb(workflow_usage.get("max_vmem_mb"))
+    if peak_vmem:
+        metrics["Peak VMEM"] = peak_vmem
+
+    accounted_tasks = workflow_usage.get("accounted_task_count")
+    if accounted_tasks not in (None, "", 0):
+        metrics["Accounted Tasks"] = int(accounted_tasks)
+
+    billing_entries = workflow_usage.get("billing_entries")
+    if isinstance(billing_entries, list) and billing_entries:
+        for entry in billing_entries:
+            if not isinstance(entry, dict):
+                continue
+            billing_hours = entry.get("billing_hours")
+            if billing_hours in (None, ""):
+                continue
+            resource_type = str(entry.get("resource_type") or "").strip().upper()
+            account_name = str(entry.get("account") or "").strip()
+            prefix = "GPU" if resource_type == "GPU" else "CPU" if resource_type == "CPU" else ""
+            label = f"{prefix} Billing Hours".strip() or "Billing Hours"
+            if account_name:
+                label = f"{label} ({account_name})"
+            metrics[label] = billing_hours
+
+    billing_by_account = workflow_usage.get("billing_hours_by_account")
+    if not metrics and isinstance(billing_by_account, dict) and billing_by_account:
+        for account_name, billing_hours in sorted(billing_by_account.items()):
+            if billing_hours in (None, ""):
+                continue
+            label = f"Billing Hours ({str(account_name).strip() or 'unknown'})"
+            metrics[label] = billing_hours
+
+    billing_units = workflow_usage.get("billing_units")
+    has_account_billing = bool(isinstance(billing_entries, list) and billing_entries) or bool(isinstance(billing_by_account, dict) and billing_by_account)
+    if billing_units not in (None, "") and not has_account_billing:
+        label = str(workflow_usage.get("billing_label") or "Billing Units").strip() or "Billing Units"
+        metrics[label] = billing_units
+
+    return metrics
+
+
+def _workflow_usage_message(workflow_usage: dict | None) -> str:
+    if not isinstance(workflow_usage, dict):
+        return ""
+    return str(workflow_usage.get("usage_message") or "").strip()
+
+
 def _wf_pore_c_output_flag_summary(raw_flags) -> str:
     flags = _wf_pore_c_output_flag_values(raw_flags)
     enabled = [
@@ -1046,6 +1139,16 @@ def render_block_part2(
                     st.success(f"✅ {message}")
                     if import_warning:
                         info_callout(import_warning, kind="warning", icon="⚠️")
+
+                    workflow_usage = job_status.get("workflow_usage") if isinstance(job_status, dict) else {}
+                    workflow_usage_metrics = _workflow_usage_metrics(workflow_usage)
+                    workflow_usage_message = _workflow_usage_message(workflow_usage)
+                    if workflow_usage_metrics or workflow_usage_message:
+                        st.caption("Workflow usage")
+                        if workflow_usage_metrics:
+                            progress_stats(workflow_usage_metrics)
+                        if workflow_usage_message:
+                            st.caption(workflow_usage_message)
                     
                     # Show completed tasks summary
                     if tasks and isinstance(tasks, dict):
@@ -1430,6 +1533,16 @@ def render_block_part2(
                     
                     # Progress bar
                     st.progress(progress / 100.0, text=f"Progress: {progress}%")
+
+                    workflow_usage = job_status.get("workflow_usage") if isinstance(job_status, dict) else {}
+                    workflow_usage_metrics = _workflow_usage_metrics(workflow_usage)
+                    workflow_usage_message = _workflow_usage_message(workflow_usage)
+                    if workflow_usage_metrics or workflow_usage_message:
+                        st.caption("Workflow usage")
+                        if workflow_usage_metrics:
+                            progress_stats(workflow_usage_metrics)
+                        if workflow_usage_message:
+                            st.caption(workflow_usage_message)
                     
                     # Nextflow-style task display
                     if tasks and isinstance(tasks, dict):

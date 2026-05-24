@@ -95,6 +95,8 @@ class DogmeJob(Base):
     imported_config_path: Mapped[str | None] = mapped_column(String, nullable=True)
     imported_copy_mode: Mapped[str | None] = mapped_column(String, nullable=True)  # "subset" or "full"
     imported_source_complete: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    workflow_usage_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    workflow_usage_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 class JobLog(Base):
     """Stores streaming logs from Nextflow execution."""

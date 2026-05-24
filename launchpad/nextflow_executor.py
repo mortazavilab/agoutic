@@ -22,7 +22,6 @@ from launchpad.config import (
     DOGME_DNA_OPENCHROM_LIBTORCH,
     DOGME_DNA_OPENCHROM_MODEL,
     DOGME_DNA_OPENCHROM_MODKITBASE,
-    DOGME_DNA_SLURM_CONTAINER,
     NEXTFLOW_BIN,
     LAUNCHPAD_WORK_DIR,
     LAUNCHPAD_LOGS_DIR,
@@ -34,7 +33,9 @@ from launchpad.config import (
     JOB_POLL_INTERVAL,
     LOCAL_DEFAULT_MAX_TASK_MEMORY_GB,
     SLURM_DEFAULT_CPU_MEMORY_GB,
+    resolve_dogme_accuracy,
 )
+from launchpad.workflow_accounting import summarize_nextflow_trace_file
 
 logger = get_logger(__name__)
 
@@ -47,6 +48,17 @@ def _json_safe(value):
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
+
+
+def _find_nextflow_trace_file(work_dir: Path) -> Path | None:
+    sample_traces = list(work_dir.glob("*_trace.txt"))
+    if sample_traces:
+        return sample_traces[0]
+
+    trace_file = work_dir / "trace.txt"
+    if trace_file.exists():
+        return trace_file
+    return None
 
 _MINIMAL_DOGME_PROFILE = "# Dogme environment profile\n# Add environment variables here if needed\n"
 _DEFAULT_LOCAL_MAX_TASK_CPUS = 12
@@ -418,7 +430,7 @@ class NextflowConfig:
         modkit_filter_threshold: float = 0.9,
         min_cov: Optional[int] = None,
         per_mod: int = 5,
-        accuracy: str = "sup",
+        accuracy: str | None = None,
         max_gpu_tasks: Optional[int] = None,
         local_max_task_cpus: int | None = None,
         local_max_task_memory_gb: int | None = None,
@@ -488,6 +500,8 @@ class NextflowConfig:
         if min_cov is None:
             min_cov = 3
 
+        resolved_accuracy = resolve_dogme_accuracy(mode, accuracy)
+
         if str(mode or "").strip().upper() == DogmeMode.DNA.value and modkit_task_runtime_exports is None:
             modkit_task_runtime_exports = _default_dna_openchromatin_runtime_exports()
 
@@ -539,8 +553,6 @@ class NextflowConfig:
             )
         
         container_image = "ghcr.io/mortazavilab/dogme-pipeline:latest"
-        if is_slurm and str(mode or "").strip().upper() == DogmeMode.DNA.value:
-            container_image = DOGME_DNA_SLURM_CONTAINER
 
         # Build config string matching example format
         config_lines = []
@@ -589,21 +601,21 @@ class NextflowConfig:
             config_lines.append(f"    t2g = '{kallisto_t2g}'")
             config_lines.append("")
         config_lines.append("    //default accuracy is sup")
-        config_lines.append(f"    accuracy = \"{accuracy}\"")
+        config_lines.append(f"    accuracy = \"{resolved_accuracy}\"")
         config_lines.append("    // change this value if 0.9 is too strict")
         config_lines.append("    // if set to null or '' then modkit will determine its threshold by sampling reads.")
         config_lines.append(f"    modkitFilterThreshold = {modkit_filter_threshold}")
         config_lines.append("")
         config_lines.append("    // these paths are all based on the topDir and sample name")
         config_lines.append("    // dogme will populate all of these folders with its output")
-        config_lines.append('    modDir = "${topDir}/dorModels"')
-        config_lines.append('    dorDir = "${topDir}/dor12-${sample}"')
-        config_lines.append('    podDir = "${topDir}/pod5"')
-        config_lines.append('    bamDir = "${topDir}/bams"')
-        config_lines.append('    annotDir = "${topDir}/annot"')
-        config_lines.append('    bedDir = "${topDir}/bedMethyl"')
-        config_lines.append('    fastqDir = "${topDir}/fastqs"')
-        config_lines.append('    kallistoDir = "${topDir}/kallisto"')
+        config_lines.append('    modDir = "${params.topDir}/dorModels"')
+        config_lines.append('    dorDir = "${params.topDir}/dor12-${params.sample}"')
+        config_lines.append('    podDir = "${params.topDir}/pod5"')
+        config_lines.append('    bamDir = "${params.topDir}/bams"')
+        config_lines.append('    annotDir = "${params.topDir}/annot"')
+        config_lines.append('    bedDir = "${params.topDir}/bedMethyl"')
+        config_lines.append('    fastqDir = "${params.topDir}/fastqs"')
+        config_lines.append('    kallistoDir = "${params.topDir}/kallisto"')
         config_lines.append("    tmpDir = '/tmp'  // Temporary directory for disk-based sorting")
         config_lines.append("}")
         config_lines.append("")
@@ -631,8 +643,8 @@ class NextflowConfig:
             config_lines.append(f"    cpus = {cpu_cpus}")
             config_lines.append(f"    memory = '{slurm_cpu_memory_gb} GB'")
             config_lines.append(f"    time = '{cpu_walltime}'")
-            config_lines.append("    clusterOptions = \"--account=${cpuAccount}\"")
-            config_lines.append("    queue = \"${cpuPartition}\"")
+            config_lines.append(f"    clusterOptions = '--account={cpu_account}'")
+            config_lines.append(f"    queue = '{cpu_partition}'")
         else:
             config_lines.append("    executor = 'local'")
             config_lines.append("")
@@ -650,8 +662,8 @@ class NextflowConfig:
         config_lines.append("")
         config_lines.append("    withName: 'doradoTask' {")
         if is_slurm:
-            config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
-            config_lines.append("        queue = \"${gpuPartition}\"")
+            config_lines.append(f"        clusterOptions = '--account={gpu_account} --gres=gpu:1'")
+            config_lines.append(f"        queue = '{gpu_partition}'")
         config_lines.append(f"        memory = '{9 if is_slurm else min(9, local_task_memory_cap)} GB'  // Increase if necessary")
         config_lines.append(f"        cpus = {4 if is_slurm else min(4, local_task_cpu_cap)}         // dorado is more GPU intensive than CPU intensive")
         config_lines.append("        time = '12:00:00'")
@@ -677,8 +689,8 @@ class NextflowConfig:
         config_lines.append("    ")
         config_lines.append("    withName: 'openChromatinTaskBg' {")
         if is_slurm:
-            config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
-            config_lines.append("        queue = \"${gpuPartition}\"")
+            config_lines.append(f"        clusterOptions = '--account={gpu_account} --gres=gpu:1'")
+            config_lines.append(f"        queue = '{gpu_partition}'")
         config_lines.append(f"        memory = '{9 if is_slurm else min(9, local_task_memory_cap)} GB'  // Increase if necessary")
         config_lines.append(f"        cpus = {4 if is_slurm else min(4, local_task_cpu_cap)}         // dorado is more GPU intensive than CPU intensive")
         if max_gpu_tasks is not None:
@@ -694,8 +706,8 @@ class NextflowConfig:
         config_lines.append("")
         config_lines.append("    withName: 'openChromatinTaskBed' {")
         if is_slurm:
-            config_lines.append("        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"")
-            config_lines.append("        queue = \"${gpuPartition}\"")
+            config_lines.append(f"        clusterOptions = '--account={gpu_account} --gres=gpu:1'")
+            config_lines.append(f"        queue = '{gpu_partition}'")
         config_lines.append(f"        memory = '{9 if is_slurm else min(9, local_task_memory_cap)} GB'  // Increase if necessary")
         config_lines.append(f"        cpus = {4 if is_slurm else min(4, local_task_cpu_cap)}         // dorado is more GPU intensive than CPU intensive")
         if max_gpu_tasks is not None:
@@ -903,6 +915,8 @@ class NextflowExecutor:
         launch_cmd = list(cmd)
         if launch_cmd and launch_cmd[0] == "nextflow":
             launch_cmd[0] = str(self.nextflow_bin)
+        launch_env = os.environ.copy()
+        launch_env.setdefault("NXF_SYNTAX_PARSER", "v1")
 
         stdout_file = self.logs_dir / f"{run_uuid}_stdout.log"
         stderr_file = self.logs_dir / f"{run_uuid}_stderr.log"
@@ -928,6 +942,7 @@ class NextflowExecutor:
                 stdout=stdout_fd,
                 stderr=stderr_fd,
                 cwd=work_dir,
+                env=launch_env,
             )
 
             pid_file = work_dir / ".nextflow_pid"
@@ -1026,7 +1041,7 @@ class NextflowExecutor:
         modkit_filter_threshold: float = 0.9,
         min_cov: Optional[int] = None,
         per_mod: int = 5,
-        accuracy: str = "sup",
+        accuracy: str | None = None,
         max_gpu_tasks: Optional[int] = None,
         local_max_task_cpus: int | None = None,
         local_max_task_memory_gb: int | None = None,
@@ -1376,6 +1391,8 @@ class NextflowExecutor:
         pid_file = work_dir / ".nextflow_pid"
         
         cancelled_marker = work_dir / ".nextflow_cancelled"
+        trace_file = _find_nextflow_trace_file(work_dir)
+        workflow_usage = summarize_nextflow_trace_file(trace_file, accounting_mode="local") if trace_file else None
 
         # Check completion markers first
         if cancelled_marker.exists():
@@ -1392,15 +1409,15 @@ class NextflowExecutor:
                 "progress_percent": 0,
                 "message": _cancel_msg,
                 "tasks": {},
+                "workflow_usage": workflow_usage,
             }
         elif success_marker.exists():
             # Parse final task summary from trace file
             completed_tasks = []
             total = 0
-            trace_files = list(work_dir.glob("*_trace.txt"))
-            if trace_files:
+            if trace_file:
                 try:
-                    with open(trace_files[0]) as f:
+                    with open(trace_file) as f:
                         lines = f.readlines()
                         if len(lines) > 1:
                             headers = lines[0].strip().split('\t')
@@ -1427,7 +1444,8 @@ class NextflowExecutor:
                     "total": total,
                     "completed_count": total,
                     "failed_count": 0
-                } if total > 0 else {}
+                } if total > 0 else {},
+                "workflow_usage": workflow_usage,
             }
         elif failed_marker.exists():
             error_msg = ""
@@ -1439,7 +1457,8 @@ class NextflowExecutor:
                 "status": JobStatus.FAILED,
                 "progress_percent": 0,
                 "message": f"Job failed: {error_msg}" if error_msg else "Job failed",
-                "tasks": {}
+                "tasks": {},
+                "workflow_usage": workflow_usage,
             }
         
         # Check if process is still running
@@ -1534,7 +1553,8 @@ class NextflowExecutor:
                         "status": JobStatus.FAILED,
                         "progress_percent": 0,
                         "message": f"Process died: {error_msg[:100]}",
-                        "tasks": {}
+                        "tasks": {},
+                        "workflow_usage": workflow_usage,
                     }
             except Exception as e:
                 pass
@@ -1705,7 +1725,8 @@ class NextflowExecutor:
             "status": JobStatus.RUNNING,
             "progress_percent": progress,
             "message": message,
-            "tasks": tasks
+            "tasks": tasks,
+            "workflow_usage": workflow_usage,
         }
     
     async def get_results(self, run_uuid: str, work_dir: Path) -> dict:

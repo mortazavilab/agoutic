@@ -8,6 +8,9 @@ import launchpad.app as launchpad_app
 
 
 class _FakeSession:
+    async def commit(self):
+        return None
+
     async def close(self):
         return None
 
@@ -60,6 +63,8 @@ async def test_get_job_status_returns_terminal_slurm_db_state_without_repoll(mon
             result_destination="local",
             nextflow_work_dir="/local/project/workflow1",
             remote_work_dir="/remote/project/workflow1",
+            workflow_usage_json={"source": "slurm_sacct+nextflow_trace", "cpu_seconds": 120.0},
+            workflow_usage_synced_at=None,
             submitted_at=None,
             started_at=None,
             completed_at=None,
@@ -79,7 +84,191 @@ async def test_get_job_status_returns_terminal_slurm_db_state_without_repoll(mon
     assert payload["slurm_job_id"] == "50052939"
     assert payload["slurm_state"] == "COMPLETED"
     assert payload["work_directory"] == "/local/project/workflow1"
+    assert payload["workflow_usage"]["cpu_seconds"] == 120.0
     assert payload["tasks"] == {}
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_backfills_terminal_slurm_workflow_usage_from_local_trace(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    workflow_dir = tmp_path / "workflow-trace"
+    workflow_dir.mkdir()
+    (workflow_dir / "trace.txt").write_text(
+        "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+        "1\taa/bb\t50060001\tmainWorkflow:doradoTask (1)\tCOMPLETED\t90s\t200%\t4G\t6G\t0\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-old-trace"
+        return SimpleNamespace(
+            run_uuid="run-old-trace",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.COMPLETED,
+            progress_percent=100,
+            error_message=None,
+            run_stage="completed",
+            slurm_job_id="50060000",
+            slurm_state="COMPLETED",
+            transfer_state="outputs_downloaded",
+            result_destination="local",
+            nextflow_work_dir=str(workflow_dir),
+            remote_work_dir="/remote/project/workflow-trace",
+            workflow_usage_json=None,
+            workflow_usage_synced_at=None,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+        )
+
+    def fail_get_backend(mode):
+        raise AssertionError(f"terminal backfill should use local trace only, got {mode}")
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", fail_get_backend)
+
+    payload = await launchpad_app.get_job_status("run-old-trace")
+
+    assert payload["status"] == launchpad_app.JobStatus.COMPLETED
+    assert payload["workflow_usage"]["accounting_mode"] == "slurm"
+    assert payload["workflow_usage"]["usage_status"] == "partial"
+    assert payload["workflow_usage"]["usage_message"] == "Using Nextflow trace only; scheduler accounting unavailable."
+    assert payload["workflow_usage"]["cpu_seconds"] == 180.0
+    assert payload["workflow_usage_synced_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_returns_usage_unavailable_for_terminal_slurm_job_without_trace(monkeypatch):
+    fake_session = _FakeSession()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-old-missing"
+        return SimpleNamespace(
+            run_uuid="run-old-missing",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.COMPLETED,
+            progress_percent=100,
+            error_message=None,
+            run_stage="completed",
+            slurm_job_id="50060010",
+            slurm_state="COMPLETED",
+            transfer_state="outputs_downloaded",
+            result_destination="local",
+            nextflow_work_dir="/local/project/missing-workflow",
+            remote_work_dir="/remote/project/missing-workflow",
+            workflow_usage_json=None,
+            workflow_usage_synced_at=None,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+        )
+
+    def fail_get_backend(mode):
+        raise AssertionError(f"terminal fallback should not repoll backend, got {mode}")
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", fail_get_backend)
+
+    payload = await launchpad_app.get_job_status("run-old-missing")
+
+    assert payload["status"] == launchpad_app.JobStatus.COMPLETED
+    assert payload["workflow_usage"]["usage_status"] == "unavailable"
+    assert payload["workflow_usage"]["usage_message"] == "Usage statistics not available."
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_returns_and_persists_slurm_workflow_usage(monkeypatch):
+    fake_session = _FakeSession()
+    job = SimpleNamespace(
+        run_uuid="run-slurm-live",
+        execution_mode="slurm",
+        status=launchpad_app.JobStatus.RUNNING,
+        progress_percent=15,
+        error_message=None,
+        run_stage="running",
+        slurm_job_id="50070000",
+        slurm_state="RUNNING",
+        transfer_state=None,
+        result_destination="local",
+        nextflow_work_dir="/local/project/workflow-live",
+        remote_work_dir="/remote/project/workflow-live",
+        workflow_usage_json=None,
+        workflow_usage_synced_at=None,
+        submitted_at=None,
+        started_at=None,
+        completed_at=None,
+    )
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-slurm-live"
+        return job
+
+    class _FakeBackend:
+        async def check_status(self, run_uuid):
+            assert run_uuid == "run-slurm-live"
+            return SimpleNamespace(
+                status=launchpad_app.JobStatus.RUNNING,
+                progress_percent=44,
+                message="Pipeline: 2/5 completed, 1 running",
+                tasks={"completed_count": 2, "total": 5},
+                execution_mode="slurm",
+                run_stage="running",
+                slurm_job_id="50070000",
+                slurm_state="RUNNING",
+                transfer_state=None,
+                transfer_detail=None,
+                result_destination="local",
+                ssh_profile_nickname="hpc3",
+                work_directory="/local/project/workflow-live",
+                workflow_usage={
+                    "source": "slurm_sacct+nextflow_trace",
+                    "accounting_mode": "slurm",
+                    "cpu_seconds": 123.5,
+                    "gpu_seconds": 40.0,
+                    "billing_units": 2.5,
+                    "billing_entries": [
+                        {
+                            "resource_type": "CPU",
+                            "account": "cpu-default",
+                            "billing_hours": 1.0,
+                        },
+                        {
+                            "resource_type": "GPU",
+                            "account": "gpu-default",
+                            "billing_hours": 1.5,
+                        },
+                    ],
+                    "billing_hours_by_account": {
+                        "cpu-default": 1.0,
+                        "gpu-default": 1.5,
+                    },
+                },
+            )
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", lambda mode: _FakeBackend())
+
+    payload = await launchpad_app.get_job_status("run-slurm-live")
+
+    assert payload["status"] == launchpad_app.JobStatus.RUNNING
+    assert payload["progress_percent"] == 44
+    assert payload["workflow_usage"]["cpu_seconds"] == 123.5
+    assert payload["workflow_usage"]["gpu_seconds"] == 40.0
+    assert payload["workflow_usage"]["billing_entries"][1]["resource_type"] == "GPU"
+    assert payload["workflow_usage"]["billing_hours_by_account"]["gpu-default"] == 1.5
+    assert payload["workflow_usage_synced_at"] is not None
+    assert job.workflow_usage_json["billing_units"] == 2.5
+    assert job.workflow_usage_json["billing_hours_by_account"]["cpu-default"] == 1.0
+    assert job.workflow_usage_synced_at is not None
 
 
 @pytest.mark.asyncio
@@ -644,6 +833,68 @@ async def test_get_job_status_reports_live_reconcile_step_for_running_script(mon
     assert payload["current_step"] == "Rewriting BAM files"
     assert "Finished rewriting sample1.GRCh38.annotated.bam" in payload["current_step_detail"]
     assert "Finished rewriting sample1.GRCh38.annotated.bam" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_returns_and_persists_local_workflow_usage(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    workflow_dir = tmp_path / "workflow1"
+    workflow_dir.mkdir()
+    job = SimpleNamespace(
+        run_uuid="run-local",
+        execution_mode="local",
+        status=launchpad_app.JobStatus.RUNNING,
+        progress_percent=25,
+        error_message=None,
+        run_stage="running",
+        nextflow_work_dir=str(workflow_dir),
+        submitted_at=None,
+        started_at=None,
+        completed_at=None,
+        workflow_usage_json=None,
+        workflow_usage_synced_at=None,
+    )
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-local"
+        return job
+
+    async def fake_check_status(run_uuid, work_dir):
+        assert run_uuid == "run-local"
+        assert str(work_dir) == str(workflow_dir)
+        return {
+            "status": launchpad_app.JobStatus.RUNNING,
+            "progress_percent": 42,
+            "message": "Pipeline: 2/5 completed, 1 running",
+            "tasks": {"completed_count": 2, "total": 5, "failed_count": 0},
+            "workflow_usage": {
+                "source": "nextflow_trace",
+                "accounting_mode": "local",
+                "cpu_seconds": 123.5,
+                "estimated_gpu_task_seconds": 40.0,
+                "max_rss_mb": 2048.0,
+            },
+        }
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(
+        launchpad_app,
+        "NextflowExecutor",
+        lambda: SimpleNamespace(work_dir=tmp_path, check_status=fake_check_status),
+    )
+
+    payload = await launchpad_app.get_job_status("run-local")
+
+    assert payload["status"] == launchpad_app.JobStatus.RUNNING
+    assert payload["progress_percent"] == 42
+    assert payload["workflow_usage"]["cpu_seconds"] == 123.5
+    assert payload["workflow_usage"]["estimated_gpu_task_seconds"] == 40.0
+    assert payload["workflow_usage_synced_at"] is not None
+    assert job.workflow_usage_json["max_rss_mb"] == 2048.0
+    assert job.workflow_usage_synced_at is not None
 
 
 def test_parse_script_output_directory_prefers_workflow_directory_from_json_stdout():

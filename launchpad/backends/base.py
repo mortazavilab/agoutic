@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol, runtime_checkable
 
+from launchpad.config import resolve_dogme_accuracy
+
 
 @dataclass
 class SubmitParams:
@@ -37,7 +39,7 @@ class SubmitParams:
     modkit_filter_threshold: float = 0.9
     min_cov: int | None = None
     per_mod: int = 5
-    accuracy: str = "sup"
+    accuracy: str | None = None
     max_gpu_tasks: Optional[int] = None
     local_max_task_cpus: int | None = None
     local_max_task_memory_gb: int | None = None
@@ -77,6 +79,10 @@ class SubmitParams:
     script_args: list[str] = field(default_factory=list)
     script_working_directory: str | None = None
 
+    def __post_init__(self) -> None:
+        if str(self.workflow_key or "dogme").strip().lower() == "dogme":
+            self.accuracy = resolve_dogme_accuracy(self.mode, self.accuracy)
+
 
 @dataclass
 class JobStatus:
@@ -97,6 +103,8 @@ class JobStatus:
     result_destination: str | None = None
     ssh_profile_nickname: str | None = None
     work_directory: str | None = None
+    workflow_usage: dict[str, Any] | None = None
+    workflow_usage_synced_at: str | None = None
 
 
 @dataclass

@@ -165,6 +165,7 @@ class TestJobToDict:
         submitted = datetime(2026, 3, 7, 12, 0, 0)
         started = submitted + timedelta(minutes=5)
         completed = started + timedelta(hours=1)
+        synced_at = completed + timedelta(minutes=2)
 
         job = DogmeJob(
             run_uuid="run-4",
@@ -182,6 +183,8 @@ class TestJobToDict:
             output_directory="/data/output",
             report_json=json.dumps({"files": 3, "status": "ok"}),
             error_message=None,
+            workflow_usage_json={"cpu_seconds": 123.4, "estimated_gpu_task_seconds": 45.0},
+            workflow_usage_synced_at=synced_at,
         )
 
         result = job_to_dict(job)
@@ -193,6 +196,8 @@ class TestJobToDict:
         assert result["completed_at"] == completed.isoformat()
         assert result["report"] == {"files": 3, "status": "ok"}
         assert result["reference_genome"] == '["GRCh38", "mm39"]'
+        assert result["workflow_usage"] == {"cpu_seconds": 123.4, "estimated_gpu_task_seconds": 45.0}
+        assert result["workflow_usage_synced_at"] == synced_at.isoformat()
 
 
 class TestWorkflowIdentityHelpers:

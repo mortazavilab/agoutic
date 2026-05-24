@@ -45,6 +45,34 @@ def _progress_fraction(stage: str) -> float:
     return (idx + 1) / len(_STAGE_ORDER)
 
 
+def _format_usage_duration(seconds) -> str:
+    try:
+        total_seconds = int(round(float(seconds or 0)))
+    except (TypeError, ValueError):
+        return ""
+    if total_seconds <= 0:
+        return ""
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _format_usage_memory_mb(megabytes) -> str:
+    try:
+        value = float(megabytes or 0)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    if value >= 1024.0:
+        return f"{value / 1024.0:.1f} GB"
+    return f"{value:.0f} MB"
+
+
 def render_run_status(status: dict) -> None:
     """
     Render an enhanced run-status display.
@@ -96,4 +124,47 @@ def render_run_status(status: dict) -> None:
     profile = status.get("ssh_profile_nickname")
     if profile:
         _common_meta["SSH Profile"] = profile
+    workflow_usage = status.get("workflow_usage") or {}
+    usage_message = ""
+    if isinstance(workflow_usage, dict):
+        cpu_time = _format_usage_duration(workflow_usage.get("cpu_seconds"))
+        if cpu_time:
+            _common_meta["CPU Time"] = cpu_time
+        actual_gpu_seconds = workflow_usage.get("gpu_seconds")
+        gpu_time = _format_usage_duration(actual_gpu_seconds if actual_gpu_seconds not in (None, "") else workflow_usage.get("estimated_gpu_task_seconds"))
+        if gpu_time:
+            _common_meta["GPU Time" if actual_gpu_seconds not in (None, "") else "GPU Task Time"] = gpu_time
+        peak_rss = _format_usage_memory_mb(workflow_usage.get("max_rss_mb"))
+        if peak_rss:
+            _common_meta["Peak RSS"] = peak_rss
+        billing_entries = workflow_usage.get("billing_entries")
+        billing_by_account = workflow_usage.get("billing_hours_by_account")
+        if isinstance(billing_entries, list) and billing_entries:
+            for entry in billing_entries:
+                if not isinstance(entry, dict):
+                    continue
+                billing_hours = entry.get("billing_hours")
+                if billing_hours in (None, ""):
+                    continue
+                resource_type = str(entry.get("resource_type") or "").strip().upper()
+                account_name = str(entry.get("account") or "").strip()
+                prefix = "GPU" if resource_type == "GPU" else "CPU" if resource_type == "CPU" else ""
+                label = f"{prefix} Billing Hours".strip() or "Billing Hours"
+                if account_name:
+                    label = f"{label} ({account_name})"
+                _common_meta[label] = billing_hours
+        elif isinstance(billing_by_account, dict) and billing_by_account:
+            for account_name, billing_hours in sorted(billing_by_account.items()):
+                if billing_hours in (None, ""):
+                    continue
+                label = f"Billing Hours ({str(account_name).strip() or 'unknown'})"
+                _common_meta[label] = billing_hours
+        else:
+            billing_units = workflow_usage.get("billing_units")
+            if billing_units not in (None, ""):
+                label = str(workflow_usage.get("billing_label") or "Billing Units").strip() or "Billing Units"
+                _common_meta[label] = billing_units
+        usage_message = str(workflow_usage.get("usage_message") or "").strip()
     metadata_row(_common_meta)
+    if usage_message:
+        st.caption(usage_message)

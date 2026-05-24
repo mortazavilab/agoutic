@@ -37,6 +37,7 @@ from cortex.remote_orchestration import (
 )
 import cortex.job_parameters as job_parameters
 import cortex.job_polling as job_polling
+from launchpad.config import resolve_dogme_accuracy
 
 REMOTE_STAGE_MCP_TIMEOUT = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
 SCRIPT_SUBMISSION_TIMEOUT_BUFFER_SECONDS = 30.0
@@ -541,7 +542,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "modkit_filter_threshold": job_params.get("modkit_filter_threshold") or 0.9,
             "min_cov": job_params.get("min_cov"),  # Let Launchpad handle None (mode-dependent default)
             "per_mod": job_params.get("per_mod") or 5,
-            "accuracy": job_params.get("accuracy") or "sup",
+            "accuracy": resolve_dogme_accuracy(job_params.get("mode"), job_params.get("accuracy")),
             "max_gpu_tasks": job_params.get("max_gpu_tasks") if "max_gpu_tasks" in job_params else None,
             "local_max_task_cpus": job_params.get("local_max_task_cpus"),
             "local_max_task_memory_gb": job_params.get("local_max_task_memory_gb"),

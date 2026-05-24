@@ -80,6 +80,12 @@ _WF_PORE_C_OUTPUT_FLAG_LABELS = {
 }
 
 
+def _default_dogme_accuracy(mode: str | None) -> str:
+    if str(mode or "").strip().upper() == "RNA":
+        return "sup"
+    return "hac"
+
+
 def _wf_pore_c_ui_enabled() -> bool:
     return str(os.getenv("WF_PORE_C_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
 
@@ -1595,7 +1601,7 @@ def render_block_part1(
                         modkit_threshold = extracted_params.get("modkit_filter_threshold", 0.9)
                         min_cov = extracted_params.get("min_cov")
                         per_mod = extracted_params.get("per_mod", 5)
-                        accuracy = extracted_params.get("accuracy", "sup")
+                        accuracy = extracted_params.get("accuracy") or _default_dogme_accuracy(mode)
                         if _field_visibility["show_dogme_advanced"]:
                             with st.expander("⚙️ Advanced Parameters (optional)"):
                                 st.caption("Leave empty to use defaults")
@@ -1636,7 +1642,7 @@ def render_block_part1(
                                 
                                 # accuracy
                                 accuracy_options = ["sup", "hac", "fast"]
-                                current_accuracy = extracted_params.get("accuracy", "sup")
+                                current_accuracy = extracted_params.get("accuracy") or _default_dogme_accuracy(mode)
                                 accuracy_index = accuracy_options.index(current_accuracy) if current_accuracy in accuracy_options else 0
                                 accuracy = st.selectbox(
                                     "Basecalling Accuracy",

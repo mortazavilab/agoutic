@@ -1495,6 +1495,87 @@ class TestRenderWorkflowStepDataframes:
             }
         )
 
+    def test_execution_job_renders_workflow_usage_for_completed_jobs(self):
+        fake_st = SimpleNamespace(
+            chat_message=MagicMock(return_value=_ContextManagerStub()),
+            session_state={},
+            caption=MagicMock(),
+            divider=MagicMock(),
+            success=MagicMock(),
+            button=MagicMock(return_value=False),
+            columns=MagicMock(side_effect=lambda n: [_ContextManagerStub() for _ in range(n)]),
+        )
+        progress_stats = MagicMock()
+        fn = _load_block_part2_function(
+            "render_block_part2",
+            {
+                "st": fake_st,
+                "section_header": lambda *args, **kwargs: None,
+                "metadata_row": lambda *args, **kwargs: None,
+                "status_chip": lambda *args, **kwargs: None,
+                "info_callout": lambda *args, **kwargs: None,
+                "progress_stats": progress_stats,
+                "segmented_progress": lambda *args, **kwargs: None,
+                "timeline": lambda *args, **kwargs: None,
+                "_workflow_usage_metrics": lambda workflow_usage: {
+                    "CPU Time": "2m 4s",
+                    "Peak RSS": "2.0 GB",
+                } if workflow_usage else {},
+                "_workflow_usage_message": lambda workflow_usage: str((workflow_usage or {}).get("usage_message") or "").strip(),
+            },
+        )
+
+        fn(
+            btype="EXECUTION_JOB",
+            block={"status": "DONE", "created_at": "2026-04-23T06:17:37Z"},
+            content={
+                "run_uuid": "run-124",
+                "sample_name": "igvfr_767-22",
+                "mode": "RNA",
+                "work_directory": "/tmp/workflow12",
+                "job_status": {
+                    "status": "COMPLETED",
+                    "progress_percent": 100,
+                    "message": "Job completed successfully.",
+                    "tasks": {},
+                    "workflow_usage": {
+                        "cpu_seconds": 124.0,
+                        "max_rss_mb": 2048.0,
+                    },
+                },
+            },
+            block_id="block-2",
+            status="COMPLETED",
+            API_URL="http://api.test",
+            active_id="proj-1",
+            LIVE_JOB_STATUS_TIMEOUT_SECONDS=30,
+            make_authenticated_request=MagicMock(),
+            get_cached_job_status=MagicMock(return_value=({}, False)),
+            show_metadata=lambda: None,
+            _workflow_status_presentation=lambda status: ("complete", status, "✅"),
+            _format_plan_timestamp=lambda value: value,
+            _format_duration=lambda *_args, **_kwargs: "",
+            _block_timestamp=lambda: "",
+            _render_workflow_plot_payload=lambda *_args, **_kwargs: None,
+            _render_embedded_dataframes=lambda *_args, **_kwargs: None,
+            _render_step_payload=lambda *_args, **_kwargs: None,
+            _job_status_updated_at=lambda *_args, **_kwargs: None,
+            _run_status_label=lambda status: ("complete", status.title(), "✅"),
+            _format_timestamp=lambda value: value,
+            _workflow_label_from_path=lambda path: "workflow12",
+            _pause_auto_refresh=lambda *_args, **_kwargs: None,
+            get_job_debug_info=lambda *_args, **_kwargs: None,
+            _render_plot_block=lambda *_args, **_kwargs: None,
+        )
+
+        progress_stats.assert_called_once_with(
+            {
+                "CPU Time": "2m 4s",
+                "Peak RSS": "2.0 GB",
+            }
+        )
+        fake_st.caption.assert_any_call("Workflow usage")
+
 
 class TestRenderWorkflowPlotPayload:
     def test_renders_saved_image_artifacts(self, tmp_path):

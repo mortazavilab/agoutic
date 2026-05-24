@@ -74,12 +74,6 @@ DOGME_DNA_OPENCHROM_LIBTORCH = Path(
     ).strip()
 )
 
-# Shared Apptainer image for SLURM DNA runs.
-DOGME_DNA_SLURM_CONTAINER = (
-    os.getenv("DOGME_DNA_SLURM_CONTAINER")
-    or "/share/crsp/lab/seyedam/share/agoutic/container/dogme-pipeline-openchrom-gpu-bedtools.sif"
-).strip()
-
 # Path to Nextflow executable
 NEXTFLOW_BIN = Path(os.getenv("NEXTFLOW_BIN", "/usr/local/bin/nextflow"))
 
@@ -106,6 +100,20 @@ class DogmeMode(str, Enum):
     DNA = "DNA"
     RNA = "RNA"
     CDNA = "CDNA"
+
+
+def default_dogme_accuracy(mode: str | None) -> str:
+    normalized_mode = str(mode or "").strip().upper()
+    if normalized_mode == DogmeMode.RNA.value:
+        return "sup"
+    return "hac"
+
+
+def resolve_dogme_accuracy(mode: str | None, accuracy: str | None) -> str:
+    cleaned_accuracy = str(accuracy or "").strip()
+    if cleaned_accuracy:
+        return cleaned_accuracy
+    return default_dogme_accuracy(mode)
 
 # --- JOB STATUS ---
 class JobStatus(str, Enum):

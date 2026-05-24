@@ -41,19 +41,27 @@ class _FakeConn:
 
 
 class _FakeStatusConn(_FakeConn):
-    def __init__(self, sacct_output: str = "", squeue_output: str = "", trace_output: str = "", slurm_out_output: str = ""):
+    def __init__(self, sacct_output: str = "", squeue_output: str = "", trace_output: str = "", slurm_out_output: str = "", usage_sacct_output: str = "", trace_path: str = "/remote/trace.txt"):
         super().__init__()
         self.sacct_output = sacct_output
         self.squeue_output = squeue_output
         self.trace_output = trace_output
         self.slurm_out_output = slurm_out_output
+        self.usage_sacct_output = usage_sacct_output
+        self.trace_path = trace_path
 
     async def run(self, command: str, check: bool = False):
         self.commands.append(command)
+        if "sacct -X -j" in command:
+            return SimpleNamespace(stdout=self.usage_sacct_output, stderr="", exit_status=0)
         if "sacct -j" in command:
             return SimpleNamespace(stdout=self.sacct_output, stderr="", exit_status=0)
         if "squeue -j" in command:
             return SimpleNamespace(stdout=self.squeue_output, stderr="", exit_status=0)
+        if "__AGOUTIC_TRACE_PATH__" in command:
+            if not self.trace_output:
+                return SimpleNamespace(stdout="", stderr="", exit_status=0)
+            return SimpleNamespace(stdout=f"__AGOUTIC_TRACE_PATH__:{self.trace_path}\n{self.trace_output}", stderr="", exit_status=0)
         if "tail -n 5000" in command and ("*_trace.txt" in command or "/trace.txt" in command):
             return SimpleNamespace(stdout=self.trace_output, stderr="", exit_status=0)
         if "tail -n 500" in command and "slurm-" in command and ".out" in command:
@@ -993,14 +1001,22 @@ async def test_check_status_reports_remote_trace_progress(monkeypatch, profile):
     conn = _FakeStatusConn(
         sacct_output="RUNNING|0:0|\n",
         trace_output=(
-            "task_id\thash\tnative_id\tname\tstatus\texit\n"
-            "1\tda/2fa490\t50043101\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
-            "2\t5/abc123\t50043106\tmainWorkflow:softwareVTask\tCOMPLETED\t0\n"
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\tda/2fa490\t50043101\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t30s\t100%\t1G\t2G\t0\n"
+            "2\t5/abc123\t50043106\tmainWorkflow:softwareVTask\tCOMPLETED\t45s\t100%\t1500M\t2G\t0\n"
+            "3\tfe/e700c5\t50043107\tmainWorkflow:doradoTask (1)\tRUNNING\t60s\t300%\t4G\t6G\t0\n"
         ),
         slurm_out_output=(
             "executor >  slurm (3)\n"
             "[fe/e700c5] mainWorkflow:doradoTask (1) | 0 of 1\n"
         ),
+        usage_sacct_output=(
+            "50043100|cpu-default|RUNNING|90|00:00:15|500M|billing=1,cpu=1\n"
+            "50043101|cpu-default|COMPLETED|30|00:00:20|1G|billing=1,cpu=1\n"
+            "50043106|cpu-default|COMPLETED|45|00:00:40|1500M|billing=1,cpu=1\n"
+            "50043107|gpu-default|RUNNING|60|00:00:50|4G|billing=2,cpu=4,gres/gpu=1\n"
+        ),
+        trace_path="/remote/eli/agoutic/proj-1/workflow7/trace.txt",
     )
 
     from launchpad import db as launchpad_db
@@ -1042,6 +1058,72 @@ async def test_check_status_reports_remote_trace_progress(monkeypatch, profile):
     assert status.tasks["total"] == 3
     assert status.tasks["running"] == ["mainWorkflow:doradoTask (1)"]
     assert "2/3 completed" in status.message
+    assert status.workflow_usage["source"] == "slurm_sacct+nextflow_trace"
+    assert status.workflow_usage["cpu_seconds"] == 125.0
+    assert status.workflow_usage["gpu_seconds"] == 60.0
+    assert status.workflow_usage["task_realtime_seconds"] == 225.0
+    assert status.workflow_usage["billing_units"] == 0.079
+    assert status.workflow_usage["billing_hours_by_account"] == {
+        "cpu-default": 0.046,
+        "gpu-default": 0.033,
+    }
+    assert status.workflow_usage["billing_entries"] == [
+        {
+            "resource_type": "CPU",
+            "account": "cpu-default",
+            "billing_hours": 0.046,
+        },
+        {
+            "resource_type": "GPU",
+            "account": "gpu-default",
+            "billing_hours": 0.033,
+        },
+    ]
+    assert status.workflow_usage["slurm_accounted_job_count"] == 4
+    assert status.workflow_usage["slurm_launcher_accounted"] is True
+    assert any("sacct -X -j" in command and "50043100" in command for command in conn.commands)
+
+
+@pytest.mark.asyncio
+async def test_check_status_without_remote_trace_leaves_workflow_usage_empty(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeStatusConn(sacct_output="RUNNING|0:0|\n")
+
+    from launchpad import db as launchpad_db
+
+    async def _get_job_by_uuid(*args, **kwargs):
+        return SimpleNamespace(
+            run_uuid="run-6b",
+            status="RUNNING",
+            progress_percent=0,
+            run_stage="running",
+            slurm_job_id="50043110",
+            transfer_state=None,
+            result_destination="local",
+            ssh_profile_id="profile-1",
+            user_id="user-1",
+            slurm_state=None,
+            remote_work_dir="/remote/eli/agoutic/proj-1/workflow8",
+        )
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _noop_update(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_db, "get_job_by_uuid", _get_job_by_uuid)
+    monkeypatch.setattr(backend, "_update_job_slurm_state", _noop_update)
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+
+    status = await backend.check_status("run-6b")
+
+    assert status.status == "RUNNING"
+    assert status.workflow_usage is None
 
 
 def test_parse_task_status_texts_excludes_numbered_tasks_already_completed_in_trace():

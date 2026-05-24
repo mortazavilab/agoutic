@@ -180,7 +180,7 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         "modkit_filter_threshold": None,  # Will use default 0.9 if not specified
         "min_cov": None,  # Will default based on mode if not specified
         "per_mod": None,  # Will use default 5 if not specified
-        "accuracy": None,  # Will use default "sup" if not specified
+        "accuracy": None,  # Will use mode-dependent default (HAC for DNA/CDNA, SUP for RNA)
         "max_gpu_tasks": slurm_reuse_seed.get("max_gpu_tasks"),  # Will use default 1 if not specified
         "execution_mode": slurm_reuse_seed.get("execution_mode") or "local",
         "ssh_profile_id": slurm_reuse_seed.get("ssh_profile_id"),

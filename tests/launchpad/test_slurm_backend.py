@@ -347,6 +347,7 @@ async def test_submit_wf_pore_c_stages_executor_inputs_and_builds_remote_command
     assert "-work-dir /remote/agoutic/proj/.nextflow-work/wf-pore-c/workflow1" in normalized_nf_command
     assert captured_sbatch["container_cache_dir"] == "/remote/agoutic"
     assert "export NXF_APPTAINER_CACHEDIR=/remote/agoutic/.nxf-apptainer-cache" in submit_script
+    assert 'export NXF_SYNTAX_PARSER="${NXF_SYNTAX_PARSER:-v1}"' in submit_script
     assert "dogme.profile" not in normalized_nf_command
     assert all("dogme.profile" not in command for command in commands)
 

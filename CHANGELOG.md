@@ -12,7 +12,11 @@
 
 - **Remote profile connection tests now show the connected user's current SLURM account balances from `sbank balance statement <username>`, with parsed balance columns and full-width rendering in the UI**
 
+- **Remote SLURM workflow status now derives live usage from Nextflow trace data plus `sacct` child-job accounting, persists CPU/GPU/billing summaries on the job row for new runs, and backfills older jobs from a local trace when available or shows `usage statistics not available` instead of erroring**
+
 ### Bug Fixes
+
+- **Launchpad now defaults `NXF_SYNTAX_PARSER=v1` for local Nextflow launches and generated SLURM submit scripts, preserving Dogme compatibility with newer Nextflow releases that enable the stricter parser by default**
 
 - **Workflow quick-delete now removes immediate-child untracked `workflow*` folders from the active project root when no Launchpad job row exists, instead of failing outright for visible but untracked workflow directories**
 
@@ -34,6 +38,10 @@
 
 - **Chat now supports `/commands` to list slash commands by category, and both the welcome card and sidebar help surface point users to that command for the full slash-command catalog**
 
+- **Dogme SLURM config generation no longer forces DNA runs onto the legacy OpenChrom `.sif`; RNA, DNA, and CDNA now all use `ghcr.io/mortazavilab/dogme-pipeline:latest`, matching the current shared container support across modes**
+
+- **Remote SLURM workflow usage now merges the parent Nextflow launcher sbatch job into the same CPU, billing, and memory totals as child task jobs, so the workflow summary includes launcher overhead instead of only trace-native child jobs**
+
 - **wf-pore-c execution cards and approval editors no longer rely on a production AST-test fallback in `ui/appui_block_part2.py`, so missing helper wiring now raises loudly instead of silently degrading to stale Dogme metadata**
 
 - **Legacy Cortex conversation and job state that only stored `mode` is now normalized on both the slow history rebuild path and the fast cached-state restore path, so old Dogme chats still reconstruct with `workflow_key="dogme"` and `analyze_job_results` no longer depends on an implicit Dogme grouping**
@@ -41,6 +49,8 @@
 - **Launchpad and Cortex persistence now tolerate legacy rows with missing `workflow_key`/`mode` through an Alembic backfill migration plus runtime normalization, preventing pre-migration jobs and conversation state from failing validation during submit/poll/rehydrate paths**
 
 ### Tests
+
+- **Added focused regression coverage for the local Nextflow subprocess environment and generated SLURM submit script so the legacy parser override stays in place**
 
 - **Added regression coverage for tracked Launchpad workflow listing, untracked workflow-folder deletion, and quick-exit project-directory resolution before context prep**
 
@@ -53,6 +63,8 @@
 - **Added Launchpad migration regression coverage for `workflow_key` backfill and nullable legacy `mode` handling, plus submit-script persistence checks to ensure new jobs store and round-trip workflow identity cleanly**
 
 - **Added SSH-manager regression coverage for `sbank` balance parsing, strict username-only filtering including starred user rows, and raw-output fallback trimming during remote profile connection tests**
+
+- **Added focused regression coverage for remote SLURM workflow usage collection, status-endpoint persistence, old-job local-trace backfill, and explicit unavailable fallbacks when no trace data can be recovered**
 
 ### Documentation
 

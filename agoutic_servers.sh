@@ -130,7 +130,7 @@ rotate_logs() {
         log "Rotated $rotated log file(s) with timestamp $timestamp"
     fi
 
-    # Archive rotated logs older than 30 days into monthly folders
+    # Archive rotated logs older than 7 days into monthly folders
     # e.g. logs/logs_202603/ for March 2026
     local archived=0
     for logfile in "$LOGS_DIR"/*.jsonl "$LOGS_DIR"/*.log; do
@@ -144,7 +144,7 @@ rotate_logs() {
         # Rotated files have at least one dot in the name portion, e.g. "cortex.20260213_082438"
         [[ "$name" == *.* ]] || continue
 
-        # Check if file is older than 30 days
+        # Check if file is older than 7 days
         if [[ "$(uname)" == "Darwin" ]]; then
             local age_days
             age_days=$(( ( $(date +%s) - $(stat -f %m "$logfile") ) / 86400 ))
@@ -152,7 +152,7 @@ rotate_logs() {
             local age_days
             age_days=$(( ( $(date +%s) - $(stat -c %Y "$logfile") ) / 86400 ))
         fi
-        [ "$age_days" -ge 30 ] || continue
+        [ "$age_days" -ge 7 ] || continue
 
         # Determine the month folder from the file's modification time
         local month_stamp
@@ -506,6 +506,9 @@ cmd_restart() {
     echo ""
     sleep 2
     cmd_start
+    local restart_completed_at
+    restart_completed_at=$(date '+%Y-%m-%d %H:%M:%S %Z')
+    log "Restart completed at $restart_completed_at"
 }
 
 # --- Main ---

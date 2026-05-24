@@ -31,6 +31,7 @@ from launchpad.import_workflows import (
     result_sync_file_patterns_for_workflow,
 )
 from launchpad.nextflow_executor import resolve_slurm_cpu_memory_gb
+from launchpad.workflow_accounting import collect_nextflow_trace_native_ids, normalize_slurm_job_id, summarize_slurm_workflow_usage
 from launchpad.workflow_executors import get_workflow_executor
 
 logger = get_logger(__name__)
@@ -614,6 +615,7 @@ class SlurmBackend:
 
                 progress_percent = 100 if agoutic_status == "COMPLETED" else 0
                 tasks: dict | None = None
+                workflow_usage: dict | None = None
                 remote_work_dir = getattr(job, "remote_work_dir", None)
                 if remote_work_dir:
                     progress_percent, tasks, task_message = await self._read_remote_task_status(
@@ -639,6 +641,11 @@ class SlurmBackend:
                         message = task_message
                     elif task_message and agoutic_status == "FAILED":
                         message = f"{message} — {task_message}"
+                    workflow_usage = await self._read_remote_workflow_usage(
+                        conn=conn,
+                        remote_work=remote_work_dir,
+                        slurm_job_id=str(job.slurm_job_id),
+                    )
 
                 if agoutic_status == "COMPLETED":
                     agoutic_status, copyback_message = await self._ensure_local_results_ready(
@@ -676,6 +683,8 @@ class SlurmBackend:
                     message=message,
                     ssh_profile_nickname=profile.nickname,
                     work_directory=self._effective_work_directory(job),
+                    workflow_usage=workflow_usage,
+                    workflow_usage_synced_at=datetime.utcnow().isoformat() if workflow_usage is not None else None,
                 )
             finally:
                 await conn.close()
@@ -741,6 +750,99 @@ class SlurmBackend:
             stdout_content=stdout_content,
             scheduler_status=scheduler_status,
         )
+
+    @staticmethod
+    def _chunk_job_ids(job_ids: list[str], *, max_chars: int = 3000) -> list[list[str]]:
+        chunks: list[list[str]] = []
+        current_chunk: list[str] = []
+        current_size = 0
+        for job_id in job_ids:
+            addition = len(job_id) + (1 if current_chunk else 0)
+            if current_chunk and current_size + addition > max_chars:
+                chunks.append(current_chunk)
+                current_chunk = [job_id]
+                current_size = len(job_id)
+                continue
+            current_chunk.append(job_id)
+            current_size += addition
+        if current_chunk:
+            chunks.append(current_chunk)
+        return chunks
+
+    async def _read_remote_workflow_usage(
+        self,
+        *,
+        conn,
+        remote_work: str,
+        slurm_job_id: str,
+    ) -> dict | None:
+        try:
+            trace_path, trace_content = await self._read_remote_workflow_trace(conn=conn, remote_work=remote_work)
+            if not trace_content.strip():
+                return None
+            native_ids = collect_nextflow_trace_native_ids(trace_content)
+            sacct_text = await self._read_remote_sacct_usage(
+                conn=conn,
+                native_ids=native_ids,
+                launcher_job_id=slurm_job_id,
+            )
+            return summarize_slurm_workflow_usage(
+                trace_text=trace_content,
+                sacct_text=sacct_text,
+                trace_path=trace_path,
+                launcher_job_id=slurm_job_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to collect remote workflow usage",
+                remote_work=remote_work,
+                error=str(exc),
+            )
+            return None
+
+    async def _read_remote_workflow_trace(self, *, conn, remote_work: str) -> tuple[str | None, str]:
+        quoted_remote_work = shlex.quote(remote_work)
+        result = await conn.run(
+            f"trace_file=$(ls -1 {quoted_remote_work}/*_trace.txt 2>/dev/null | head -1); "
+            f"if [ -z \"$trace_file\" ] && [ -f {quoted_remote_work}/trace.txt ]; then trace_file={quoted_remote_work}/trace.txt; fi; "
+            "if [ -n \"$trace_file\" ]; then printf '__AGOUTIC_TRACE_PATH__:%s\\n' \"$trace_file\"; cat \"$trace_file\"; fi"
+        )
+        output = result.stdout or ""
+        prefix = "__AGOUTIC_TRACE_PATH__:"
+        if output.startswith(prefix):
+            first_line, _, remainder = output.partition("\n")
+            trace_path = first_line[len(prefix):].strip() or None
+            return trace_path, remainder
+        return None, output
+
+    async def _read_remote_sacct_usage(
+        self,
+        *,
+        conn,
+        native_ids: list[str],
+        launcher_job_id: str | None = None,
+    ) -> str:
+        job_ids: list[str] = []
+        seen_job_ids: set[str] = set()
+        for raw_job_id in [*native_ids, launcher_job_id]:
+            normalized_job_id = normalize_slurm_job_id(raw_job_id)
+            if not normalized_job_id or normalized_job_id in seen_job_ids:
+                continue
+            seen_job_ids.add(normalized_job_id)
+            job_ids.append(normalized_job_id)
+
+        if not job_ids:
+            return ""
+        outputs: list[str] = []
+        for chunk in self._chunk_job_ids(job_ids):
+            result = await conn.run(
+                f"sacct -X -j {shlex.quote(','.join(chunk))} "
+                "--format=JobIDRaw,Account,State,ElapsedRaw,TotalCPU,MaxRSS,AllocTRES "
+                "--noheader --parsable2 2>/dev/null || true"
+            )
+            if result.stdout:
+                outputs.append(result.stdout)
+        return "".join(outputs)
 
     @staticmethod
     def _parse_task_status_texts(

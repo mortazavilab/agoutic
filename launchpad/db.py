@@ -39,6 +39,7 @@ def _effective_workflow_key(value: str | None) -> str:
 def job_to_dict(job: DogmeJob) -> dict:
     """Convert DogmeJob row to dictionary."""
     imported_source_complete = getattr(job, "imported_source_complete", None)
+    workflow_usage_synced_at = getattr(job, "workflow_usage_synced_at", None)
     return {
         "run_uuid": job.run_uuid,
         "project_id": job.project_id,
@@ -71,6 +72,8 @@ def job_to_dict(job: DogmeJob) -> dict:
         "imported_config_path": getattr(job, "imported_config_path", None),
         "imported_copy_mode": getattr(job, "imported_copy_mode", None),
         "imported_source_complete": imported_source_complete,
+        "workflow_usage": getattr(job, "workflow_usage_json", None),
+        "workflow_usage_synced_at": workflow_usage_synced_at.isoformat() if workflow_usage_synced_at else None,
         "import_warning_message": (
             "Imported from a workflow that does not look complete yet. Run /sync-workflow later to pull new outputs."
             if imported_source_complete is False
@@ -340,6 +343,8 @@ async def update_job_status(
     status: str,
     progress: int | None = None,
     error_message: str | None = None,
+    workflow_usage: dict | None = None,
+    workflow_usage_synced_at: datetime | None = None,
 ) -> DogmeJob | None:
     """Update job status and optionally progress."""
     job = await get_job(session, run_uuid)
@@ -349,6 +354,9 @@ async def update_job_status(
             job.progress_percent = progress
         if error_message:
             job.error_message = error_message
+        if workflow_usage is not None:
+            job.workflow_usage_json = workflow_usage
+            job.workflow_usage_synced_at = workflow_usage_synced_at or datetime.utcnow()
         await session.commit()
         await session.refresh(job)
     return job

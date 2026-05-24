@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, Any, List, Literal, Union
 from datetime import datetime
 
-from launchpad.config import MAX_GPU_TASKS_LIMIT
+from launchpad.config import MAX_GPU_TASKS_LIMIT, resolve_dogme_accuracy
 
 class SubmitJobRequest(BaseModel):
     """Request to submit a Dogme job."""
@@ -58,7 +58,7 @@ class SubmitJobRequest(BaseModel):
     modkit_filter_threshold: Optional[float] = 0.9  # Modification calling threshold
     min_cov: Optional[int] = None  # Minimum coverage (defaults: 3 reads unless explicitly overridden)
     per_mod: Optional[int] = 5  # Percentage threshold for modifications
-    accuracy: Optional[str] = "sup"  # Basecalling accuracy (sup/hac/fast)
+    accuracy: Optional[str] = None  # Basecalling accuracy (defaults by mode)
     max_gpu_tasks: Optional[int] = None  # None lets Nextflow manage concurrency without maxForks
     custom_dogme_profile: Optional[str] = None
     custom_dogme_bind_paths: list[str] = Field(default_factory=list)
@@ -118,6 +118,12 @@ class SubmitJobRequest(BaseModel):
         if value < 1 or value > 2048:
             raise ValueError("local_max_task_memory_gb must be between 1 and 2048")
         return value
+
+    @model_validator(mode="after")
+    def apply_dogme_accuracy_default(self):
+        if self.workflow_key == "dogme":
+            self.accuracy = resolve_dogme_accuracy(self.mode, self.accuracy)
+        return self
 
     @field_validator("custom_dogme_bind_paths", mode="before")
     @classmethod
@@ -196,6 +202,8 @@ class JobDetailsResponse(BaseModel):
     imported_config_path: Optional[str] = None
     imported_copy_mode: Optional[str] = None
     imported_source_complete: Optional[bool] = None
+    workflow_usage: Optional[dict[str, Any]] = None
+    workflow_usage_synced_at: Optional[str] = None
     import_warning_message: Optional[str] = None
 
 
@@ -527,6 +535,8 @@ class JobStatusExtendedResponse(JobStatusResponse):
     result_destination: Optional[str] = None
     ssh_profile_nickname: Optional[str] = None
     work_directory: Optional[str] = None
+    workflow_usage: Optional[dict[str, Any]] = None
+    workflow_usage_synced_at: Optional[str] = None
     submitted_at: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
