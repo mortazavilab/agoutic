@@ -4,6 +4,12 @@
 
 - **Chat workflow commands now support `list launchpad workflows` / `/list-launchpad-workflows` to show the non-deleted Launchpad workflow rows tracked for the active project**
 
+- **AGOUTIC now supports unified inventory discovery across chat and the UI: deterministic `/list samples`, `/list staged`, `/list imported`, `/list dfs`, `/list workflows`, and `/list files` commands plus matching natural-language requests all route through one shared Cortex inventory layer**
+
+- **Cortex now exposes authenticated `/inventory/samples`, `/inventory/staged`, `/inventory/imported`, `/inventory/workflows`, and `/inventory/files` endpoints so the UI and chat share the same local-sample, remote-stage, imported-workflow, workflow-folder, and file-browsing semantics**
+
+- **The existing My Data page is now a consolidated inventory surface with Local Samples, Staged Samples, Imported Samples, Workflows, and Files tabs, including active-project workflow/file browsing alongside the central shared data-folder management tools**
+
 - **Dogme approval gates now populate Reference Genome(s) from the configured reference catalog, so `mad1` and other installed genomes appear automatically and multi-genome runs can be approved from the UI without another hardcoded option update**
 
 - **The reference-genome config API now returns alias and asset metadata, and Dogme approval gates render alias-aware genome labels from that server payload so future client-side UIs can discover the same catalog without importing backend code**
@@ -52,6 +58,8 @@
 
 - **Added focused regression coverage for the local Nextflow subprocess environment and generated SLURM submit script so the legacy parser override stays in place**
 
+- **Added focused regression coverage for `/list` inventory command parsing/rendering and the new Cortex inventory route layer that backs the revised My Data inventory tabs**
+
 - **Added regression coverage for tracked Launchpad workflow listing, untracked workflow-folder deletion, and quick-exit project-directory resolution before context prep**
 
 - **Added regression coverage for Dogme multi-genome extraction with `mm39` plus `mad1`, and for future configured genome names so they are recognized as reference genomes instead of sample names**
@@ -69,6 +77,8 @@
 ### Documentation
 
 - **Updated `README.md` with wf-pore-c Phase 3 status, default-off flag behavior, validation counts, and links to the plan plus local/remote smoke guides**
+
+- **Updated the quick reference, `/commands` catalog, sidebar help, and local help surfaces to document the new inventory commands, natural-language inventory lookups, and the expanded My Data page**
 
 - **Updated `docs/wf_pore_c_plan.md` to mark Phase 3 complete, record the `1988 > 1839` closure gate, and call out the production fallback removal plus dual-path backward-compat normalization**
 

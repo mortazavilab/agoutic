@@ -19,6 +19,7 @@ from cortex.chat_sync_handler import (
 from cortex.db import row_to_dict
 from cortex.db_helpers import _create_block_internal, _resolve_project_dir, save_conversation_message
 from cortex.file_commands import execute_file_command, parse_file_command
+from cortex.list_commands import detect_list_intent, execute_list_command, parse_list_command
 from cortex.memory_commands import (
     detect_memory_intent,
     execute_memory_command,
@@ -45,6 +46,13 @@ def _slash_commands_markdown() -> str:
         "- `/skills`\n"
         "- `/skill <skill_key>`\n"
         "- `/use-skill <skill_key>`\n\n"
+        "**Inventory**\n"
+        "- `/list samples`\n"
+        "- `/list staged [--profile NAME]`\n"
+        "- `/list imported`\n"
+        "- `/list dfs`\n"
+        "- `/list workflows`\n"
+        "- `/list files [target] [--project] [--depth N]`\n\n"
         "**Workflows**\n"
         "- `/use <workflow>`\n"
         "- `/reanalyze [workflow[, workflow2, ...]]` — omit the workflow to use the active workflow\n"
@@ -131,6 +139,7 @@ class CapabilitiesStage:
             "Use `/commands` to list all slash commands by category.\n\n"
             "Useful slash commands:\n"
             "- `/commands`\n"
+            "- Inventory: `/list samples`, `/list staged [--profile NAME]`, `/list imported`, `/list dfs`, `/list workflows`, `/list files [target] [--project] [--depth N]`\n"
             "- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`\n"
             "- Workflows: `/use <workflow>`, `/reanalyze [workflow[, workflow2, ...]]`, `/rerun [workflow[, workflow2, ...]]`, `/delete [workflow[, workflow2, ...]]`, `/sync-workflow [workflow[, workflow2, ...]]`\n"
             "- Files: `/read-file <path> [--lines N] [--mode auto|plain|markdown|html_text|html_raw]`\n"
@@ -297,6 +306,52 @@ class DfCommandStage:
 
 
 register_stage(DfCommandStage())
+
+
+class ListCommandStage:
+    name = "list_command"
+    priority = 223
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return parse_list_command(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        from sqlalchemy import select
+        from cortex.models import ProjectBlock
+
+        list_cmd = parse_list_command(ctx.message)
+
+        if not ctx.history_blocks and list_cmd.action in {"dfs", "files"}:
+            history_result = ctx.session.execute(
+                select(ProjectBlock)
+                .where(ProjectBlock.project_id == ctx.project_id)
+                .where(ProjectBlock.type.in_(["USER_MESSAGE", "AGENT_PLAN", "EXECUTION_JOB"]))
+                .order_by(ProjectBlock.seq.asc())
+            )
+            ctx.history_blocks = history_result.scalars().all()
+
+        markdown = await execute_list_command(
+            ctx.session,
+            list_cmd,
+            user_id=ctx.user.id,
+            project_id=ctx.project_id,
+            project_dir=_resolve_workflow_command_project_dir(ctx),
+            history_blocks=ctx.history_blocks,
+        )
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="list_command",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(ListCommandStage())
 
 
 # ── 225  Skill slash commands ──────────────────────────────────────────────
@@ -556,6 +611,52 @@ class WorkflowIntentStage:
 
 
 register_stage(WorkflowIntentStage())
+
+
+class ListIntentStage:
+    name = "list_intent"
+    priority = 239
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return detect_list_intent(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        from sqlalchemy import select
+        from cortex.models import ProjectBlock
+
+        list_cmd = detect_list_intent(ctx.message)
+
+        if not ctx.history_blocks and list_cmd.action in {"dfs", "files"}:
+            history_result = ctx.session.execute(
+                select(ProjectBlock)
+                .where(ProjectBlock.project_id == ctx.project_id)
+                .where(ProjectBlock.type.in_(["USER_MESSAGE", "AGENT_PLAN", "EXECUTION_JOB"]))
+                .order_by(ProjectBlock.seq.asc())
+            )
+            ctx.history_blocks = history_result.scalars().all()
+
+        markdown = await execute_list_command(
+            ctx.session,
+            list_cmd,
+            user_id=ctx.user.id,
+            project_id=ctx.project_id,
+            project_dir=_resolve_workflow_command_project_dir(ctx),
+            history_blocks=ctx.history_blocks,
+        )
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="list_intent",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(ListIntentStage())
 
 class MemoryIntentStage:
     name = "memory_intent"

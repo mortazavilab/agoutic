@@ -119,6 +119,7 @@ from cortex.routes.analyzer_proxy import (
 )
 from cortex.routes.user_data import router as user_data_router
 from cortex.routes.cross_project import router as cross_project_router
+from cortex.routes.inventory import router as inventory_router
 from cortex.routes.memories import router as memories_router
 from cortex.task_service import sync_project_tasks, clear_project_tasks
 from cortex.remote_orchestration import (
@@ -211,6 +212,7 @@ app.include_router(files_router)
 app.include_router(analyzer_proxy_router)
 app.include_router(user_data_router)
 app.include_router(cross_project_router)
+app.include_router(inventory_router)
 app.include_router(memories_router)
 
 # Initialize database on startup

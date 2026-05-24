@@ -184,6 +184,27 @@ Workflow references can match a workflow folder, workflow alias, workflow displa
 
 `/delete workflowN` can also remove an untracked on-disk `workflow*` folder when it exists as an immediate child of the current project root but has no Launchpad job row.
 
+### Inventory Commands
+
+| Command | Syntax | Description |
+|---|---|---|
+| `/list samples` | `/list samples` | List your user-wide local sample inventory from the central data folder |
+| `/list staged` | `/list staged --profile hpc3` | List remote staged samples, optionally filtered to one profile |
+| `/list imported` | `/list imported` | List imported workflows across all accessible projects |
+| `/list dfs` | `/list dfs` | List dataframes currently available in the chat context |
+| `/list workflows` | `/list workflows` | List tracked and on-disk workflows for the active project |
+| `/list files` | `/list files annot --depth 2` | List files in the active workflow by default, or use `--project` to browse from the project root |
+
+Natural language equivalents are also supported for direct inventory lookups, for example:
+
+- `show my samples`
+- `show staged samples on hpc3`
+- `what imported samples do i have`
+- `show workflows in this project`
+- `list files in workflow7/annot`
+
+The Streamlit My Data page now surfaces the same inventories in tabs for Local Samples, Staged Samples, Imported Samples, Workflows, and Files.
+
 ### Workflow Import and Sync
 
 - Remote import slash command: `/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote`

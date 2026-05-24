@@ -44,6 +44,18 @@ def render_sidebar(
 
         with st.expander("❓ Help", expanded=False):
             st.caption("Use `/commands` to list all slash commands by category.")
+            st.caption("**Inventory**")
+            if st.button("/list samples", key="help_prompt_list_samples", width="stretch"):
+                st.session_state["_help_prompt"] = "/list samples"
+                st.rerun()
+            if st.button("/list staged", key="help_prompt_list_staged", width="stretch"):
+                st.session_state["_help_prompt"] = "/list staged"
+                st.rerun()
+            if st.button("/list imported", key="help_prompt_list_imported", width="stretch"):
+                st.session_state["_help_prompt"] = "/list imported"
+                st.rerun()
+            st.caption("`/list workflows`  ·  `/list files`  ·  `/list dfs`")
+            st.caption("Natural language also works: `show my samples`, `show staged samples on hpc3`, `show workflows in this project`")
             st.caption("**Workflows**")
             if st.button("help", key="help_prompt_help", width="stretch"):
                 st.session_state["_help_prompt"] = "help"

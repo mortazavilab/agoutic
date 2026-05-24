@@ -109,15 +109,19 @@ def _render_local_help_response() -> None:
         with st.expander("Common Actions", expanded=False):
             st.markdown("- run dna workflow for sample X from /path")
             st.markdown("- stage sample to remote slurm profile hpc3")
+            st.markdown("- show my local samples, staged samples, or imported workflows")
+            st.markdown("- list workflows or files for the active project")
             st.markdown("- show job status and next steps")
             st.markdown("- parse results for run UUID")
             st.markdown("- compare reconcile abundance samples with edgePython")
         with st.expander("Slash Commands", expanded=False):
             st.markdown("- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`")
+            st.markdown("- Inventory: `/list samples`, `/list staged [--profile NAME]`, `/list imported`, `/list dfs`, `/list workflows`, `/list files [target] [--project] [--depth N]`")
             st.markdown("- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`")
             st.markdown("- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`")
             st.markdown("- Memory: `/remember`, `/remember-global`, `/remember-df`, `/memories`, `/forget`, `/pin`, `/unpin`, `/restore`, `/annotate`, `/search-memories`, `/upgrade-to-global`")
             st.markdown("- Hyphenated memory commands also accept underscore variants such as `/remember_global`, `/remember_df`, and `/upgrade_global`")
+            st.markdown("- Natural language inventory requests also work: `show my samples`, `show staged samples on hpc3`, `what imported samples do i have`, `show workflows in this project`, `list files in workflow7/annot`")
         with st.expander("Execution Modes", expanded=False):
             st.markdown("- Local: run on AGOUTIC host")
             st.markdown("- SLURM: submit via remote profile and queue")
