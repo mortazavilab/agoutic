@@ -18,6 +18,8 @@
 
 - **RNA `mod* summary` follow-ups now route through the same `bedMethyl` counting path even from non-workflow skills when workflow context is available: singular `modification summary`, short forms like `mod summary`, and `modkit summary` all auto-list `bedMethyl` outputs and chain into `analyze_job_results/count_bed` without requiring the user to switch skills first**
 
+- **Cortex startup recovery now restarts orphaned running job polls without waiting for the normal first 30-second sleep, so live Nextflow/SLURM progress and persisted job-status caches begin warming immediately after a server restart instead of sitting on stale running snapshots until the first delayed poll window elapses**
+
 - **RNA workflow interpretation now explicitly allows analysis of failed or cancelled workflows when the requested result files are actually present on disk (for example after a later sync), so mode-specific follow-ups no longer assume a different completed workflow is the only valid analysis target**
 
 ### Tests
@@ -33,6 +35,8 @@
 - **Added chat-path regression coverage for plural `modifications summary` requests against a failed workflow with synced `bedMethyl` outputs, ensuring the analyzer listing still chains into `count_bed` instead of stopping at raw file listings**
 
 - **Added focused regression coverage for generic-skill `mod summary` and `modkit summary` prompts so shorthand RNA modification-summary requests still auto-route to `bedMethyl` counting, override generic analyzer summaries, and chain into `count_bed`**
+
+- **Added restart-recovery regression coverage for orphaned running EXECUTION_JOB blocks so server restarts keep resuming job polling immediately rather than waiting through an avoidable initial delay before refreshing live status**
 
 ## [3.6.9] - 2026-05-24
 

@@ -159,7 +159,13 @@ def _sanitize_work_directory(value: str | None) -> str | None:
     return cleaned or None
 
 
-async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
+async def poll_job_status(
+    project_id: str,
+    block_id: str,
+    run_uuid: str,
+    *,
+    initial_delay_seconds: float | None = None,
+):
     """
     Background task to poll Launchpad for job status via MCP and update the EXECUTION_JOB block.
     Continues until job is completed or failed.
@@ -171,6 +177,7 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
         (1200, 30),  # ~10 h coverage at 30-second intervals
     ]
     _job_done = False
+    _next_delay = initial_delay_seconds
 
     for _batch_polls, _interval in _POLL_SCHEDULE:
         if _job_done:
@@ -178,7 +185,9 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
         for _ in range(_batch_polls):
             if _job_done:
                 break
-            await asyncio.sleep(_interval)
+            delay_seconds = _interval if _next_delay is None else max(0.0, float(_next_delay))
+            _next_delay = None
+            await asyncio.sleep(delay_seconds)
 
             session = SessionLocal()
             try:

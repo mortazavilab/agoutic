@@ -251,7 +251,12 @@ async def _recover_orphaned_background_tasks() -> None:
                     logger.info("Startup recovery: triggered auto-analysis", run_uuid=run_uuid)
             else:
                 asyncio.create_task(
-                    job_polling.poll_job_status(block.project_id, block.id, run_uuid)
+                    job_polling.poll_job_status(
+                        block.project_id,
+                        block.id,
+                        run_uuid,
+                        initial_delay_seconds=0.0,
+                    )
                 )
                 logger.info(
                     "Startup recovery: resumed polling for orphaned job",

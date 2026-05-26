@@ -1989,6 +1989,44 @@ class TestSubmitJobAfterApproval:
 
 class TestStartupRecovery:
     @pytest.mark.asyncio
+    async def test_resumes_orphaned_execution_job_poll_immediately_after_restart(self, session_factory, seed_data):
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "restart-run-1",
+                "job_status": {"status": "RUNNING", "progress_percent": 44},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        captured_args = None
+        captured_kwargs = None
+
+        async def _noop_poll():
+            return None
+
+        def _fake_poll(*args, **kwargs):
+            nonlocal captured_args, captured_kwargs
+            captured_args = args
+            captured_kwargs = kwargs
+            return _noop_poll()
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling.poll_job_status", new=_fake_poll), \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+            await _recover_orphaned_background_tasks()
+
+        assert captured_args == ("proj-bg", job_block.id, "restart-run-1")
+        assert captured_kwargs == {"initial_delay_seconds": 0.0}
+
+    @pytest.mark.asyncio
     async def test_resumes_orphaned_staging_poll_when_task_id_is_persisted(self, session_factory, seed_data):
         sess = session_factory()
         workflow_block = _create_block_internal(
