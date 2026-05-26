@@ -421,7 +421,7 @@ class TestProjectSwitchHelpers:
             has_running_job=True,
         )
 
-        assert value == dt.timedelta(seconds=2)
+        assert value == dt.timedelta(seconds=5)
 
     def test_bootstrap_suppressed_monitoring_only_when_timer_is_missing(self):
         fn = _load_function("_should_bootstrap_suppressed_monitoring")

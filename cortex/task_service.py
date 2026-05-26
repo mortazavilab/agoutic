@@ -171,9 +171,52 @@ def _apply_manual_state(task: ProjectTask, spec: dict, metadata: dict, now: date
         task.completed_at = task.completed_at or now
 
 
-def _upsert_task(session, existing_by_source: dict[str, ProjectTask], spec: dict, *, owner_id: str) -> ProjectTask:
+def _set_if_changed(task: ProjectTask, field_name: str, value) -> bool:
+    if getattr(task, field_name) == value:
+        return False
+    setattr(task, field_name, value)
+    return True
+
+
+def _resolved_task_state(
+    task: ProjectTask,
+    spec: dict,
+    metadata: dict,
+    *,
+    prev_status: str | None,
+    now: datetime.datetime,
+) -> tuple[str, datetime.datetime | None, datetime.datetime | None]:
+    status = spec["status"]
+    archived_at = task.archived_at
+    completed_at = task.completed_at
+
+    if metadata.get("archived_by_user"):
+        archived_at = task.archived_at or now
+    else:
+        archived_at = None
+        if spec["kind"] in _USER_MANAGED_KINDS and metadata.get("user_completed"):
+            status = "COMPLETED"
+            completed_at = task.completed_at or now
+
+    if status in {"COMPLETED", "CANCELLED"}:
+        if completed_at is None:
+            completed_at = now
+    elif prev_status in {"COMPLETED", "CANCELLED"} and not metadata.get("user_completed"):
+        completed_at = None
+
+    return status, archived_at, completed_at
+
+
+def _upsert_task(
+    session,
+    existing_by_source: dict[str, ProjectTask],
+    spec: dict,
+    *,
+    owner_id: str,
+) -> tuple[ProjectTask, bool]:
     now = datetime.datetime.utcnow()
     task = existing_by_source.get(spec["source_key"])
+    created = False
     if task is None:
         task = ProjectTask(
             id=str(uuid.uuid4()),
@@ -181,32 +224,41 @@ def _upsert_task(session, existing_by_source: dict[str, ProjectTask], spec: dict
             owner_id=owner_id,
             source_key=spec["source_key"],
             created_at=now,
+            updated_at=now,
         )
         session.add(task)
         existing_by_source[spec["source_key"]] = task
+        created = True
 
     prev_status = task.status
     metadata = _merged_metadata(task, spec)
-    task.kind = spec["kind"]
-    task.title = spec["title"]
-    task.status = spec["status"]
-    task.priority = spec.get("priority", "normal")
-    task.source_type = spec.get("source_type")
-    task.source_id = spec.get("source_id")
-    task.parent_task_id = spec.get("parent_task_id")
-    task.action_label = spec.get("action_label")
-    task.action_target = spec.get("action_target")
-    task.metadata_json = json.dumps(metadata)
-    task.updated_at = now
-    _apply_manual_state(task, spec, metadata, now)
+    metadata_json = json.dumps(metadata)
+    status, archived_at, completed_at = _resolved_task_state(
+        task,
+        spec,
+        metadata,
+        prev_status=prev_status,
+        now=now,
+    )
 
-    if task.status in {"COMPLETED", "CANCELLED"}:
-        if task.completed_at is None:
-            task.completed_at = now
-    elif prev_status in {"COMPLETED", "CANCELLED"} and not metadata.get("user_completed"):
-        task.completed_at = None
+    changed = created
+    changed |= _set_if_changed(task, "kind", spec["kind"])
+    changed |= _set_if_changed(task, "title", spec["title"])
+    changed |= _set_if_changed(task, "status", status)
+    changed |= _set_if_changed(task, "priority", spec.get("priority", "normal"))
+    changed |= _set_if_changed(task, "source_type", spec.get("source_type"))
+    changed |= _set_if_changed(task, "source_id", spec.get("source_id"))
+    changed |= _set_if_changed(task, "parent_task_id", spec.get("parent_task_id"))
+    changed |= _set_if_changed(task, "action_label", spec.get("action_label"))
+    changed |= _set_if_changed(task, "action_target", spec.get("action_target"))
+    changed |= _set_if_changed(task, "metadata_json", metadata_json)
+    changed |= _set_if_changed(task, "completed_at", completed_at)
+    changed |= _set_if_changed(task, "archived_at", archived_at)
 
-    return task
+    if changed and not created:
+        task.updated_at = now
+
+    return task, changed
 
 
 def _build_target(kind: str, *, block_id: str | None = None, run_uuid: str | None = None) -> str:
@@ -470,6 +522,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
     seen_sources: set[str] = set()
     workflow_parent_ids: dict[str, str] = {}
     workflow_run_ids: set[str] = set()
+    changed = False
 
     # ── Determine which workflow plans are active ──────────────────
     active_wf_ids = _active_workflow_ids(blocks)
@@ -506,18 +559,20 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 },
                 activity_at=_block_activity_at(block, payload),
             )
-            plan_task = _upsert_task(
+            plan_task, task_changed = _upsert_task(
                 session,
                 existing_by_source,
                 workflow_plan_spec,
                 owner_id=owner_id,
             )
+            changed = changed or task_changed
             workflow_parent_ids[block.id] = plan_task.id
             if payload.get("run_uuid"):
                 workflow_run_ids.add(payload["run_uuid"])
             for child_spec in _iter_workflow_plan_specs(project_id, plan_task.id, block, payload):
                 seen_sources.add(child_spec["source_key"])
-                _upsert_task(session, existing_by_source, child_spec, owner_id=owner_id)
+                _, task_changed = _upsert_task(session, existing_by_source, child_spec, owner_id=owner_id)
+                changed = changed or task_changed
             continue
 
         if block.type == "APPROVAL_GATE":
@@ -537,7 +592,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 action_label = _action_for_status(task_status, pending_label="Review choice", completed_label="Resolved")
             source_key = f"approval:{block.id}"
             seen_sources.add(source_key)
-            _upsert_task(
+            _, task_changed = _upsert_task(
                 session,
                 existing_by_source,
                 _decorate_task_spec(
@@ -563,6 +618,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 ),
                 owner_id=owner_id,
             )
+            changed = changed or task_changed
             continue
 
         if block.type == "DOWNLOAD_TASK":
@@ -575,7 +631,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             }.get(block.status, "RUNNING")
             source_key = f"download:{block.id}"
             seen_sources.add(source_key)
-            download_task = _upsert_task(
+            download_task, task_changed = _upsert_task(
                 session,
                 existing_by_source,
                 _decorate_task_spec(
@@ -600,9 +656,11 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 ),
                 owner_id=owner_id,
             )
+            changed = changed or task_changed
             for child_spec in _iter_download_file_specs(project_id, download_task.id, block, payload):
                 seen_sources.add(child_spec["source_key"])
-                _upsert_task(session, existing_by_source, child_spec, owner_id=owner_id)
+                _, task_changed = _upsert_task(session, existing_by_source, child_spec, owner_id=owner_id)
+                changed = changed or task_changed
             continue
 
         if block.type == "STAGING_TASK":
@@ -620,7 +678,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             }.get(block.status, "PENDING")
             source_key = f"stage-transfer:{block.id}"
             seen_sources.add(source_key)
-            _upsert_task(
+            _, task_changed = _upsert_task(
                 session,
                 existing_by_source,
                 _decorate_task_spec(
@@ -647,6 +705,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 ),
                 owner_id=owner_id,
             )
+            changed = changed or task_changed
             continue
 
         if block.type != "EXECUTION_JOB":
@@ -669,7 +728,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
         }.get(block.status, "PENDING")
         seen_sources.add(source_key)
         run_activity_at = _block_activity_at(block, payload)
-        run_task = _upsert_task(
+        run_task, task_changed = _upsert_task(
             session,
             existing_by_source,
             _decorate_task_spec(
@@ -695,6 +754,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             ),
             owner_id=owner_id,
         )
+        changed = changed or task_changed
 
         for child_spec in _iter_workflow_stage_specs(
             project_id,
@@ -705,13 +765,14 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             sample_name=sample_name,
         ):
             seen_sources.add(child_spec["source_key"])
-            _upsert_task(session, existing_by_source, child_spec, owner_id=owner_id)
+            _, task_changed = _upsert_task(session, existing_by_source, child_spec, owner_id=owner_id)
+            changed = changed or task_changed
 
         if block.status == "DONE":
             analysis_source = f"analysis:{run_uuid or block.id}"
             analysis_status = "COMPLETED" if sample_name in analyzed_samples else "RUNNING"
             seen_sources.add(analysis_source)
-            _upsert_task(
+            _, task_changed = _upsert_task(
                 session,
                 existing_by_source,
                 _decorate_task_spec(
@@ -736,11 +797,12 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 ),
                 owner_id=owner_id,
             )
+            changed = changed or task_changed
 
             review_source = f"review:{run_uuid or block.id}"
             review_status = "FOLLOW_UP" if sample_name in reviewed_samples else "PENDING"
             seen_sources.add(review_source)
-            _upsert_task(
+            _, task_changed = _upsert_task(
                 session,
                 existing_by_source,
                 _decorate_task_spec(
@@ -765,11 +827,12 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 ),
                 owner_id=owner_id,
             )
+            changed = changed or task_changed
 
         if block.status == "FAILED":
             retry_source = f"retry:{run_uuid or block.id}"
             seen_sources.add(retry_source)
-            _upsert_task(
+            _, task_changed = _upsert_task(
                 session,
                 existing_by_source,
                 _decorate_task_spec(
@@ -795,6 +858,7 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
                 ),
                 owner_id=owner_id,
             )
+            changed = changed or task_changed
 
     now = datetime.datetime.utcnow()
     for task in existing_tasks:
@@ -803,8 +867,10 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
         if task.archived_at is None:
             task.archived_at = now
             task.updated_at = now
+            changed = True
 
-    session.commit()
+    if changed:
+        session.commit()
     return session.execute(
         select(ProjectTask)
         .where(ProjectTask.project_id == project_id)

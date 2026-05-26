@@ -12,7 +12,7 @@ Provides:
 import os
 from pathlib import Path
 
-from sqlalchemy import create_engine, Engine
+from sqlalchemy import create_engine, Engine, event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import NullPool, StaticPool
 
 
 # ---------------------------------------------------------------------------
@@ -42,10 +43,18 @@ def _default_sqlite_url() -> str:
 
 DATABASE_URL: str = os.getenv("DATABASE_URL", _default_sqlite_url())
 
+_SQLITE_BUSY_TIMEOUT_SECONDS = float(os.getenv("SQLITE_BUSY_TIMEOUT_SECONDS", "30"))
+_SQLITE_JOURNAL_MODE = str(os.getenv("SQLITE_JOURNAL_MODE", "WAL") or "WAL").strip().upper()
+
 
 def is_sqlite(url: str | None = None) -> bool:
     """Check if the given (or default) URL targets SQLite."""
     return (url or DATABASE_URL).startswith("sqlite")
+
+
+def _is_in_memory_sqlite(url: str) -> bool:
+    """Return True when the SQLite URL uses an in-memory database."""
+    return url.startswith("sqlite") and (":memory:" in url or "mode=memory" in url)
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +74,50 @@ def _to_async_url(url: str) -> str:
 def _sync_connect_args(url: str) -> dict:
     """Return connect_args needed for the sync driver."""
     if url.startswith("sqlite"):
-        return {"check_same_thread": False}
+        return {
+            "check_same_thread": False,
+            "timeout": _SQLITE_BUSY_TIMEOUT_SECONDS,
+        }
+    return {}
+
+
+def _async_connect_args(url: str) -> dict:
+    """Return connect_args needed for the async driver."""
+    if url.startswith("sqlite"):
+        return {"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS}
+    return {}
+
+
+def _engine_pool_kwargs(url: str) -> dict:
+    """Return engine kwargs that keep SQLite stable under multi-service load."""
+    if not url.startswith("sqlite"):
+        return {}
+    if _is_in_memory_sqlite(url):
+        return {"poolclass": StaticPool}
+    # File-backed SQLite behaves better without a tiny shared QueuePool.
+    return {"poolclass": NullPool}
+
+
+def _configure_sqlite_pragmas(engine: Engine, url: str) -> None:
+    """Apply SQLite runtime pragmas to every new DB-API connection."""
+    if not url.startswith("sqlite"):
+        return
+
+    journal_mode = None if _is_in_memory_sqlite(url) else _SQLITE_JOURNAL_MODE
+    busy_timeout_ms = max(int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000), 0)
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            if journal_mode:
+                cursor.execute(f"PRAGMA journal_mode={journal_mode}")
+                cursor.fetchone()
+                cursor.execute("PRAGMA synchronous=NORMAL")
+        finally:
+            cursor.close()
     return {}
 
 
@@ -95,7 +147,9 @@ def get_sync_engine(url: str | None = None) -> Engine:
             _url,
             connect_args=_sync_connect_args(_url),
             echo=False,
+            **_engine_pool_kwargs(_url),
         )
+        _configure_sqlite_pragmas(_sync_engine, _url)
     return _sync_engine
 
 
@@ -104,7 +158,13 @@ def get_async_engine(url: str | None = None) -> AsyncEngine:
     global _async_engine
     if _async_engine is None:
         _url = _to_async_url(url or DATABASE_URL)
-        _async_engine = create_async_engine(_url, echo=False)
+        _async_engine = create_async_engine(
+            _url,
+            connect_args=_async_connect_args(_url),
+            echo=False,
+            **_engine_pool_kwargs(_url),
+        )
+        _configure_sqlite_pragmas(_async_engine.sync_engine, _url)
     return _async_engine
 
 

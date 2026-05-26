@@ -90,7 +90,7 @@ if DEFAULT_MAX_GPU_TASKS is not None and not 1 <= DEFAULT_MAX_GPU_TASKS <= MAX_G
     )
 
 # Job polling interval (seconds)
-JOB_POLL_INTERVAL = int(os.getenv("JOB_POLL_INTERVAL", "10"))
+JOB_POLL_INTERVAL = int(os.getenv("JOB_POLL_INTERVAL", "30"))
 
 # Job timeout (seconds) - 48 hours default
 JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "172800"))

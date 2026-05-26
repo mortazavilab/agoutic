@@ -126,6 +126,47 @@ class TestWorkflowTaskIsolation:
 
         session.close()
 
+    def test_sync_project_tasks_skips_noop_commit(self, session_factory, monkeypatch):
+        session = session_factory()
+        pid = "proj-isolation-noop"
+
+        _create_block_internal(
+            session, pid, "WORKFLOW_PLAN",
+            _plan_payload(sample_name="EXC", status="PENDING"),
+            status="PENDING", owner_id="u1",
+        )
+
+        class _FrozenDateTime(datetime.datetime):
+            current = datetime.datetime(2026, 5, 24, 12, 0, 0)
+
+            @classmethod
+            def utcnow(cls):
+                return cls.current
+
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return cls.current
+                return cls.current.replace(tzinfo=datetime.timezone.utc).astimezone(tz)
+
+        monkeypatch.setattr("cortex.task_service.datetime.datetime", _FrozenDateTime)
+        monkeypatch.setattr(
+            "cortex.task_service._utc_now",
+            lambda: _FrozenDateTime.current.replace(tzinfo=datetime.timezone.utc),
+        )
+
+        first_tasks = sync_project_tasks(session, pid)
+        first_updated_at = {task.source_key: task.updated_at for task in first_tasks}
+
+        _FrozenDateTime.current = datetime.datetime(2026, 5, 24, 13, 0, 0)
+
+        second_tasks = sync_project_tasks(session, pid)
+        second_updated_at = {task.source_key: task.updated_at for task in second_tasks}
+
+        assert second_updated_at == first_updated_at
+
+        session.close()
+
     def test_approval_gate_skipped_for_old_workflow(self, session_factory):
         """APPROVAL_GATE blocks linked to a superseded workflow plan
         should not produce tasks."""

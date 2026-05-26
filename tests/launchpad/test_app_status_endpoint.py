@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 import json
 from unittest.mock import AsyncMock, MagicMock
@@ -86,6 +87,83 @@ async def test_get_job_status_returns_terminal_slurm_db_state_without_repoll(mon
     assert payload["work_directory"] == "/local/project/workflow1"
     assert payload["workflow_usage"]["cpu_seconds"] == 120.0
     assert payload["tasks"] == {}
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_repolls_terminal_failed_slurm_job_for_task_summary(monkeypatch):
+    fake_session = _FakeSession()
+    synced_at = datetime(2026, 5, 25, 5, 12, 12, tzinfo=timezone.utc)
+    job = SimpleNamespace(
+        run_uuid="run-failed-terminal",
+        execution_mode="slurm",
+        status=launchpad_app.JobStatus.FAILED,
+        progress_percent=0,
+        error_message="Job failed — exit code 1:0; Failure reason: None — Pipeline: 0/48 completed, 48 remaining",
+        run_stage="failed",
+        slurm_job_id="50052999",
+        slurm_state="FAILED",
+        transfer_state=None,
+        result_destination="local",
+        nextflow_work_dir=None,
+        remote_work_dir="/remote/project/workflow1",
+        workflow_usage_json=None,
+        workflow_usage_synced_at=None,
+        submitted_at=None,
+        started_at=None,
+        completed_at=None,
+    )
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-failed-terminal"
+        return job
+
+    fake_backend = SimpleNamespace(
+        check_status=AsyncMock(
+            return_value=SimpleNamespace(
+                run_uuid="run-failed-terminal",
+                status="FAILED",
+                progress_percent=99,
+                message="Job failed — exit code 1:0; Failure reason: None — Pipeline: 742/744 completed, 1 remaining, 1 failed",
+                tasks={
+                    "total": 744,
+                    "completed_count": 742,
+                    "failed_count": 1,
+                    "remaining_count": 1,
+                },
+                execution_mode="slurm",
+                run_stage="failed",
+                slurm_job_id="50052999",
+                slurm_state="FAILED",
+                transfer_state=None,
+                transfer_detail=None,
+                result_destination="local",
+                ssh_profile_nickname="hpc3",
+                work_directory="/remote/project/workflow1",
+                workflow_usage={"source": "slurm_sacct+nextflow_trace", "cpu_seconds": 120.0},
+                workflow_usage_synced_at=synced_at.isoformat(),
+            )
+        )
+    )
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", lambda mode: fake_backend)
+
+    payload = await launchpad_app.get_job_status("run-failed-terminal")
+
+    fake_backend.check_status.assert_awaited_once_with("run-failed-terminal")
+    assert payload["status"] == "FAILED"
+    assert payload["progress_percent"] == 99
+    assert payload["tasks"]["completed_count"] == 742
+    assert payload["tasks"]["failed_count"] == 1
+    assert payload["tasks"]["total"] == 744
+    assert "742/744 completed" in payload["message"]
+    assert payload["workflow_usage"]["cpu_seconds"] == 120.0
+    assert payload["workflow_usage_synced_at"] == synced_at.replace(tzinfo=None).isoformat()
+    assert job.workflow_usage_json["cpu_seconds"] == 120.0
+    assert job.workflow_usage_synced_at == synced_at.replace(tzinfo=None)
 
 
 @pytest.mark.asyncio
@@ -185,6 +263,7 @@ async def test_get_job_status_returns_usage_unavailable_for_terminal_slurm_job_w
 @pytest.mark.asyncio
 async def test_get_job_status_returns_and_persists_slurm_workflow_usage(monkeypatch):
     fake_session = _FakeSession()
+    synced_at = datetime(2026, 5, 24, 20, 0, 0, tzinfo=timezone.utc)
     job = SimpleNamespace(
         run_uuid="run-slurm-live",
         execution_mode="slurm",
@@ -229,6 +308,7 @@ async def test_get_job_status_returns_and_persists_slurm_workflow_usage(monkeypa
                 result_destination="local",
                 ssh_profile_nickname="hpc3",
                 work_directory="/local/project/workflow-live",
+                workflow_usage_synced_at=synced_at.isoformat(),
                 workflow_usage={
                     "source": "slurm_sacct+nextflow_trace",
                     "accounting_mode": "slurm",
@@ -265,10 +345,10 @@ async def test_get_job_status_returns_and_persists_slurm_workflow_usage(monkeypa
     assert payload["workflow_usage"]["gpu_seconds"] == 40.0
     assert payload["workflow_usage"]["billing_entries"][1]["resource_type"] == "GPU"
     assert payload["workflow_usage"]["billing_hours_by_account"]["gpu-default"] == 1.5
-    assert payload["workflow_usage_synced_at"] is not None
+    assert payload["workflow_usage_synced_at"] == synced_at.replace(tzinfo=None).isoformat()
     assert job.workflow_usage_json["billing_units"] == 2.5
     assert job.workflow_usage_json["billing_hours_by_account"]["cpu-default"] == 1.0
-    assert job.workflow_usage_synced_at is not None
+    assert job.workflow_usage_synced_at == synced_at.replace(tzinfo=None)
 
 
 @pytest.mark.asyncio
@@ -840,6 +920,7 @@ async def test_get_job_status_returns_and_persists_local_workflow_usage(monkeypa
     fake_session = _FakeSession()
     workflow_dir = tmp_path / "workflow1"
     workflow_dir.mkdir()
+    synced_at = datetime(2026, 5, 25, 14, 30, 0, tzinfo=timezone.utc)
     job = SimpleNamespace(
         run_uuid="run-local",
         execution_mode="local",
@@ -877,6 +958,7 @@ async def test_get_job_status_returns_and_persists_local_workflow_usage(monkeypa
                 "estimated_gpu_task_seconds": 40.0,
                 "max_rss_mb": 2048.0,
             },
+            "workflow_usage_synced_at": synced_at.isoformat(),
         }
 
     monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
@@ -892,9 +974,9 @@ async def test_get_job_status_returns_and_persists_local_workflow_usage(monkeypa
     assert payload["progress_percent"] == 42
     assert payload["workflow_usage"]["cpu_seconds"] == 123.5
     assert payload["workflow_usage"]["estimated_gpu_task_seconds"] == 40.0
-    assert payload["workflow_usage_synced_at"] is not None
+    assert payload["workflow_usage_synced_at"] == synced_at.replace(tzinfo=None).isoformat()
     assert job.workflow_usage_json["max_rss_mb"] == 2048.0
-    assert job.workflow_usage_synced_at is not None
+    assert job.workflow_usage_synced_at == synced_at.replace(tzinfo=None)
 
 
 def test_parse_script_output_directory_prefers_workflow_directory_from_json_stdout():

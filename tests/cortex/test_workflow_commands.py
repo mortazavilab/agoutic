@@ -157,6 +157,13 @@ class TestDetectWorkflowIntent:
         cmd = detect_workflow_intent("rerun automatic analysis for workflow3")
         assert cmd == WorkflowCommand(action="reanalyze", workflow_ref="workflow3", workflow_refs=["workflow3"], new_name="")
 
+    def test_detect_natural_language_analyze_workflow_routes_to_reanalyze(self):
+        cmd = detect_workflow_intent("analyze workflow3")
+        assert cmd == WorkflowCommand(action="reanalyze", workflow_ref="workflow3", workflow_refs=["workflow3"], new_name="")
+
+    def test_detect_natural_language_generic_analyze_does_not_become_workflow_command(self):
+        assert detect_workflow_intent("analyze the results") is None
+
     def test_detect_natural_language_rename(self):
         cmd = detect_workflow_intent("rename workflow3 to tumor-fix")
         assert cmd == WorkflowCommand(action="rename", workflow_ref="workflow3", new_name="tumor-fix")

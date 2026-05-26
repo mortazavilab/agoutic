@@ -22,7 +22,7 @@ from cortex.task_service import sync_project_tasks
 logger = get_logger(__name__)
 
 _TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
-_JOB_STATUS_CACHE_MAX_AGE_SECONDS = 5.0
+_JOB_STATUS_CACHE_MAX_AGE_SECONDS = 30.0
 _ACTIVE_RESULT_SYNC_STATES = {"pending_import", "downloading_outputs"}
 _latest_job_status_by_run_uuid: dict[str, dict] = {}
 
@@ -165,13 +165,10 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
     Continues until job is completed or failed.
     """
 
-    # Adaptive polling: fast at first (3 s) then slow down to 30 s.
-    # Total coverage: ~10 h, which is enough for the longest pipelines.
+    # Poll execution status at a steady 30-second cadence to avoid hammering
+    # Launchpad and SQLite-backed state while jobs are active.
     _POLL_SCHEDULE = [
-        (120, 3),    # first 6 min  -> every 3 s  (120 polls)
-        (120, 10),   # next 20 min  -> every 10 s
-        (120, 30),   # next 60 min  -> every 30 s
-        (960, 30),   # next ~8 h    -> every 30 s  (960 polls)
+        (1200, 30),  # ~10 h coverage at 30-second intervals
     ]
     _job_done = False
 

@@ -120,6 +120,13 @@ _MODIFICATION_COUNT_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MODIFICATION_SUMMARY_INTENT_RE = re.compile(
+    r'\bshow\s+me\s+(?:the\s+)?modification\s+summary\b'
+    r'|\bmodification\s+summary\b'
+    r'|\bsummary\s+of\s+(?:the\s+)?modifications?\b',
+    re.IGNORECASE,
+)
+
 _BAM_DETAILS_INTENT_RE = re.compile(
     r'\b(?:bam\s*(?:details?|info|information|stats|statistics|summary)|alignment\s+summary|mapped\s*/\s*unmapped)\b',
     re.IGNORECASE,
@@ -131,6 +138,12 @@ def _extract_modification_name(user_message: str) -> str | None:
     if not match:
         return None
     return (match.group("mod") or match.group("mod2") or "").lower() or None
+
+
+def _is_modification_summary_intent(user_message: str) -> bool:
+    if _extract_modification_name(user_message):
+        return False
+    return bool(_MODIFICATION_SUMMARY_INTENT_RE.search(user_message))
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +788,37 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                         "_chain": _pick_file_tool(_resolved_file),
                     })
 
+        _modification_name = _extract_modification_name(user_message)
+        _modification_summary_intent = _is_modification_summary_intent(user_message)
+        if not calls and (
+            _modification_name
+            or (
+                skill_key in {"run_dogme_dna", "run_dogme_rna", "analyze_job_results"}
+                and _modification_summary_intent
+            )
+        ):
+            _params: dict = {
+                "extensions": ".bed,.bed.gz",
+                "max_depth": 1,
+            }
+            if work_dir:
+                _params["work_dir"] = _resolve_workflow_path("bedMethyl", work_dir, workflows)
+            elif run_uuid:
+                _params["run_uuid"] = run_uuid
+            calls.append({
+                "source_type": "service", "source_key": "analyzer",
+                "tool": "list_job_files",
+                "params": _params,
+            })
+            logger.warning(
+                "Auto-generated list_job_files for workflow modification BED summary",
+                work_dir=_params.get("work_dir"),
+                run_uuid=run_uuid,
+                modification=_modification_name,
+                skill_key=skill_key,
+            )
+            return calls
+
         # --- Catch-all for analyze_job_results: if the LLM narrated steps
         # instead of emitting a DATA_CALL, auto-generate get_analysis_summary
         # so the analysis actually executes. ---
@@ -890,7 +934,7 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
 
             if _modification_name:
                 _params: dict = {
-                    "extensions": ".bed",
+                    "extensions": ".bed,.bed.gz",
                     "max_depth": 1,
                 }
                 if work_dir:

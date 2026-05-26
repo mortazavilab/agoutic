@@ -680,7 +680,27 @@ class TestAnalyzeJobResultsCatchAll:
         assert len(calls) == 1
         assert calls[0]["tool"] == "list_job_files"
         assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
-        assert calls[0]["params"]["extensions"] == ".bed"
+        assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
+        assert calls[0]["params"]["max_depth"] == 1
+
+    def test_rna_skill_modification_summary_uses_bedmethyl_listing(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "aaaa-bbbb",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "Show me the modification summary",
+            "run_dogme_rna",
+            history_blocks=blocks,
+        )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
+        assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
         assert calls[0]["params"]["max_depth"] == 1
 
     def test_bam_details_fallback_lists_files_first(self):

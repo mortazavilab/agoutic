@@ -148,6 +148,7 @@ class TestUpdateJobStatus:
         assert updated.status == "FAILED"
         assert updated.progress_percent == 87
         assert updated.error_message == "pipeline crashed"
+        assert updated.completed_at is not None
 
     @pytest.mark.asyncio
     async def test_returns_none_for_unknown_job(self, async_session):

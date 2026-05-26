@@ -43,6 +43,7 @@ class SlurmBackend:
     _result_sync_tasks: dict[str, asyncio.Task] = {}
     _transfer_progress: dict[str, dict] = {}
     _ACTIVE_RESULT_SYNC_STATES = {"pending_import", "downloading_outputs"}
+    _ACTIVE_WORKFLOW_USAGE_CACHE_SECONDS = 600.0
     _RSYNC_PARTIAL_DIR = ".rsync-partial"
     _RESULT_SYNC_DIRS = RESULT_SYNC_DIRS
     _RESULT_SYNC_FILE_PATTERNS = RESULT_SYNC_FILE_PATTERNS
@@ -59,6 +60,43 @@ class SlurmBackend:
     def __init__(self):
         self._ssh_manager = SSHConnectionManager()
         self._transfer_manager = FileTransferManager()
+
+    @staticmethod
+    def _workflow_usage_synced_at_datetime(raw_value) -> datetime | None:
+        if raw_value in (None, ""):
+            return None
+        parsed = raw_value
+        if isinstance(raw_value, str):
+            cleaned = str(raw_value).strip()
+            if not cleaned:
+                return None
+            try:
+                parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(parsed, datetime):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _workflow_usage_synced_at_iso(cls, raw_value) -> str | None:
+        parsed = cls._workflow_usage_synced_at_datetime(raw_value)
+        return parsed.isoformat() if parsed is not None else None
+
+    @classmethod
+    def _can_reuse_live_workflow_usage(cls, *, job, scheduler_status: str) -> bool:
+        if str(scheduler_status or "").upper() not in {"RUNNING", "PENDING", "QUEUED"}:
+            return False
+        cached_usage = getattr(job, "workflow_usage_json", None)
+        if not isinstance(cached_usage, dict) or not cached_usage:
+            return False
+        synced_at = cls._workflow_usage_synced_at_datetime(getattr(job, "workflow_usage_synced_at", None))
+        if synced_at is None:
+            return False
+        age_seconds = (datetime.now(timezone.utc) - synced_at).total_seconds()
+        return age_seconds <= cls._ACTIVE_WORKFLOW_USAGE_CACHE_SECONDS
 
     @classmethod
     def is_result_sync_active(cls, run_uuid: str) -> bool:
@@ -616,6 +654,7 @@ class SlurmBackend:
                 progress_percent = 100 if agoutic_status == "COMPLETED" else 0
                 tasks: dict | None = None
                 workflow_usage: dict | None = None
+                workflow_usage_synced_at: str | None = None
                 remote_work_dir = getattr(job, "remote_work_dir", None)
                 if remote_work_dir:
                     progress_percent, tasks, task_message = await self._read_remote_task_status(
@@ -641,10 +680,12 @@ class SlurmBackend:
                         message = task_message
                     elif task_message and agoutic_status == "FAILED":
                         message = f"{message} — {task_message}"
-                    workflow_usage = await self._read_remote_workflow_usage(
+                    workflow_usage, workflow_usage_synced_at = await self._get_live_workflow_usage(
+                        job=job,
                         conn=conn,
                         remote_work=remote_work_dir,
                         slurm_job_id=str(job.slurm_job_id),
+                        scheduler_status=agoutic_status,
                     )
 
                 if agoutic_status == "COMPLETED":
@@ -684,7 +725,7 @@ class SlurmBackend:
                     ssh_profile_nickname=profile.nickname,
                     work_directory=self._effective_work_directory(job),
                     workflow_usage=workflow_usage,
-                    workflow_usage_synced_at=datetime.utcnow().isoformat() if workflow_usage is not None else None,
+                    workflow_usage_synced_at=workflow_usage_synced_at,
                 )
             finally:
                 await conn.close()
@@ -799,6 +840,29 @@ class SlurmBackend:
                 error=str(exc),
             )
             return None
+
+    async def _get_live_workflow_usage(
+        self,
+        *,
+        job,
+        conn,
+        remote_work: str,
+        slurm_job_id: str,
+        scheduler_status: str,
+    ) -> tuple[dict | None, str | None]:
+        cached_usage = getattr(job, "workflow_usage_json", None)
+        cached_synced_at = self._workflow_usage_synced_at_iso(getattr(job, "workflow_usage_synced_at", None))
+        if self._can_reuse_live_workflow_usage(job=job, scheduler_status=scheduler_status):
+            return cached_usage, cached_synced_at
+
+        workflow_usage = await self._read_remote_workflow_usage(
+            conn=conn,
+            remote_work=remote_work,
+            slurm_job_id=slurm_job_id,
+        )
+        if workflow_usage is None:
+            return cached_usage, cached_synced_at
+        return workflow_usage, datetime.now(timezone.utc).isoformat()
 
     async def _read_remote_workflow_trace(self, *, conn, remote_work: str) -> tuple[str | None, str]:
         quoted_remote_work = shlex.quote(remote_work)

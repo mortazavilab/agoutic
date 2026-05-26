@@ -9,7 +9,7 @@ import re
 import signal
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -194,6 +194,70 @@ def _workflow_usage_payload(job) -> dict[str, object | None]:
     return {
         "workflow_usage": getattr(job, "workflow_usage_json", None),
         "workflow_usage_synced_at": synced_at.isoformat() if synced_at else None,
+    }
+
+
+def _coerce_workflow_usage_synced_at(raw_value) -> datetime | None:
+    if raw_value in (None, ""):
+        return None
+    parsed = raw_value
+    if isinstance(raw_value, str):
+        cleaned = str(raw_value).strip()
+        if not cleaned:
+            return None
+        try:
+            parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(parsed, datetime):
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _slurm_status_poll_failed(status_data) -> bool:
+    message = str(getattr(status_data, "message", "") or "")
+    tasks = getattr(status_data, "tasks", None)
+    return message.startswith("Failed to poll scheduler:") and not tasks
+
+
+async def _slurm_status_payload(session, job, status_data) -> dict[str, object]:
+    workflow_usage = getattr(status_data, "workflow_usage", None)
+    workflow_usage_synced_at = getattr(status_data, "workflow_usage_synced_at", None)
+    if workflow_usage is not None:
+        resolved_synced_at = _coerce_workflow_usage_synced_at(workflow_usage_synced_at) or datetime.utcnow()
+        existing_synced_at = _coerce_workflow_usage_synced_at(getattr(job, "workflow_usage_synced_at", None))
+        workflow_usage_changed = getattr(job, "workflow_usage_json", None) != workflow_usage
+        synced_at_changed = existing_synced_at != resolved_synced_at
+        if workflow_usage_changed or synced_at_changed:
+            job.workflow_usage_json = workflow_usage
+            job.workflow_usage_synced_at = resolved_synced_at
+            await session.commit()
+        workflow_usage_synced_at = resolved_synced_at.isoformat()
+    return {
+        "run_uuid": str(getattr(status_data, "run_uuid", None) or getattr(job, "run_uuid", "") or ""),
+        "status": getattr(status_data, "status", None) or job.status,
+        "progress_percent": (
+            getattr(status_data, "progress_percent", None)
+            if getattr(status_data, "progress_percent", None) is not None
+            else (100 if getattr(status_data, "status", None) == JobStatus.COMPLETED else job.progress_percent)
+        ),
+        "message": getattr(status_data, "message", None) or job.error_message or f"Status: {job.status}",
+        "tasks": getattr(status_data, "tasks", None) or {},
+        "execution_mode": getattr(status_data, "execution_mode", None) or "slurm",
+        "run_stage": getattr(status_data, "run_stage", None) or job.run_stage,
+        "slurm_job_id": getattr(status_data, "slurm_job_id", None) or job.slurm_job_id,
+        "slurm_state": getattr(status_data, "slurm_state", None) or job.slurm_state,
+        "transfer_state": getattr(status_data, "transfer_state", None),
+        "transfer_detail": getattr(status_data, "transfer_detail", None),
+        "result_destination": getattr(status_data, "result_destination", None) or job.result_destination,
+        "ssh_profile_nickname": getattr(status_data, "ssh_profile_nickname", None),
+        "work_directory": getattr(status_data, "work_directory", None) or _effective_job_work_directory(job),
+        "workflow_usage": workflow_usage if workflow_usage is not None else getattr(job, "workflow_usage_json", None),
+        "workflow_usage_synced_at": workflow_usage_synced_at or (job.workflow_usage_synced_at.isoformat() if getattr(job, "workflow_usage_synced_at", None) else None),
+        **_import_status_payload(job),
+        **_job_timing_payload(job),
     }
 
 
@@ -1192,6 +1256,9 @@ async def monitor_job(run_uuid: str, work_dir):
                 progress = status_info["progress_percent"]
                 message = status_info["message"]
                 workflow_usage = status_info.get("workflow_usage")
+                workflow_usage_synced_at = _coerce_workflow_usage_synced_at(
+                    status_info.get("workflow_usage_synced_at")
+                )
                 
                 # Update database
                 await update_job_status(
@@ -1200,7 +1267,7 @@ async def monitor_job(run_uuid: str, work_dir):
                     job_status,
                     progress=progress,
                     workflow_usage=workflow_usage,
-                    workflow_usage_synced_at=datetime.utcnow() if workflow_usage is not None else None,
+                    workflow_usage_synced_at=workflow_usage_synced_at,
                 )
                 
                 # Log the update
@@ -1903,8 +1970,6 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 **_job_timing_payload(job),
             }
         if job.status in terminal_statuses:
-            if job.execution_mode == "slurm":
-                await _backfill_terminal_slurm_workflow_usage(session, job)
             warning_message = import_warning_message(getattr(job, "imported_source_complete", None))
             work_directory = _effective_job_work_directory(job)
             base_payload = {
@@ -1919,6 +1984,12 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 **_job_timing_payload(job),
             }
             if job.execution_mode == "slurm":
+                if job.status in {JobStatus.FAILED, JobStatus.CANCELLED}:
+                    backend = get_backend("slurm")
+                    status_data = await backend.check_status(run_uuid)
+                    if not _slurm_status_poll_failed(status_data):
+                        return await _slurm_status_payload(session, job, status_data)
+                await _backfill_terminal_slurm_workflow_usage(session, job)
                 base_payload.update(
                     {
                         "execution_mode": "slurm",
@@ -1935,33 +2006,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         if job.execution_mode == "slurm":
             backend = get_backend("slurm")
             status_data = await backend.check_status(run_uuid)
-            workflow_usage = getattr(status_data, "workflow_usage", None)
-            workflow_usage_synced_at = None
-            if workflow_usage is not None:
-                job.workflow_usage_json = workflow_usage
-                job.workflow_usage_synced_at = datetime.utcnow()
-                workflow_usage_synced_at = job.workflow_usage_synced_at.isoformat()
-                await session.commit()
-            return {
-                "run_uuid": run_uuid,
-                "status": status_data.status,
-                "progress_percent": status_data.progress_percent if status_data.progress_percent is not None else (100 if status_data.status == JobStatus.COMPLETED else job.progress_percent),
-                "message": status_data.message or job.error_message or f"Status: {job.status}",
-                "tasks": status_data.tasks or {},
-                "execution_mode": status_data.execution_mode,
-                "run_stage": status_data.run_stage,
-                "slurm_job_id": status_data.slurm_job_id,
-                "slurm_state": status_data.slurm_state,
-                "transfer_state": status_data.transfer_state,
-                "transfer_detail": status_data.transfer_detail,
-                "result_destination": status_data.result_destination,
-                "ssh_profile_nickname": status_data.ssh_profile_nickname,
-                "work_directory": status_data.work_directory,
-                "workflow_usage": workflow_usage if workflow_usage is not None else getattr(job, "workflow_usage_json", None),
-                "workflow_usage_synced_at": workflow_usage_synced_at or (job.workflow_usage_synced_at.isoformat() if getattr(job, "workflow_usage_synced_at", None) else None),
-                **_import_status_payload(job),
-                **_job_timing_payload(job),
-            }
+            return await _slurm_status_payload(session, job, status_data)
 
         # Get detailed status including tasks from check_status
         executor = NextflowExecutor()
@@ -1970,12 +2015,19 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         work_dir = Path(effective_work_directory) if effective_work_directory else executor.work_dir / run_uuid
         status_data = await executor.check_status(run_uuid, work_dir)
         workflow_usage = status_data.get("workflow_usage")
-        workflow_usage_synced_at = None
+        workflow_usage_synced_at = status_data.get("workflow_usage_synced_at")
         if workflow_usage is not None:
-            job.workflow_usage_json = workflow_usage
-            job.workflow_usage_synced_at = datetime.utcnow()
-            workflow_usage_synced_at = job.workflow_usage_synced_at.isoformat()
-            await session.commit()
+            resolved_synced_at = (
+                _coerce_workflow_usage_synced_at(workflow_usage_synced_at)
+                or _coerce_workflow_usage_synced_at(getattr(job, "workflow_usage_synced_at", None))
+                or datetime.utcnow()
+            )
+            existing_synced_at = _coerce_workflow_usage_synced_at(getattr(job, "workflow_usage_synced_at", None))
+            if getattr(job, "workflow_usage_json", None) != workflow_usage or existing_synced_at != resolved_synced_at:
+                job.workflow_usage_json = workflow_usage
+                job.workflow_usage_synced_at = resolved_synced_at
+                await session.commit()
+            workflow_usage_synced_at = resolved_synced_at.isoformat()
         
         return {
             "run_uuid": run_uuid,

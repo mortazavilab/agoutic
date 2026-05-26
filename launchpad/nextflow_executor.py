@@ -60,6 +60,51 @@ def _find_nextflow_trace_file(work_dir: Path) -> Path | None:
         return trace_file
     return None
 
+
+_WORKFLOW_USAGE_CACHE_SECONDS = 600.0
+_workflow_usage_cache: dict[str, dict[str, object]] = {}
+
+
+def _resolve_cached_workflow_usage(
+    run_uuid: str,
+    trace_file: Path | None,
+    *,
+    force_refresh: bool = False,
+) -> tuple[dict | None, str | None]:
+    cached = _workflow_usage_cache.get(run_uuid)
+
+    if trace_file is None or not trace_file.exists():
+        if isinstance(cached, dict):
+            synced_at = cached.get("synced_at")
+            cached_usage = cached.get("workflow_usage")
+            if isinstance(cached_usage, dict) and isinstance(synced_at, datetime):
+                return cached_usage, synced_at.isoformat()
+        return None, None
+
+    now = datetime.utcnow()
+    if not force_refresh and isinstance(cached, dict):
+        synced_at = cached.get("synced_at")
+        cached_usage = cached.get("workflow_usage")
+        if isinstance(cached_usage, dict) and isinstance(synced_at, datetime):
+            age_seconds = (now - synced_at).total_seconds()
+            if age_seconds <= _WORKFLOW_USAGE_CACHE_SECONDS:
+                return cached_usage, synced_at.isoformat()
+
+    workflow_usage = summarize_nextflow_trace_file(trace_file, accounting_mode="local")
+    if workflow_usage is None:
+        if isinstance(cached, dict):
+            synced_at = cached.get("synced_at")
+            cached_usage = cached.get("workflow_usage")
+            if isinstance(cached_usage, dict) and isinstance(synced_at, datetime):
+                return cached_usage, synced_at.isoformat()
+        return None, None
+
+    _workflow_usage_cache[run_uuid] = {
+        "workflow_usage": workflow_usage,
+        "synced_at": now,
+    }
+    return workflow_usage, now.isoformat()
+
 _MINIMAL_DOGME_PROFILE = "# Dogme environment profile\n# Add environment variables here if needed\n"
 _DEFAULT_LOCAL_MAX_TASK_CPUS = 12
 _DEFAULT_LOCAL_MAX_TASK_MEMORY_GB = LOCAL_DEFAULT_MAX_TASK_MEMORY_GB
@@ -1368,6 +1413,136 @@ class NextflowExecutor:
                 
         except Exception as e:
             logger.error("Error monitoring process", run_uuid=run_uuid, error=str(e))
+
+    def _build_task_status_summary(self, run_uuid: str, work_dir: Path, trace_file: Path | None) -> dict:
+        progress = 10
+        message = "Job starting..."
+        tasks = {
+            "completed": [],
+            "running": [],
+            "total": 0,
+            "completed_count": 0,
+            "failed_count": 0,
+        }
+
+        completed_tasks: list[str] = []
+        failed_tasks: list[str] = []
+
+        if trace_file and trace_file.exists():
+            try:
+                with open(trace_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = f.readlines()
+
+                for line in lines[1:]:
+                    if not line.strip():
+                        continue
+
+                    parts = line.split('\t')
+                    if len(parts) < 5:
+                        continue
+
+                    task_name = parts[3].strip()
+                    status = parts[4].strip()
+                    if ':' not in task_name:
+                        continue
+
+                    if status in {'COMPLETED', 'CACHED'}:
+                        if task_name not in completed_tasks:
+                            completed_tasks.append(task_name)
+                    elif status == 'FAILED':
+                        if task_name not in failed_tasks:
+                            failed_tasks.append(task_name)
+            except Exception:
+                pass
+
+        stdout_file = self.logs_dir / f"{run_uuid}_stdout.log"
+        running_tasks: list[str] = []
+        submitted_count = 0
+
+        if stdout_file.exists():
+            try:
+                with open(stdout_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                lines = content.split('\n')
+
+                task_events_by_hash: dict[str, tuple[str, bool]] = {}
+                for line in lines:
+                    if 'executor >' in line and '(' in line:
+                        try:
+                            count_str = line.split('(')[1].split(')')[0]
+                            submitted_count = max(submitted_count, int(count_str))
+                        except Exception:
+                            pass
+
+                    if line.startswith('[') and ']' in line and ':' in line.split(']', 1)[-1]:
+                        hash_part = line.split(']')[0] + ']'
+                        if '/' not in hash_part:
+                            continue
+
+                        rest = line.split(']', 1)[1] if ']' in line else ''
+                        task_name = rest.strip().split()[0] if rest.strip() else ''
+                        if '(' in rest and ')' in rest:
+                            task_num = rest[rest.find('('):rest.find(')') + 1]
+                            if task_num not in task_name:
+                                task_name = task_name + ' ' + task_num
+
+                        if not task_name:
+                            continue
+
+                        is_terminal_stdout_event = 'FAILED' in line.upper()
+                        if '✔' in line or 'SUCCEED' in line.upper() or 'COMPLETED' in line.upper():
+                            is_terminal_stdout_event = True
+                        task_events_by_hash[hash_part] = (task_name, is_terminal_stdout_event)
+
+                for task_name, is_terminal_stdout_event in task_events_by_hash.values():
+                    if is_terminal_stdout_event:
+                        continue
+                    if task_name in completed_tasks or task_name in failed_tasks:
+                        continue
+                    if task_name not in running_tasks:
+                        running_tasks.append(task_name)
+            except Exception:
+                pass
+
+        total = max(submitted_count, len(completed_tasks) + len(running_tasks) + len(failed_tasks))
+
+        if total > 0 or completed_tasks or running_tasks or failed_tasks:
+            tasks['completed'] = completed_tasks
+            tasks['running'] = running_tasks[-5:] if len(running_tasks) > 5 else running_tasks
+            tasks['total'] = total
+            tasks['completed_count'] = len(completed_tasks)
+            tasks['failed_count'] = len(failed_tasks)
+            tasks['remaining_count'] = max(total - len(completed_tasks) - len(failed_tasks), 0) if total > 0 else 0
+
+            progress = int((len(completed_tasks) / total) * 90) if total > 0 else 10
+
+            msg_parts = []
+            if total > 0:
+                msg_parts.append(f"{len(completed_tasks)}/{total} completed")
+            if running_tasks:
+                msg_parts.append(f"{len(running_tasks)} running")
+            if failed_tasks:
+                msg_parts.append(f"{len(failed_tasks)} failed")
+            message = "Pipeline: " + ", ".join(msg_parts) if msg_parts else "Pipeline starting..."
+
+        if progress == 10 and not completed_tasks:
+            nextflow_log = work_dir / ".nextflow.log"
+            if nextflow_log.exists():
+                try:
+                    with open(nextflow_log) as f:
+                        log_content = f.read()
+                    submitted = log_content.count('Submitted process')
+                    if submitted > 0:
+                        progress = min(30 + (submitted * 3), 80)
+                        message = f"Pipeline executing ({submitted} tasks submitted)..."
+                except Exception:
+                    pass
+
+        return {
+            "progress_percent": progress,
+            "message": message,
+            "tasks": tasks,
+        }
     
     async def check_status(self, run_uuid: str, work_dir: Path) -> dict:
         """
@@ -1392,94 +1567,88 @@ class NextflowExecutor:
         
         cancelled_marker = work_dir / ".nextflow_cancelled"
         trace_file = _find_nextflow_trace_file(work_dir)
-        workflow_usage = summarize_nextflow_trace_file(trace_file, accounting_mode="local") if trace_file else None
+        force_usage_refresh = cancelled_marker.exists() or success_marker.exists() or failed_marker.exists()
+        workflow_usage, workflow_usage_synced_at = _resolve_cached_workflow_usage(
+            run_uuid,
+            trace_file,
+            force_refresh=force_usage_refresh,
+        )
+        task_summary = self._build_task_status_summary(run_uuid, work_dir, trace_file)
+        task_payload = task_summary.get("tasks") or {}
+        task_message = str(task_summary.get("message") or "").strip()
+        task_progress = int(task_summary.get("progress_percent") or 0)
+        total_tasks = int(task_payload.get("total", 0) or 0)
+        completed_count = int(task_payload.get("completed_count", 0) or 0)
+        failed_count = int(task_payload.get("failed_count", 0) or 0)
+        has_task_stats = bool(total_tasks or completed_count or failed_count or task_payload.get("running"))
+        terminal_progress = task_progress
+        if total_tasks > 0:
+            terminal_progress = max(task_progress, int((completed_count / total_tasks) * 100))
 
-        # Check completion markers first
         if cancelled_marker.exists():
             _cancel_detail = ""
             try:
                 _cancel_detail = cancelled_marker.read_text().strip()
             except OSError:
                 pass
-            # Second line of the marker contains the kill message
             _cancel_lines = _cancel_detail.splitlines()
             _cancel_msg = _cancel_lines[1] if len(_cancel_lines) > 1 else "Job was cancelled by user."
+            message_parts = [_cancel_msg]
+            if has_task_stats and task_message:
+                message_parts.append(task_message)
             return {
                 "status": JobStatus.CANCELLED,
-                "progress_percent": 0,
-                "message": _cancel_msg,
-                "tasks": {},
+                "progress_percent": terminal_progress if has_task_stats else 0,
+                "message": " | ".join(message_parts),
+                "tasks": task_payload if has_task_stats else {},
                 "workflow_usage": workflow_usage,
+                "workflow_usage_synced_at": workflow_usage_synced_at,
             }
-        elif success_marker.exists():
-            # Parse final task summary from trace file
-            completed_tasks = []
-            total = 0
-            if trace_file:
-                try:
-                    with open(trace_file) as f:
-                        lines = f.readlines()
-                        if len(lines) > 1:
-                            headers = lines[0].strip().split('\t')
-                            try:
-                                name_idx = headers.index('name')
-                            except ValueError:
-                                name_idx = 0
-                            
-                            for line in lines[1:]:
-                                parts = line.strip().split('\t')
-                                if len(parts) > name_idx:
-                                    completed_tasks.append(parts[name_idx])
-                            total = len(lines) - 1
-                except:
-                    pass
-            
+
+        if success_marker.exists():
+            if total_tasks > 0:
+                message = f"Job completed successfully - {completed_count}/{total_tasks} workflow tasks completed"
+            else:
+                message = "Job completed successfully"
             return {
                 "status": JobStatus.COMPLETED,
                 "progress_percent": 100,
-                "message": f"Job completed successfully - {total} tasks completed",
-                "tasks": {
-                    "completed": completed_tasks,  # All completed tasks
-                    "running": [],
-                    "total": total,
-                    "completed_count": total,
-                    "failed_count": 0
-                } if total > 0 else {},
+                "message": message,
+                "tasks": task_payload if has_task_stats else {},
                 "workflow_usage": workflow_usage,
+                "workflow_usage_synced_at": workflow_usage_synced_at,
             }
-        elif failed_marker.exists():
+
+        if failed_marker.exists():
             error_msg = ""
             error_file = work_dir / ".nextflow_error"
             if error_file.exists():
                 with open(error_file) as f:
-                    error_msg = f.read()[:200]  # First 200 chars
+                    error_msg = f.read()[:200]
+            message_parts = [f"Job failed: {error_msg}" if error_msg else "Job failed"]
+            if has_task_stats and task_message:
+                message_parts.append(task_message)
             return {
                 "status": JobStatus.FAILED,
-                "progress_percent": 0,
-                "message": f"Job failed: {error_msg}" if error_msg else "Job failed",
-                "tasks": {},
+                "progress_percent": terminal_progress if has_task_stats else 0,
+                "message": " | ".join(message_parts),
+                "tasks": task_payload if has_task_stats else {},
                 "workflow_usage": workflow_usage,
+                "workflow_usage_synced_at": workflow_usage_synced_at,
             }
-        
-        # Check if process is still running
+
         if pid_file.exists():
             try:
                 pid = int(pid_file.read_text().strip())
-                # Check if PID is alive
                 import os
                 import signal
                 try:
-                    os.kill(pid, 0)  # Signal 0 checks if process exists
+                    os.kill(pid, 0)
                     is_running = True
                 except OSError:
                     is_running = False
-                
+
                 if not is_running and running_marker.exists():
-                    # Process is gone. But did it actually succeed?
-                    # After a server restart we lose the process handle, so
-                    # _monitor_process never writes .nextflow_success.  Check
-                    # the trace file: if every task status is COMPLETED (and
-                    # there is at least one task), the job finished fine.
                     _job_actually_succeeded = False
                     _trace_files = list(work_dir.glob("*_trace.txt"))
                     if not _trace_files and (work_dir / "trace.txt").exists():
@@ -1499,7 +1668,7 @@ class NextflowExecutor:
                                         if _st not in ('COMPLETED', 'CACHED'):
                                             _all_done = False
                                             break
-                                _task_count = len([l for l in _tlines[1:] if l.strip()])
+                                _task_count = len([line for line in _tlines[1:] if line.strip()])
                                 if _all_done and _task_count > 0:
                                     _job_actually_succeeded = True
                         except Exception:
@@ -1508,24 +1677,17 @@ class NextflowExecutor:
                     running_marker.unlink()
 
                     if _job_actually_succeeded:
-                        # Recover: write the success marker that _monitor_process
-                        # would have written had the server not been restarted.
                         success_marker = work_dir / ".nextflow_success"
                         success_marker.write_text(
                             f"Recovered at {datetime.utcnow().isoformat()} "
                             f"(process exited while server was down)\n"
                         )
-                        logger.info("Recovered successful job after server restart",
-                                    run_uuid=run_uuid)
-                        # Re-enter check_status — it will now find .nextflow_success
+                        logger.info("Recovered successful job after server restart", run_uuid=run_uuid)
                         return await self.check_status(run_uuid, work_dir)
 
-                    # Genuinely failed — write markers
                     failed_marker = work_dir / ".nextflow_failed"
                     failed_marker.write_text(f"Process died unexpectedly at {datetime.utcnow().isoformat()}\n")
-                    
-                    # Try to get error from stderr (filter out ANSI and
-                    # Nextflow version-update nag messages)
+
                     stderr_file = self.logs_dir / f"{run_uuid}_stderr.log"
                     error_msg = "Process died unexpectedly"
                     if stderr_file.exists():
@@ -1533,200 +1695,44 @@ class NextflowExecutor:
                             content = f.read()
                             if content:
                                 import re as _re
-                                # Strip ANSI escape codes
                                 content = _re.sub(r'\x1b\[[0-9;]*m', '', content)
-                                # Drop harmless "update available" lines
                                 _lines = [
-                                    l for l in content.splitlines()
-                                    if l.strip()
-                                    and 'is available' not in l
-                                    and 'consider updating' not in l.lower()
+                                    line for line in content.splitlines()
+                                    if line.strip()
+                                    and 'is available' not in line
+                                    and 'consider updating' not in line.lower()
                                 ]
                                 if _lines:
                                     error_msg = '\n'.join(_lines)[-200:]
-                                # If only version nag remains, keep default msg
-                    
+
                     error_file = work_dir / ".nextflow_error"
                     error_file.write_text(error_msg)
-                    
+                    workflow_usage, workflow_usage_synced_at = _resolve_cached_workflow_usage(
+                        run_uuid,
+                        trace_file,
+                        force_refresh=True,
+                    )
+                    message_parts = [f"Process died: {error_msg[:100]}"]
+                    if has_task_stats and task_message:
+                        message_parts.append(task_message)
                     return {
                         "status": JobStatus.FAILED,
-                        "progress_percent": 0,
-                        "message": f"Process died: {error_msg[:100]}",
-                        "tasks": {},
+                        "progress_percent": terminal_progress if has_task_stats else 0,
+                        "message": " | ".join(message_parts),
+                        "tasks": task_payload if has_task_stats else {},
                         "workflow_usage": workflow_usage,
+                        "workflow_usage_synced_at": workflow_usage_synced_at,
                     }
-            except Exception as e:
+            except Exception:
                 pass
-        
-        # Job is running - parse detailed task information from trace.txt
-        progress = 10  # Default
-        message = "Job starting..."
-        tasks = {
-            "completed": [],
-            "running": [],
-            "total": 0,
-            "completed_count": 0,
-            "failed_count": 0
-        }
-        
-        # Parse trace file for completed tasks - tab-separated with columns:
-        # task_id hash native_id name status exit submit duration realtime %cpu peak_rss peak_vmem rchar wchar
-        # Nextflow writes {sample}_trace.txt (via -with-trace flag).
-        # Prefer the sample-specific file; fall back to generic trace.txt.
-        trace_file = None
-        sample_traces = list(work_dir.glob("*_trace.txt"))
-        if sample_traces:
-            trace_file = sample_traces[0]
-        elif (work_dir / "trace.txt").exists():
-            trace_file = work_dir / "trace.txt"
-        
-        completed_tasks = []
-        failed_tasks = []
-        
-        if trace_file and trace_file.exists():
-            try:
-                with open(trace_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-                    
-                    # Skip header line
-                    for line in lines[1:]:
-                        if not line.strip():
-                            continue
-                        
-                        # Split by tabs
-                        parts = line.split('\t')
-                        if len(parts) < 5:
-                            continue
-                        
-                        # Extract task name (column 3, index 3) and status (column 4, index 4)
-                        task_name = parts[3].strip()
-                        status = parts[4].strip()
-                        
-                        # Only track workflow tasks (contain ':' in the name,
-                        # e.g. mainWorkflow:doradoTask, remap:minimapTask).
-                        # This filters out Nextflow internal tasks while
-                        # supporting all entry points (remap, basecall, modkit,
-                        # annotateRNA, reports).
-                        if ':' not in task_name:
-                            continue
-                        
-                        # Categorize by status
-                        if status == 'COMPLETED':
-                            if task_name not in completed_tasks:
-                                completed_tasks.append(task_name)
-                        elif status == 'FAILED':
-                            if task_name not in failed_tasks:
-                                failed_tasks.append(task_name)
-                        
-            except Exception as e:
-                pass
-        
-        # Now parse stdout for currently running tasks (not yet in trace.txt)
-        stdout_file = self.logs_dir / f"{run_uuid}_stdout.log"
-        running_tasks = []
-        submitted_count = 0
-        
-        if stdout_file.exists():
-            try:
-                with open(stdout_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                    lines = content.split('\n')
-                    
-                    task_events_by_hash = {}
-                    
-                    for line in lines:
-                        # Look for executor count to get total submitted
-                        if 'executor >' in line and '(' in line:
-                            try:
-                                count_str = line.split('(')[1].split(')')[0]
-                                submitted_count = max(submitted_count, int(count_str))
-                            except:
-                                pass
-                        
-                        # Look for task lines: [hash] workflowName:taskName
-                        # Accept any workflow prefix (mainWorkflow, remap,
-                        # basecall, modkit, annotateRNA, reports).
-                        if line.startswith('[') and ']' in line and ':' in line.split(']', 1)[-1]:
-                            # Extract hash
-                            hash_part = line.split(']')[0] + ']'
-                            
-                            # Skip placeholder lines [-        ]
-                            if '/' not in hash_part:
-                                continue
-                            
-                            # Extract task name
-                            rest = line.split(']', 1)[1] if ']' in line else ''
-                            task_name = rest.strip().split()[0] if rest.strip() else ''
-                            
-                            # Add number if present: workflow:taskName (1)
-                            if '(' in rest and ')' in rest:
-                                task_num = rest[rest.find('('):rest.find(')')+1]
-                                if task_num not in task_name:
-                                    task_name = task_name + ' ' + task_num
-                            
-                            if not task_name:
-                                continue
-                            
-                            is_terminal_stdout_event = '✔' in line or 'FAILED' in line.upper()
-                            task_events_by_hash[hash_part] = (task_name, is_terminal_stdout_event)
 
-                    for task_name, is_terminal_stdout_event in task_events_by_hash.values():
-                        if is_terminal_stdout_event:
-                            continue
-                        if task_name in completed_tasks or task_name in failed_tasks:
-                            continue
-                        if task_name not in running_tasks:
-                            running_tasks.append(task_name)
-                            
-            except Exception as e:
-                pass
-        
-        # Calculate totals
-        total = max(submitted_count, len(completed_tasks) + len(running_tasks) + len(failed_tasks))
-        
-        if total > 0 or completed_tasks or running_tasks:
-            tasks['completed'] = completed_tasks  # All completed tasks
-            tasks['running'] = running_tasks[-5:] if len(running_tasks) > 5 else running_tasks  # Last 5 running
-            tasks['total'] = total
-            tasks['completed_count'] = len(completed_tasks)
-            tasks['failed_count'] = len(failed_tasks)
-            
-            # Calculate progress
-            progress = int((len(completed_tasks) / total) * 90) if total > 0 else 10
-            
-            # Build message
-            msg_parts = []
-            if total > 0:
-                msg_parts.append(f"{len(completed_tasks)}/{total} completed")
-            if running_tasks:
-                msg_parts.append(f"{len(running_tasks)} running")
-            if failed_tasks:
-                msg_parts.append(f"{len(failed_tasks)} failed")
-            
-            message = "Pipeline: " + ", ".join(msg_parts) if msg_parts else "Pipeline starting..."
-        
-        # Fallback: Check .nextflow.log for recent activity if we still have no data
-        if progress == 10 and not completed_tasks:
-            nextflow_log = work_dir / ".nextflow.log"
-            if nextflow_log.exists():
-                try:
-                    with open(nextflow_log) as f:
-                        log_content = f.read()
-                        # Look for executor messages about submitted tasks
-                        submitted = log_content.count('Submitted process')
-                        if submitted > 0:
-                            progress = min(30 + (submitted * 3), 80)
-                            message = f"Pipeline executing ({submitted} tasks submitted)..."
-                except Exception:
-                    pass
-        
         return {
             "status": JobStatus.RUNNING,
-            "progress_percent": progress,
-            "message": message,
-            "tasks": tasks,
+            "progress_percent": task_progress,
+            "message": task_message,
+            "tasks": task_payload,
             "workflow_usage": workflow_usage,
+            "workflow_usage_synced_at": workflow_usage_synced_at,
         }
     
     async def get_results(self, run_uuid: str, work_dir: Path) -> dict:

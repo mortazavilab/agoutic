@@ -132,9 +132,17 @@ For modification-count requests, use the workflow's `bedMethyl` folder and match
 
 `<sample>.<genome>.plus.<modification>.filtered.bed`
 
+or
+
+`<sample>.<genome>.plus.<modification>.filtered.bed.gz`
+
 and
 
 `<sample>.<genome>.minus.<modification>.filtered.bed`
+
+or
+
+`<sample>.<genome>.minus.<modification>.filtered.bed.gz`
 
 Use both plus and minus files when both exist for the requested modification. If only one exists, use the one that exists.
 

@@ -409,7 +409,7 @@ def render_sidebar(
 
         model_choice = st.selectbox("Brain Model", model_options, index=default_index)
         auto_refresh = st.toggle("Live Stream", value=True)
-        poll_seconds = st.slider("Poll interval (sec)", 1, 5, 2)
+        poll_seconds = st.slider("Poll interval (sec)", 5, 60, 30)
         st.caption("Live Stream controls automatic project-page monitoring. Turn it off if a figure-heavy page becomes unstable.")
         debug_mode = st.toggle("🐛 Debug", value=False)
         st.session_state["_debug_mode"] = debug_mode

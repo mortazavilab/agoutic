@@ -150,6 +150,43 @@ class TestFormatData:
         assert "rendered as plain" in result
         assert "Analysis complete." in result
 
+    def test_count_bed_script_result_surfaces_modification_totals_first(self):
+        data = {
+            "script_id": "analyze_job_results/count_bed",
+            "exit_code": 0,
+            "modification_totals_markdown": (
+                "Modification totals:\n"
+                "| Sample | Genome | Modification | Count |\n"
+                "|---|---|---|---|\n"
+                "| igvfr_698-04 | mm39 | m6A | 22 |\n"
+                "| igvfr_698-04 | mm39 | pseU | 7 |"
+            ),
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr2", "Count": 11},
+                ],
+                "row_count": 2,
+                "metadata": {
+                    "label": "BED chromosome counts",
+                    "input_files": [
+                        {"file_name": "igvfr_698-04.mm39.plus.m6A.filtered.bed"},
+                        {"file_name": "igvfr_698-04.mm39.minus.m6A.filtered.bed"},
+                    ],
+                },
+            },
+            "stdout": "{... large json omitted ...}",
+        }
+
+        result = _format_data(data, [], None, "type")
+
+        assert "Modification totals:" in result
+        assert "| igvfr_698-04 | mm39 | m6A | 22 |" in result
+        assert "Detailed dataframe: **BED chromosome counts** (2 rows x 5 columns)." in result
+        assert "Input files counted: 2." in result
+        assert "large json omitted" not in result
+
 
 # =========================================================================
 # _format_files_by_type

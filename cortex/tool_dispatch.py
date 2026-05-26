@@ -69,8 +69,15 @@ _MODIFICATION_COUNT_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MODIFICATION_SUMMARY_INTENT_RE = re.compile(
+    r"\bshow\s+me\s+(?:the\s+)?modification\s+summary\b"
+    r"|\bmodification\s+summary\b"
+    r"|\bsummary\s+of\s+(?:the\s+)?modifications?\b",
+    re.IGNORECASE,
+)
+
 _BED_FILENAME_METADATA_RE = re.compile(
-    r"^(?P<sample>.+?)\.(?P<genome>[^.]+)\.(?P<strand>plus|minus)\.(?P<modification>[^.]+)\.filtered\.bed$",
+    r"^(?P<sample>.+?)\.(?P<genome>[^.]+)\.(?P<strand>plus|minus)\.(?P<modification>[^.]+)\.filtered\.bed(?:\.gz)?$",
     re.IGNORECASE,
 )
 
@@ -82,11 +89,111 @@ def _extract_modification_name(user_message: str) -> str | None:
     return (match.group("mod") or match.group("mod2") or "").lower() or None
 
 
+def _is_modification_summary_intent(user_message: str) -> bool:
+    if _extract_modification_name(user_message):
+        return False
+    return bool(_MODIFICATION_SUMMARY_INTENT_RE.search(user_message))
+
+
 def _parse_bed_filename_metadata(file_path: str) -> dict[str, str] | None:
     match = _BED_FILENAME_METADATA_RE.match(Path(file_path).name)
     if not match:
         return None
     return {key: value for key, value in match.groupdict().items()}
+
+
+def _build_modification_totals_rows(dataframe: dict | None) -> list[dict]:
+    """Aggregate per-chromosome BED counts into per-modification totals."""
+    if not isinstance(dataframe, dict):
+        return []
+
+    rows = dataframe.get("data")
+    if not isinstance(rows, list) or not rows:
+        return []
+
+    columns = dataframe.get("columns") or []
+    required_columns = {"Sample", "Genome", "Modification", "Count"}
+    if not required_columns.issubset(set(columns)):
+        return []
+
+    totals: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        modification = str(row.get("Modification") or "").strip()
+        if not modification:
+            continue
+        sample = str(row.get("Sample") or "").strip()
+        genome = str(row.get("Genome") or "").strip()
+        count_value = row.get("Count", 0)
+        try:
+            count = int(count_value)
+        except (TypeError, ValueError):
+            try:
+                count = int(float(count_value))
+            except (TypeError, ValueError):
+                continue
+        key = (sample, genome, modification)
+        totals[key] = totals.get(key, 0) + count
+
+    return [
+        {
+            "Sample": sample,
+            "Genome": genome,
+            "Modification": modification,
+            "Count": count,
+        }
+        for (sample, genome, modification), count in sorted(totals.items())
+    ]
+
+
+def _render_modification_totals_markdown(summary_rows: list[dict]) -> str | None:
+    """Render a compact markdown table of per-modification totals."""
+    if not summary_rows:
+        return None
+
+    lines = [
+        "Modification totals:",
+        "| Sample | Genome | Modification | Count |",
+        "|---|---|---|---|",
+    ]
+    for row in summary_rows:
+        lines.append(
+            "| {sample} | {genome} | {modification} | {count} |".format(
+                sample=row.get("Sample", ""),
+                genome=row.get("Genome", ""),
+                modification=row.get("Modification", ""),
+                count=row.get("Count", ""),
+            )
+        )
+    return "\n".join(lines)
+
+
+def _augment_bed_counter_result(chain_result: dict | None) -> dict | None:
+    """Attach per-modification totals alongside the chromosome-level dataframe."""
+    if not isinstance(chain_result, dict):
+        return chain_result
+
+    summary_rows = _build_modification_totals_rows(chain_result.get("dataframe"))
+    if not summary_rows:
+        return chain_result
+
+    bundle = dict(chain_result.get("_dataframes") or {})
+    bundle["Modification totals"] = {
+        "columns": ["Sample", "Genome", "Modification", "Count"],
+        "data": summary_rows,
+        "row_count": len(summary_rows),
+        "metadata": {
+            "label": "Modification totals",
+            "visible": False,
+        },
+    }
+    chain_result["_dataframes"] = bundle
+    chain_result["modification_totals"] = summary_rows
+    summary_markdown = _render_modification_totals_markdown(summary_rows)
+    if summary_markdown:
+        chain_result["modification_totals_markdown"] = summary_markdown
+    return chain_result
 
 
 async def _run_bed_counter_script(
@@ -109,6 +216,8 @@ async def _run_bed_counter_script(
     finally:
         await launchpad_client.disconnect()
 
+    chain_result = _augment_bed_counter_result(chain_result)
+
     source_results.append({
         "tool": "run_allowlisted_script",
         "params": chain_params,
@@ -125,11 +234,12 @@ async def _chain_list_job_files(
     active_skill: str,
 ) -> None:
     """After list_job_files, optionally chain into modification BED counting."""
-    if active_skill != "analyze_job_results":
+    if active_skill not in {"analyze_job_results", "run_dogme_rna", "run_dogme_dna"}:
         return
 
     modification_name = _extract_modification_name(user_message)
-    if not modification_name:
+    modification_summary_intent = _is_modification_summary_intent(user_message)
+    if not modification_name and not modification_summary_intent:
         return
 
     work_dir = result_data.get("work_dir")
@@ -147,7 +257,7 @@ async def _chain_list_job_files(
         metadata = _parse_bed_filename_metadata(relative_path)
         if not metadata:
             continue
-        if metadata["modification"].lower() != modification_name:
+        if modification_name and metadata["modification"].lower() != modification_name:
             continue
         bed_path = Path(relative_path).expanduser()
         if not bed_path.is_absolute():
@@ -164,7 +274,7 @@ async def _chain_list_job_files(
         "Chaining list_job_files follow-up",
         chain_tool="run_allowlisted_script",
         matched_files=deduped_paths,
-        modification=modification_name,
+        modification=modification_name or "all-filtered-modifications",
     )
     await _run_bed_counter_script(deduped_paths, source_results)
 
@@ -1248,8 +1358,8 @@ async def _chain_find_file(
         return None
 
     if (
-        active_skill == "analyze_job_results"
-        and primary_path.lower().endswith(".bed")
+        active_skill in {"analyze_job_results", "run_dogme_rna", "run_dogme_dna", "run_dogme_cdna"}
+        and primary_path.lower().endswith((".bed", ".bed.gz"))
         and _BED_COUNT_INTENT_RE.search(user_message)
     ):
         chain_tool = "run_allowlisted_script"

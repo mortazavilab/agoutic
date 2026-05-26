@@ -1,5 +1,27 @@
 ## [Unreleased]
 
+### Bug Fixes
+
+- **File-backed SQLite runtime now uses WAL, busy-timeout, and non-shared pooling defaults, and Cortex task projection now skips no-op writes, reducing lock contention and write amplification under concurrent polling, chat traffic, and remote job updates**
+
+- **Job-refresh behavior is now less aggressive across the stack: the UI defaults running-workflow polling to 30 seconds, Cortex cached status polling reuses results for 30 seconds, Launchpad local Nextflow monitor polling defaults to 30 seconds, and active SLURM accounting refreshes are reused for 10 minutes unless terminal-state refresh is required**
+
+- **Failed and cancelled workflows now retain meaningful status details instead of falling back to empty task summaries: local Nextflow terminal states preserve task and workflow-usage data, failed/cancelled SLURM jobs repoll trace/accounting data for recovered progress, and Launchpad now persists missing `completed_at` timestamps when jobs first enter a terminal state**
+
+- **Natural-language `analyze workflowN` requests now route through the same reanalysis path as `/reanalyze workflowN`, so workflow follow-up analysis behaves consistently regardless of whether the user phrases it as a slash command or a plain-language request**
+
+- **Direct RNA modification-summary follow-ups now use filtered `bedMethyl` outputs instead of searching for nonexistent modkit summary files; generic requests like `Show me the modification summary` now run the allowlisted `analyze_job_results/count_bed` utility, surface numeric per-modification totals first, and keep the chromosome-level dataframe available for later plotting**
+
+- **The bundled `count_bed.py` utility and the surrounding Cortex discovery/chaining path now support both `.bed` and `.bed.gz` files, including compressed `*.filtered.bed.gz` modification outputs for automatic RNA summary follow-ups and explicit BED chromosome-count requests**
+
+### Tests
+
+- **Added focused regression coverage for SQLite engine hardening and Cortex task-sync no-op write suppression so remote polling/runtime changes stay protected against future lock-contention regressions**
+
+- **Added focused regression coverage for the revised poll intervals, local failed-workflow task-summary retention, failed-SLURM status backfill, Launchpad `completed_at` persistence, and natural-language `analyze workflowN` reanalysis parity**
+
+- **Added regression coverage for RNA modification-summary routing, count-beds aggregation of per-modification totals, compressed `.bed.gz` support, and formatter output so the second-pass analysis sees numeric modification counts instead of only detected modification names**
+
 ## [3.6.9] - 2026-05-24
 
 ### Features

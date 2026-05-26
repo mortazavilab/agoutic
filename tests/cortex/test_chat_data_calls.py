@@ -3872,7 +3872,7 @@ class TestFileToolChaining:
             if tool_name == "find_file":
                 return {
                     "success": True,
-                    "primary_path": "results/data.bed",
+                    "primary_path": "results/data.bed.gz",
                     "work_dir": str(workflow_dir),
                 }
             raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
@@ -3893,7 +3893,7 @@ class TestFileToolChaining:
         def think(msg, skill, history):
             return (
                 "Let me count those regions.\n"
-                "[[DATA_CALL: service=analyzer, tool=find_file, run_uuid=abc, filename=data.bed]]",
+                "[[DATA_CALL: service=analyzer, tool=find_file, run_uuid=abc, filename=data.bed.gz]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
@@ -3905,7 +3905,7 @@ class TestFileToolChaining:
         client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
-            "count bed regions by chromosome for data.bed",
+            "count bed regions by chromosome for data.bed.gz",
             skill="analyze_job_results",
         )
 
@@ -3913,7 +3913,7 @@ class TestFileToolChaining:
         launchpad_mcp.call_tool.assert_awaited_once_with(
             "run_allowlisted_script",
             script_id="analyze_job_results/count_bed",
-            script_args=["--json", str((workflow_dir / "results/data.bed").resolve())],
+            script_args=["--json", str((workflow_dir / "results/data.bed.gz").resolve())],
             timeout_seconds=60.0,
         )
         data = resp.json()
@@ -4055,6 +4055,94 @@ class TestFileToolChaining:
         dfs = payload.get("_dataframes", {})
         assert "BED chromosome counts" in dfs
         assert dfs["BED chromosome counts"]["row_count"] == 2
+
+    def test_list_job_files_chains_rna_modification_summary_to_dataframe(self, SL, seed, tmp_path):
+        """Generic modification-summary requests should count all filtered bedMethyl modifications in RNA mode."""
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_dir = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow1/bedMethyl")
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                return {
+                    "success": True,
+                    "work_dir": str(workflow_dir),
+                    "file_count": 7,
+                    "files": [
+                        {"path": "igvfr_698-04.mm39.minus.inosine.filtered.bed.gz", "name": "igvfr_698-04.mm39.minus.inosine.filtered.bed.gz", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m6A.filtered.bed.gz", "name": "igvfr_698-04.mm39.minus.m6A.filtered.bed.gz", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.pseU.filtered.bed.gz", "name": "igvfr_698-04.mm39.minus.pseU.filtered.bed.gz", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.pseU.filtered.bed", "name": "igvfr_698-04.mm39.plus.pseU.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.bed.gz", "name": "igvfr_698-04.mm39.plus.bed.gz", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 11}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"pseU\", \"Chromosome\": \"chr1\", \"Count\": 3}], \"row_count\": 3, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "pseU", "Chromosome": "chr1", "Count": 3},
+                ],
+                "row_count": 3,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "Let me inspect the workflow modification files.\n"
+                "[[DATA_CALL: service=analyzer, tool=list_job_files, work_dir=/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow1/bedMethyl, extensions=.bed, max_depth=1]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "Show me the modification summary",
+            skill="run_dogme_rna",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow_dir / "igvfr_698-04.mm39.minus.inosine.filtered.bed.gz").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.minus.m6A.filtered.bed.gz").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.minus.pseU.filtered.bed.gz").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.m6A.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.pseU.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
+        data = resp.json()
+        payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        dfs = payload.get("_dataframes", {})
+        assert "BED chromosome counts" in dfs
+        assert dfs["BED chromosome counts"]["row_count"] == 3
+        assert "Modification totals" in dfs
+        assert dfs["Modification totals"]["row_count"] == 3
+        assert dfs["Modification totals"]["data"] == [
+            {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "inosine", "Count": 7},
+            {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Count": 11},
+            {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "pseU", "Count": 3},
+        ]
 
 
 # ===========================================================================

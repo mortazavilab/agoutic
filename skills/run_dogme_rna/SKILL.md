@@ -120,7 +120,26 @@ That guide includes:
 **RNA-specific tools:**
 - Modification sites: `parse_bed_file` for `*.m6A.filtered.bed`, `*.pseU.filtered.bed`
 - Gene counts: `parse_csv_file` for expression data
-- Summaries: `read_file_content` for `*.modkit_summary.txt`
+- Modification summaries: list `bedMethyl/*.filtered.bed` and `bedMethyl/*.filtered.bed.gz` files and use the allowlisted script `analyze_job_results/count_bed` to count sites across plus/minus files
+
+### Modification Summary Requests
+
+There is no `modkit_summary` file in the current RNA workflow outputs. For requests like:
+- "Show me the modification summary"
+- "Summarize the RNA modifications"
+- "How many modification sites were found?"
+
+use the workflow's `bedMethyl/` folder instead.
+
+Preferred flow:
+1. List `.bed` files in `<work_dir>/bedMethyl`
+2. Use only `*.filtered.bed` or `*.filtered.bed.gz` files that include explicit modification names such as `m6A`, `inosine`, `m5C`, `pseU`, or `Nm`
+3. Sum plus/minus files with the allowlisted script `analyze_job_results/count_bed`
+4. Present totals by modification, noting that the underlying dataframe remains available for plotting or chromosome-level follow-up
+
+When `count_bed` returns chromosome-level rows, the first markdown summary table must show numeric totals per modification by summing the `Count` column across chromosomes. Use a `Modification | Count` style summary, not a `Detected` or `Present` status table. Keep the detailed per-chromosome dataframe available for later plotting.
+
+Do not search for `modkit_summary`, `modification_summary.txt`, or similar nonexistent summary files for this workflow.
 
 ### RNA-Specific Notes
 

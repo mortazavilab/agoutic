@@ -55,6 +55,10 @@ _NL_RERUN_ANALYSIS = re.compile(
     r"^(?:please\s+)?(?:re-?run|rerun|regenerate)\s+(?:the\s+)?(?:(?:automatic|auto)\s+)?analysis(?:\s+(?:for|of))?(?:\s+(.+))?$",
     re.IGNORECASE | re.DOTALL,
 )
+_NL_ANALYZE_WORKFLOW = re.compile(
+    r"^(?:please\s+)?analy[sz]e(?:\s+(?:results?\s+(?:for|of)\s+)?)?(workflow\S*(?:[\s,]+(?:and\s+)?workflow\S*)*)$",
+    re.IGNORECASE | re.DOTALL,
+)
 _NL_DELETE = re.compile(r"^(?:please\s+)?delete(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
 _NL_RENAME = re.compile(r"^(?:please\s+)?rename\s+(\S+)\s+(?:to\s+)?(.+)$", re.IGNORECASE | re.DOTALL)
 _NL_USE = re.compile(
@@ -365,6 +369,10 @@ def detect_workflow_intent(message: str) -> WorkflowCommand | None:
         return WorkflowCommand(action="list_tracked")
 
     match = _NL_RERUN_ANALYSIS.match(msg)
+    if match:
+        return _command_with_refs("reanalyze", match.group(1))
+
+    match = _NL_ANALYZE_WORKFLOW.match(msg)
     if match:
         return _command_with_refs("reanalyze", match.group(1))
 

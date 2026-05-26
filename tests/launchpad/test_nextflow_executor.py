@@ -812,6 +812,84 @@ class TestGenericWorkflowSubmission:
         assert metadata["result_sync_spec"]["report_filename"] == "wf-pore-c-report.html"
 
     @pytest.mark.asyncio
+    async def test_check_status_failed_marker_keeps_task_summary_and_usage(self, tmp_path):
+        nextflow_module._workflow_usage_cache.clear()
+
+        work_dir = tmp_path / "workflow1"
+        work_dir.mkdir()
+        (work_dir / ".nextflow_failed").write_text("failed\n", encoding="utf-8")
+        (work_dir / ".nextflow_error").write_text("Process exited with code 1", encoding="utf-8")
+        (work_dir / "trace.txt").write_text(
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\taa/bb\t1001\tmainWorkflow:doradoTask (1)\tCOMPLETED\t60s\t200%\t4G\t6G\t0\n"
+            "2\tbb/cc\t1002\tmainWorkflow:minimapTask (1)\tFAILED\t30s\t100%\t2G\t3G\t1\n",
+            encoding="utf-8",
+        )
+
+        executor = NextflowExecutor()
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        status = await executor.check_status("run-failed-stats", work_dir)
+
+        assert status["status"] == nextflow_module.JobStatus.FAILED
+        assert status["progress_percent"] == 50
+        assert status["tasks"]["completed_count"] == 1
+        assert status["tasks"]["failed_count"] == 1
+        assert status["tasks"]["total"] == 2
+        assert "Pipeline: 1/2 completed, 1 failed" in status["message"]
+        assert status["workflow_usage"]["completed_task_count"] == 1
+        assert status["workflow_usage"]["failed_task_count"] == 1
+        assert status["workflow_usage_synced_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_check_status_reuses_cached_workflow_usage_until_terminal_refresh(self, monkeypatch, tmp_path):
+        nextflow_module._workflow_usage_cache.clear()
+
+        work_dir = tmp_path / "workflow-cache"
+        work_dir.mkdir()
+        trace_file = work_dir / "trace.txt"
+        trace_file.write_text(
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\taa/bb\t1001\tmainWorkflow:doradoTask (1)\tRUNNING\t60s\t200%\t4G\t6G\t0\n",
+            encoding="utf-8",
+        )
+
+        calls = {"count": 0}
+
+        def fake_summarize(_trace_file, accounting_mode="local"):
+            assert accounting_mode == "local"
+            calls["count"] += 1
+            return {
+                "source": "nextflow_trace",
+                "accounting_mode": "local",
+                "cpu_seconds": float(10 * calls["count"]),
+            }
+
+        monkeypatch.setattr(nextflow_module, "summarize_nextflow_trace_file", fake_summarize)
+
+        executor = NextflowExecutor()
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        first = await executor.check_status("run-cache-refresh", work_dir)
+
+        trace_file.write_text(
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\taa/bb\t1001\tmainWorkflow:doradoTask (1)\tCOMPLETED\t60s\t200%\t4G\t6G\t0\n",
+            encoding="utf-8",
+        )
+        second = await executor.check_status("run-cache-refresh", work_dir)
+
+        (work_dir / ".nextflow_success").write_text("done\n", encoding="utf-8")
+        third = await executor.check_status("run-cache-refresh", work_dir)
+
+        assert calls["count"] == 2
+        assert first["workflow_usage"]["cpu_seconds"] == 10.0
+        assert second["workflow_usage"]["cpu_seconds"] == 10.0
+        assert third["workflow_usage"]["cpu_seconds"] == 20.0
+
+    @pytest.mark.asyncio
     async def test_submit_job_copies_staged_input_when_symlink_rejected(self, monkeypatch, tmp_path):
         agoutic_data = tmp_path / "agoutic-data"
         nextflow_bin = tmp_path / "bin" / "nextflow"

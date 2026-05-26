@@ -1,5 +1,6 @@
 """Behavioral tests for SLURM cache flow (hit/miss/refresh/fallback)."""
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -1085,6 +1086,71 @@ async def test_check_status_reports_remote_trace_progress(monkeypatch, profile):
 
 
 @pytest.mark.asyncio
+async def test_check_status_reports_failed_remote_trace_progress(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeStatusConn(
+        sacct_output="FAILED|1:0|None\n",
+        trace_output=(
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\t1a/11309b\t50053101\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t30s\t100%\t1G\t2G\t0\n"
+            "2\t15/8e2ad6\t50053102\tmainWorkflow:softwareVTask\tCOMPLETED\t45s\t100%\t1500M\t2G\t0\n"
+            "3\t8a/e8d3e0\t50053103\tmainWorkflow:doradoTask (1)\tCOMPLETED\t60s\t300%\t4G\t6G\t0\n"
+            "4\t7d/7e33ed\t50053104\tmainWorkflow:annotateRNATask (1)\tFAILED\t90s\t150%\t2G\t3G\t1\n"
+        ),
+        slurm_out_output=(
+            "executor >  slurm (4)\n"
+            "[1a/11309b] mainWorkflow:doradoDownloadTask | 1 of 1 ✔\n"
+            "[15/8e2ad6] mainWorkflow:softwareVTask     | 1 of 1 ✔\n"
+            "[8a/e8d3e0] mainWorkflow:doradoTask (1)  | 1 of 1 ✔\n"
+            "[7d/7e33ed] mainWorkflow:annotateRNATask (1) | 0 of 1\n"
+        ),
+    )
+
+    from launchpad import db as launchpad_db
+
+    async def _get_job_by_uuid(*args, **kwargs):
+        return SimpleNamespace(
+            run_uuid="run-6f",
+            status="FAILED",
+            progress_percent=0,
+            run_stage="failed",
+            slurm_job_id="50053100",
+            transfer_state=None,
+            result_destination="local",
+            ssh_profile_id="profile-1",
+            user_id="user-1",
+            slurm_state=None,
+            remote_work_dir="/remote/eli/agoutic/proj-1/workflow8",
+            workflow_usage_json=None,
+            workflow_usage_synced_at=None,
+        )
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _noop_update(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_db, "get_job_by_uuid", _get_job_by_uuid)
+    monkeypatch.setattr(backend, "_update_job_slurm_state", _noop_update)
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+
+    status = await backend.check_status("run-6f")
+
+    assert status.status == "FAILED"
+    assert status.progress_percent >= 60
+    assert status.tasks["completed_count"] == 3
+    assert status.tasks["failed_count"] == 1
+    assert status.tasks["total"] == 4
+    assert "exit code 1:0" in status.message
+    assert "Pipeline: 3/4 completed" in status.message
+
+
+@pytest.mark.asyncio
 async def test_check_status_without_remote_trace_leaves_workflow_usage_empty(monkeypatch, profile):
     backend = SlurmBackend()
     conn = _FakeStatusConn(sacct_output="RUNNING|0:0|\n")
@@ -1124,6 +1190,71 @@ async def test_check_status_without_remote_trace_leaves_workflow_usage_empty(mon
 
     assert status.status == "RUNNING"
     assert status.workflow_usage is None
+
+
+@pytest.mark.asyncio
+async def test_check_status_reuses_recent_live_workflow_usage_without_full_usage_refresh(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeStatusConn(
+        sacct_output="RUNNING|0:0|\n",
+        trace_output=(
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\tfe/e700c5\t50043107\tmainWorkflow:doradoTask (1)\tRUNNING\t60s\t300%\t4G\t6G\t0\n"
+        ),
+        slurm_out_output=(
+            "executor >  slurm (1)\n"
+            "[fe/e700c5] mainWorkflow:doradoTask (1) | 0 of 1\n"
+        ),
+    )
+
+    cached_usage = {
+        "source": "slurm_sacct+nextflow_trace",
+        "accounting_mode": "slurm",
+        "cpu_queue_seconds": 12.0,
+        "gpu_queue_seconds": 34.0,
+    }
+    cached_synced_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+
+    from launchpad import db as launchpad_db
+
+    async def _get_job_by_uuid(*args, **kwargs):
+        return SimpleNamespace(
+            run_uuid="run-6c",
+            status="RUNNING",
+            progress_percent=0,
+            run_stage="running",
+            slurm_job_id="50043100",
+            transfer_state=None,
+            result_destination="local",
+            ssh_profile_id="profile-1",
+            user_id="user-1",
+            slurm_state=None,
+            remote_work_dir="/remote/eli/agoutic/proj-1/workflow7",
+            workflow_usage_json=cached_usage,
+            workflow_usage_synced_at=cached_synced_at,
+        )
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _noop_update(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_db, "get_job_by_uuid", _get_job_by_uuid)
+    monkeypatch.setattr(backend, "_update_job_slurm_state", _noop_update)
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+
+    status = await backend.check_status("run-6c")
+
+    assert status.status == "RUNNING"
+    assert status.workflow_usage == cached_usage
+    assert status.workflow_usage_synced_at == cached_synced_at.isoformat()
+    assert not any("sacct -X -j" in command for command in conn.commands)
+    assert not any("__AGOUTIC_TRACE_PATH__" in command for command in conn.commands)
 
 
 def test_parse_task_status_texts_excludes_numbered_tasks_already_completed_in_trace():

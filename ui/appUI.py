@@ -262,7 +262,7 @@ def _project_refresh_interval(
     if project_switch_loading:
         return timedelta(milliseconds=100)
 
-    refresh_seconds = min(max(int(poll_seconds or 2), 1), 2) if has_running_job else max(int(poll_seconds or 2), 1)
+    refresh_seconds = max(int(poll_seconds or 30), 1)
     if has_running_job and auto_refresh_suppressed:
         return timedelta(seconds=refresh_seconds)
     if not (auto_refresh or has_running_job) or auto_refresh_suppressed:
