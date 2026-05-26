@@ -46,6 +46,15 @@ def _looks_like_slash_command_message(user_text: str) -> bool:
     return bool(re.match(r"^/[a-zA-Z][a-zA-Z0-9-]*$", token))
 
 
+def _looks_like_slash_command_path(path_text: str | None) -> bool:
+    stripped = str(path_text or "").strip().rstrip('.,;:!?')
+    if not stripped.startswith("/"):
+        return False
+    if "/" in stripped[1:]:
+        return False
+    return bool(re.match(r"^/[a-zA-Z][a-zA-Z0-9-]*$", stripped))
+
+
 def _extract_explicit_input_candidate(
     user_messages: list[str],
     *,
@@ -58,12 +67,15 @@ def _extract_explicit_input_candidate(
         rel_paths = re.findall(_RELATIVE_INPUT_PATH_PATTERN, message)
         abs_paths = re.findall(_ABSOLUTE_INPUT_PATH_PATTERN, message)
         filtered_abs_paths = [
-            candidate for candidate in abs_paths
-            if not remote_input_path or candidate.rstrip('.,;:!?') != remote_input_path
+            candidate.rstrip('.,;:!?') for candidate in abs_paths
+            if (
+                (not remote_input_path or candidate.rstrip('.,;:!?') != remote_input_path)
+                and not _looks_like_slash_command_path(candidate)
+            )
         ]
 
         if filtered_abs_paths:
-            return filtered_abs_paths[0].rstrip('.,;:!?'), False
+            return filtered_abs_paths[0], False
         if rel_paths:
             return rel_paths[0].rstrip('.,;:!?'), True
 

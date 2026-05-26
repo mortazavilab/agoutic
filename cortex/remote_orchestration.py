@@ -90,6 +90,15 @@ def _extract_remote_profile_nickname(user_message: str) -> str | None:
     return None
 
 
+def _looks_like_slash_command_path(path_text: str | None) -> bool:
+    stripped = str(path_text or "").strip().rstrip('.,;:!?')
+    if not stripped.startswith("/"):
+        return False
+    if "/" in stripped[1:]:
+        return False
+    return bool(re.match(r"^/[a-zA-Z][a-zA-Z0-9-]*$", stripped))
+
+
 def _remote_path_fingerprint(remote_path: str) -> str:
     cleaned = str(remote_path or "").strip()
     return hashlib.sha256(f"remote:{cleaned}".encode("utf-8")).hexdigest()
@@ -982,7 +991,10 @@ async def _prepare_remote_execution_params(
 
     if remote_input_path:
         normalized["staged_remote_input_path"] = remote_input_path
-        if not normalized.get("input_directory"):
+        if _looks_like_slash_command_path(normalized.get("input_directory")):
+            normalized["input_directory"] = remote_input_path
+            normalized["input_directory_explicit"] = False
+        elif not normalized.get("input_directory"):
             normalized["input_directory"] = f"remote:{remote_input_path}"
 
     normalized = await _build_slurm_cache_preflight(session, project_id, owner_id, normalized)
@@ -1016,12 +1028,16 @@ async def _prepare_remote_execution_params(
             normalized["staged_remote_input_path"] = staged_payload["remote_data_path"]
             normalized["remote_staged_sample"] = staged_payload
             normalized["remote_base_path"] = normalized.get("remote_base_path") or staged_payload["remote_base_path"]
-            if not normalized.get("input_directory_explicit"):
+            if (
+                not normalized.get("input_directory_explicit")
+                or _looks_like_slash_command_path(normalized.get("input_directory"))
+            ):
                 normalized["input_directory"] = (
                     staged_payload.get("source_path")
                     or normalized.get("input_directory")
                     or f"remote:{staged_payload['remote_data_path']}"
                 )
+                normalized["input_directory_explicit"] = False
             preflight = normalized.get("cache_preflight") or {}
             if isinstance(preflight, dict):
                 preflight["status"] = "ready"

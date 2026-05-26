@@ -18,6 +18,7 @@ from sqlalchemy.pool import StaticPool
 from common.database import Base
 from cortex.models import User, Project, ProjectAccess, ProjectBlock
 from cortex.job_parameters import extract_job_parameters_from_conversation
+from cortex.remote_orchestration import _prepare_remote_execution_params
 from launchpad.models import RemoteStagedSample
 
 
@@ -739,6 +740,82 @@ class TestRemoteExecutionDetection:
         assert result["input_directory"] == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip"
         assert result["input_directory"] != "/list"
         assert result["staged_remote_input_path"] == "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2"
+
+    @pytest.mark.asyncio
+    async def test_embedded_slash_command_token_does_not_override_reused_staged_source_path(self):
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {"text": "after /list staged, run dogme rna on hpc3 using staged sample igvfr_698-04 with mm39"},
+            seq=1,
+        )
+        sess = self.sf()
+        staged = RemoteStagedSample(
+            id="stage-embedded-list",
+            user_id="u1",
+            ssh_profile_id="profile-123",
+            ssh_profile_nickname="hpc3",
+            sample_name="igvfr_698-04",
+            sample_slug="igvfr-698-04",
+            mode="RNA",
+            reference_genome_json=["mm39"],
+            source_path="/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5",
+            input_fingerprint="fp-embedded-list",
+            remote_base_path="/share/crsp/lab/seyedam/share/agoutic/seyedam",
+            remote_data_path="/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-embedded-list",
+            remote_reference_paths_json={"mm39": "/share/crsp/lab/seyedam/share/agoutic/seyedam/ref/mm39"},
+            status="READY",
+        )
+        sess.add(staged)
+        sess.commit()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+                 "id": "profile-123",
+                 "nickname": "hpc3",
+                 "ssh_username": "seyedam",
+                 "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+             }])):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["input_directory"] == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5"
+        assert result["input_directory"] != "/list"
+        assert result["input_directory_explicit"] is False
+
+    @pytest.mark.asyncio
+    async def test_remote_input_path_replaces_spurious_slash_command_input_directory(self):
+        sess = self.sf()
+        try:
+            with patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+                 patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+                     "id": "profile-123",
+                     "nickname": "hpc3",
+                     "ssh_username": "seyedam",
+                     "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                 }])):
+                result = await _prepare_remote_execution_params(
+                    sess,
+                    "proj-1",
+                    "u1",
+                    {
+                        "execution_mode": "slurm",
+                        "ssh_profile_id": "profile-123",
+                        "ssh_profile_nickname": "hpc3",
+                        "sample_name": "igvfr_698-04",
+                        "mode": "RNA",
+                        "reference_genome": ["mm39"],
+                        "input_directory": "/list",
+                        "input_directory_explicit": True,
+                        "remote_input_path": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5",
+                    },
+                )
+        finally:
+            sess.close()
+
+        assert result["remote_input_path"] == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5"
+        assert result["input_directory"] == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5"
+        assert result["input_directory_explicit"] is False
 
     @pytest.mark.asyncio
     async def test_ignores_account_partition_phrase_when_extracting_path_and_partition(self):
