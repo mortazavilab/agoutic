@@ -14,6 +14,12 @@
 
 - **The bundled `count_bed.py` utility and the surrounding Cortex discovery/chaining path now support both `.bed` and `.bed.gz` files, including compressed `*.filtered.bed.gz` modification outputs for automatic RNA summary follow-ups and explicit BED chromosome-count requests**
 
+- **Workflow-specific RNA modification summaries now honor both explicit workflow references like `show me the modifications summary for workflow1` and cached active-workflow selections from `/use workflow1`; plural `modifications summary` phrasing now triggers the same `bedMethyl` counting path, and newer active-workflow state can override the latest completed workflow when follow-up analysis requests are routed**
+
+- **RNA `mod* summary` follow-ups now route through the same `bedMethyl` counting path even from non-workflow skills when workflow context is available: singular `modification summary`, short forms like `mod summary`, and `modkit summary` all auto-list `bedMethyl` outputs and chain into `analyze_job_results/count_bed` without requiring the user to switch skills first**
+
+- **RNA workflow interpretation now explicitly allows analysis of failed or cancelled workflows when the requested result files are actually present on disk (for example after a later sync), so mode-specific follow-ups no longer assume a different completed workflow is the only valid analysis target**
+
 ### Tests
 
 - **Added focused regression coverage for SQLite engine hardening and Cortex task-sync no-op write suppression so remote polling/runtime changes stay protected against future lock-contention regressions**
@@ -21,6 +27,12 @@
 - **Added focused regression coverage for the revised poll intervals, local failed-workflow task-summary retention, failed-SLURM status backfill, Launchpad `completed_at` persistence, and natural-language `analyze workflowN` reanalysis parity**
 
 - **Added regression coverage for RNA modification-summary routing, count-beds aggregation of per-modification totals, compressed `.bed.gz` support, and formatter output so the second-pass analysis sees numeric modification counts instead of only detected modification names**
+
+- **Added focused regression coverage for plural workflow-specific modification-summary prompts, cached active-workflow context after `/use workflowN`, and chat-path overrides that replace generic `get_analysis_summary` tags with workflow-specific `bedMethyl` counting calls**
+
+- **Added chat-path regression coverage for plural `modifications summary` requests against a failed workflow with synced `bedMethyl` outputs, ensuring the analyzer listing still chains into `count_bed` instead of stopping at raw file listings**
+
+- **Added focused regression coverage for generic-skill `mod summary` and `modkit summary` prompts so shorthand RNA modification-summary requests still auto-route to `bedMethyl` counting, override generic analyzer summaries, and chain into `count_bed`**
 
 ## [3.6.9] - 2026-05-24
 

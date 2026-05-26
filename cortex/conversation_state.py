@@ -327,14 +327,64 @@ def _extract_job_context_from_history(
 
     # --- Primary source: EXECUTION_JOB blocks (authoritative) -----------
     workflows: list[dict] = []
+    latest_exec_index = -1
     if history_blocks:
-        for blk in history_blocks:
+        for idx, blk in enumerate(history_blocks):
             if blk.type != "EXECUTION_JOB":
                 continue
             _pl = get_block_payload(blk)
             workflow_record = _normalized_workflow_record(_pl)
             if workflow_record.get("work_dir") or workflow_record.get("run_uuid"):
                 workflows.append(workflow_record)
+                latest_exec_index = idx
+
+        for idx in range(len(history_blocks) - 1, -1, -1):
+            blk = history_blocks[idx]
+            if blk.type != "AGENT_PLAN":
+                continue
+            _pl = get_block_payload(blk)
+            cached = _pl.get("state")
+            if not isinstance(cached, dict):
+                continue
+            cached_workflows = [
+                _normalized_workflow_record(workflow)
+                for workflow in (cached.get("workflows") or [])
+                if isinstance(workflow, dict)
+            ]
+            if not cached_workflows:
+                continue
+            if latest_exec_index >= 0 and idx <= latest_exec_index:
+                break
+
+            active_index = cached.get("active_workflow_index")
+            if isinstance(active_index, int) and 0 <= active_index < len(cached_workflows):
+                selected = cached_workflows[active_index]
+            else:
+                cached_work_dir = _sanitize_path(str(cached.get("work_dir") or ""))
+                selected = next(
+                    (workflow for workflow in cached_workflows if workflow.get("work_dir") == cached_work_dir),
+                    cached_workflows[-1],
+                )
+
+            if workflows:
+                selected = next(
+                    (
+                        workflow for workflow in workflows
+                        if (
+                            selected.get("work_dir") and workflow.get("work_dir") == selected.get("work_dir")
+                        ) or (
+                            selected.get("run_uuid") and workflow.get("run_uuid") == selected.get("run_uuid")
+                        )
+                    ),
+                    selected,
+                )
+
+            context["work_dir"] = selected.get("work_dir", "")
+            context["run_uuid"] = selected.get("run_uuid", "")
+            context["workflow_key"] = selected.get("workflow_key") or "dogme"
+            context["workflows"] = workflows or cached_workflows
+            return context
+
         if workflows:
             # Prefer the most recent pipeline (dogme) workflow over utility
             # scripts whose work_directory points at the skill's scripts

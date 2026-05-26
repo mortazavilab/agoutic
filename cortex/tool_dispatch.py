@@ -69,10 +69,14 @@ _MODIFICATION_COUNT_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_INVALID_MOD_SUMMARY_TERMS = frozenset({
+    "mode", "modes", "model", "models", "module", "modules",
+})
+
 _MODIFICATION_SUMMARY_INTENT_RE = re.compile(
-    r"\bshow\s+me\s+(?:the\s+)?modification\s+summary\b"
-    r"|\bmodification\s+summary\b"
-    r"|\bsummary\s+of\s+(?:the\s+)?modifications?\b",
+    r"\bshow\s+me\s+(?:the\s+)?(?P<term1>mod[a-z0-9_+\-]*)\s+summary\b"
+    r"|\b(?P<term2>mod[a-z0-9_+\-]*)\s+summary\b"
+    r"|\bsummary\s+of\s+(?:the\s+)?(?P<term3>mod[a-z0-9_+\-]*)\b",
     re.IGNORECASE,
 )
 
@@ -89,10 +93,22 @@ def _extract_modification_name(user_message: str) -> str | None:
     return (match.group("mod") or match.group("mod2") or "").lower() or None
 
 
+def _looks_like_mod_summary_term(term: str | None) -> bool:
+    if not term:
+        return False
+    normalized = term.lower()
+    return normalized.startswith("mod") and normalized not in _INVALID_MOD_SUMMARY_TERMS
+
+
 def _is_modification_summary_intent(user_message: str) -> bool:
     if _extract_modification_name(user_message):
         return False
-    return bool(_MODIFICATION_SUMMARY_INTENT_RE.search(user_message))
+    match = _MODIFICATION_SUMMARY_INTENT_RE.search(user_message)
+    if not match:
+        return False
+    return _looks_like_mod_summary_term(
+        match.group("term1") or match.group("term2") or match.group("term3")
+    )
 
 
 def _parse_bed_filename_metadata(file_path: str) -> dict[str, str] | None:
@@ -234,9 +250,6 @@ async def _chain_list_job_files(
     active_skill: str,
 ) -> None:
     """After list_job_files, optionally chain into modification BED counting."""
-    if active_skill not in {"analyze_job_results", "run_dogme_rna", "run_dogme_dna"}:
-        return
-
     modification_name = _extract_modification_name(user_message)
     modification_summary_intent = _is_modification_summary_intent(user_message)
     if not modification_name and not modification_summary_intent:

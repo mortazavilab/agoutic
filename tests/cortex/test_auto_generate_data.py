@@ -703,6 +703,82 @@ class TestAnalyzeJobResultsCatchAll:
         assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
         assert calls[0]["params"]["max_depth"] == 1
 
+    def test_generic_skill_mod_summary_uses_bedmethyl_listing(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "aaaa-bbbb",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "Show me the mod summary",
+            "welcome",
+            history_blocks=blocks,
+        )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
+        assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
+        assert calls[0]["params"]["max_depth"] == 1
+
+    def test_generic_skill_modkit_summary_for_explicit_workflow_uses_requested_workflow(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "uuid-1",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }},
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow2",
+                "run_uuid": "uuid-2",
+                "sample_name": "igvfr_086-04",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "show me the modkit summary for workflow1",
+            "welcome",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
+        assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
+        assert calls[0]["params"]["max_depth"] == 1
+
+    def test_rna_skill_plural_modifications_summary_for_explicit_workflow_uses_requested_workflow(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "uuid-1",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }},
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow2",
+                "run_uuid": "uuid-2",
+                "sample_name": "igvfr_086-04",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "show me the modifications summary for workflow1",
+            "run_dogme_rna",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
+        assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
+        assert calls[0]["params"]["max_depth"] == 1
+
     def test_bam_details_fallback_lists_files_first(self):
         blocks = _make_blocks([
             {"type": "EXECUTION_JOB", "payload": {

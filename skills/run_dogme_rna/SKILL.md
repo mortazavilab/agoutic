@@ -131,6 +131,13 @@ There is no `modkit_summary` file in the current RNA workflow outputs. For reque
 
 use the workflow's `bedMethyl/` folder instead.
 
+Do not reject or redirect a workflow-specific analysis request just because that workflow is marked `FAILED` or `CANCELLED`. If the user explicitly asks for `workflow1`, `/use workflow1`, or another named workflow and result files are present, analyze that workflow's files directly. A cancelled or failed workflow can still contain synced outputs worth summarizing.
+
+When a workflow-specific RNA follow-up targets a failed/cancelled workflow, prefer this order:
+1. Check the requested workflow's relevant output folder such as `bedMethyl/`, `annot/`, or other expected result paths
+2. If the files exist, continue the analysis for that workflow instead of switching to a different completed workflow
+3. Only fall back to another workflow when the explicitly requested workflow truly has no relevant result files
+
 Preferred flow:
 1. List `.bed` files in `<work_dir>/bedMethyl`
 2. Use only `*.filtered.bed` or `*.filtered.bed.gz` files that include explicit modification names such as `m6A`, `inosine`, `m5C`, `pseU`, or `Nm`

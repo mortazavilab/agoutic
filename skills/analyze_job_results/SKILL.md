@@ -4,6 +4,8 @@
 
 This skill analyzes completed Dogme pipeline job results. It examines output files (txt, csv, bed) from completed jobs and generates QC reports, summaries, and statistical analyses.
 
+If a workflow is marked `FAILED` or `CANCELLED` but its result files have been synced and are present on disk, it is still a valid analysis target. When the user explicitly names that workflow, prefer checking the requested workflow's files first instead of automatically switching to a different completed workflow.
+
 **⚠️ CRITICAL: This skill is analysis-first. Do NOT submit new Dogme or Nextflow jobs. The only allowed execution exception is a local allowlisted utility script that inspects an existing BED file and returns per-chromosome counts. For normal result analysis, only use the /analysis/* endpoints listed below.**
 
 ## Skill Scope & Routing

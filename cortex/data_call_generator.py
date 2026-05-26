@@ -120,10 +120,14 @@ _MODIFICATION_COUNT_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_INVALID_MOD_SUMMARY_TERMS = frozenset({
+    'mode', 'modes', 'model', 'models', 'module', 'modules',
+})
+
 _MODIFICATION_SUMMARY_INTENT_RE = re.compile(
-    r'\bshow\s+me\s+(?:the\s+)?modification\s+summary\b'
-    r'|\bmodification\s+summary\b'
-    r'|\bsummary\s+of\s+(?:the\s+)?modifications?\b',
+    r'\bshow\s+me\s+(?:the\s+)?(?P<term1>mod[a-z0-9_+\-]*)\s+summary\b'
+    r'|\b(?P<term2>mod[a-z0-9_+\-]*)\s+summary\b'
+    r'|\bsummary\s+of\s+(?:the\s+)?(?P<term3>mod[a-z0-9_+\-]*)\b',
     re.IGNORECASE,
 )
 
@@ -140,10 +144,22 @@ def _extract_modification_name(user_message: str) -> str | None:
     return (match.group("mod") or match.group("mod2") or "").lower() or None
 
 
+def _looks_like_mod_summary_term(term: str | None) -> bool:
+    if not term:
+        return False
+    normalized = term.lower()
+    return normalized.startswith("mod") and normalized not in _INVALID_MOD_SUMMARY_TERMS
+
+
 def _is_modification_summary_intent(user_message: str) -> bool:
     if _extract_modification_name(user_message):
         return False
-    return bool(_MODIFICATION_SUMMARY_INTENT_RE.search(user_message))
+    match = _MODIFICATION_SUMMARY_INTENT_RE.search(user_message)
+    if not match:
+        return False
+    return _looks_like_mod_summary_term(
+        match.group("term1") or match.group("term2") or match.group("term3")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +468,50 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
             })
         # If no resolvable path, return empty calls — the browsing error
         # handler in the results pipeline will show helpful suggestions.
+        return calls
+
+    _modification_name = _extract_modification_name(user_message)
+    _modification_summary_intent = _is_modification_summary_intent(user_message)
+    _has_workflow_context = bool(work_dir or run_uuid or workflows or _project_dir)
+    if not calls and _has_workflow_context and (_modification_name or _modification_summary_intent):
+        _requested_workflow_match = re.search(r'\b(workflow\d+)\b', user_message, re.IGNORECASE)
+        _requested_workflow = _requested_workflow_match.group(1) if _requested_workflow_match else ""
+        _target_work_dir = ""
+        if _requested_workflow:
+            _workflow_base = _project_dir or work_dir
+            if not _workflow_base and workflows:
+                _workflow_base = workflows[-1].get("work_dir", "")
+                if _workflow_base and re.search(r'/workflow\d+/?$', _workflow_base):
+                    _workflow_base = _workflow_base.rstrip("/").rsplit("/", 1)[0]
+            if _workflow_base:
+                _target_work_dir = _resolve_workflow_path(
+                    f"{_requested_workflow}/bedMethyl",
+                    _workflow_base,
+                    workflows,
+                )
+        elif work_dir:
+            _target_work_dir = _resolve_workflow_path("bedMethyl", work_dir, workflows)
+
+        _params: dict = {
+            "extensions": ".bed,.bed.gz",
+            "max_depth": 1,
+        }
+        if _target_work_dir:
+            _params["work_dir"] = _target_work_dir
+        elif run_uuid:
+            _params["run_uuid"] = run_uuid
+        calls.append({
+            "source_type": "service", "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": _params,
+        })
+        logger.warning(
+            "Auto-generated list_job_files for workflow modification BED summary",
+            work_dir=_params.get("work_dir"),
+            run_uuid=run_uuid,
+            modification=_modification_name,
+            skill_key=skill_key,
+        )
         return calls
 
     # Organism lookup for KNOWN biosamples.  This is NOT exhaustive — it
@@ -787,37 +847,6 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                         "params": _params,
                         "_chain": _pick_file_tool(_resolved_file),
                     })
-
-        _modification_name = _extract_modification_name(user_message)
-        _modification_summary_intent = _is_modification_summary_intent(user_message)
-        if not calls and (
-            _modification_name
-            or (
-                skill_key in {"run_dogme_dna", "run_dogme_rna", "analyze_job_results"}
-                and _modification_summary_intent
-            )
-        ):
-            _params: dict = {
-                "extensions": ".bed,.bed.gz",
-                "max_depth": 1,
-            }
-            if work_dir:
-                _params["work_dir"] = _resolve_workflow_path("bedMethyl", work_dir, workflows)
-            elif run_uuid:
-                _params["run_uuid"] = run_uuid
-            calls.append({
-                "source_type": "service", "source_key": "analyzer",
-                "tool": "list_job_files",
-                "params": _params,
-            })
-            logger.warning(
-                "Auto-generated list_job_files for workflow modification BED summary",
-                work_dir=_params.get("work_dir"),
-                run_uuid=run_uuid,
-                modification=_modification_name,
-                skill_key=skill_key,
-            )
-            return calls
 
         # --- Catch-all for analyze_job_results: if the LLM narrated steps
         # instead of emitting a DATA_CALL, auto-generate get_analysis_summary

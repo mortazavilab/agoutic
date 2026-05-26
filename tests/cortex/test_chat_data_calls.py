@@ -4144,6 +4144,488 @@ class TestFileToolChaining:
             {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "pseU", "Count": 3},
         ]
 
+    def test_modification_summary_overrides_generic_get_analysis_summary_tag(self, SL, seed, tmp_path):
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_root = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow2")
+        workflow_dir = workflow_root / "bedMethyl"
+
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="EXECUTION_JOB",
+            status="DONE",
+            payload_json=json.dumps({
+                "work_directory": str(workflow_root),
+                "run_uuid": "run-igvfr-086-04",
+                "sample_name": "igvfr_086-04",
+                "mode": "RNA",
+            }),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                assert kwargs in (
+                    {
+                        "work_dir": str(workflow_dir),
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                    {
+                        "run_uuid": "run-igvfr-086-04",
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                )
+                return {
+                    "success": True,
+                    "work_dir": str(workflow_dir),
+                    "file_count": 7,
+                    "files": [
+                        {"path": "igvfr_086-04.mm39.minus.inosine.filtered.bed", "name": "igvfr_086-04.mm39.minus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.minus.m5C.filtered.bed", "name": "igvfr_086-04.mm39.minus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.minus.m6A.filtered.bed", "name": "igvfr_086-04.mm39.minus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.plus.inosine.filtered.bed", "name": "igvfr_086-04.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.plus.m5C.filtered.bed", "name": "igvfr_086-04.mm39.plus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.plus.m6A.filtered.bed", "name": "igvfr_086-04.mm39.plus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.plus.bed", "name": "igvfr_086-04.mm39.plus.bed", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"igvfr_086-04\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}, {\"Sample\": \"igvfr_086-04\", \"Genome\": \"mm39\", \"Modification\": \"m5C\", \"Chromosome\": \"chr1\", \"Count\": 5}, {\"Sample\": \"igvfr_086-04\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 11}], \"row_count\": 3, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_086-04", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                    {"Sample": "igvfr_086-04", "Genome": "mm39", "Modification": "m5C", "Chromosome": "chr1", "Count": 5},
+                    {"Sample": "igvfr_086-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                ],
+                "row_count": 3,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "I will inspect the workflow outputs first.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow_root}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "Show me the modification summary",
+            skill="run_dogme_rna",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow_dir / "igvfr_086-04.mm39.minus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_086-04.mm39.minus.m5C.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_086-04.mm39.minus.m6A.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_086-04.mm39.plus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_086-04.mm39.plus.m5C.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_086-04.mm39.plus.m6A.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
+        data = resp.json()
+        payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        dfs = payload.get("_dataframes", {})
+        assert "Modification totals" in dfs
+        assert dfs["Modification totals"]["row_count"] == 3
+
+    def test_modification_summary_uses_active_workflow_from_cached_state(self, SL, seed, tmp_path):
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow1_root = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow1")
+        workflow1_dir = workflow1_root / "bedMethyl"
+        workflow2_root = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow2")
+
+        s = SL()
+        blocks = [
+            ProjectBlock(
+                id=str(uuid.uuid4()),
+                project_id="proj-plot",
+                owner_id="u-plot",
+                seq=1,
+                type="EXECUTION_JOB",
+                status="DONE",
+                payload_json=json.dumps({
+                    "work_directory": str(workflow1_root),
+                    "run_uuid": "run-igvfr-698-04",
+                    "sample_name": "igvfr_698-04",
+                    "mode": "RNA",
+                }),
+            ),
+            ProjectBlock(
+                id=str(uuid.uuid4()),
+                project_id="proj-plot",
+                owner_id="u-plot",
+                seq=2,
+                type="EXECUTION_JOB",
+                status="DONE",
+                payload_json=json.dumps({
+                    "work_directory": str(workflow2_root),
+                    "run_uuid": "run-igvfr-086-04",
+                    "sample_name": "igvfr_086-04",
+                    "mode": "RNA",
+                }),
+            ),
+            ProjectBlock(
+                id=str(uuid.uuid4()),
+                project_id="proj-plot",
+                owner_id="u-plot",
+                seq=3,
+                type="AGENT_PLAN",
+                status="DONE",
+                payload_json=json.dumps({
+                    "markdown": f"Switched active workflow to workflow1 ({workflow1_root}).",
+                    "state": {
+                        "active_skill": "run_dogme_rna",
+                        "work_dir": str(workflow1_root),
+                        "workflow_key": "dogme",
+                        "sample_name": "igvfr_698-04",
+                        "sample_type": "RNA",
+                        "active_workflow_index": 0,
+                        "workflows": [
+                            {
+                                "work_dir": str(workflow1_root),
+                                "run_uuid": "run-igvfr-698-04",
+                                "sample_name": "igvfr_698-04",
+                                "mode": "RNA",
+                                "workflow_key": "dogme",
+                            },
+                            {
+                                "work_dir": str(workflow2_root),
+                                "run_uuid": "run-igvfr-086-04",
+                                "sample_name": "igvfr_086-04",
+                                "mode": "RNA",
+                                "workflow_key": "dogme",
+                            },
+                        ],
+                    },
+                }),
+            ),
+        ]
+        for block in blocks:
+            s.add(block)
+        s.commit()
+        s.close()
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                assert kwargs in (
+                    {
+                        "work_dir": str(workflow1_dir),
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                    {
+                        "run_uuid": "run-igvfr-698-04",
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                )
+                return {
+                    "success": True,
+                    "work_dir": str(workflow1_dir),
+                    "file_count": 7,
+                    "files": [
+                        {"path": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m5C.filtered.bed", "name": "igvfr_698-04.mm39.minus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m5C.filtered.bed", "name": "igvfr_698-04.mm39.plus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.bed", "name": "igvfr_698-04.mm39.plus.bed", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m5C\", \"Chromosome\": \"chr1\", \"Count\": 5}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 11}], \"row_count\": 3, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m5C", "Chromosome": "chr1", "Count": 5},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                ],
+                "row_count": 3,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "I will inspect the workflow outputs first.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow2_root}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "Show me the modification summary",
+            skill="run_dogme_rna",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow1_dir / "igvfr_698-04.mm39.minus.inosine.filtered.bed").resolve()),
+                str((workflow1_dir / "igvfr_698-04.mm39.minus.m5C.filtered.bed").resolve()),
+                str((workflow1_dir / "igvfr_698-04.mm39.minus.m6A.filtered.bed").resolve()),
+                str((workflow1_dir / "igvfr_698-04.mm39.plus.inosine.filtered.bed").resolve()),
+                str((workflow1_dir / "igvfr_698-04.mm39.plus.m5C.filtered.bed").resolve()),
+                str((workflow1_dir / "igvfr_698-04.mm39.plus.m6A.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
+
+    def test_plural_modifications_summary_for_workflow1_chains_bed_counter(self, SL, seed, tmp_path):
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_root = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow1")
+        workflow_dir = workflow_root / "bedMethyl"
+
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="EXECUTION_JOB",
+            status="FAILED",
+            payload_json=json.dumps({
+                "work_directory": str(workflow_root),
+                "run_uuid": "run-igvfr-698-04",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                assert kwargs in (
+                    {
+                        "work_dir": str(workflow_dir),
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                    {
+                        "run_uuid": "run-igvfr-698-04",
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                )
+                return {
+                    "success": True,
+                    "work_dir": str(workflow_dir),
+                    "file_count": 7,
+                    "files": [
+                        {"path": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m5C.filtered.bed", "name": "igvfr_698-04.mm39.minus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m5C.filtered.bed", "name": "igvfr_698-04.mm39.plus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.Nm.filtered.bed", "name": "igvfr_698-04.mm39.plus.Nm.filtered.bed", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m5C\", \"Chromosome\": \"chr1\", \"Count\": 5}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 11}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"Nm\", \"Chromosome\": \"chr1\", \"Count\": 3}], \"row_count\": 4, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m5C", "Chromosome": "chr1", "Count": 5},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "Nm", "Chromosome": "chr1", "Count": 3},
+                ],
+                "row_count": 4,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "I will inspect the workflow files first.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow_root}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "show me the modifications summary for workflow1",
+            skill="run_dogme_rna",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow_dir / "igvfr_698-04.mm39.minus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.minus.m5C.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.minus.m6A.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.Nm.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.m5C.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.m6A.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
+
+    def test_modkit_summary_from_generic_skill_overrides_and_chains_bed_counter(self, SL, seed, tmp_path):
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_root = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow1")
+        workflow_dir = workflow_root / "bedMethyl"
+
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="EXECUTION_JOB",
+            status="DONE",
+            payload_json=json.dumps({
+                "work_directory": str(workflow_root),
+                "run_uuid": "run-igvfr-698-04",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                assert kwargs in (
+                    {
+                        "work_dir": str(workflow_dir),
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                    {
+                        "run_uuid": "run-igvfr-698-04",
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                )
+                return {
+                    "success": True,
+                    "work_dir": str(workflow_dir),
+                    "file_count": 4,
+                    "files": [
+                        {"path": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 11}], \"row_count\": 2, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                ],
+                "row_count": 2,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "I will inspect the workflow outputs first.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow_root}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "show me the modkit summary for workflow1",
+            skill="welcome",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow_dir / "igvfr_698-04.mm39.minus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.minus.m6A.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.m6A.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
+
 
 # ===========================================================================
 # DF Inspection Quick Commands (list dfs / head DF)

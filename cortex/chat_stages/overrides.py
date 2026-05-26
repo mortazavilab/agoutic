@@ -21,6 +21,12 @@ from cortex.remote_orchestration import (
 logger = get_logger(__name__)
 
 PRIORITY = 800
+_WORKFLOW_ANALYSIS_SKILLS = {
+    "run_dogme_dna",
+    "run_dogme_rna",
+    "run_dogme_cdna",
+    "analyze_job_results",
+}
 
 
 def _suppress_all_tags(ctx: ChatContext) -> None:
@@ -140,14 +146,29 @@ class OverrideDetectionStage:
                            calls=len(ctx.auto_calls))
             return
 
-        # ── Auto-generate / hallucination guard ───────────────────────
-        if not ctx.has_any_tags and (not ctx.injected_previous_data or ctx.injected_was_capped):
-            ctx.auto_calls = _auto_generate_data_calls(
+        _generated_calls = []
+        _can_auto_generate = not ctx.injected_previous_data or ctx.injected_was_capped
+        if _can_auto_generate:
+            _generated_calls = _auto_generate_data_calls(
                 ctx.message, ctx.active_skill, ctx.conversation_history,
                 history_blocks=ctx.history_blocks,
                 project_dir=ctx.project_dir,
                 project_id=ctx.project_id,
             )
+            if _should_override_generic_workflow_summary_tags(ctx, _generated_calls):
+                _suppress_all_tags(ctx)
+                ctx.auto_calls = _generated_calls
+                ctx.clean_markdown = ""
+                logger.warning(
+                    "Workflow-analysis override: replacing generic summary tags with specific auto-generated calls",
+                    skill=ctx.active_skill,
+                    calls=len(ctx.auto_calls),
+                )
+                return
+
+        # ── Auto-generate / hallucination guard ───────────────────────
+        if not ctx.has_any_tags and _can_auto_generate:
+            ctx.auto_calls = _generated_calls
             if ctx.auto_calls:
                 logger.warning("LLM failed to generate DATA_CALL tags, auto-generating",
                                count=len(ctx.auto_calls), skill=ctx.active_skill)
@@ -243,6 +264,28 @@ def _format_size(sz: int) -> str:
     if sz > 0:
         return f"{sz / 1024:.0f} KB"
     return "—"
+
+
+def _should_override_generic_workflow_summary_tags(ctx: ChatContext, auto_calls: list[dict]) -> bool:
+    if not ctx.has_any_tags or not auto_calls:
+        return False
+    if ctx.legacy_encode_matches:
+        return False
+
+    auto_tools = [
+        call.get("tool")
+        for call in auto_calls
+        if call.get("source_key") == "analyzer"
+    ]
+    if not auto_tools or all(tool == "get_analysis_summary" for tool in auto_tools):
+        return False
+
+    llm_tools = [match.group(3) for match in ctx.data_call_matches]
+    llm_tools.extend(match.group(1) for match in ctx.legacy_analysis_matches)
+    if not llm_tools:
+        return False
+
+    return all(tool == "get_analysis_summary" for tool in llm_tools)
 
 
 def _validate_referential_accessions(ctx: ChatContext) -> None:

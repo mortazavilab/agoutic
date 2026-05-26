@@ -104,6 +104,50 @@ class TestExtractJobContext:
         assert ctx["run_uuid"] == "uuid-2"
         assert len(ctx["workflows"]) == 2
 
+    def test_newer_cached_active_workflow_overrides_latest_execution_job(self):
+        blocks = [
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow1",
+                "run_uuid": "uuid-1",
+                "sample_name": "s1",
+                "mode": "RNA",
+            }),
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow2",
+                "run_uuid": "uuid-2",
+                "sample_name": "s2",
+                "mode": "RNA",
+            }),
+            _make_block("AGENT_PLAN", {
+                "state": {
+                    "work_dir": "/data/proj/workflow1",
+                    "active_workflow_index": 0,
+                    "workflows": [
+                        {
+                            "work_dir": "/data/proj/workflow1",
+                            "run_uuid": "uuid-1",
+                            "sample_name": "s1",
+                            "mode": "RNA",
+                            "workflow_key": "dogme",
+                        },
+                        {
+                            "work_dir": "/data/proj/workflow2",
+                            "run_uuid": "uuid-2",
+                            "sample_name": "s2",
+                            "mode": "RNA",
+                            "workflow_key": "dogme",
+                        },
+                    ],
+                },
+            }),
+        ]
+
+        ctx = _extract_job_context_from_history(None, history_blocks=blocks)
+
+        assert ctx["work_dir"] == "/data/proj/workflow1"
+        assert ctx["run_uuid"] == "uuid-1"
+        assert len(ctx["workflows"]) == 2
+
     def test_fallback_text_uuid(self):
         history = _history([
             ("assistant", "Job submitted! Run UUID: 12345678-1234-1234-1234-123456789abc"),
