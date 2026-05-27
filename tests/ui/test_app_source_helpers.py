@@ -688,6 +688,54 @@ class TestProjectAccessUiHelpers:
         assert any("**editor@example.com**" in line and "Editor · You" in line and "Active now" in line for line in lines[1:])
 
 
+class TestProjectsPageCollaboratorSummary:
+    def test_owner_sees_count_and_list_when_project_is_shared(self):
+        fn = _load_projects_page_function("_project_page_collaborator_summary")
+
+        result = fn(
+            can_manage=True,
+            collaborators=[
+                {"email": "owner@example.com", "role": "owner", "is_owner": True},
+                {"email": "editor@example.com", "role": "editor", "is_owner": False},
+                {"email": "viewer@example.com", "role": "viewer", "is_owner": False},
+            ],
+        )
+
+        assert result == {
+            "count": 2,
+            "label": "Shared with 2 collaborators",
+            "lines": [
+                "editor@example.com · Editor",
+                "viewer@example.com · Viewer",
+            ],
+        }
+
+    def test_owner_hides_count_when_no_non_owner_collaborators_exist(self):
+        fn = _load_projects_page_function("_project_page_collaborator_summary")
+
+        result = fn(
+            can_manage=True,
+            collaborators=[
+                {"email": "owner@example.com", "role": "owner", "is_owner": True},
+            ],
+        )
+
+        assert result is None
+
+    def test_non_owner_hides_count_and_list(self):
+        fn = _load_projects_page_function("_project_page_collaborator_summary")
+
+        result = fn(
+            can_manage=False,
+            collaborators=[
+                {"email": "owner@example.com", "role": "owner", "is_owner": True},
+                {"email": "editor@example.com", "role": "editor", "is_owner": False},
+            ],
+        )
+
+        assert result is None
+
+
 class TestStagingBlockNeedsRefresh:
     def test_running_block_refreshes_quickly_without_transfer_snapshot(self):
         fn = _load_block_part2_function(

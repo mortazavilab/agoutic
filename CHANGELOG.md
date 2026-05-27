@@ -8,6 +8,8 @@
 
 - **Chat now supports deterministic `list users` / `list collaborators` prompts and a sidebar shortcut to display the current project roster with role and recent-activity labels, so all collaborators can see who is in the project at a glance without sending requests through the model**
 
+- **Project pages now show an owner/admin-only collaborator count and compact collaborator list at the top of the detail view, so shared-project membership is visible without scrolling into the Collaborators tab**
+
 ### Documentation
 
 - **Updated the main README to describe the shipped collaboration model, including owner/editor/viewer behavior, chat-driven sharing, Projects-page collaborator management, and viewer read-only UI gating**

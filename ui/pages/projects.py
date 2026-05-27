@@ -95,6 +95,29 @@ def _status_badge(status: str) -> str:
         "DELETED": "🗑️ Deleted",
     }.get(normalized, f"❓ {normalized.title()}")
 
+
+def _project_page_collaborator_summary(*, can_manage: bool, collaborators: list[dict] | None) -> dict | None:
+    if not can_manage:
+        return None
+
+    visible_collaborators = [
+        collaborator
+        for collaborator in (collaborators or [])
+        if not collaborator.get("is_owner")
+    ]
+    if not visible_collaborators:
+        return None
+
+    count = len(visible_collaborators)
+    return {
+        "count": count,
+        "label": f"Shared with {count} collaborator" + ("s" if count != 1 else ""),
+        "lines": [
+            f"{str(collaborator.get('email') or '—')} · {str(collaborator.get('role') or 'viewer').title()}"
+            for collaborator in visible_collaborators
+        ],
+    }
+
 # ── Disk Usage Summary ───────────────────────────────────────────────
 try:
     disk_resp = make_authenticated_request("GET", f"{API_URL}/user/disk-usage", timeout=5)
@@ -346,6 +369,24 @@ selected_access_label = _project_membership_label(selected_project)
 selected_can_manage = _project_can_manage_collaborators(selected_project, user)
 selected_can_mutate = _project_can_mutate(selected_project, user)
 _current_active_project = st.session_state.get("active_project_id")
+selected_collaborators: list[dict] = []
+selected_collaborators_error: str | None = None
+
+try:
+    selected_collab_resp = make_authenticated_request(
+        "GET", f"{API_URL}/projects/{selected_id}/collaborators", timeout=5
+    )
+    if selected_collab_resp.status_code == 200:
+        selected_collaborators = selected_collab_resp.json().get("collaborators", [])
+    else:
+        selected_collaborators_error = f"Could not load collaborators ({selected_collab_resp.status_code})"
+except Exception as e:
+    selected_collaborators_error = f"Error: {e}"
+
+selected_collaborator_summary = _project_page_collaborator_summary(
+    can_manage=selected_can_manage,
+    collaborators=selected_collaborators,
+)
 
 if _current_active_project == selected_id:
     st.info(f"Active chat project: {selected_project_name}")
@@ -360,6 +401,13 @@ status_chip(
     label=selected_access_label,
     icon="🏠" if selected_project.get("role") == "owner" else "🤝",
 )
+
+if selected_collaborator_summary:
+    with st.expander(selected_collaborator_summary["label"], expanded=True):
+        st.caption("Visible here so shared-project membership is easy to scan.")
+        for line in selected_collaborator_summary["lines"]:
+            st.caption(line)
+        st.caption("Manage access in the Collaborators tab below.")
 
 switch_col, chat_col = st.columns(2)
 with switch_col:
@@ -638,13 +686,10 @@ with tab_convos:
 # ── Collaborators Tab ───────────────────────────────────────────────
 with tab_collabs:
     try:
-        collab_resp = make_authenticated_request(
-            "GET", f"{API_URL}/projects/{selected_id}/collaborators", timeout=5
-        )
-        if collab_resp.status_code != 200:
-            st.warning(f"Could not load collaborators ({collab_resp.status_code})")
+        if selected_collaborators_error:
+            st.warning(selected_collaborators_error)
         else:
-            collaborators = collab_resp.json().get("collaborators", [])
+            collaborators = selected_collaborators
             active_now_count = sum(
                 1
                 for collaborator in collaborators
