@@ -16,6 +16,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import require_auth, make_authenticated_request
 from components.cards import section_header, stat_tile, empty_state, status_chip
+from appui_state import (
+    _collaborator_activity_status,
+    _project_can_manage_collaborators,
+    _project_can_mutate,
+    _project_membership_label,
+    _shared_project_activity_warning,
+)
 
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 
@@ -203,6 +210,7 @@ for p in filtered:
         "Archive": False,
         "Delete": False,
         "Name": p.get("name", "—"),
+        "Access": _project_membership_label(p),
         "Jobs": p.get("job_count") if p.get("job_count") is not None else 0,
         "Size (MB)": disk_mb,
         "Messages": msg_count,
@@ -212,6 +220,8 @@ for p in filtered:
         "Last Active": last_active or "—",
         "Status": "🗄️ Archived" if p.get("is_archived") else "Active",
         "_id": pid,
+        "_can_manage": _project_can_manage_collaborators(p, user),
+        "_can_mutate": _project_can_mutate(p, user),
     })
 
 # ── Editable project table ───────────────────────────────────────────
@@ -221,13 +231,14 @@ if rows:
     df = pd.DataFrame(rows)
 
     edited_df = st.data_editor(
-        df.drop(columns=["_id"]),
+        df.drop(columns=["_id", "_can_manage", "_can_mutate"]),
         width="stretch",
         hide_index=True,
         column_config={
             "Archive": st.column_config.CheckboxColumn("🗄️ Archive", default=False),
             "Delete": st.column_config.CheckboxColumn("🗑️ Delete", default=False),
             "Name": st.column_config.TextColumn("Name", disabled=True),
+            "Access": st.column_config.TextColumn("Access", disabled=True),
             "Jobs": st.column_config.NumberColumn("Jobs", disabled=True),
             "Size (MB)": st.column_config.NumberColumn("Size (MB)", format="%.2f", disabled=True),
             "Messages": st.column_config.NumberColumn("Messages", disabled=True),
@@ -241,8 +252,13 @@ if rows:
     )
 
     # Gather selected IDs from the checkboxes
-    archive_ids = [rows[i]["_id"] for i in range(len(rows)) if edited_df.iloc[i]["Archive"]]
-    delete_ids = [rows[i]["_id"] for i in range(len(rows)) if edited_df.iloc[i]["Delete"]]
+    archive_ids = [rows[i]["_id"] for i in range(len(rows)) if edited_df.iloc[i]["Archive"] and rows[i]["_can_manage"]]
+    delete_ids = [rows[i]["_id"] for i in range(len(rows)) if edited_df.iloc[i]["Delete"] and rows[i]["_can_manage"]]
+    blocked_archive_ids = [rows[i]["_id"] for i in range(len(rows)) if edited_df.iloc[i]["Archive"] and not rows[i]["_can_manage"]]
+    blocked_delete_ids = [rows[i]["_id"] for i in range(len(rows)) if edited_df.iloc[i]["Delete"] and not rows[i]["_can_manage"]]
+
+    if blocked_archive_ids or blocked_delete_ids:
+        st.warning("Archive and permanent delete are owner/admin-only project controls. Shared collaborators can view those projects but cannot perform those actions.")
 
     # Action buttons
     if archive_ids or delete_ids:
@@ -311,36 +327,53 @@ st.divider()
 section_header("Project Details", "Inspect project stats, jobs, files, and conversations", icon="🔎")
 
 # Choose which project to inspect
-proj_options = {p.get("name", p.get("id", "?")): p.get("id") for p in filtered}
+proj_options = {
+    f"{p.get('name', p.get('id', '?'))} · {_project_membership_label(p)}": p.get("id")
+    for p in filtered
+}
 if not proj_options:
     st.info("No projects match the filter.")
     st.stop()
 
 selected_name = st.selectbox("Select project", list(proj_options.keys()))
 selected_id = proj_options[selected_name]
+selected_project = next(
+    (project for project in filtered if project.get("id") == selected_id),
+    {"id": selected_id, "name": selected_name, "role": "viewer"},
+)
+selected_project_name = selected_project.get("name", selected_name)
+selected_access_label = _project_membership_label(selected_project)
+selected_can_manage = _project_can_manage_collaborators(selected_project, user)
+selected_can_mutate = _project_can_mutate(selected_project, user)
 _current_active_project = st.session_state.get("active_project_id")
 
 if _current_active_project == selected_id:
-    st.info(f"Active chat project: {selected_name}")
+    st.info(f"Active chat project: {selected_project_name}")
 else:
     st.caption(
         "Selected project is not the current chat project. "
         "Use the actions below to switch safely without opening appUI first."
     )
 
+status_chip(
+    "info" if (selected_project.get("role") == "owner" or user.get("role") == "admin") else "warning",
+    label=selected_access_label,
+    icon="🏠" if selected_project.get("role") == "owner" else "🤝",
+)
+
 switch_col, chat_col = st.columns(2)
 with switch_col:
     if st.button("📌 Set Active Project", width="stretch"):
-        _set_active_project(selected_id, selected_name)
+        _set_active_project(selected_id, selected_project_name)
 with chat_col:
     if st.button("💬 Open This Project In Chat", width="stretch"):
-        _set_active_project(selected_id, selected_name, open_chat=True)
+        _set_active_project(selected_id, selected_project_name, open_chat=True)
 
 # Quick actions row
 act1, act2 = st.columns(2)
 with act1:
-    new_name = st.text_input("Rename", value=selected_name, key="rename_input")
-    if new_name != selected_name and st.button("✏️ Save name"):
+    new_name = st.text_input("Rename", value=selected_project_name, key="rename_input")
+    if new_name != selected_project_name and st.button("✏️ Save name", disabled=not selected_can_manage):
         try:
             r = make_authenticated_request(
                 "PATCH",
@@ -381,8 +414,8 @@ with act2:
         st.rerun()
 
 # Tabs for detail views
-tab_stats, tab_jobs, tab_files, tab_convos = st.tabs(
-    ["📈 Stats", "🧪 Jobs", "📂 Files", "💬 Conversations"]
+tab_stats, tab_jobs, tab_files, tab_convos, tab_collabs = st.tabs(
+    ["📈 Stats", "🧪 Jobs", "📂 Files", "💬 Conversations", "🤝 Collaborators"]
 )
 
 # ── Stats Tab ────────────────────────────────────────────────────────
@@ -462,7 +495,7 @@ with tab_jobs:
 
                 # Cancel button for RUNNING jobs
                 running_jobs = [j for j in jobs if j.get("status") in ("RUNNING", "PENDING")]
-                if running_jobs:
+                if running_jobs and selected_can_mutate:
                     st.divider()
                     st.subheader("🛑 Cancel a Running Job")
                     cancel_options = {
@@ -486,7 +519,7 @@ with tab_jobs:
                             st.error(f"Error cancelling job: {_e}")
 
                 failed_jobs = [j for j in jobs if j.get("status") == "FAILED" and j.get("run_uuid")]
-                if failed_jobs:
+                if failed_jobs and selected_can_mutate:
                     st.divider()
                     st.subheader("🗑️ Delete a Failed Run")
                     failed_options = {
@@ -599,6 +632,110 @@ with tab_convos:
                 st.info("No conversations in this project yet.")
         else:
             st.warning(f"Could not load conversations ({conv_resp.status_code})")
+    except Exception as e:
+        st.warning(f"Error: {e}")
+
+# ── Collaborators Tab ───────────────────────────────────────────────
+with tab_collabs:
+    try:
+        collab_resp = make_authenticated_request(
+            "GET", f"{API_URL}/projects/{selected_id}/collaborators", timeout=5
+        )
+        if collab_resp.status_code != 200:
+            st.warning(f"Could not load collaborators ({collab_resp.status_code})")
+        else:
+            collaborators = collab_resp.json().get("collaborators", [])
+            active_now_count = sum(
+                1
+                for collaborator in collaborators
+                if _collaborator_activity_status(collaborator)[0] == "active"
+            )
+            shared_warning = _shared_project_activity_warning(
+                collaborators,
+                user.get("id"),
+                selected_can_mutate,
+            )
+            st.caption(
+                f"Project roster: {len(collaborators)} member(s)"
+                + (f" · {active_now_count} active now" if active_now_count else "")
+            )
+            if shared_warning:
+                st.warning(shared_warning)
+
+            if selected_can_manage:
+                st.caption("Owner/admin can update roles or remove collaborators from this tab.")
+                with st.form(key=f"add_collaborator_{selected_id}"):
+                    collaborator_email = st.text_input("Collaborator email", placeholder="name@example.com")
+                    collaborator_role = st.selectbox("Role", ["viewer", "editor"], key=f"collab_add_role_{selected_id}")
+                    add_submit = st.form_submit_button("Add collaborator")
+
+                if add_submit:
+                    add_resp = make_authenticated_request(
+                        "POST",
+                        f"{API_URL}/projects/{selected_id}/collaborators",
+                        json={"email": collaborator_email, "role": collaborator_role},
+                        timeout=5,
+                    )
+                    if add_resp.status_code == 200:
+                        st.success(f"Added {collaborator_email} as {collaborator_role}.")
+                        st.rerun()
+                    else:
+                        st.error(add_resp.text)
+            else:
+                st.caption("Shared collaborators can see the full roster and recent activity here.")
+
+            if not collaborators:
+                st.info("No collaborators found for this project.")
+            else:
+                for collaborator in collaborators:
+                    collab_role = collaborator.get("role", "viewer")
+                    collab_email = collaborator.get("email", "—")
+                    collab_user_id = collaborator.get("user_id", "")
+                    activity_state, activity_label = _collaborator_activity_status(collaborator)
+                    role_label = "Owner" if collaborator.get("is_owner") else collab_role.title()
+                    if collab_user_id == user.get("id"):
+                        role_label = f"{role_label} · You"
+                    col_info, col_edit, col_remove = st.columns([3, 2, 1])
+                    with col_info:
+                        st.markdown(f"**{collab_email}**")
+                        st.caption(f"{role_label} · {activity_label}")
+                    if selected_can_manage and collab_role != "owner":
+                        with col_edit:
+                            next_role = st.selectbox(
+                                "Role",
+                                ["viewer", "editor"],
+                                index=0 if collab_role == "viewer" else 1,
+                                key=f"collab_role_{selected_id}_{collab_user_id}",
+                            )
+                            if st.button("Save", key=f"collab_save_{selected_id}_{collab_user_id}"):
+                                update_resp = make_authenticated_request(
+                                    "PATCH",
+                                    f"{API_URL}/projects/{selected_id}/collaborators/{collab_user_id}",
+                                    json={"role": next_role},
+                                    timeout=5,
+                                )
+                                if update_resp.status_code == 200:
+                                    st.success(f"Updated {collab_email} to {next_role}.")
+                                    st.rerun()
+                                else:
+                                    st.error(update_resp.text)
+                        with col_remove:
+                            if st.button("Remove", key=f"collab_remove_{selected_id}_{collab_user_id}"):
+                                delete_resp = make_authenticated_request(
+                                    "DELETE",
+                                    f"{API_URL}/projects/{selected_id}/collaborators/{collab_user_id}",
+                                    timeout=5,
+                                )
+                                if delete_resp.status_code == 200:
+                                    st.success(f"Removed {collab_email}.")
+                                    st.rerun()
+                                else:
+                                    st.error(delete_resp.text)
+                    else:
+                        with col_edit:
+                            st.caption(collab_role.title())
+                        with col_remove:
+                            st.caption("—")
     except Exception as e:
         st.warning(f"Error: {e}")
 

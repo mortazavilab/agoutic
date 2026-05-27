@@ -1,6 +1,20 @@
 ## [Unreleased]
 
+### Features
+
+- **Project owners can now share a project immediately with any existing approved AGOUTIC user by granting viewer or editor access, admins can manage collaborators for any project, and non-owner collaborators can leave a shared project without affecting the owner or other members**
+
+- **Project sharing is now exposed in the product UI: natural-language share requests in chat open a dedicated email-and-role form, the Projects page includes a Collaborators tab plus owned/shared project labels, and viewer-only collaborators now see the chat UI in a read-only mode that blocks uploads, chat submission, chat clearing, and other mutating project actions**
+
+- **Chat now supports deterministic `list users` / `list collaborators` prompts and a sidebar shortcut to display the current project roster with role and recent-activity labels, so all collaborators can see who is in the project at a glance without sending requests through the model**
+
+### Documentation
+
+- **Updated the main README to describe the shipped collaboration model, including owner/editor/viewer behavior, chat-driven sharing, Projects-page collaborator management, and viewer read-only UI gating**
+
 ### Bug Fixes
+
+- **Project conversations are now shared at the project level instead of being private to the user who created the thread: authorized project members can reopen shared conversation history and attach follow-up jobs to the same project conversation when their role allows it**
 
 - **Project-scoped collaboration hardening now applies the existing owner/editor/viewer RBAC consistently across shared conversations, project file surfaces, and analyzer/job access: collaborators with project membership can read project conversation history, editor-only mutations stay restricted, shared-project uploads/downloads resolve the project data directory through the canonical project owner while keeping each acting user's central data folder private, and run-level analyzer/job access now checks project membership before falling back to legacy direct job ownership**
 

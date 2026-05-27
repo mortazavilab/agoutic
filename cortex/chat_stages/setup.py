@@ -61,6 +61,9 @@ class SetupStage:
                     project_id=ctx.project_id,
                     project_name=_proj.name,
                     role="owner",
+                    invited_by=None,
+                    created_at=now,
+                    updated_at=now,
                     last_accessed=now,
                 )
                 _ensure_session.add(_acc)

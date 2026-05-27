@@ -17,11 +17,18 @@ from components.progress import stepper, segmented_progress, timeline, progress_
 from components.forms import review_panel, grouped_section
 from appui_state import (
     _auto_refresh_is_suppressed,
+    _collaborator_activity_status,
     _is_help_intent,
+    _is_list_users_intent,
+    _is_share_intent,
     _job_status_updated_at,
     _pause_auto_refresh,
+    _project_can_manage_collaborators,
+    _project_can_mutate,
+    _project_membership_label,
     _render_local_help_response,
     _render_profile_path_template,
+    _shared_project_activity_warning,
     _slugify_project_name,
 )
 from appui_tasks import (
@@ -52,7 +59,7 @@ from appui_services import (
     launchpad_headers as _launchpad_headers_impl,
 )
 from appui_sidebar import render_sidebar
-from appui_chat_runtime import handle_active_chat, launch_chat_request, render_file_upload
+from appui_chat_runtime import handle_active_chat, launch_chat_request, render_file_upload, render_project_collaborator_list, render_project_share_form
 from appui_block_part1 import render_block_part1
 from appui_block_part2 import render_block_part2
 
@@ -243,6 +250,17 @@ def _project_scope_mount_key(scope_name: str, project_id: str) -> str:
     scope_token = (scope_name or "scope").strip() or "scope"
     project_token = (project_id or "none").strip() or "none"
     return f"{scope_token}_project_scope_{project_token}"
+
+
+def _current_project_record(project_id: str) -> dict:
+    for project in st.session_state.get("_cached_projects", []):
+        if project.get("id") == project_id:
+            return project
+    return {
+        "id": project_id,
+        "name": _resolved_page_project_name() or project_id,
+        "role": "viewer",
+    }
 
 
 def _finish_project_switch_loading(active_project_id: str) -> None:
@@ -613,6 +631,10 @@ _known_project_name = _resolved_page_project_name()
 if _known_project_name:
     st.session_state["_page_project_name"] = _known_project_name
 _active_project_name = _known_project_name or (active_id[:12] + "…")
+_active_project = _current_project_record(active_id)
+_can_mutate_active_project = _project_can_mutate(_active_project, user)
+_can_manage_active_collaborators = _project_can_manage_collaborators(_active_project, user)
+_active_project_access_label = _project_membership_label(_active_project)
 
 # Determine whether the page is in a transient project-switch state.
 _auto_refresh_suppressed = _auto_refresh_is_suppressed()
@@ -785,7 +807,42 @@ with st.container(key=_project_scope_mount_key("project_panel", active_id)):
         f"<script>window.parent.document.title = {json.dumps(_browser_page_title(_known_project_name))};</script>",
         height=0,
     )
+    _active_project_collaborators = []
+    try:
+        _collab_resp = make_authenticated_request(
+            "GET", f"{API_URL}/projects/{active_id}/collaborators", timeout=5
+        )
+        if _collab_resp.status_code == 200:
+            _payload = _collab_resp.json() or {}
+            if isinstance(_payload, dict):
+                _active_project_collaborators = _payload.get("collaborators", []) or []
+    except Exception:
+        _active_project_collaborators = []
+
+    _shared_activity_warning = _shared_project_activity_warning(
+        _active_project_collaborators,
+        user.get("id"),
+        _can_mutate_active_project,
+    )
+    _other_active_now = sum(
+        1
+        for collaborator in _active_project_collaborators
+        if str(collaborator.get("user_id") or "").strip() != str(user.get("id") or "").strip()
+        and _collaborator_activity_status(collaborator)[0] == "active"
+    )
     st.title(f"🧬 {_active_project_name}")
+    status_chip(
+        "info" if (_active_project.get("role") == "owner" or user.get("role") == "admin") else "warning",
+        label=_active_project_access_label,
+        icon="🏠" if _active_project.get("role") == "owner" else "🤝",
+    )
+    if _active_project_collaborators:
+        st.caption(
+            f"Project collaborators: {len(_active_project_collaborators)} total"
+            + (f" · {_other_active_now} other active now" if _other_active_now else "")
+        )
+    if _shared_activity_warning:
+        st.warning(_shared_activity_warning)
     project_loading_slot = st.empty()
     if _project_switch_loading:
         with project_loading_slot.container():
@@ -833,7 +890,8 @@ def _render_task_dock():
 # of those paths — and persist immediately so neither a bootstrap rerun nor
 # an active-chat rerun can lose the user's prompt.
 _queued_help_prompt = st.session_state.pop("_help_prompt", None)
-_captured_prompt = _queued_help_prompt or st.chat_input("Ask Agoutic to do something...")
+_chat_prompt_placeholder = "Ask Agoutic to do something..." if _can_mutate_active_project else "Viewer access is read-only in this shared project."
+_captured_prompt = _queued_help_prompt or st.chat_input(_chat_prompt_placeholder, disabled=not _can_mutate_active_project)
 if _captured_prompt and not st.session_state.get("_pending_prompt"):
     st.session_state["_pending_prompt"] = _captured_prompt
 
@@ -858,10 +916,22 @@ _finish_project_switch_loading(active_id)
 st.write("---")
 
 # 2.5 File Upload (expandable)
-render_file_upload(api_url=API_URL, active_id=active_id, get_session_cookie_fn=get_session_cookie)
+render_file_upload(
+    api_url=API_URL,
+    active_id=active_id,
+    get_session_cookie_fn=get_session_cookie,
+    disabled=not _can_mutate_active_project,
+    disabled_reason="Viewer access is read-only in this shared project.",
+)
 
 # --- Handle in-flight chat request (non-blocking polling with stop support) ---
 handle_active_chat(api_url=API_URL, active_project_id=active_id)
+render_project_share_form(
+    api_url=API_URL,
+    active_project=_active_project,
+    user=user,
+    get_session_cookie_fn=get_session_cookie,
+)
 
 # 3. Chat Input
 # The prompt was captured earlier (before bootstrap/active-chat reruns).
@@ -884,6 +954,43 @@ if prompt and prompt.strip().lower() in ("try again", "retry"):
         st.stop()
 
 if prompt:
+
+    if _is_list_users_intent(prompt):
+        st.session_state.pop("_pending_prompt", None)
+        render_project_collaborator_list(
+            prompt=prompt,
+            active_project=_active_project,
+            collaborators=_active_project_collaborators,
+            current_user_id=user.get("id"),
+            activity_status_fn=_collaborator_activity_status,
+        )
+        st.stop()
+
+    if _is_share_intent(prompt):
+        st.session_state.pop("_pending_prompt", None)
+        st.session_state.pop("_share_form_feedback", None)
+        if _can_manage_active_collaborators:
+            st.session_state["_pending_share_form"] = {
+                "project_id": active_id,
+                "project_name": _active_project_name,
+                "prompt": prompt,
+                "email": "",
+                "role": "viewer",
+                "error": None,
+            }
+        else:
+            st.session_state["_share_form_feedback"] = {
+                "project_id": active_id,
+                "status": "error",
+                "message": "Only the project owner or an admin can manage collaborators for this project.",
+            }
+        st.rerun()
+
+    if not _can_mutate_active_project:
+        st.session_state.pop("_pending_prompt", None)
+        with st.chat_message("assistant"):
+            st.info("Viewer access is read-only in this shared project. Chat submission, uploads, and other mutating actions are disabled.")
+        st.stop()
 
     with st.chat_message("user"):
         st.write(prompt)

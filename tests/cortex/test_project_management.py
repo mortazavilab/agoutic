@@ -489,7 +489,7 @@ class TestUploadFiles:
         with patch("cortex.routes.files._resolve_user_and_project",
                    return_value=("testuser", "upload-proj", pdir)), \
              patch("cortex.routes.files.get_user_data_dir", return_value=central), \
-             patch("cortex.routes.files.create_project_file_symlink",
+             patch("cortex.routes.files._create_project_data_symlink",
                    return_value=pdir / "data" / "test.txt"), \
              patch("cortex.app._post_download_suggestions", new_callable=AsyncMock), \
              patch("cortex.routes.files._post_download_suggestions", new_callable=AsyncMock):
@@ -633,7 +633,7 @@ class TestConversationMessages:
         assert len(body["messages"]) == 1
         assert body["messages"][0]["content"] == "hello"
 
-    def test_get_messages_wrong_user(self, setup):
+    def test_get_messages_allows_project_owner_for_conversation_created_by_other_user(self, setup):
         engine, SL, data, client = setup
         s = SL()
         cid = str(uuid.uuid4())
@@ -647,7 +647,7 @@ class TestConversationMessages:
         s.close()
 
         resp = client.get(f"/conversations/{cid}/messages")
-        assert resp.status_code in (403, 404)
+        assert resp.status_code == 200
 
 
 # ===========================================================================

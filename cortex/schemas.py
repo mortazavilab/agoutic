@@ -257,6 +257,51 @@ class StageStatusResponse(BaseModel):
     manifest_relative_path: str
 
 
+# ==================== Project Collaborator Schemas ====================
+
+class ProjectCollaboratorOut(BaseModel):
+    user_id: str
+    email: str
+    display_name: Optional[str] = None
+    username: Optional[str] = None
+    role: Literal["owner", "editor", "viewer"]
+    invited_by: Optional[str] = None
+    invited_by_email: Optional[str] = None
+    created_at: str
+    updated_at: str
+    last_accessed: str
+    is_owner: bool = False
+
+
+class ProjectCollaboratorListOut(BaseModel):
+    project_id: str
+    owner_id: str
+    collaborators: list[ProjectCollaboratorOut] = Field(default_factory=list)
+
+
+class ProjectCollaboratorCreateRequest(BaseModel):
+    email: str
+    role: Literal["viewer", "editor"]
+
+
+class ProjectCollaboratorUpdateRequest(BaseModel):
+    role: Literal["viewer", "editor"]
+
+
+class ProjectCollaboratorMutationOut(BaseModel):
+    status: str
+    project_id: str
+    user_id: str
+    email: str
+    role: Literal["owner", "editor", "viewer"]
+
+
+class ProjectLeaveResponse(BaseModel):
+    status: str
+    project_id: str
+    user_id: str
+
+
 # ==================== Memory Schemas ====================
 
 class MemoryCreate(BaseModel):

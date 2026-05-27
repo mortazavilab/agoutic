@@ -2,6 +2,7 @@
 
 import ast
 import base64
+import contextlib
 import datetime as dt
 import json
 import os
@@ -550,6 +551,141 @@ class TestActiveChatIsolation:
         assert fake_st.session_state["_active_chat"]["project_id"] == "project-a"
         fake_st.chat_message.assert_not_called()
         fake_st.rerun.assert_not_called()
+
+
+class TestProjectAccessUiHelpers:
+    def test_current_project_record_prefers_cached_project(self):
+        fake_st = SimpleNamespace(
+            session_state={
+                "_cached_projects": [
+                    {"id": "proj-1", "name": "Shared RNA", "role": "viewer"}
+                ]
+            }
+        )
+        fn = _load_function(
+            "_current_project_record",
+            {"st": fake_st, "_resolved_page_project_name": lambda: ""},
+        )
+
+        result = fn("proj-1")
+
+        assert result["name"] == "Shared RNA"
+        assert result["role"] == "viewer"
+
+    def test_render_file_upload_skips_widgets_when_disabled(self):
+        _nullcontext = contextlib.nullcontext
+        fake_st = SimpleNamespace(
+            expander=lambda *args, **kwargs: _nullcontext(),
+            info=MagicMock(),
+            file_uploader=MagicMock(),
+            button=MagicMock(),
+        )
+        fn = _load_function("render_file_upload", {"st": fake_st})
+
+        fn(
+            api_url="http://api.test",
+            active_id="proj-1",
+            get_session_cookie_fn=lambda: None,
+            disabled=True,
+            disabled_reason="Viewer access is read-only in this shared project.",
+        )
+
+        fake_st.info.assert_called_once()
+        fake_st.file_uploader.assert_not_called()
+        fake_st.button.assert_not_called()
+
+    def test_share_success_message_includes_project_email_and_role(self):
+        fn = _load_function("_share_success_message")
+
+        message = fn("Shared RNA", "viewer@example.com", "viewer")
+
+        assert "Shared RNA" in message
+        assert "viewer@example.com" in message
+        assert "viewer" in message
+
+    def test_submit_share_request_falls_back_to_role_update_for_existing_collaborator(self):
+        create_resp = SimpleNamespace(
+            status_code=409,
+            text="duplicate",
+            json=lambda: {"detail": "That user already has project access. Use role update instead."},
+        )
+        list_resp = SimpleNamespace(
+            status_code=200,
+            text="ok",
+            json=lambda: {
+                "collaborators": [
+                    {"user_id": "user-42", "email": "viewer@example.com", "role": "viewer"}
+                ]
+            },
+        )
+        patch_resp = SimpleNamespace(
+            status_code=200,
+            text="ok",
+            json=lambda: {"status": "updated", "role": "editor"},
+        )
+        fake_requests = SimpleNamespace(
+            Response=object,
+            post=MagicMock(return_value=create_resp),
+            get=MagicMock(return_value=list_resp),
+            patch=MagicMock(return_value=patch_resp),
+        )
+        detail_fn = _load_function("_response_error_detail", {"requests": fake_requests})
+        match_fn = _load_function("_matching_collaborator_user_id")
+        submit_fn = _load_function(
+            "_submit_share_request",
+            {
+                "requests": fake_requests,
+                "_buffer_and_close_response": lambda response: response,
+                "_response_error_detail": detail_fn,
+                "_matching_collaborator_user_id": match_fn,
+            },
+        )
+
+        resp, action = submit_fn(
+            api_url="http://api.test",
+            project_id="proj-1",
+            email="viewer@example.com",
+            role="editor",
+            cookies={"session": "abc"},
+            timeout=10,
+        )
+
+        assert resp is patch_resp
+        assert action == "updated"
+        fake_requests.post.assert_called_once_with(
+            "http://api.test/projects/proj-1/collaborators",
+            json={"email": "viewer@example.com", "role": "editor"},
+            cookies={"session": "abc"},
+            timeout=10,
+        )
+        fake_requests.get.assert_called_once_with(
+            "http://api.test/projects/proj-1/collaborators",
+            cookies={"session": "abc"},
+            timeout=10,
+        )
+        fake_requests.patch.assert_called_once_with(
+            "http://api.test/projects/proj-1/collaborators/user-42",
+            json={"role": "editor"},
+            cookies={"session": "abc"},
+            timeout=10,
+        )
+
+    def test_format_project_collaborator_roster_includes_you_role_and_activity(self):
+        fn = _load_function("_format_project_collaborator_roster")
+
+        lines = fn(
+            "glu",
+            [
+                {"user_id": "owner-1", "email": "owner@example.com", "is_owner": True, "role": "owner", "last_accessed": "2026-05-27T21:29:00Z"},
+                {"user_id": "me", "email": "editor@example.com", "role": "editor", "last_accessed": "2026-05-27T21:28:00Z"},
+            ],
+            "me",
+            lambda collaborator: ("active", "Active now"),
+        )
+
+        assert lines[0] == "Users in **glu** (2):"
+        assert any("**owner@example.com**" in line and "Owner" in line for line in lines[1:])
+        assert any("**editor@example.com**" in line and "Editor · You" in line and "Active now" in line for line in lines[1:])
 
 
 class TestStagingBlockNeedsRefresh:

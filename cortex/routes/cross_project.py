@@ -850,6 +850,9 @@ async def stage_files(
                 project_id=dest_project_id,
                 project_name=new_name,
                 role="owner",
+                invited_by=None,
+                created_at=now,
+                updated_at=now,
                 last_accessed=now,
             )
             session.add(access)

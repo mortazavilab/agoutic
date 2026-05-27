@@ -20,6 +20,33 @@ def _fetch_model_options(api_url: str, _request_fn) -> list[str]:
     return ["default"]
 
 
+def _project_membership_label(project: dict | None) -> str:
+    role = str((project or {}).get("role") or "").strip().lower()
+    if role == "owner":
+        return "Owned by me"
+    if role == "editor":
+        return "Shared with me · Editor"
+    if role == "viewer":
+        return "Shared with me · Viewer"
+    return "Shared with me"
+
+
+def _project_can_mutate(project: dict | None, user: dict | None = None) -> bool:
+    user_role = str((user or {}).get("role") or "").strip().lower()
+    if user_role == "admin":
+        return True
+    role = str((project or {}).get("role") or "").strip().lower()
+    return role in {"owner", "editor"}
+
+
+def _project_can_manage_collaborators(project: dict | None, user: dict | None = None) -> bool:
+    user_role = str((user or {}).get("role") or "").strip().lower()
+    if user_role == "admin":
+        return True
+    role = str((project or {}).get("role") or "").strip().lower()
+    return role == "owner"
+
+
 def render_sidebar(
     *,
     user: dict,
@@ -35,6 +62,11 @@ def render_sidebar(
     default_index = model_options.index("default") if "default" in model_options else 0
 
     with st.sidebar:
+        active_project_id = st.session_state.get("active_project_id")
+        active_project = next(
+            (project for project in st.session_state.get("_cached_projects", []) if project.get("id") == active_project_id),
+            None,
+        )
         st.title("🧬 AGOUTIC")
         st.caption(f"v{agoutic_version}")
 
@@ -89,6 +121,10 @@ def render_sidebar(
             st.caption("**Skills**")
             if st.button("/skills", key="help_prompt_skills", width="stretch"):
                 st.session_state["_help_prompt"] = "/skills"
+                st.rerun()
+            st.caption("**Project Sharing**")
+            if st.button("list users", key="help_prompt_list_users", width="stretch"):
+                st.session_state["_help_prompt"] = "list users"
                 st.rerun()
             st.caption("`/skill <skill_key>`  ·  `/use-skill <skill_key>`")
             st.caption("**Workflow Slash Commands**")
@@ -164,7 +200,10 @@ def render_sidebar(
 
         col_clear, col_refresh = st.columns(2)
         with col_clear:
-            if st.button("🗑️ Clear Chat", width="stretch"):
+            current_project = active_project or {"id": active_project_id}
+            can_mutate_current = _project_can_mutate(current_project, user)
+            clear_help = "Clear the current project's chat history" if can_mutate_current else "Viewer access is read-only for this shared project."
+            if st.button("🗑️ Clear Chat", width="stretch", disabled=not can_mutate_current, help=clear_help):
                 try:
                     resp = request_fn(
                         "DELETE",
@@ -193,6 +232,10 @@ def render_sidebar(
                 if proj_resp.status_code == 200:
                     user_projects = proj_resp.json().get("projects", [])
                     st.session_state["_cached_projects"] = user_projects
+                    active_project = next(
+                        (project for project in user_projects if project.get("id") == active_project_id),
+                        None,
+                    )
                     if user_projects:
                         st.caption(f"{len(user_projects)} project(s)")
 
@@ -217,6 +260,8 @@ def render_sidebar(
                             proj_slug = proj.get("slug", "")
                             is_current = proj_id == st.session_state.active_project_id
                             archive_confirm_id = st.session_state.get("_confirm_archive_project_id")
+                            access_label = _project_membership_label(proj)
+                            can_manage_project = _project_can_manage_collaborators(proj, user)
 
                             job_count = proj.get("job_count")
                             label_extra = f" · {job_count} job{'s' if job_count != 1 else ''}" if job_count else ""
@@ -227,13 +272,13 @@ def render_sidebar(
                                 slug_hint = f" `({proj_slug})`"
 
                             if is_current:
-                                st.info(f"📌 **{proj_name}**{slug_hint}{label_extra}")
+                                st.info(f"📌 **{proj_name}** · {access_label}{slug_hint}{label_extra}")
                             else:
                                 col_name, col_archive = st.columns([5, 1])
                                 with col_name:
                                     if archive_confirm_id == proj_id:
                                         st.warning(f"Archive {proj_name}?")
-                                    elif st.button(f"📂 {proj_name}{slug_hint}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
+                                    elif st.button(f"📂 {proj_name} · {access_label}{slug_hint}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
                                         st.session_state["_project_switch_loading_for"] = proj_id
                                         st.session_state.active_project_id = proj_id
                                         st.session_state["_page_project_name"] = proj.get("name", "")
@@ -252,7 +297,7 @@ def render_sidebar(
                                             pass
                                         st.rerun()
                                 with col_archive:
-                                    if archive_confirm_id == proj_id:
+                                    if archive_confirm_id == proj_id and can_manage_project:
                                         if st.button("✅", key=f"arch_yes_{proj_id}", help=f"Confirm archive '{proj_name}'"):
                                             pause_auto_refresh(4)
                                             try:
@@ -268,7 +313,7 @@ def render_sidebar(
                                         if st.button("✖", key=f"arch_no_{proj_id}", help="Cancel archive"):
                                             st.session_state.pop("_confirm_archive_project_id", None)
                                             st.rerun()
-                                    elif st.button("🗑", key=f"arch_{proj_id}", help=f"Archive '{proj_name}'"):
+                                    elif st.button("🗑", key=f"arch_{proj_id}", help=f"Archive '{proj_name}'", disabled=not can_manage_project):
                                         st.session_state["_confirm_archive_project_id"] = proj_id
                                         pause_auto_refresh(4)
                                         st.rerun()

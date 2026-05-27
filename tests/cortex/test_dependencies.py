@@ -264,7 +264,7 @@ class TestRequireRunUuidAccess:
         with patch("cortex.dependencies.SessionLocal", return_value=dep_session):
             require_run_uuid_access("run-shared", editor)
 
-    def test_direct_job_owner_still_passes_when_project_lookup_cannot_authorize(self, dep_session, user_in_db):
+    def test_direct_job_owner_without_project_membership_is_denied(self, dep_session, user_in_db):
         dep_session.add(
             DogmeJob(
                 run_uuid="run-legacy",
@@ -278,7 +278,9 @@ class TestRequireRunUuidAccess:
         dep_session.commit()
 
         with patch("cortex.dependencies.SessionLocal", return_value=dep_session):
-            require_run_uuid_access("run-legacy", user_in_db)
+            with pytest.raises(HTTPException) as exc:
+                require_run_uuid_access("run-legacy", user_in_db)
+            assert exc.value.status_code == 403
 
     def test_non_member_non_owner_is_denied(self, dep_session, project_in_db, user_in_db):
         stranger = User(

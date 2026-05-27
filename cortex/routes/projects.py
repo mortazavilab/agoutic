@@ -18,12 +18,29 @@ from sqlalchemy import select, desc, func, text
 import cortex.config as _cfg
 import cortex.db as _db
 import cortex.db_helpers as _dbh
-from cortex.dependencies import require_project_access
+from cortex.dependencies import require_project_access, require_project_owner_or_admin
 from cortex.models import (
     Project, ProjectAccess, ProjectBlock, Conversation,
     ConversationMessage, User,
 )
-from cortex.schemas import CrossProjectTaskListOut, ProjectTaskListOut, ProjectTaskOut, ProjectTaskUpdate
+from cortex.project_collaborators import (
+    create_project_collaborator,
+    leave_project,
+    list_project_collaborators,
+    remove_project_collaborator,
+    update_project_collaborator_role,
+)
+from cortex.schemas import (
+    CrossProjectTaskListOut,
+    ProjectCollaboratorCreateRequest,
+    ProjectCollaboratorListOut,
+    ProjectCollaboratorMutationOut,
+    ProjectCollaboratorUpdateRequest,
+    ProjectLeaveResponse,
+    ProjectTaskListOut,
+    ProjectTaskOut,
+    ProjectTaskUpdate,
+)
 from cortex.task_service import build_task_sections, sync_project_tasks, task_to_dict, update_task_action
 from common.logging_config import get_logger
 
@@ -152,6 +169,9 @@ async def create_project(req: ProjectCreateRequest, request: Request):
             project_id=project_id,
             project_name=req.name,
             role="owner",
+            invited_by=None,
+            created_at=now,
+            updated_at=now,
             last_accessed=now,
         )
         session.add(access)
@@ -228,6 +248,112 @@ async def list_projects(request: Request, include_archived: bool = False):
             })
 
         return {"projects": projects}
+    finally:
+        session.close()
+
+
+@router.get("/projects/{project_id}/collaborators", response_model=ProjectCollaboratorListOut)
+async def get_project_collaborators(project_id: str, request: Request):
+    """List collaborators for a project for any authorized project member."""
+    user = request.state.user
+    require_project_access(project_id, user, min_role="viewer")
+
+    session = _db.SessionLocal()
+    try:
+        project, collaborators = list_project_collaborators(session, project_id, user)
+        return {
+            "project_id": project.id,
+            "owner_id": project.owner_id,
+            "collaborators": collaborators,
+        }
+    finally:
+        session.close()
+
+
+@router.post("/projects/{project_id}/collaborators", response_model=ProjectCollaboratorMutationOut)
+async def add_project_collaborator(project_id: str, body: ProjectCollaboratorCreateRequest, request: Request):
+    """Grant immediate collaborator access to an existing approved AGOUTIC user."""
+    user = request.state.user
+    require_project_owner_or_admin(project_id, user)
+
+    session = _db.SessionLocal()
+    try:
+        _project, collaborator, access = create_project_collaborator(
+            session,
+            project_id,
+            user,
+            str(body.email),
+            body.role,
+        )
+        return {
+            "status": "created",
+            "project_id": project_id,
+            "user_id": collaborator.id,
+            "email": collaborator.email,
+            "role": access.role,
+        }
+    finally:
+        session.close()
+
+
+@router.patch("/projects/{project_id}/collaborators/{user_id}", response_model=ProjectCollaboratorMutationOut)
+async def patch_project_collaborator(project_id: str, user_id: str, body: ProjectCollaboratorUpdateRequest, request: Request):
+    """Update a collaborator role without changing project ownership."""
+    user = request.state.user
+    require_project_owner_or_admin(project_id, user)
+
+    session = _db.SessionLocal()
+    try:
+        _project, collaborator, access = update_project_collaborator_role(
+            session,
+            project_id,
+            user_id,
+            body.role,
+        )
+        return {
+            "status": "updated",
+            "project_id": project_id,
+            "user_id": collaborator.id,
+            "email": collaborator.email,
+            "role": access.role,
+        }
+    finally:
+        session.close()
+
+
+@router.delete("/projects/{project_id}/collaborators/{user_id}", response_model=ProjectCollaboratorMutationOut)
+async def delete_project_collaborator(project_id: str, user_id: str, request: Request):
+    """Remove a non-owner collaborator from the project."""
+    user = request.state.user
+    require_project_owner_or_admin(project_id, user)
+
+    session = _db.SessionLocal()
+    try:
+        _project, collaborator, removed_role = remove_project_collaborator(session, project_id, user_id)
+        return {
+            "status": "removed",
+            "project_id": project_id,
+            "user_id": collaborator.id,
+            "email": collaborator.email,
+            "role": removed_role,
+        }
+    finally:
+        session.close()
+
+
+@router.post("/projects/{project_id}/leave", response_model=ProjectLeaveResponse)
+async def leave_shared_project(project_id: str, request: Request):
+    """Allow a non-owner collaborator to remove their own membership."""
+    user = request.state.user
+
+    session = _db.SessionLocal()
+    try:
+        project, _access = leave_project(session, project_id, user)
+        return {
+            "status": "left",
+            "project_id": project.id,
+            "user_id": user.id,
+        }
     finally:
         session.close()
 

@@ -14,9 +14,129 @@ def _buffer_and_close_response(response: requests.Response) -> requests.Response
     return response
 
 
-def render_file_upload(*, api_url: str, active_id: str, get_session_cookie_fn):
+def _share_success_message(project_name: str, email: str, role: str) -> str:
+    target_name = (project_name or "this project").strip() or "this project"
+    return f"Shared **{target_name}** with **{email}** as **{role}**."
+
+
+def _response_error_detail(response: requests.Response) -> str:
+    error_detail = response.text
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            error_detail = payload.get("detail") or error_detail
+    except Exception:
+        pass
+    return error_detail
+
+
+def _matching_collaborator_user_id(collaborators: list[dict] | None, email: str) -> str | None:
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return None
+
+    for collaborator in collaborators or []:
+        candidate = str(collaborator.get("email") or "").strip().lower()
+        if candidate == normalized:
+            user_id = str(collaborator.get("user_id") or "").strip()
+            return user_id or None
+    return None
+
+
+def _submit_share_request(*, api_url: str, project_id: str, email: str, role: str, cookies: dict, timeout: int = 10) -> tuple[requests.Response, str]:
+    create_resp = _buffer_and_close_response(
+        requests.post(
+            f"{api_url}/projects/{project_id}/collaborators",
+            json={"email": email, "role": role},
+            cookies=cookies,
+            timeout=timeout,
+        )
+    )
+    error_detail = _response_error_detail(create_resp).lower()
+    if create_resp.status_code != 409 or "already has project access" not in error_detail:
+        return create_resp, "created"
+
+    collaborators_resp = _buffer_and_close_response(
+        requests.get(
+            f"{api_url}/projects/{project_id}/collaborators",
+            cookies=cookies,
+            timeout=timeout,
+        )
+    )
+    if collaborators_resp.status_code != 200:
+        return create_resp, "created"
+
+    collaborators_payload = collaborators_resp.json() if hasattr(collaborators_resp, "json") else {}
+    collaborator_user_id = _matching_collaborator_user_id(
+        collaborators_payload.get("collaborators", []) if isinstance(collaborators_payload, dict) else [],
+        email,
+    )
+    if not collaborator_user_id:
+        return create_resp, "created"
+
+    update_resp = _buffer_and_close_response(
+        requests.patch(
+            f"{api_url}/projects/{project_id}/collaborators/{collaborator_user_id}",
+            json={"role": role},
+            cookies=cookies,
+            timeout=timeout,
+        )
+    )
+    return update_resp, "updated"
+
+
+def _format_project_collaborator_roster(project_name: str, collaborators: list[dict] | None, current_user_id: str | None, activity_status_fn) -> list[str]:
+    target_name = (project_name or "this project").strip() or "this project"
+    roster = collaborators or []
+    lines = [f"Users in **{target_name}** ({len(roster)}):"]
+    if not roster:
+        lines.append("- No collaborators found.")
+        return lines
+
+    current_user_token = str(current_user_id or "").strip()
+    for collaborator in roster:
+        collaborator_user_id = str(collaborator.get("user_id") or "").strip()
+        label = str(
+            collaborator.get("display_name")
+            or collaborator.get("username")
+            or collaborator.get("email")
+            or collaborator_user_id
+            or "Unknown user"
+        ).strip()
+        email = str(collaborator.get("email") or "").strip()
+        if email and email.lower() != label.lower():
+            label = f"{label} ({email})"
+
+        role_label = "Owner" if collaborator.get("is_owner") else str(collaborator.get("role") or "viewer").title()
+        if collaborator_user_id and collaborator_user_id == current_user_token:
+            role_label = f"{role_label} · You"
+
+        _activity_state, activity_label = activity_status_fn(collaborator)
+        lines.append(f"- **{label}** — {role_label} · {activity_label}")
+    return lines
+
+
+def render_project_collaborator_list(*, prompt: str, active_project: dict, collaborators: list[dict] | None, current_user_id: str | None, activity_status_fn):
+    with st.chat_message("user"):
+        st.write(prompt or "list users")
+
+    with st.chat_message("assistant"):
+        for line in _format_project_collaborator_roster(
+            active_project.get("name") or "this project",
+            collaborators,
+            current_user_id,
+            activity_status_fn,
+        ):
+            st.markdown(line)
+
+
+def render_file_upload(*, api_url: str, active_id: str, get_session_cookie_fn, disabled: bool = False, disabled_reason: str | None = None):
     """Render file upload UI and perform uploads for the active project."""
     with st.expander("📎 Upload files", expanded=False):
+        if disabled:
+            st.info(disabled_reason or "Uploads are disabled for this project.")
+            return
+
         uploaded_files = st.file_uploader(
             "Drop files here to upload to your project's data/ folder",
             accept_multiple_files=True,
@@ -44,6 +164,98 @@ def render_file_upload(*, api_url: str, active_id: str, get_session_cookie_fn):
                     st.error(f"Upload failed: {resp.text}")
             except Exception as e:
                 st.error(f"Upload error: {e}")
+
+
+def render_project_share_form(
+    *,
+    api_url: str,
+    active_project: dict,
+    user: dict,
+    get_session_cookie_fn,
+):
+    feedback = st.session_state.get("_share_form_feedback")
+    if feedback and feedback.get("project_id") == active_project.get("id"):
+        with st.chat_message("assistant"):
+            if feedback.get("status") == "success":
+                st.success(feedback.get("message", "Project shared."))
+            else:
+                st.error(feedback.get("message", "Sharing failed."))
+
+    pending = st.session_state.get("_pending_share_form")
+    if not pending or pending.get("project_id") != active_project.get("id"):
+        return
+
+    with st.chat_message("user"):
+        st.write(pending.get("prompt") or "Share this project")
+
+    with st.chat_message("assistant"):
+        project_name = active_project.get("name") or "this project"
+        st.markdown(f"Share **{project_name}** by entering the collaborator email and access level below.")
+
+        error_message = pending.get("error")
+        if error_message:
+            st.error(error_message)
+
+        with st.form(key=f"share_project_form_{active_project.get('id')}"):
+            email = st.text_input(
+                "Collaborator email",
+                value=pending.get("email") or "",
+                placeholder="name@example.com",
+            )
+            role = st.selectbox(
+                "Role",
+                ["viewer", "editor"],
+                index=0 if (pending.get("role") or "viewer") == "viewer" else 1,
+            )
+            submitted = st.form_submit_button("Share project")
+
+        if not submitted:
+            return
+
+        session_token = get_session_cookie_fn()
+        cookies = {"session": session_token} if session_token else {}
+        try:
+            resp, action = _submit_share_request(
+                api_url=api_url,
+                project_id=active_project["id"],
+                email=email,
+                role=role,
+                cookies=cookies,
+                timeout=10,
+            )
+        except Exception as exc:
+            pending.update({"email": email, "role": role, "error": str(exc)})
+            st.session_state["_pending_share_form"] = pending
+            st.session_state["_share_form_feedback"] = {
+                "project_id": active_project.get("id"),
+                "status": "error",
+                "message": str(exc),
+            }
+            st.rerun()
+
+        if resp.status_code == 200:
+            st.session_state.pop("_pending_share_form", None)
+            st.session_state["_share_form_feedback"] = {
+                "project_id": active_project.get("id"),
+                "status": "success",
+                "message": (
+                    f"Updated **{email}** on **{project_name}** to **{role}**."
+                    if action == "updated"
+                    else _share_success_message(project_name, email, role)
+                ),
+            }
+            st.rerun()
+
+        error_detail = _response_error_detail(resp)
+
+        pending.update({"email": email, "role": role, "error": error_detail})
+        st.session_state["_pending_share_form"] = pending
+        st.session_state["_share_form_feedback"] = {
+            "project_id": active_project.get("id"),
+            "status": "error",
+            "message": error_detail,
+        }
+        st.rerun()
 
 
 def handle_active_chat(*, api_url: str, active_project_id: str | None = None):
