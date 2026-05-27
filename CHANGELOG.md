@@ -10,6 +10,10 @@
 
 - **Project pages now show an owner/admin-only collaborator count and compact collaborator list at the top of the detail view, so shared-project membership is visible without scrolling into the Collaborators tab**
 
+- **The project collaborator count and active-user warning now stay pinned at the top of shared owner/admin chat views while the conversation scrolls, so users do not lose awareness of who else is in the project**
+
+- **The pinned shared-project collaborator banner now uses an opaque background and a collapsed-by-default expandable summary, so chat content no longer bleeds through it and the full collaborator roster only expands when needed**
+
 ### Documentation
 
 - **Updated the main README to describe the shipped collaboration model, including owner/editor/viewer behavior, chat-driven sharing, Projects-page collaborator management, and viewer read-only UI gating**

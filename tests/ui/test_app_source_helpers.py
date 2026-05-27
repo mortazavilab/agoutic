@@ -687,6 +687,105 @@ class TestProjectAccessUiHelpers:
         assert any("**owner@example.com**" in line and "Owner" in line for line in lines[1:])
         assert any("**editor@example.com**" in line and "Editor · You" in line and "Active now" in line for line in lines[1:])
 
+    def test_render_project_shared_status_banner_uses_sticky_container_when_visible(self):
+        fake_st = SimpleNamespace(markdown=MagicMock())
+        fn = _load_function("_render_project_shared_status_banner", {"st": fake_st})
+
+        fn(
+            {
+                "summary": "Project collaborators: 3 total · 1 other active now",
+                "lines": [
+                    "owner@example.com · Owner · You · Active now",
+                    "editor@example.com · Editor · Active now",
+                ],
+                "warning": "Ali Mortazavi active in this project right now.",
+            }
+        )
+
+        fake_st.markdown.assert_called_once()
+        markup = fake_st.markdown.call_args.args[0]
+        assert 'project-shared-status-banner-fixed' in markup
+        assert '<details class="project-shared-status-banner-fixed">' in markup
+        assert '<summary class="project-shared-status-banner__summary">' in markup
+        assert 'Project collaborators: 3 total · 1 other active now' in markup
+        assert 'owner@example.com · Owner · You · Active now' in markup
+        assert 'editor@example.com · Editor · Active now' in markup
+        assert 'Ali Mortazavi active in this project right now.' in markup
+        assert fake_st.markdown.call_args.kwargs["unsafe_allow_html"] is True
+
+    def test_render_project_shared_status_banner_skips_sticky_container_when_hidden(self):
+        fake_st = SimpleNamespace(markdown=MagicMock())
+        fn = _load_function("_render_project_shared_status_banner", {"st": fake_st})
+
+        fn(None)
+
+        fake_st.markdown.assert_not_called()
+
+    def test_project_shared_status_banner_payload_hides_for_non_owner_collaborator_view(self):
+        fn = _load_function("_project_shared_status_banner_payload")
+
+        result = fn(
+            can_manage_collaborators=False,
+            collaborators=[
+                {"user_id": "owner-1", "email": "owner@example.com", "is_owner": True, "role": "owner"},
+                {"user_id": "viewer-1", "email": "viewer@example.com", "is_owner": False, "role": "viewer"},
+            ],
+            current_user_id="viewer-1",
+            activity_status_fn=lambda collaborator: ("active", "Active now"),
+            shared_warning="Owner active now",
+        )
+
+        assert result is None
+
+    def test_project_shared_status_banner_payload_hides_for_unshared_project(self):
+        fn = _load_function("_project_shared_status_banner_payload")
+
+        result = fn(
+            can_manage_collaborators=True,
+            collaborators=[
+                {"user_id": "owner-1", "email": "owner@example.com", "is_owner": True, "role": "owner"},
+            ],
+            current_user_id="owner-1",
+            activity_status_fn=lambda collaborator: ("idle", "Active today"),
+            shared_warning=None,
+        )
+
+        assert result is None
+
+    def test_project_shared_status_banner_payload_shows_for_owner_of_shared_project(self):
+        fn = _load_function("_project_shared_status_banner_payload")
+
+        result = fn(
+            can_manage_collaborators=True,
+            collaborators=[
+                {"user_id": "owner-1", "email": "owner@example.com", "is_owner": True, "role": "owner"},
+                {"user_id": "editor-1", "email": "editor@example.com", "is_owner": False, "role": "editor"},
+                {"user_id": "viewer-1", "email": "viewer@example.com", "is_owner": False, "role": "viewer"},
+            ],
+            current_user_id="owner-1",
+            activity_status_fn=lambda collaborator: ("active", "Active now") if collaborator.get("user_id") == "editor-1" else ("idle", "Active today"),
+            shared_warning="Ali Mortazavi active in this project right now.",
+        )
+
+        assert result == {
+            "summary": "Project collaborators: 3 total · 1 other active now",
+            "lines": [
+                "owner@example.com · Owner · You · Active today",
+                "editor@example.com · Editor · Active now",
+                "viewer@example.com · Viewer · Active today",
+            ],
+            "warning": "Ali Mortazavi active in this project right now.",
+        }
+
+    def test_appui_includes_sticky_shared_status_banner_css(self):
+        source = UI_APP_PATH.read_text()
+
+        assert '.project-shared-status-banner-fixed {' in source
+        assert 'position: fixed;' in source
+        assert 'top: 4.15rem;' in source
+        assert 'background: #181a1b;' in source
+        assert '.project-shared-status-banner-fixed[open] .project-shared-status-banner__summary {' in source
+
 
 class TestProjectsPageCollaboratorSummary:
     def test_owner_sees_count_and_list_when_project_is_shared(self):

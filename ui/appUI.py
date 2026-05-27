@@ -133,6 +133,104 @@ st.markdown(
     .st-key-task_dock [data-testid="stVerticalBlock"] > div {
         gap: 0.6rem;
     }
+
+    .project-shared-status-banner-fixed {
+        position: fixed;
+        top: 4.15rem;
+        left: 20rem;
+        right: 1.5rem;
+        max-width: 52rem;
+        z-index: 60;
+        background: #181a1b;
+        background-color: #181a1b;
+        opacity: 1;
+        isolation: isolate;
+        border: 1px solid #2e3336;
+        border-radius: 0.85rem;
+        box-shadow: 0 14px 32px rgba(15, 23, 42, 0.28);
+        overflow: hidden;
+    }
+
+    .project-shared-status-banner__summary {
+        font-size: 0.82rem;
+        line-height: 1.3;
+        color: color-mix(in srgb, var(--text-color) 88%, transparent);
+        font-weight: 600;
+        list-style: none;
+        cursor: pointer;
+        padding: 0.55rem 0.8rem 0.65rem;
+    }
+
+    .project-shared-status-banner__summary::-webkit-details-marker {
+        display: none;
+    }
+
+    .project-shared-status-banner__summary::after {
+        content: "Show collaborators";
+        float: right;
+        font-size: 0.72rem;
+        font-weight: 500;
+        color: color-mix(in srgb, var(--text-color) 62%, transparent);
+    }
+
+    .project-shared-status-banner-fixed[open] .project-shared-status-banner__summary {
+        border-bottom: 1px solid #2e3336;
+        margin-bottom: 0;
+    }
+
+    .project-shared-status-banner-fixed[open] .project-shared-status-banner__summary::after {
+        content: "Hide collaborators";
+    }
+
+    .project-shared-status-banner__body {
+        padding: 0.45rem 0.8rem 0.7rem;
+    }
+
+    .project-shared-status-banner__line {
+        font-size: 0.78rem;
+        line-height: 1.25;
+        color: color-mix(in srgb, var(--text-color) 82%, transparent);
+        margin-top: 0.12rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .project-shared-status-banner__warning {
+        margin-top: 0.45rem;
+        font-size: 0.76rem;
+        line-height: 1.3;
+        color: #f4d7a1;
+        border-top: 1px solid color-mix(in srgb, var(--secondary-background-color) 75%, transparent);
+        padding-top: 0.4rem;
+    }
+
+    .project-shared-status-banner-spacer {
+        width: 100%;
+    }
+
+    @media (max-width: 768px) {
+        .project-shared-status-banner-fixed {
+            top: 3.7rem;
+            left: 0.85rem;
+            right: 0.85rem;
+            max-width: none;
+        }
+
+        .project-shared-status-banner__summary {
+            font-size: 0.76rem;
+            padding: 0.42rem 0.6rem 0.5rem;
+        }
+
+        .project-shared-status-banner__body {
+            padding: 0.35rem 0.6rem 0.55rem;
+        }
+
+        .project-shared-status-banner__line,
+        .project-shared-status-banner__warning {
+            font-size: 0.72rem;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -285,7 +383,94 @@ def _project_refresh_interval(
         return timedelta(seconds=refresh_seconds)
     if not (auto_refresh or has_running_job) or auto_refresh_suppressed:
         return None
+
     return timedelta(seconds=refresh_seconds)
+
+
+def _project_shared_status_banner_payload(
+    *,
+    can_manage_collaborators: bool,
+    collaborators: list[dict] | None,
+    current_user_id: str | None,
+    activity_status_fn,
+    shared_warning: str | None,
+) -> dict | None:
+    if not can_manage_collaborators:
+        return None
+
+    roster = collaborators or []
+    non_owner_count = sum(1 for collaborator in roster if not collaborator.get("is_owner"))
+    if non_owner_count <= 0:
+        return None
+
+    active_now = sum(
+        1
+        for collaborator in roster
+        if str(collaborator.get("user_id") or "").strip() != str(current_user_id or "").strip()
+        and activity_status_fn(collaborator)[0] == "active"
+    )
+
+    summary = f"Project collaborators: {len(roster)} total"
+    if active_now:
+        summary += f" · {active_now} other active now"
+
+    lines = []
+    current_user_token = str(current_user_id or "").strip()
+    for collaborator in roster:
+        label = str(
+            collaborator.get("display_name")
+            or collaborator.get("username")
+            or collaborator.get("email")
+            or collaborator.get("user_id")
+            or "Unknown user"
+        ).strip()
+        role_label = "Owner" if collaborator.get("is_owner") else str(collaborator.get("role") or "viewer").title()
+        if str(collaborator.get("user_id") or "").strip() == current_user_token:
+            role_label = f"{role_label} · You"
+        _activity_state, activity_label = activity_status_fn(collaborator)
+        lines.append(f"{label} · {role_label} · {activity_label}")
+
+    return {
+        "summary": summary,
+        "lines": lines,
+        "warning": shared_warning,
+    }
+
+
+def _render_project_shared_status_banner(banner_payload: dict | None) -> None:
+    if not banner_payload:
+        return
+
+    import html as _html
+
+    summary_text = _html.escape(str(banner_payload.get("summary") or "").strip())
+    line_markup = "".join(
+        f'<div class="project-shared-status-banner__line">{_html.escape(str(line))}</div>'
+        for line in (banner_payload.get("lines") or [])
+        if str(line or "").strip()
+    )
+    warning_text = str(banner_payload.get("warning") or "").strip()
+    warning_markup = ""
+    if warning_text:
+        warning_markup = (
+            f'<div class="project-shared-status-banner__warning">{_html.escape(warning_text)}</div>'
+        )
+
+    spacer_rem = 3.55
+    st.markdown(
+        (
+            f'<div class="project-shared-status-banner-spacer" aria-hidden="true" '
+            f'style="height: {spacer_rem:.2f}rem;"></div>'
+            f'<details class="project-shared-status-banner-fixed">'
+            f'<summary class="project-shared-status-banner__summary">{summary_text}</summary>'
+            f'<div class="project-shared-status-banner__body">'
+            f'{line_markup}'
+            f'{warning_markup}'
+            f'</div>'
+            f'</details>'
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def _should_bootstrap_suppressed_monitoring(
@@ -824,11 +1009,12 @@ with st.container(key=_project_scope_mount_key("project_panel", active_id)):
         user.get("id"),
         _can_mutate_active_project,
     )
-    _other_active_now = sum(
-        1
-        for collaborator in _active_project_collaborators
-        if str(collaborator.get("user_id") or "").strip() != str(user.get("id") or "").strip()
-        and _collaborator_activity_status(collaborator)[0] == "active"
+    _shared_status_banner = _project_shared_status_banner_payload(
+        can_manage_collaborators=_can_manage_active_collaborators,
+        collaborators=_active_project_collaborators,
+        current_user_id=user.get("id"),
+        activity_status_fn=_collaborator_activity_status,
+        shared_warning=_shared_activity_warning,
     )
     st.title(f"🧬 {_active_project_name}")
     status_chip(
@@ -836,13 +1022,7 @@ with st.container(key=_project_scope_mount_key("project_panel", active_id)):
         label=_active_project_access_label,
         icon="🏠" if _active_project.get("role") == "owner" else "🤝",
     )
-    if _active_project_collaborators:
-        st.caption(
-            f"Project collaborators: {len(_active_project_collaborators)} total"
-            + (f" · {_other_active_now} other active now" if _other_active_now else "")
-        )
-    if _shared_activity_warning:
-        st.warning(_shared_activity_warning)
+    _render_project_shared_status_banner(_shared_status_banner)
     project_loading_slot = st.empty()
     if _project_switch_loading:
         with project_loading_slot.container():
