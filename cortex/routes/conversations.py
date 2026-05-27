@@ -21,6 +21,15 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+def _get_conversation_or_404(session, conversation_id: str) -> Conversation:
+    conversation = session.execute(
+        select(Conversation).where(Conversation.id == conversation_id)
+    ).scalar_one_or_none()
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
+
+
 @router.get("/projects/{project_id}/conversations")
 async def get_project_conversations(project_id: str, request: Request):
     """Get all conversations for a project."""
@@ -59,16 +68,8 @@ async def get_conversation_messages(conversation_id: str, request: Request):
 
     session = _db.SessionLocal()
     try:
-        # Verify user owns this conversation
-        conv_query = select(Conversation).where(Conversation.id == conversation_id)
-        result = session.execute(conv_query)
-        conversation = result.scalar_one_or_none()
-
-        if not conversation:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-
-        if conversation.user_id != user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
+        conversation = _get_conversation_or_404(session, conversation_id)
+        require_project_access(conversation.project_id, user, min_role="viewer")
 
         # Get messages
         msg_query = select(ConversationMessage)\
@@ -146,13 +147,8 @@ async def link_job_to_conversation(conversation_id: str, run_uuid: str, request:
 
     session = _db.SessionLocal()
     try:
-        # Verify conversation exists and user owns it
-        conv_query = select(Conversation).where(Conversation.id == conversation_id)
-        result = session.execute(conv_query)
-        conversation = result.scalar_one_or_none()
-
-        if not conversation or conversation.user_id != user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
+        conversation = _get_conversation_or_404(session, conversation_id)
+        require_project_access(conversation.project_id, user, min_role="editor")
 
         # TODO: Query launchpad for job details
         # For now, create with minimal info

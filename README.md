@@ -21,7 +21,10 @@ with Alembic migrations. Gene annotation and enrichment tools moved from
 edgePython to Analyzer. The analyzer/server4 adapter layer proxies remaining
 edgePython MCP calls upstream. Atlas now exposes both ENCODE and IGVF
 consortium MCP servers through the same schema-aware routing and formatting
-layer.
+layer. Shared-project collaboration foundations now use the existing
+owner/editor/viewer project RBAC consistently for conversation history,
+project-scoped file routing, and analyzer/job access; collaborator management
+APIs and UI are still in progress.
 
 ## 🖥️ Execution Modes
 
@@ -214,8 +217,9 @@ AGOUTIC enforces access control at every layer:
 
 - **Authentication**: Google OAuth 2.0 with session cookies (`httponly`, `samesite=lax`, `secure` in production)
 - **Authorization**: Role-based access (owner / editor / viewer) checked on every endpoint via `require_project_access()`. Admins bypass all project-level checks; public projects allow viewer access.
-- **Job ownership**: Each job records the submitting `user_id`. `require_run_uuid_access()` verifies ownership before exposing debug info or analysis results.
-- **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{username}/{project-slug}/`) with input sanitization and jail-escape guards; legacy `{user_id}/{project_id}` paths are still supported for backward compatibility.
+- **Project collaboration**: Shared projects expose conversation history and other project-scoped surfaces to members according to project role. Viewer access is read-only; editor access is required for project mutations such as linking jobs to conversations or writing project files.
+- **Run-level access**: Each job still records the submitting `user_id`, but `require_run_uuid_access()` now authorizes via the job's `project_id` first so shared-project collaborators can inspect project jobs; direct `user_id` ownership remains a fallback for legacy rows.
+- **File isolation**: Project files resolve through the canonical shared project directory, while downloaded/uploaded source files remain in the acting user's central data folder (`AGOUTIC_DATA/users/{username}/data/`). Project `data/` entries are symlinks into that central store, preserving per-user private storage while letting collaborators work in one shared project tree. Legacy `{user_id}/{project_id}` paths are still supported for backward compatibility.
 - **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
 - **Project management**: Full dashboard for browsing projects, viewing stats/files/jobs, renaming, archiving, and permanent deletion with cascading cleanup.
 - **Bootstrap & admin scripts**: Run `python scripts/cortex/init_db.py` for a fresh database bootstrap, `python scripts/cortex/set_usernames.py auto` to derive usernames from email addresses on an existing instance, and `python scripts/cortex/bootstrap_project_tasks.py` to seed persistent project tasks from existing workflow history.

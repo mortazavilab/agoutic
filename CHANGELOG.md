@@ -2,6 +2,8 @@
 
 ### Bug Fixes
 
+- **Project-scoped collaboration hardening now applies the existing owner/editor/viewer RBAC consistently across shared conversations, project file surfaces, and analyzer/job access: collaborators with project membership can read project conversation history, editor-only mutations stay restricted, shared-project uploads/downloads resolve the project data directory through the canonical project owner while keeping each acting user's central data folder private, and run-level analyzer/job access now checks project membership before falling back to legacy direct job ownership**
+
 - **File-backed SQLite runtime now uses WAL, busy-timeout, and non-shared pooling defaults, and Cortex task projection now skips no-op writes, reducing lock contention and write amplification under concurrent polling, chat traffic, and remote job updates**
 
 - **Job-refresh behavior is now less aggressive across the stack: the UI defaults running-workflow polling to 30 seconds, Cortex cached status polling reuses results for 30 seconds, Launchpad local Nextflow monitor polling defaults to 30 seconds, and active SLURM accounting refreshes are reused for 10 minutes unless terminal-state refresh is required**
@@ -23,6 +25,8 @@
 - **RNA workflow interpretation now explicitly allows analysis of failed or cancelled workflows when the requested result files are actually present on disk (for example after a later sync), so mode-specific follow-ups no longer assume a different completed workflow is the only valid analysis target**
 
 ### Tests
+
+- **Added focused regression coverage for shared-project conversation access, owner-resolved project file paths with actor-owned central storage, and collaborator access to project-scoped run UUID surfaces so the collaboration RBAC foundation stays enforced across chat, files, and analyzer/job routes**
 
 - **Added focused regression coverage for SQLite engine hardening and Cortex task-sync no-op write suppression so remote polling/runtime changes stay protected against future lock-contention regressions**
 

@@ -29,7 +29,7 @@ import cortex.db_helpers as _dbh
 from cortex.dependencies import require_project_access
 from cortex.llm_validators import get_block_payload
 from cortex.models import ProjectBlock, UserFile, UserFileProjectLink, User, Project
-from cortex.user_jail import get_user_data_dir, create_project_file_symlink
+from cortex.user_jail import get_user_data_dir
 from common.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -52,9 +52,11 @@ class DownloadRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _resolve_user_and_project(session, user, project_id: str):
-    """Return (username, project_slug, project_dir) for the current user+project.
+    """Return (actor_username, project_slug, project_dir) for this request.
 
-    Falls back to legacy UUID-based paths when slug metadata is missing.
+    The central data folder remains scoped to the acting user, but the project
+    directory always resolves through the project's owner-aware path helper so
+    shared collaborators operate on the same on-disk project tree.
     """
     project_obj = session.execute(
         select(Project).where(Project.id == project_id)
@@ -62,14 +64,20 @@ def _resolve_user_and_project(session, user, project_id: str):
     username = getattr(user, "username", None)
     slug = project_obj.slug if project_obj else None
 
-    if username and slug:
-        from cortex.config import AGOUTIC_DATA
-        project_dir = Path(AGOUTIC_DATA) / "users" / username / slug
-    else:
-        from cortex.config import AGOUTIC_DATA
-        project_dir = Path(AGOUTIC_DATA) / "users" / user.id / project_id
+    project_dir = _dbh._resolve_project_dir(session, user, project_id)
 
     return username, slug, project_dir
+
+
+def _create_project_data_symlink(project_dir: Path, filename: str, central_path: Path) -> Path:
+    """Create or replace a symlink inside the shared project's data directory."""
+    project_data_dir = project_dir / "data"
+    project_data_dir.mkdir(parents=True, exist_ok=True)
+    symlink_path = project_data_dir / filename
+    if symlink_path.is_symlink() or symlink_path.exists():
+        symlink_path.unlink()
+    symlink_path.symlink_to(central_path.resolve())
+    return symlink_path
 
 
 def _compute_md5(path: Path, chunk_size: int = 65536) -> str:
@@ -225,8 +233,7 @@ async def initiate_download(project_id: str, req: DownloadRequest, request: Requ
                 owner_id=user.id,
                 files=req.files,
                 target_dir=central_dir,
-                username=username,
-                project_slug=slug,
+                project_dir=project_dir,
                 source=req.source,
             )
         )
@@ -281,8 +288,7 @@ async def _download_files_background(
     owner_id: str,
     files: list[dict],
     target_dir: Path,
-    username: str | None = None,
-    project_slug: str | None = None,
+    project_dir: Path,
     source: str = "url",
 ):
     """Background task that streams files from URLs into the central data dir.
@@ -335,18 +341,18 @@ async def _download_files_background(
                     existing_md5 = _compute_md5(Path(existing_uf.disk_path))
                     if existing_md5 == existing_uf.md5_hash:
                         # Exact duplicate — skip download, just link to project
-                        if username and project_slug:
-                            sym = create_project_file_symlink(
-                                username, project_slug, filename,
-                                Path(existing_uf.disk_path),
+                        sym = _create_project_data_symlink(
+                            project_dir,
+                            filename,
+                            Path(existing_uf.disk_path),
+                        )
+                        if not _already_linked(session, existing_uf.id, project_id):
+                            _link_file_to_project(
+                                session,
+                                user_file=existing_uf,
+                                project_id=project_id,
+                                symlink_path=sym,
                             )
-                            if not _already_linked(session, existing_uf.id, project_id):
-                                _link_file_to_project(
-                                    session,
-                                    user_file=existing_uf,
-                                    project_id=project_id,
-                                    symlink_path=sym,
-                                )
 
                         downloaded_files.append({
                             "filename": filename,
@@ -439,16 +445,13 @@ async def _download_files_background(
                     )
 
                     # Create project symlink
-                    if username and project_slug:
-                        sym = create_project_file_symlink(
-                            username, project_slug, filename, dest,
-                        )
-                        _link_file_to_project(
-                            session,
-                            user_file=uf,
-                            project_id=project_id,
-                            symlink_path=sym,
-                        )
+                    sym = _create_project_data_symlink(project_dir, filename, dest)
+                    _link_file_to_project(
+                        session,
+                        user_file=uf,
+                        project_id=project_id,
+                        symlink_path=sym,
+                    )
 
                     downloaded_files.append({
                         "filename": filename,
@@ -655,18 +658,18 @@ async def upload_file(project_id: str, request: Request):
                 and existing_uf.md5_hash == md5_hex
             ):
                 # Already have this exact file — just link to project
-                if username and slug:
-                    sym = create_project_file_symlink(
-                        username, slug, safe_name,
-                        Path(existing_uf.disk_path),
+                sym = _create_project_data_symlink(
+                    project_dir,
+                    safe_name,
+                    Path(existing_uf.disk_path),
+                )
+                if not _already_linked(session2, existing_uf.id, project_id):
+                    _link_file_to_project(
+                        session2,
+                        user_file=existing_uf,
+                        project_id=project_id,
+                        symlink_path=sym,
                     )
-                    if not _already_linked(session2, existing_uf.id, project_id):
-                        _link_file_to_project(
-                            session2,
-                            user_file=existing_uf,
-                            project_id=project_id,
-                            symlink_path=sym,
-                        )
                 uploaded.append({
                     "filename": safe_name,
                     "size_bytes": existing_uf.size_bytes or len(content),
@@ -689,14 +692,13 @@ async def upload_file(project_id: str, request: Request):
                 source="upload",
             )
 
-            if username and slug:
-                sym = create_project_file_symlink(username, slug, safe_name, dest)
-                _link_file_to_project(
-                    session2,
-                    user_file=uf,
-                    project_id=project_id,
-                    symlink_path=sym,
-                )
+            sym = _create_project_data_symlink(project_dir, safe_name, dest)
+            _link_file_to_project(
+                session2,
+                user_file=uf,
+                project_id=project_id,
+                symlink_path=sym,
+            )
 
             uploaded.append({
                 "filename": safe_name,

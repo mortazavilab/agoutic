@@ -123,10 +123,11 @@ def require_project_access(project_id: str, user: User, min_role: str = "viewer"
 
 def require_run_uuid_access(run_uuid: str, user: User) -> None:
     """
-    Verify the user owns the job identified by run_uuid.
+    Verify the user can access the job identified by run_uuid.
 
-    Checks dogme_jobs.user_id (if present) or falls back to checking
-    that the user has access to the job's project_id.
+    Prefer project-level access so shared-project collaborators can inspect
+    jobs tied to the project. Fall back to direct job ownership for legacy
+    rows whose project access cannot be verified yet.
     """
     from launchpad.models import DogmeJob as LaunchpadDogmeJob
 
@@ -139,17 +140,25 @@ def require_run_uuid_access(run_uuid: str, user: User) -> None:
         if not job:
             raise HTTPException(status_code=404, detail="Job not found.")
 
-        # If job has user_id, check direct ownership
-        if hasattr(job, 'user_id') and job.user_id:
-            if job.user_id != user.id and user.role != "admin":
-                raise HTTPException(
-                    status_code=403,
-                    detail="You do not have access to this job."
-                )
-            return
+        project_access_error: HTTPException | None = None
+        if getattr(job, "project_id", None):
+            try:
+                require_project_access(job.project_id, user, min_role="viewer")
+                return
+            except HTTPException as exc:
+                project_access_error = exc
 
-        # Fallback: check project access
-        require_project_access(job.project_id, user, min_role="viewer")
+        if hasattr(job, "user_id") and job.user_id:
+            if job.user_id == user.id or user.role == "admin":
+                return
+
+        if project_access_error is not None:
+            raise project_access_error
+
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this job.",
+        )
     except HTTPException:
         raise
     except Exception:
