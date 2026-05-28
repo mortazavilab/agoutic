@@ -16,8 +16,10 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
+from common.maintenance_mode import clear_maintenance_state, get_maintenance_state, set_maintenance_state
 from cortex.config import AGOUTIC_DATA
 from cortex.db import SessionLocal
+from cortex.dependencies import get_current_user
 from cortex.models import (
     User,
     Conversation,
@@ -26,6 +28,7 @@ from cortex.models import (
     DeletedProjectTokenDaily,
 )
 from cortex.dependencies import require_admin
+from cortex.schemas import MaintenanceStateOut, MaintenanceStateUpdate
 from cortex.user_jail import rename_user_dir
 
 
@@ -47,6 +50,50 @@ class UserListItem(BaseModel):
 class UserUpdateRequest(BaseModel):
     is_active: bool | None = None
     role: str | None = None
+
+
+@router.get("/maintenance", response_model=MaintenanceStateOut)
+async def get_maintenance(user: User = Depends(get_current_user)):
+    """Return maintenance state for any authenticated user.
+
+    The path remains under `/admin` for consistency with the write endpoints,
+    but GET is intentionally readable by any authenticated user so the global
+    UI banner can show the configured maintenance details.
+    """
+    session = SessionLocal()
+    try:
+        return get_maintenance_state(session)
+    finally:
+        session.close()
+
+
+@router.post("/maintenance", response_model=MaintenanceStateOut)
+async def set_maintenance(
+    update: MaintenanceStateUpdate,
+    admin: User = Depends(require_admin),
+):
+    """Set maintenance mode state. Admin-only."""
+    session = SessionLocal()
+    try:
+        return set_maintenance_state(
+            session,
+            mode=update.mode,
+            message=update.message,
+            starts_at=update.starts_at,
+            updated_by=admin.id,
+        )
+    finally:
+        session.close()
+
+
+@router.delete("/maintenance", response_model=MaintenanceStateOut)
+async def delete_maintenance(admin: User = Depends(require_admin)):
+    """Clear maintenance mode state. Admin-only."""
+    session = SessionLocal()
+    try:
+        return clear_maintenance_state(session, updated_by=admin.id)
+    finally:
+        session.close()
 
 
 @router.get("/users", response_model=List[UserListItem])

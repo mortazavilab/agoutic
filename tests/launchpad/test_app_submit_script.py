@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 import launchpad.app as launchpad_app
 from launchpad import config as launchpad_config
 from common.database import Base
+from cortex.models import SystemSetting, User
 from launchpad.models import DogmeJob
 from launchpad.schemas import SubmitJobRequest
 
@@ -68,6 +70,35 @@ async def async_session_factory(tmp_path):
     yield session_factory
 
     await engine.dispose()
+
+
+async def _seed_user_and_maintenance(
+    async_session_factory,
+    *,
+    user_id: str,
+    role: str,
+    mode: bool,
+    message: str = "",
+    starts_at: str = "",
+):
+    async with async_session_factory() as session:
+        session.add(
+            User(
+                id=user_id,
+                email=f"{user_id}@example.com",
+                role=role,
+                username=user_id,
+                is_active=True,
+            )
+        )
+        session.add_all(
+            [
+                SystemSetting(key="maintenance_mode", value="true" if mode else "false"),
+                SystemSetting(key="maintenance_message", value=message),
+                SystemSetting(key="maintenance_starts_at", value=starts_at),
+            ]
+        )
+        await session.commit()
 
 
 @pytest.mark.asyncio
@@ -361,6 +392,190 @@ async def test_submit_script_job_success(monkeypatch, tmp_path):
     assert fake_job.run_stage == "SCRIPT_RUNNING"
     assert fake_job.nextflow_process_id == 4321
     assert subprocess_kwargs["start_new_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_submit_job_returns_503_for_non_admin_during_maintenance(monkeypatch, async_session_factory):
+    await _seed_user_and_maintenance(
+        async_session_factory,
+        user_id="maint-user",
+        role="user",
+        mode=True,
+        message="Launchpad maintenance window.",
+    )
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: async_session_factory())
+
+    req = SubmitJobRequest(
+        project_id="proj-1",
+        user_id="maint-user",
+        sample_name="blocked-job",
+        mode="DNA",
+        input_directory="/tmp/input",
+        run_type="script",
+        script_id="demo",
+        execution_mode="local",
+    )
+
+    result = await launchpad_app.submit_job(req)
+
+    assert result.status_code == 503
+    assert json.loads(result.body) == {
+        "error": "maintenance_mode",
+        "message": "Launchpad maintenance window.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_admin_submit_job_succeeds_during_maintenance(monkeypatch, async_session_factory, tmp_path):
+    script_path = tmp_path / "run.py"
+    script_path.write_text("print('ok')\n")
+    subprocess_kwargs = {}
+
+    await _seed_user_and_maintenance(
+        async_session_factory,
+        user_id="maint-admin",
+        role="admin",
+        mode=True,
+        message="Admins only window.",
+    )
+
+    fake_job = SimpleNamespace(
+        run_uuid="run-maint-admin",
+        status="PENDING",
+        execution_mode="local",
+        ssh_profile_id=None,
+        slurm_account=None,
+        slurm_partition=None,
+        slurm_cpus=None,
+        slurm_memory_gb=None,
+        slurm_walltime=None,
+        slurm_gpus=None,
+        slurm_gpu_type=None,
+        result_destination=None,
+        cache_preflight_json=None,
+        reference_cache_status=None,
+        data_cache_status=None,
+        reference_cache_path=None,
+        data_cache_path=None,
+        run_stage=None,
+        nextflow_process_id=None,
+        nextflow_work_dir=None,
+        log_file=None,
+        stderr_log=None,
+        report_json=None,
+        started_at=None,
+    )
+
+    async def fake_create_job(*_args, **_kwargs):
+        return fake_job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_subprocess_exec(*_args, **_kwargs):
+        subprocess_kwargs.update(_kwargs)
+        return _FakeProcess()
+
+    def fake_create_task(coro):
+        coro.close()
+        return SimpleNamespace()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: async_session_factory())
+    monkeypatch.setattr(launchpad_app, "create_job", fake_create_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app.uuid, "uuid4", lambda: "run-maint-admin")
+    monkeypatch.setattr(launchpad_app, "resolve_allowlisted_script", lambda **_kwargs: SimpleNamespace(script_id="demo", script_path=script_path.resolve()))
+    monkeypatch.setattr(launchpad_app, "normalize_script_args", lambda args: args or [])
+    monkeypatch.setattr(launchpad_app, "validate_script_working_directory", lambda _path: script_path.parent.resolve())
+    monkeypatch.setattr(launchpad_app.asyncio, "create_subprocess_exec", fake_subprocess_exec)
+    monkeypatch.setattr(launchpad_app.asyncio, "create_task", fake_create_task)
+
+    req = SubmitJobRequest(
+        project_id="proj-1",
+        user_id="maint-admin",
+        sample_name="admin-script-job",
+        mode="DNA",
+        input_directory=str(script_path.parent),
+        run_type="script",
+        script_id="demo",
+        script_args=["--dry-run"],
+        script_working_directory=str(script_path.parent),
+        execution_mode="local",
+    )
+
+    result = await launchpad_app.submit_job(req)
+
+    assert result["run_uuid"] == "run-maint-admin"
+    assert result["status"] == launchpad_app.JobStatus.RUNNING
+    assert subprocess_kwargs["start_new_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_still_returns_running_status_during_maintenance(monkeypatch, async_session_factory):
+    await _seed_user_and_maintenance(
+        async_session_factory,
+        user_id="status-user",
+        role="user",
+        mode=True,
+        message="Status remains readable.",
+    )
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: async_session_factory())
+
+    async def fake_get_job(session, run_uuid):
+        assert run_uuid == "run-live"
+        return SimpleNamespace(
+            run_uuid="run-live",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.RUNNING,
+            progress_percent=42,
+            error_message=None,
+            run_stage="running",
+            slurm_job_id="50070001",
+            slurm_state="RUNNING",
+            transfer_state=None,
+            result_destination="local",
+            nextflow_work_dir="/local/project/workflow1",
+            remote_work_dir="/remote/project/workflow1",
+            workflow_usage_json=None,
+            workflow_usage_synced_at=None,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+        )
+
+    fake_backend = SimpleNamespace(
+        check_status=AsyncMock(
+            return_value=SimpleNamespace(
+                run_uuid="run-live",
+                status="RUNNING",
+                progress_percent=42,
+                message="Still running",
+                tasks={"total": 10, "completed_count": 4, "failed_count": 0, "remaining_count": 6},
+                execution_mode="slurm",
+                run_stage="running",
+                slurm_job_id="50070001",
+                slurm_state="RUNNING",
+                transfer_state=None,
+                transfer_detail=None,
+                result_destination="local",
+                ssh_profile_nickname="hpc3",
+                work_directory="/remote/project/workflow1",
+                workflow_usage=None,
+                workflow_usage_synced_at=None,
+            )
+        )
+    )
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", lambda mode: fake_backend)
+
+    payload = await launchpad_app.get_job_status("run-live")
+
+    assert payload["status"] == "RUNNING"
+    assert payload["progress_percent"] == 42
+    assert payload["tasks"]["remaining_count"] == 6
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,8 @@
 
 - **Added an admin-only Activity tab in the admin page showing recently active users, currently running jobs, and active chat sessions in real time, with a color-coded SAFE TO RESTART / WAIT banner. Reuses the same data collection and recommendation logic as `scripts/cortex/maintenance_status.py`. Auto-refreshes every 30 seconds with configurable interval and thresholds.**
 
+- **Added maintenance mode. Admins can toggle AGOUTIC into a state where new chat and job submissions are blocked but existing in-flight work continues uninterrupted. Blocked submissions return HTTP 503 with a clear error payload, a non-dismissible maintenance banner appears for all users with the configured message and optional countdown, read-only operations remain available during maintenance, the maintenance flag is exposed in `/health` for monitoring, and admins remain exempt so they can manage the maintenance window.**
+
 ## [3.7.0] - 2026-05-28
 
 ### Features

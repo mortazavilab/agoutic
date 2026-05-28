@@ -346,3 +346,17 @@ class MemoryListOut(BaseModel):
     """Paginated list of memory entries."""
     memories: list[MemoryOut] = Field(default_factory=list)
     total: int = 0
+
+
+class MaintenanceStateOut(BaseModel):
+    mode: bool
+    message: str = ""
+    starts_at: Optional[str] = None
+    updated_by_email: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class MaintenanceStateUpdate(BaseModel):
+    mode: bool
+    message: str = ""
+    starts_at: Optional[str] = None

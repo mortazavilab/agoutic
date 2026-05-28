@@ -52,7 +52,7 @@ from common.database import Base
 import cortex.job_polling as job_polling_module
 from cortex.models import (
     User, Session as SessionModel, Project, ProjectAccess,
-    ProjectBlock,
+    ProjectBlock, SystemSetting,
 )
 from cortex.app import (
     handle_rejection,
@@ -2010,6 +2010,51 @@ class TestSubmitJobAfterApproval:
 
 
 class TestStartupRecovery:
+    @pytest.mark.asyncio
+    async def test_recovery_still_resumes_orphaned_jobs_when_maintenance_mode_is_on(self, session_factory, seed_data):
+        sess = session_factory()
+        sess.add_all(
+            [
+                SystemSetting(key="maintenance_mode", value="true"),
+                SystemSetting(key="maintenance_message", value="Drain mode"),
+                SystemSetting(key="maintenance_starts_at", value=""),
+            ]
+        )
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "restart-run-maint",
+                "job_status": {"status": "RUNNING", "progress_percent": 50},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        captured_args = None
+        captured_kwargs = None
+
+        async def _noop_poll():
+            return None
+
+        def _fake_poll(*args, **kwargs):
+            nonlocal captured_args, captured_kwargs
+            captured_args = args
+            captured_kwargs = kwargs
+            return _noop_poll()
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling.poll_job_status", new=_fake_poll), \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+            await _recover_orphaned_background_tasks()
+
+        assert captured_args == ("proj-bg", job_block.id, "restart-run-maint")
+        assert captured_kwargs == {"initial_delay_seconds": 0.0}
+
     @pytest.mark.asyncio
     async def test_resumes_orphaned_execution_job_poll_immediately_after_restart(self, session_factory, seed_data):
         sess = session_factory()

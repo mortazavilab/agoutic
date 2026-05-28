@@ -354,6 +354,60 @@ class TestAdminActivityHelpers:
         assert [row["run_uuid"] for row in snapshot["stale_jobs"]] == [job.run_uuid]
 
 
+class TestMaintenanceBannerHelpers:
+    def test_render_maintenance_banner_outputs_markup_when_flag_on(self):
+        calls = []
+        fake_st = SimpleNamespace(markdown=lambda text, unsafe_allow_html=False: calls.append((text, unsafe_allow_html)))
+        fn = _load_function("_render_maintenance_banner", {"st": fake_st})
+
+        fn({"text": "Drain mode is active.", "mode": True})
+
+        assert len(calls) == 1
+        assert "Drain mode is active." in calls[0][0]
+        assert calls[0][1] is True
+
+    def test_render_maintenance_banner_produces_no_output_when_flag_off(self):
+        calls = []
+        fake_st = SimpleNamespace(markdown=lambda text, unsafe_allow_html=False: calls.append((text, unsafe_allow_html)))
+        fn = _load_function("_render_maintenance_banner", {"st": fake_st})
+
+        fn(None)
+
+        assert calls == []
+
+    def test_maintenance_countdown_helper_formats_future_starts_at(self):
+        parse_dt = _load_function("_parse_maintenance_datetime")
+        fn = _load_function("_maintenance_banner_text", {"_parse_maintenance_datetime": parse_dt})
+        now = dt.datetime(2026, 5, 28, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+        text = fn(
+            {
+                "mode": True,
+                "message": "Planned maintenance.",
+                "starts_at": "2026-05-28T13:02:03+00:00",
+            },
+            now=now,
+        )
+
+        assert text == "Planned maintenance. Maintenance starts in 01:02:03."
+
+    def test_maintenance_countdown_helper_falls_back_when_starts_at_is_past(self):
+        parse_dt = _load_function("_parse_maintenance_datetime")
+        fn = _load_function("_maintenance_banner_text", {"_parse_maintenance_datetime": parse_dt})
+        now = dt.datetime(2026, 5, 28, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+        text = fn(
+            {
+                "mode": True,
+                "message": "",
+                "starts_at": "2026-05-28T11:00:00+00:00",
+            },
+            now=now,
+        )
+
+        assert text == "AGOUTIC is currently in maintenance mode."
+
+
 class TestLoadReferenceGenomeCatalog:
     def test_returns_api_catalog_and_caches(self):
         fake_st = SimpleNamespace(session_state={})

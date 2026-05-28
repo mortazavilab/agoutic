@@ -179,6 +179,81 @@ class TestListUsers:
         assert resp.status_code == 403
 
 
+class TestMaintenanceMode:
+    def test_post_maintenance_as_admin_persists_state(self, admin_client):
+        resp = admin_client.post(
+            "/admin/maintenance",
+            json={
+                "mode": True,
+                "message": "Deploy in progress.",
+                "starts_at": "2026-05-28T16:00:00+00:00",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["mode"] is True
+        assert data["message"] == "Deploy in progress."
+        assert data["starts_at"] == "2026-05-28T16:00:00+00:00"
+        assert data["updated_by_email"] == "admin@example.com"
+        assert data["updated_at"] is not None
+
+        get_resp = admin_client.get("/admin/maintenance")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["mode"] is True
+
+    def test_post_maintenance_as_non_admin_forbidden(self, non_admin_client):
+        resp = non_admin_client.post("/admin/maintenance", json={"mode": True})
+        assert resp.status_code == 403
+
+    def test_get_maintenance_as_any_authenticated_user_returns_state(self, admin_client, non_admin_client):
+        set_resp = admin_client.post(
+            "/admin/maintenance",
+            json={
+                "mode": True,
+                "message": "Maintenance starts soon.",
+                "starts_at": "2026-05-28T18:30:00+00:00",
+            },
+        )
+        assert set_resp.status_code == 200
+
+        resp = non_admin_client.get("/admin/maintenance")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["mode"] is True
+        assert data["message"] == "Maintenance starts soon."
+        assert data["starts_at"] == "2026-05-28T18:30:00+00:00"
+        assert data["updated_by_email"] == "admin@example.com"
+
+    def test_delete_maintenance_as_admin_clears_state(self, admin_client):
+        admin_client.post(
+            "/admin/maintenance",
+            json={"mode": True, "message": "Window", "starts_at": "2026-05-28T18:30:00+00:00"},
+        )
+
+        resp = admin_client.delete("/admin/maintenance")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["mode"] is False
+        assert data["message"] == ""
+        assert data["starts_at"] is None
+        assert data["updated_by_email"] == "admin@example.com"
+
+    def test_delete_maintenance_as_non_admin_forbidden(self, admin_client, non_admin_client):
+        admin_client.post("/admin/maintenance", json={"mode": True})
+        resp = non_admin_client.delete("/admin/maintenance")
+        assert resp.status_code == 403
+
+    def test_health_reports_maintenance_mode_false_then_true(self, admin_client):
+        resp = admin_client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["maintenance_mode"] is False
+
+        admin_client.post("/admin/maintenance", json={"mode": True, "message": "Window"})
+        resp = admin_client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["maintenance_mode"] is True
+
+
 # ---------------------------------------------------------------------------
 # PATCH /admin/users/{id}
 # ---------------------------------------------------------------------------

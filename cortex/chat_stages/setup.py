@@ -7,6 +7,7 @@ import uuid
 from fastapi import HTTPException
 from sqlalchemy import select, desc, text
 
+from common.maintenance_mode import get_maintenance_state, maintenance_block_message
 from common.logging_config import get_logger
 from cortex.chat_context import ChatContext
 from cortex.chat_stages import register_stage
@@ -31,6 +32,21 @@ class SetupStage:
 
     async def run(self, ctx: ChatContext) -> None:
         user = ctx.user
+
+        if user.role != "admin":
+            maintenance_session = SessionLocal()
+            try:
+                maintenance_state = get_maintenance_state(maintenance_session)
+            finally:
+                maintenance_session.close()
+            if maintenance_state.get("mode"):
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "maintenance_mode",
+                        "message": maintenance_block_message(maintenance_state, noun="chat"),
+                    },
+                )
 
         # ── Auto-register project if missing ──────────────────────────
         _ensure_session = SessionLocal()

@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import String, Integer, Text, DateTime, Boolean, Float, UniqueConstraint, func
+from sqlalchemy import String, Integer, Text, DateTime, Boolean, Float, UniqueConstraint, func, ForeignKey
 from common.database import Base
 
 class User(Base):
@@ -38,6 +38,21 @@ class Session(Base):
     )
     expires_at: Mapped[str] = mapped_column(DateTime(timezone=True), nullable=False)
     is_valid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class SystemSetting(Base):
+    """Key/value system settings shared across AGOUTIC services."""
+    __tablename__ = "system_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 class Project(Base):
     """Project metadata with ownership"""

@@ -430,6 +430,7 @@ class HealthCheckResponse(BaseModel):
     version: str
     running_jobs: int
     database_ok: bool
+    maintenance_mode: bool
 
 
 # ==================== SSH Profile Schemas ====================

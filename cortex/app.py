@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import Body, FastAPI, HTTPException, Path as FastAPIPath, Query, Request
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool  # To run LLM without blocking
 from pydantic import BaseModel
 from sqlalchemy import select, desc, func, text
@@ -403,7 +404,17 @@ from cortex.chat_sync_handler import (  # noqa: F401 — re-exported for backwar
 @app.get("/health")
 async def health_check():
     """Health check endpoint (no auth required)"""
-    return {"status": "ok", "service": "cortex", "version": AGOUTIC_VERSION}
+    session = SessionLocal()
+    try:
+        maintenance_state = get_maintenance_state(session)
+    finally:
+        session.close()
+    return {
+        "status": "ok",
+        "service": "cortex",
+        "version": AGOUTIC_VERSION,
+        "maintenance_mode": bool(maintenance_state.get("mode")),
+    }
 
 
 @app.get("/config/llm-models")
@@ -1905,6 +1916,7 @@ async def cancel_chat(request_id: str):
 # --- CHAT & AGENT LOGIC ---
 from cortex.chat_context import ChatContext  # noqa: E402
 from cortex.chat_pipeline import run_chat_pipeline  # noqa: E402
+from common.maintenance_mode import get_maintenance_state  # noqa: E402
 
 @app.post("/chat")
 async def chat_with_agent(req: ChatRequest, request: Request):
@@ -1951,7 +1963,13 @@ async def chat_with_agent(req: ChatRequest, request: Request):
             }
         finally:
             session.close()
-    except HTTPException:
+    except HTTPException as exc:
+        if (
+            exc.status_code == 503
+            and isinstance(exc.detail, dict)
+            and exc.detail.get("error") == "maintenance_mode"
+        ):
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
         raise
     except Exception as e:
         import traceback

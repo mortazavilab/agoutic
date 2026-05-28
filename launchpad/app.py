@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from common.logging_config import setup_logging, get_logger
 from common.logging_middleware import RequestLoggingMiddleware
+from common.maintenance_mode import get_maintenance_state_async, maintenance_block_message
 from launchpad.config import (
     AGOUTIC_DATA,
     LAUNCHPAD_LOGS_DIR,
@@ -53,6 +54,7 @@ from launchpad.db import (
     get_staging_task_record,
     staging_task_record_to_dict,
 )
+from cortex.models import User
 from launchpad.models import DogmeJob, SSHProfile
 from launchpad.nextflow_executor import NextflowExecutor, _find_nextflow_trace_file
 from launchpad.schemas import (
@@ -220,6 +222,15 @@ def _slurm_status_poll_failed(status_data) -> bool:
     message = str(getattr(status_data, "message", "") or "")
     tasks = getattr(status_data, "tasks", None)
     return message.startswith("Failed to poll scheduler:") and not tasks
+
+
+async def _submitter_is_admin(session, user_id: str | None) -> bool:
+    if not user_id:
+        return False
+    role = (
+        await session.execute(select(User.role).where(User.id == user_id))
+    ).scalar_one_or_none()
+    return str(role or "").strip().lower() == "admin"
 
 
 async def _slurm_status_payload(session, job, status_data) -> dict[str, object]:
@@ -1480,12 +1491,14 @@ async def health_check():
                 select(DogmeJob).where(DogmeJob.status == JobStatus.RUNNING)
             )
             running_jobs = len(result.scalars().all())
+            maintenance_state = await get_maintenance_state_async(session)
 
             return {
                 "status": "ok",
                 "version": "0.3.0",
                 "running_jobs": running_jobs,
                 "database_ok": True,
+                "maintenance_mode": bool(maintenance_state.get("mode")),
             }
         except Exception as e:
             return {
@@ -1493,6 +1506,7 @@ async def health_check():
                 "version": "0.3.0",
                 "running_jobs": 0,
                 "database_ok": False,
+                "maintenance_mode": False,
                 "error": str(e)
             }
 
@@ -1707,6 +1721,16 @@ async def submit_job(req: SubmitJobRequest):
     session = SessionLocal()
 
     try:
+        maintenance_state = await get_maintenance_state_async(session)
+        if maintenance_state.get("mode") and not await _submitter_is_admin(session, req.user_id):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "maintenance_mode",
+                    "message": maintenance_block_message(maintenance_state, noun="job"),
+                },
+            )
+
         # Generate unique run ID
         run_uuid = str(uuid.uuid4())
         run_type = (req.run_type or "dogme").strip().lower()

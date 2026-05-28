@@ -134,6 +134,30 @@ st.markdown(
         gap: 0.6rem;
     }
 
+    .maintenance-banner-fixed {
+        position: fixed;
+        top: 4.15rem;
+        left: 20rem;
+        right: 1.5rem;
+        z-index: 70;
+        background: #f0b44d;
+        background-color: #f0b44d;
+        color: #2f2413;
+        opacity: 1;
+        isolation: isolate;
+        border: 1px solid #c78e2e;
+        border-radius: 0.85rem;
+        box-shadow: 0 14px 32px rgba(15, 23, 42, 0.22);
+        font-size: 0.9rem;
+        line-height: 1.35;
+        font-weight: 700;
+        padding: 0.8rem 1rem;
+    }
+
+    .maintenance-banner-spacer {
+        width: 100%;
+    }
+
     .project-shared-status-banner-fixed {
         position: fixed;
         top: 4.15rem;
@@ -149,6 +173,10 @@ st.markdown(
         border-radius: 0.85rem;
         box-shadow: 0 14px 32px rgba(15, 23, 42, 0.28);
         overflow: hidden;
+    }
+
+    .project-shared-status-banner-fixed--with-maintenance {
+        top: 8.35rem;
     }
 
     .project-shared-status-banner__summary {
@@ -210,11 +238,21 @@ st.markdown(
     }
 
     @media (max-width: 768px) {
+        .maintenance-banner-fixed {
+            top: 3.7rem;
+            left: 0.85rem;
+            right: 0.85rem;
+        }
+
         .project-shared-status-banner-fixed {
             top: 3.7rem;
             left: 0.85rem;
             right: 0.85rem;
             max-width: none;
+        }
+
+        .project-shared-status-banner-fixed--with-maintenance {
+            top: 7.5rem;
         }
 
         .project-shared-status-banner__summary {
@@ -457,17 +495,80 @@ def _render_project_shared_status_banner(banner_payload: dict | None) -> None:
         )
 
     spacer_rem = 3.55
+    banner_class = "project-shared-status-banner-fixed"
+    if banner_payload.get("maintenance_visible"):
+        banner_class = f"{banner_class} project-shared-status-banner-fixed--with-maintenance"
     st.markdown(
         (
             f'<div class="project-shared-status-banner-spacer" aria-hidden="true" '
             f'style="height: {spacer_rem:.2f}rem;"></div>'
-            f'<details class="project-shared-status-banner-fixed">'
+            f'<details class="{banner_class}">'
             f'<summary class="project-shared-status-banner__summary">{summary_text}</summary>'
             f'<div class="project-shared-status-banner__body">'
             f'{line_markup}'
             f'{warning_markup}'
             f'</div>'
             f'</details>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _parse_maintenance_datetime(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _maintenance_banner_text(state: dict | None, *, now=None) -> str:
+    data = state or {}
+    if not data.get("mode"):
+        return ""
+    message = str(data.get("message") or "").strip() or "AGOUTIC is currently in maintenance mode."
+    reference_now = now or datetime.datetime.now(datetime.timezone.utc)
+    starts_at = _parse_maintenance_datetime(data.get("starts_at"))
+    if starts_at is not None and starts_at > reference_now:
+        remaining = max(int((starts_at - reference_now).total_seconds()), 0)
+        hours, remainder = divmod(remaining, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{message} Maintenance starts in {hours:02d}:{minutes:02d}:{seconds:02d}."
+    return message
+
+
+def _maintenance_banner_payload(api_url: str, *, now=None) -> dict | None:
+    try:
+        response = make_authenticated_request("GET", f"{api_url}/admin/maintenance", timeout=3)
+    except Exception:
+        return None
+    if getattr(response, "status_code", 0) != 200:
+        return None
+    payload = response.json() if callable(getattr(response, "json", None)) else None
+    if not isinstance(payload, dict) or not payload.get("mode"):
+        return None
+    return {
+        "text": _maintenance_banner_text(payload, now=now),
+        "mode": True,
+    }
+
+
+def _render_maintenance_banner(banner_payload: dict | None) -> None:
+    if not banner_payload:
+        return
+
+    import html as _html
+
+    text = _html.escape(str(banner_payload.get("text") or "").strip())
+    spacer_rem = 4.15
+    st.markdown(
+        (
+            f'<div class="maintenance-banner-spacer" aria-hidden="true" style="height: {spacer_rem:.2f}rem;"></div>'
+            f'<div class="maintenance-banner-fixed" role="status" aria-live="polite">{text}</div>'
         ),
         unsafe_allow_html=True,
     )
@@ -1016,12 +1117,19 @@ with st.container(key=_project_scope_mount_key("project_panel", active_id)):
         activity_status_fn=_collaborator_activity_status,
         shared_warning=_shared_activity_warning,
     )
+    _maintenance_banner = _maintenance_banner_payload(API_URL)
+    _render_maintenance_banner(_maintenance_banner)
     st.title(f"🧬 {_active_project_name}")
     status_chip(
         "info" if (_active_project.get("role") == "owner" or user.get("role") == "admin") else "warning",
         label=_active_project_access_label,
         icon="🏠" if _active_project.get("role") == "owner" else "🤝",
     )
+    if _shared_status_banner:
+        _shared_status_banner = {
+            **_shared_status_banner,
+            "maintenance_visible": bool(_maintenance_banner),
+        }
     _render_project_shared_status_banner(_shared_status_banner)
     project_loading_slot = st.empty()
     if _project_switch_loading:
