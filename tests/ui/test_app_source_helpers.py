@@ -353,6 +353,74 @@ class TestAdminActivityHelpers:
         assert snapshot["jobs"] == []
         assert [row["run_uuid"] for row in snapshot["stale_jobs"]] == [job.run_uuid]
 
+    def test_enable_maintenance_mode_posts_admin_endpoint(self):
+        response = SimpleNamespace(status_code=200, text="ok")
+        request = MagicMock(return_value=response)
+        fn = _load_admin_page_function(
+            "_enable_maintenance_mode",
+            {"make_authenticated_request": request},
+        )
+
+        result = fn(
+            "http://api.test",
+            message="Drain mode",
+            starts_at="2026-05-28T17:00:00+00:00",
+        )
+
+        assert result is response
+        request.assert_called_once_with(
+            "POST",
+            "http://api.test/admin/maintenance",
+            json={
+                "mode": True,
+                "message": "Drain mode",
+                "starts_at": "2026-05-28T17:00:00+00:00",
+            },
+            timeout=5,
+        )
+
+    def test_enable_maintenance_mode_normalizes_blank_starts_at(self):
+        response = SimpleNamespace(status_code=200, text="ok")
+        request = MagicMock(return_value=response)
+        fn = _load_admin_page_function(
+            "_enable_maintenance_mode",
+            {"make_authenticated_request": request},
+        )
+
+        fn(
+            "http://api.test",
+            message="",
+            starts_at="   ",
+        )
+
+        request.assert_called_once_with(
+            "POST",
+            "http://api.test/admin/maintenance",
+            json={
+                "mode": True,
+                "message": "",
+                "starts_at": None,
+            },
+            timeout=5,
+        )
+
+    def test_disable_maintenance_mode_calls_delete_endpoint(self):
+        response = SimpleNamespace(status_code=200, text="ok")
+        request = MagicMock(return_value=response)
+        fn = _load_admin_page_function(
+            "_disable_maintenance_mode",
+            {"make_authenticated_request": request},
+        )
+
+        result = fn("http://api.test")
+
+        assert result is response
+        request.assert_called_once_with(
+            "DELETE",
+            "http://api.test/admin/maintenance",
+            timeout=5,
+        )
+
 
 class TestMaintenanceBannerHelpers:
     def test_render_maintenance_banner_outputs_markup_when_flag_on(self):

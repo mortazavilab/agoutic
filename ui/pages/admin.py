@@ -212,6 +212,52 @@ def _render_activity_banner(recommendation):
         unsafe_allow_html=True,
     )
 
+
+def _fetch_maintenance_state(api_url):
+    try:
+        response = make_authenticated_request(
+            "GET",
+            f"{api_url}/admin/maintenance",
+            timeout=5,
+        )
+    except Exception as exc:
+        return None, str(exc)
+    if response.status_code != 200:
+        return None, f"{response.status_code}: {response.text}"
+    payload = response.json() if callable(getattr(response, "json", None)) else None
+    if not isinstance(payload, dict):
+        return None, "Maintenance endpoint returned an invalid payload."
+    return payload, None
+
+
+def _enable_maintenance_mode(api_url, *, message="", starts_at=None):
+    normalized_starts_at = str(starts_at or "").strip() or None
+    return make_authenticated_request(
+        "POST",
+        f"{api_url}/admin/maintenance",
+        json={
+            "mode": True,
+            "message": str(message or ""),
+            "starts_at": normalized_starts_at,
+        },
+        timeout=5,
+    )
+
+
+def _disable_maintenance_mode(api_url):
+    return make_authenticated_request(
+        "DELETE",
+        f"{api_url}/admin/maintenance",
+        timeout=5,
+    )
+
+
+def _sync_maintenance_editor_state(state):
+    if "_admin_maintenance_message" not in st.session_state:
+        st.session_state["_admin_maintenance_message"] = str((state or {}).get("message") or "")
+    if "_admin_maintenance_starts_at" not in st.session_state:
+        st.session_state["_admin_maintenance_starts_at"] = str((state or {}).get("starts_at") or "")
+
 st.set_page_config(page_title="AGOUTIC Admin", layout="wide")
 
 # Require authentication
@@ -556,6 +602,9 @@ try:
                     active_job_max_age_hours=_active_job_max_age_hours,
                 )
                 recommendation = _activity_recommendation(snapshot)
+                maintenance_state, maintenance_error = _fetch_maintenance_state(API_URL)
+                maintenance_state = maintenance_state or {"mode": False, "message": "", "starts_at": None}
+                _sync_maintenance_editor_state(maintenance_state)
                 report_text = _activity_report_text(
                     snapshot,
                     chat_window_minutes=_chat_window_minutes,
@@ -564,6 +613,74 @@ try:
                 now_utc = datetime.now(timezone.utc)
 
                 _render_activity_banner(recommendation)
+
+                maintenance_summary_col, maintenance_controls_col = st.columns([3, 2])
+                with maintenance_summary_col:
+                    current_mode = bool(maintenance_state.get("mode"))
+                    status_label = "ON" if current_mode else "OFF"
+                    st.markdown(f"**Maintenance mode:** {status_label}")
+                    st.caption(
+                        "When ON, new workflow submissions, imports, and transfers are blocked for non-admin users while existing running jobs continue uninterrupted."
+                    )
+                    if maintenance_state.get("message"):
+                        st.caption(f"Message: {maintenance_state['message']}")
+                    if maintenance_state.get("starts_at"):
+                        st.caption(f"Countdown starts_at: {maintenance_state['starts_at']}")
+                    if maintenance_state.get("updated_at") or maintenance_state.get("updated_by_email"):
+                        updated_bits = []
+                        if maintenance_state.get("updated_at"):
+                            updated_bits.append(f"Updated {maintenance_state['updated_at']}")
+                        if maintenance_state.get("updated_by_email"):
+                            updated_bits.append(f"by {maintenance_state['updated_by_email']}")
+                        st.caption(" ".join(updated_bits))
+                    if maintenance_error:
+                        st.warning(f"Could not read maintenance state: {maintenance_error}")
+
+                with maintenance_controls_col:
+                    st.markdown("#### Maintenance control")
+                    _maintenance_message = st.text_input(
+                        "Banner message",
+                        key="_admin_maintenance_message",
+                        placeholder="Optional maintenance message",
+                    )
+                    _maintenance_starts_at = st.text_input(
+                        "Countdown starts_at (optional)",
+                        key="_admin_maintenance_starts_at",
+                        placeholder="2026-05-28T17:00:00+00:00",
+                    )
+                    _enable_col, _disable_col = st.columns(2)
+                    with _enable_col:
+                        if st.button(
+                            "Turn ON",
+                            key="_admin_activity_maintenance_on",
+                            disabled=bool(maintenance_state.get("mode")),
+                            use_container_width=True,
+                        ):
+                            resp = _enable_maintenance_mode(
+                                API_URL,
+                                message=_maintenance_message,
+                                starts_at=_maintenance_starts_at,
+                            )
+                            if resp.status_code == 200:
+                                st.success("Maintenance mode enabled.")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to enable maintenance mode: {resp.text}")
+                    with _disable_col:
+                        if st.button(
+                            "Turn OFF",
+                            key="_admin_activity_maintenance_off",
+                            disabled=not bool(maintenance_state.get("mode")),
+                            use_container_width=True,
+                        ):
+                            resp = _disable_maintenance_mode(API_URL)
+                            if resp.status_code == 200:
+                                st.session_state["_admin_maintenance_message"] = ""
+                                st.session_state["_admin_maintenance_starts_at"] = ""
+                                st.success("Maintenance mode disabled.")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to disable maintenance mode: {resp.text}")
 
                 if _refresh_interval is not None:
                     st.caption(

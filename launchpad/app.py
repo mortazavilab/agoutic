@@ -646,6 +646,16 @@ async def import_existing_workflow(req: ImportWorkflowRequest):
     session = SessionLocal()
 
     try:
+        maintenance_state = await get_maintenance_state_async(session)
+        if maintenance_state.get("mode") and not await _submitter_is_admin(session, req.user_id):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "maintenance_mode",
+                    "message": maintenance_block_message(maintenance_state, noun="workflow import"),
+                },
+            )
+
         source_kind = str(req.source_kind or "local").strip().lower()
         if source_kind not in {"local", "slurm"}:
             raise HTTPException(status_code=400, detail="source_kind must be 'local' or 'slurm'")
@@ -1534,6 +1544,20 @@ async def stage_remote_sample(
     Pass ``?sync=true`` to fall back to the legacy synchronous behaviour
     (blocks until the transfer completes or times out).
     """
+    session = SessionLocal()
+    try:
+        maintenance_state = await get_maintenance_state_async(session)
+        if maintenance_state.get("mode") and not await _submitter_is_admin(session, req.user_id):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "maintenance_mode",
+                    "message": maintenance_block_message(maintenance_state, noun="transfer"),
+                },
+            )
+    finally:
+        await session.close()
+
     from launchpad.backends.staging_worker import (
         StagingTaskState,
         get_staging_tasks,

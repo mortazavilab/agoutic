@@ -40,6 +40,7 @@ from cortex.models import (
     Project,
     ProjectAccess,
     Session as SessionModel,
+    SystemSetting,
     User,
 )
 
@@ -152,6 +153,19 @@ def _seed_for_staging(session, tmp_agoutic_data):
     }
 
 
+def _set_maintenance_mode(session_factory, *, mode: bool, message: str = ""):
+    session = session_factory()
+    session.add_all(
+        [
+            SystemSetting(key="maintenance_mode", value="true" if mode else "false"),
+            SystemSetting(key="maintenance_message", value=message),
+            SystemSetting(key="maintenance_starts_at", value=""),
+        ]
+    )
+    session.commit()
+    session.close()
+
+
 @pytest.fixture()
 def setup(tmp_path, monkeypatch):
     """Yield (engine, SessionLocal factory, seed data, TestClient, tmp_agoutic_data)."""
@@ -184,6 +198,26 @@ def setup(tmp_path, monkeypatch):
 # ===========================================================================
 
 class TestServerSideRevalidation:
+    def test_stage_blocked_during_maintenance_for_non_admin(self, setup):
+        engine, SL, data, client, tmp_data = setup
+        _set_maintenance_mode(SL, mode=True, message="Transfers paused")
+
+        payload = {
+            "selected_files": [
+                {"source_project_id": data["source_project_id"], "relative_path": "data/sample1.bam"}
+            ],
+            "action_type": "stage_workspace",
+            "destination_project_id": data["dest_project_id"],
+        }
+
+        resp = client.post("/cross-project/stage", json=payload)
+
+        assert resp.status_code == 503
+        assert resp.json() == {
+            "error": "maintenance_mode",
+            "message": "Transfers paused",
+        }
+
     def test_nonexistent_file_rejected(self, setup):
         """Staging a file that doesn't exist is rejected."""
         engine, SL, data, client, tmp_data = setup

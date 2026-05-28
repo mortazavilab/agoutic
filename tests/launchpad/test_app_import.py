@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -6,7 +7,7 @@ import pytest
 
 import launchpad.app as launchpad_app
 from launchpad.import_workflows import WorkflowImportMetadata
-from launchpad.schemas import ImportWorkflowRequest
+from launchpad.schemas import ImportWorkflowRequest, StageRemoteSampleRequest
 
 
 class _FakeSession:
@@ -50,6 +51,7 @@ async def test_import_existing_workflow_local_uses_config_metadata(monkeypatch, 
         return None
 
     monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_maintenance_state_async", AsyncMock(return_value={"mode": False}))
     monkeypatch.setattr(launchpad_app, "normalize_local_workflow_source", lambda _path: str(source_dir))
     monkeypatch.setattr(launchpad_app, "find_job_by_workflow_path", AsyncMock(return_value=None))
     monkeypatch.setattr(launchpad_app, "find_import_duplicate", AsyncMock(return_value=None))
@@ -137,6 +139,7 @@ async def test_import_existing_workflow_local_recognizes_wf_pore_c_metadata(monk
         return None
 
     monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_maintenance_state_async", AsyncMock(return_value={"mode": False}))
     monkeypatch.setattr(launchpad_app, "normalize_local_workflow_source", lambda _path: str(source_dir))
     monkeypatch.setattr(launchpad_app, "find_job_by_workflow_path", AsyncMock(return_value=None))
     monkeypatch.setattr(launchpad_app, "find_import_duplicate", AsyncMock(return_value=None))
@@ -190,6 +193,67 @@ async def test_import_existing_workflow_local_recognizes_wf_pore_c_metadata(monk
     assert response.mode is None
     assert response.status == launchpad_app.JobStatus.COMPLETED
     assert response.work_directory == str(destination_root / "workflow4")
+
+
+@pytest.mark.asyncio
+async def test_import_existing_workflow_blocks_non_admin_during_maintenance(monkeypatch):
+    fake_session = _FakeSession()
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(
+        launchpad_app,
+        "get_maintenance_state_async",
+        AsyncMock(return_value={"mode": True, "message": "Drain mode"}),
+    )
+    monkeypatch.setattr(launchpad_app, "_submitter_is_admin", AsyncMock(return_value=False))
+
+    request = ImportWorkflowRequest(
+        project_id="proj-1",
+        user_id="user-1",
+        username="alice",
+        project_slug="proj-a",
+        source_path="/tmp/workflow",
+        source_kind="local",
+    )
+
+    response = await launchpad_app.import_existing_workflow(request)
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {
+        "error": "maintenance_mode",
+        "message": "Drain mode",
+    }
+
+
+@pytest.mark.asyncio
+async def test_stage_remote_sample_blocks_non_admin_during_maintenance(monkeypatch):
+    fake_session = _FakeSession()
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(
+        launchpad_app,
+        "get_maintenance_state_async",
+        AsyncMock(return_value={"mode": True, "message": "Transfers paused"}),
+    )
+    monkeypatch.setattr(launchpad_app, "_submitter_is_admin", AsyncMock(return_value=False))
+
+    request = StageRemoteSampleRequest(
+        project_id="proj-1",
+        user_id="user-1",
+        username="alice",
+        project_slug="proj-a",
+        sample_name="sample-a",
+        mode="DNA",
+        input_directory="/input/pod5",
+        reference_genome=["mm39"],
+        ssh_profile_id="ssh-1",
+    )
+
+    response = await launchpad_app.stage_remote_sample(request)
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {
+        "error": "maintenance_mode",
+        "message": "Transfers paused",
+    }
 
 
 @pytest.mark.asyncio
