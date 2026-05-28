@@ -16,10 +16,15 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import pytest
+from cortex.maintenance_status import build_recommendation, build_snapshot, render_text_report
+from cortex.models import Project, User
+from launchpad.config import JobStatus
+from launchpad.models import DogmeJob
 
 
 UI_APP_PATH = Path(__file__).resolve().parents[2] / "ui" / "appUI.py"
 _UI_DIR = UI_APP_PATH.parent
+_ADMIN_PAGE_PATH = _UI_DIR / "pages" / "admin.py"
 
 # Mapping from the extracted module filename to its path on disk.
 _EXTRACTED_MODULES = {
@@ -210,6 +215,19 @@ def _load_projects_page_function(name: str, extra_globals: dict | None = None):
     return _ast_load_fn_from_file(name, _PROJECTS_PAGE_PATH, namespace)
 
 
+def _load_admin_page_function(name: str, extra_globals: dict | None = None):
+    namespace: dict = {
+        "pd": pd,
+        "datetime": dt.datetime,
+        "timedelta": dt.timedelta,
+        "timezone": dt.timezone,
+        "DEFAULT_ACTIVE_JOB_MAX_AGE_HOURS": 168,
+    }
+    if extra_globals:
+        namespace.update(extra_globals)
+    return _ast_load_fn_from_file(name, _ADMIN_PAGE_PATH, namespace)
+
+
 class TestCreateProjectServerSide:
     def test_returns_server_project_id_on_success(self):
         response = SimpleNamespace(
@@ -245,6 +263,95 @@ class TestCreateProjectServerSide:
 
         assert isinstance(result, dict)
         assert result["id"] == "uuid-fallback"
+
+
+class TestAdminActivityHelpers:
+    def test_activity_recommendation_matches_shared_module(self):
+        fn = _load_admin_page_function(
+            "_activity_recommendation",
+            {"build_recommendation": build_recommendation},
+        )
+        snapshot = {
+            "jobs": [{"run_uuid": "run-1", "runtime_duration": "20m"}],
+            "chats": [],
+        }
+
+        assert fn(snapshot) == build_recommendation(snapshot)
+
+    def test_activity_report_text_matches_shared_renderer(self):
+        fn = _load_admin_page_function(
+            "_activity_report_text",
+            {"render_text_report": render_text_report},
+        )
+        snapshot = {
+            "generated_at": "2026-05-28T12:00:00+00:00",
+            "users": [],
+            "jobs": [],
+            "stale_jobs": [],
+            "chats": [],
+            "transfers": [],
+            "stale_transfers": [],
+            "recommendation": {"status": "SAFE TO RESTART", "message": "SAFE TO RESTART"},
+        }
+
+        assert fn(
+            snapshot,
+            chat_window_minutes=5,
+            active_job_max_age_hours=168,
+        ) == render_text_report(
+            snapshot,
+            last_active_window_minutes=15,
+            chat_window_minutes=5,
+            active_job_max_age_hours=168,
+        )
+
+    def test_admin_gating_helper_rejects_non_admin(self):
+        fn = _load_admin_page_function("_is_admin_user")
+
+        assert fn({"role": "admin"}) is True
+        assert fn({"role": "user"}) is False
+        assert fn(None) is False
+
+    def test_ui_threshold_selector_can_mark_old_running_job_stale(self, db_session):
+        threshold_fn = _load_admin_page_function("_activity_max_age_hours")
+        now = dt.datetime(2026, 5, 28, 12, 0, tzinfo=dt.timezone.utc)
+
+        user = User(
+            id="admin-activity-user",
+            email="activity@example.com",
+            display_name="Activity User",
+            role="user",
+            is_active=True,
+        )
+        project = Project(
+            id="admin-activity-project",
+            name="Activity Project",
+            owner_id=user.id,
+        )
+        job = DogmeJob(
+            run_uuid="admin-activity-run",
+            project_id=project.id,
+            user_id=user.id,
+            workflow_key="dogme",
+            workflow_display_name="dogme",
+            sample_name="sample-a",
+            input_directory="/tmp/input",
+            status=JobStatus.RUNNING.value,
+            submitted_at=now - dt.timedelta(hours=49),
+            started_at=now - dt.timedelta(hours=48),
+        )
+        db_session.add_all([user, project, job])
+        db_session.commit()
+
+        snapshot = build_snapshot(
+            db_session,
+            chat_window_minutes=5,
+            active_job_max_age_hours=threshold_fn("24h"),
+            now=now,
+        )
+
+        assert snapshot["jobs"] == []
+        assert [row["run_uuid"] for row in snapshot["stale_jobs"]] == [job.run_uuid]
 
 
 class TestLoadReferenceGenomeCatalog:

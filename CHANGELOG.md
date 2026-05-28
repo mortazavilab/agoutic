@@ -4,6 +4,8 @@
 
 - **Added `scripts/cortex/maintenance_status.py` so operators can check recent user activity, running jobs, and active chats before any maintenance action. Read-only, supports plain text and JSON output, includes `--active-job-max-age` stale-row filtering for orphaned RUNNING/PENDING job records, and approximates activity from chat and job records since AGOUTIC does not track presence.**
 
+- **Added an admin-only Activity tab in the admin page showing recently active users, currently running jobs, and active chat sessions in real time, with a color-coded SAFE TO RESTART / WAIT banner. Reuses the same data collection and recommendation logic as `scripts/cortex/maintenance_status.py`. Auto-refreshes every 30 seconds with configurable interval and thresholds.**
+
 ## [3.7.0] - 2026-05-28
 
 ### Features
