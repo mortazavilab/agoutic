@@ -70,6 +70,12 @@ class TestResolveHelpTopic:
         assert topic.kind == "skill"
         assert topic.key == "remote_execution"
 
+    def test_resolve_haplotype_topic(self):
+        topic = resolve_help_topic("how do i haplotype workflow7 with a vcf")
+
+        assert topic.kind == "topic"
+        assert topic.key == "haplotype-vcf"
+
 
 class TestExecuteHelpCommand:
     def test_overview_mentions_remote_slurm_lifecycle(self):
@@ -136,6 +142,26 @@ class TestExecuteHelpCommand:
         assert "intake wizard" in markdown.lower()
         assert "Sample types" in markdown
 
+    def test_haplotype_command_help_mentions_indexed_vcf_and_approval(self):
+        markdown = execute_help_command(
+            HelpCommand(action="topic", topic_ref="/haplotype"),
+            active_skill="welcome",
+        )
+
+        assert "/haplotype" in markdown
+        assert "indexed vcf" in markdown.lower()
+        assert "approval" in markdown.lower()
+
+    def test_haplotype_skill_help_uses_override_examples(self):
+        markdown = execute_help_command(
+            HelpCommand(action="topic", topic_ref="haplotype_with_vcf skill"),
+            active_skill="welcome",
+        )
+
+        assert "Haplotype With VCF Skill" in markdown
+        assert "workflow7" in markdown.lower()
+        assert "/haplotype" in markdown
+
 
 class TestRenderSlashCommandsMarkdown:
     def test_slash_catalog_mentions_help_entry(self):
@@ -143,3 +169,8 @@ class TestRenderSlashCommandsMarkdown:
 
         assert "/help <topic>" in markdown
         assert "/commands" in markdown
+
+    def test_slash_catalog_mentions_haplotype_command(self):
+        markdown = render_slash_commands_markdown()
+
+        assert "/haplotype <DNA|RNA|cDNA> <workflow> <vcf>" in markdown

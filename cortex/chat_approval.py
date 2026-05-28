@@ -292,6 +292,7 @@ async def _ensure_workflow_plan_approval_gate(
 
     plan_specific_context = (
         _build_wf_pore_c_plan_approval_context(workflow_block)
+        or _build_haplotype_with_vcf_plan_approval_context(workflow_block)
         or _build_reconcile_plan_approval_context(workflow_block)
         or _build_compare_region_overlap_approval_context(workflow_block)
     )
@@ -768,6 +769,172 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
         "cache_preflight": None,
         "gate_action": "reconcile_bams",
         "skill": "reconcile_bams",
+    }
+
+
+def _extract_haplotype_preflight_payload(results: list | dict) -> dict | None:
+    items = results if isinstance(results, list) else [results]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("tool") != "run_allowlisted_script":
+            continue
+        result_data = item.get("result") if isinstance(item.get("result"), dict) else {}
+        if result_data.get("script_id") != "haplotype_with_vcf/haplotype_with_vcf":
+            continue
+        stdout_payload = result_data.get("stdout")
+        if not isinstance(stdout_payload, str) or not stdout_payload.strip():
+            continue
+        try:
+            parsed = json.loads(stdout_payload)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _build_haplotype_with_vcf_plan_approval_context(workflow_block: ProjectBlock) -> dict | None:
+    payload = get_block_payload(workflow_block)
+    if payload.get("plan_type") != "haplotype_with_vcf":
+        return None
+
+    current_step_id = payload.get("current_step_id")
+    current_approval_step = next(
+        (
+            step for step in payload.get("steps", [])
+            if step.get("id") == current_step_id and step.get("kind") == "REQUEST_APPROVAL"
+        ),
+        None,
+    )
+    if not isinstance(current_approval_step, dict):
+        current_approval_step = next(
+            (
+                step for step in payload.get("steps", [])
+                if step.get("kind") == "REQUEST_APPROVAL" and step.get("status") in {"WAITING_APPROVAL", "PENDING"}
+            ),
+            None,
+        )
+
+    preflight_step = next(
+        (
+            step for step in payload.get("steps", [])
+            if step.get("kind") == "CHECK_EXISTING" and step.get("status") == "COMPLETED"
+        ),
+        None,
+    )
+    run_step = next(
+        (
+            step for step in payload.get("steps", [])
+            if step.get("kind") == "RUN_SCRIPT"
+            and (
+                not isinstance(current_approval_step, dict)
+                or current_approval_step.get("id") in (step.get("depends_on") or [])
+            )
+        ),
+        None,
+    )
+    if not isinstance(run_step, dict):
+        return None
+
+    if isinstance(current_approval_step, dict) and isinstance(current_approval_step.get("preflight_summary"), dict):
+        preflight_payload = current_approval_step.get("preflight_summary")
+    elif isinstance(run_step.get("preflight_summary"), dict):
+        preflight_payload = run_step.get("preflight_summary")
+    else:
+        preflight_payload = _extract_haplotype_preflight_payload(preflight_step.get("result")) if isinstance(preflight_step, dict) else None
+
+    tool_call = next(
+        (
+            call for call in (run_step.get("tool_calls") or [])
+            if call.get("tool") == "run_allowlisted_script"
+        ),
+        None,
+    )
+    params = dict((tool_call or {}).get("params") or {})
+    script_args = params.get("script_args") if isinstance(params.get("script_args"), list) else []
+
+    execution_defaults = {}
+    vcf_info = {}
+    label_info = {}
+    thresholds = {}
+    bam_inputs = []
+    mode = str(payload.get("input_type") or "").strip() or None
+    assignment_mode = None
+    outputs_info = {}
+    if isinstance(preflight_payload, dict):
+        execution_defaults = preflight_payload.get("execution_defaults") or {}
+        vcf_info = preflight_payload.get("vcf") or {}
+        label_info = preflight_payload.get("labels") or {}
+        thresholds = preflight_payload.get("thresholds") or {}
+        inputs_info = preflight_payload.get("inputs") or {}
+        if isinstance(inputs_info, dict):
+            bam_inputs = inputs_info.get("bams") or []
+        outputs_info = preflight_payload.get("outputs") or {}
+        mode = str(preflight_payload.get("mode") or mode or "").strip() or None
+        assignment_mode = preflight_payload.get("assignment_mode")
+
+    output_directory = str(
+        (current_approval_step or {}).get("output_directory")
+        or run_step.get("output_directory")
+        or outputs_info.get("output_root")
+        or payload.get("output_directory")
+        or ""
+    ).strip() or None
+    first_input_dir = None
+    if bam_inputs:
+        first_input = bam_inputs[0]
+        if isinstance(first_input, dict):
+            first_input_dir = str(first_input.get("workflow_dir") or Path(str(first_input.get("path") or "")).parent)
+
+    bam_names = []
+    for item in bam_inputs:
+        if not isinstance(item, dict):
+            continue
+        bam_names.append(str(item.get("name") or Path(str(item.get("path") or "")).name))
+    displayed_names = ", ".join(bam_names[:4])
+    if len(bam_names) > 4:
+        displayed_names = f"{displayed_names}, +{len(bam_names) - 4} more"
+
+    extracted_params = {
+        "plan_type": "haplotype_with_vcf",
+        "workflow_block_id": workflow_block.id,
+        "run_type": "script",
+        "script_id": params.get("script_id") or "haplotype_with_vcf/haplotype_with_vcf",
+        "script_path": params.get("script_path"),
+        "script_args": script_args,
+        "script_working_directory": params.get("script_working_directory"),
+        "sample_name": "haplotype_with_vcf",
+        "mode": mode,
+        "input_type": "bam",
+        "input_directory": first_input_dir or ".",
+        "output_directory": output_directory,
+        "vcf_path": vcf_info.get("path"),
+        "vcf_available_samples": vcf_info.get("available_samples") or [],
+        "vcf_selected_samples": vcf_info.get("selected_samples") or [],
+        "assignment_mode": assignment_mode,
+        "label_a": label_info.get("label_a"),
+        "label_b": label_info.get("label_b"),
+        "ambiguous_label": label_info.get("ambiguous"),
+        "bam_inputs": bam_inputs,
+        "bam_count": len(bam_inputs),
+        "min_informative_sites": thresholds.get("min_informative_sites"),
+        "min_mapq": thresholds.get("min_mapq"),
+        "progress_read_interval": execution_defaults.get("progress_read_interval") or 100000,
+        "underlying_script_id": execution_defaults.get("underlying_script_id") or "haplotype_with_vcf/haplotype_with_vcf",
+        "preflight_summary": preflight_payload,
+        "gate_action": "haplotype_with_vcf",
+    }
+
+    gate_label = f"Do you authorize the Agent to haplotype these {mode or 'selected'} BAMs with the selected VCF?"
+    if displayed_names:
+        gate_label = f"{gate_label} BAMs: {displayed_names}"
+    return {
+        "label": gate_label,
+        "extracted_params": extracted_params,
+        "cache_preflight": None,
+        "gate_action": "haplotype_with_vcf",
+        "skill": "haplotype_with_vcf",
     }
 
 

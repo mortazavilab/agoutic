@@ -42,6 +42,12 @@ _PORE_C_VCF_PATH_RE = re.compile(
     r"(?P<path>(?:/|~|\.)[^\s,;]+?\.vcf(?:\.gz)?)\b",
     re.IGNORECASE,
 )
+_HAPLOTYPE_WORKFLOW_RE = re.compile(r"\b(workflow\d+)\b", re.IGNORECASE)
+_HAPLOTYPE_MODE_RE = re.compile(r"\b(DNA|RNA|cDNA)\b", re.IGNORECASE)
+_HAPLOTYPE_VCF_HINT_RE = re.compile(
+    r"(?:with\s+file|using|with)\s+(?P<path>(?:/|~|\.)?[^\s,;]+?\.vcf(?:\.gz)?)\b",
+    re.IGNORECASE,
+)
 _PORE_C_SAMPLE_SHEET_RE = re.compile(
     r"(?:sample[_ ]sheet|samplesheet)\s+(?:at|in|from|path)?\s*[=:]?\s*(?P<path>\S+\.(?:csv|tsv|txt))",
     re.IGNORECASE,
@@ -710,6 +716,39 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
                 params["alpha"] = float(m.group(1))
             except ValueError:
                 pass
+
+    if plan_type == "haplotype_with_vcf":
+        mode_match = _HAPLOTYPE_MODE_RE.search(message)
+        if mode_match:
+            raw_mode = mode_match.group(1).strip().lower()
+            params["input_type"] = "cDNA" if raw_mode == "cdna" else raw_mode.upper()
+
+        vcf_match = _HAPLOTYPE_VCF_HINT_RE.search(message) or _PORE_C_VCF_PATH_RE.search(message)
+        if vcf_match:
+            params["vcf_path"] = _trim_path_token(vcf_match.group("path"))
+
+        workflow_tokens = [match.strip() for match in _HAPLOTYPE_WORKFLOW_RE.findall(message)]
+        if workflow_tokens:
+            workflow_dirs: list[str] = []
+            for workflow_name in workflow_tokens:
+                if project_dir:
+                    workflow_dirs.append(str(Path(project_dir) / workflow_name))
+                elif getattr(conv_state, "work_dir", ""):
+                    base = Path(str(getattr(conv_state, "work_dir", ""))).resolve().parent
+                    workflow_dirs.append(str((base / workflow_name).resolve()))
+            if workflow_dirs:
+                params["workflow_dirs"] = workflow_dirs
+                params["work_dir"] = workflow_dirs[0]
+
+        output_root = _project_output_root(project_dir, conv_state)
+        if output_root:
+            params["output_directory"] = _next_project_workflow_dir(output_root)
+
+        params.setdefault(
+            "goal",
+            "Label long-read BAM reads with haplotype or genotype assignments using an indexed VCF",
+        )
+        return params
 
     if plan_type == "reconcile_bams":
         mentioned_references: list[str] = []

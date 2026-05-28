@@ -121,6 +121,12 @@ _COMMAND_CATALOG: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ),
     ),
     (
+        "Haplotyping",
+        (
+            ("/haplotype <DNA|RNA|cDNA> <workflow> <vcf>", "haplotype workflow BAMs against an indexed VCF"),
+        ),
+    ),
+    (
         "Files",
         (
             ("/read-file <path> [--lines N] [--mode auto|plain|markdown|html_text|html_raw]", "open a project or workflow file"),
@@ -165,10 +171,11 @@ _TOPIC_GUIDES: dict[str, HelpTopic] = {
             "How do I prompt you to run Dogme DNA on /data/tumor-a with GRCh38?",
             "How do I stage a sample on hpc3?",
             "How do I sync workflow12 back from the cluster?",
+            "How do I haplotype workflow7 with a VCF?",
             "How do I use /list files?",
         ),
-        slash_commands=("/help", "/help remote slurm", "/commands", "/skills"),
-        related_skills=("analyze_local_sample", "remote_execution", "analyze_job_results", "differential_expression"),
+        slash_commands=("/help", "/help remote slurm", "/help /haplotype", "/commands", "/skills"),
+        related_skills=("analyze_local_sample", "remote_execution", "analyze_job_results", "differential_expression", "haplotype_with_vcf"),
         internal_steps=(
             "Resolve your question to a task, skill, or slash command topic.",
             "Tell you the shortest reliable prompt pattern and what details are worth including.",
@@ -186,10 +193,11 @@ _TOPIC_GUIDES: dict[str, HelpTopic] = {
         example_prompts=(
             "/commands",
             "/help /list files",
+            "/help /haplotype",
             "/list staged --profile hpc3",
             "/sync-workflow workflow12",
         ),
-        slash_commands=("/help <topic>", "/commands", "/skills", "/list files", "/read-file"),
+        slash_commands=("/help <topic>", "/commands", "/skills", "/list files", "/read-file", "/haplotype"),
         related_skills=("welcome",),
         internal_steps=(
             "Parse the slash command before LLM planning runs.",
@@ -383,6 +391,29 @@ _TOPIC_GUIDES: dict[str, HelpTopic] = {
             "Run the deterministic DE pipeline or build the required plan from the current context.",
         ),
     ),
+    "haplotype-vcf": HelpTopic(
+        title="Haplotyping Workflow BAMs With A VCF",
+        summary="Use haplotype prompts when you want AGOUTIC to label long-read DNA, RNA, or cDNA workflow BAMs against an indexed VCF and write haplotyped BAM outputs into a new workflow.",
+        what_to_provide=(
+            "The assay mode: DNA, RNA, or cDNA.",
+            "A workflow name or explicit BAM context.",
+            "An indexed VCF path with a .tbi or .csi index.",
+            "Optional VCF sample selection, label overrides, or BAM-name narrowing when one workflow contains multiple BAMs.",
+        ),
+        example_prompts=(
+            "/haplotype RNA workflow7 /data/parents.vcf.gz",
+            "haplotype RNA workflow7 with file /data/parents.vcf.gz",
+            "/haplotype DNA workflow5 /data/family.vcf.gz",
+        ),
+        slash_commands=("/haplotype <DNA|RNA|cDNA> <workflow> <vcf>", "/help /haplotype", "/list files"),
+        related_skills=("haplotype_with_vcf", "analyze_job_results"),
+        internal_steps=(
+            "Locate eligible BAMs from the named workflow using mode-specific discovery rules.",
+            "Run a preflight check to validate BAM indexes, indexed VCF access, and selectable VCF samples.",
+            "Show an approval gate with the exact BAM names, selected samples, labels, thresholds, and destination workflow before execution.",
+        ),
+        advanced_note="RNA and cDNA workflows use annotated BAMs from annot/, DNA workflows use mapped BAMs from bams/, and reconcile outputs are treated as RNA-only annotated BAMs.",
+    ),
     "dataframes-plots": HelpTopic(
         title="Working With DataFrames And Plots",
         summary="When you want dataframe help, name the dataframe or workflow context and describe the transform, summary, or plot you want.",
@@ -519,6 +550,25 @@ _COMMAND_GUIDES: dict[str, HelpTopic] = {
         related_skills=("differential_expression",),
         internal_steps=("Validate the supplied groups and route to the DE planning or execution flow.",),
     ),
+    "haplotype": HelpTopic(
+        title="/haplotype",
+        summary="Use /haplotype when you already know the assay mode, workflow, and indexed VCF you want AGOUTIC to use for haplotyping.",
+        what_to_provide=(
+            "The assay mode: DNA, RNA, or cDNA.",
+            "The workflow identity whose BAMs should be haplotyped.",
+            "The indexed VCF path.",
+        ),
+        example_prompts=(
+            "/haplotype RNA workflow7 /data/parents.vcf.gz",
+            "/haplotype DNA workflow5 /data/family.vcf.gz",
+        ),
+        slash_commands=("/haplotype <DNA|RNA|cDNA> <workflow> <vcf>", "/help /haplotype"),
+        related_skills=("haplotype_with_vcf",),
+        internal_steps=(
+            "Parse the assay mode, workflow, and VCF from the command.",
+            "Run preflight before approval and only execute after the approval gate is accepted.",
+        ),
+    ),
 }
 
 _SKILL_HELP_OVERRIDES: dict[str, HelpTopic] = {
@@ -577,6 +627,24 @@ _SKILL_HELP_OVERRIDES: dict[str, HelpTopic] = {
         slash_commands=("/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2", "/list dfs"),
         related_skills=("differential_expression",),
         internal_steps=("Resolve the data source, validate group membership, and route to the DE analysis flow.",),
+    ),
+    "haplotype_with_vcf": HelpTopic(
+        title="Haplotype With VCF Skill",
+        summary="Use this skill to haplotype long-read DNA, RNA, or cDNA workflow BAMs against an indexed VCF with an approval-gated preflight and workflow-aware BAM discovery.",
+        what_to_provide=(
+            "The assay mode, workflow, and indexed VCF path.",
+            "Optional BAM-name narrowing or VCF sample selection when AGOUTIC should not auto-pick them.",
+        ),
+        example_prompts=(
+            "How do I use the haplotype_with_vcf skill for workflow7?",
+            "Use the haplotype_with_vcf skill to haplotype RNA workflow7 with /data/parents.vcf.gz.",
+        ),
+        slash_commands=("/haplotype <DNA|RNA|cDNA> <workflow> <vcf>", "/help /haplotype"),
+        related_skills=("haplotype_with_vcf", "analyze_job_results"),
+        internal_steps=(
+            "Resolve workflow BAMs by mode, validate the indexed VCF and selectable samples, then build the approval gate.",
+            "Run the allowlisted haplotype script locally and expose live per-BAM and per-chromosome status during execution.",
+        ),
     ),
 }
 
@@ -653,6 +721,8 @@ def resolve_help_topic(topic_ref: str) -> ResolvedHelpTopic:
         return _resolved_topic("remote-slurm")
     if _contains_any(normalized, ("import workflow", "workflow import", "imported workflow")):
         return _resolved_topic("workflow-import")
+    if _contains_any(normalized, ("haplotype", "haplotyping", "vcf", "genotype assignment")):
+        return _resolved_topic("haplotype-vcf")
     if _contains_any(normalized, ("differential expression", "compare treated", "compare control", "de analysis")):
         return _resolved_topic("differential-expression")
     if _contains_any(normalized, ("dataframe", "dataframes", "plot", "plotting", "df ", " df")):
@@ -826,6 +896,8 @@ def _resolve_command_key(topic_ref: str) -> str | None:
         return "sync-workflow"
     if "/read-file" in raw or (explicit_command and normalized.startswith("read file")):
         return "read-file"
+    if raw.startswith("/haplotype") or (explicit_command and normalized.startswith("haplotype ")) or normalized == "haplotype":
+        return "haplotype"
     if raw.startswith("/de") or (explicit_command and (normalized.startswith("de ") or normalized == "de")):
         return "de"
     return None

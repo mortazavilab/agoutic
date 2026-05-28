@@ -1,4 +1,22 @@
-## [Unreleased]
+## [3.7.0] - 2026-05-28
+
+### Features
+
+- **AGOUTIC now supports approval-gated `haplotype_with_vcf` execution for long-read DNA, RNA, and cDNA BAMs using an indexed VCF, including workflow-aware BAM discovery from Dogme and reconcile outputs, tagged/indexed output BAMs, and per-BAM summary TSVs**
+
+- **Chat now supports both `/haplotype` and natural-language requests such as `haplotype RNA workflow7 with file parents.vcf.gz`, with approval gates that show the exact BAM names, selected VCF samples, assignment labels, thresholds, and destination workflow before execution**
+
+- **Launchpad live script monitoring now understands haplotype progress markers, so `haplotype_with_vcf` jobs surface per-BAM and per-chromosome progress in the UI instead of a generic standalone-script status**
+
+### Documentation
+
+- **Updated the main README, quick reference, tutorial, skills guide, and Cortex/UI/Launchpad READMEs to document the new haplotype skill, `/haplotype` slash command, indexed-VCF natural-language prompts, and the 3.7.0 release series**
+
+### Tests
+
+- **Added focused regression coverage for haplotype preflight/execution behavior, approval-gate payload construction, and Launchpad live-status parsing so the new VCF haplotyping flow stays protected end to end**
+
+## [3.6.10] - 2026-05-27
 
 ### Features
 

@@ -985,6 +985,17 @@ def _is_reconcile_script_job(job, report: dict | None = None) -> bool:
     return script_path.name in {"reconcile_bams.py", "reconcileBams.py"}
 
 
+def _is_haplotype_script_job(job, report: dict | None = None) -> bool:
+    report = report or _parse_job_report(job)
+    script_id = (report.get("script_id") or "").strip()
+    script_path = Path(report.get("script_path") or "") if report.get("script_path") else None
+    if script_id == "haplotype_with_vcf/haplotype_with_vcf":
+        return True
+    if script_path is None:
+        return False
+    return script_path.name == "haplotype_with_vcf.py"
+
+
 def _infer_reconcile_progress(stdout_lines: list[str], stderr_lines: list[str]) -> dict[str, str | int | None]:
     markers = [
         ("=== Parsing reference annotation", "Parsing reference annotation", 10),
@@ -1036,6 +1047,133 @@ def _infer_reconcile_progress(stdout_lines: list[str], stderr_lines: list[str]) 
     }
 
 
+def _parse_haplotype_progress_line(line: str) -> dict | None:
+    parts = [part.strip() for part in line.strip().split("\t") if part.strip()]
+    if len(parts) < 2 or parts[0] != "HAPLOTYPE_PROGRESS":
+        return None
+    fields: dict[str, str] = {}
+    for token in parts[2:]:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        fields[key] = value
+    return {
+        "event": parts[1],
+        "fields": fields,
+        "raw": line.strip(),
+    }
+
+
+def _haplotype_progress_from_fields(fields: dict[str, str], *, default: int = 5, event: str = "") -> int:
+    def _as_int(name: str, fallback: int | None = None) -> int | None:
+        raw_value = fields.get(name)
+        if raw_value in (None, ""):
+            return fallback
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError):
+            return fallback
+
+    bam_index = _as_int("bam_index")
+    total_bams = _as_int("total_bams")
+    chrom_index = _as_int("chrom_index")
+    total_chroms = _as_int("total_chroms")
+
+    if event == "COMPLETE":
+        return 100
+    if event == "INDEX_END":
+        return 98
+    if event == "INDEX_START":
+        return 94
+
+    if bam_index and total_bams and total_bams > 0:
+        bam_fraction = (bam_index - 1) / total_bams
+        if chrom_index and total_chroms and total_chroms > 0:
+            chrom_fraction = chrom_index / total_chroms
+            return max(default, min(93, int(8 + ((bam_fraction + (chrom_fraction / total_bams)) * 84))))
+        if event == "BAM_END":
+            return max(default, min(97, int(8 + ((bam_index / total_bams) * 88))))
+        return max(default, min(92, int(8 + (bam_fraction * 84))))
+
+    return default
+
+
+def _infer_haplotype_progress(stdout_lines: list[str], stderr_lines: list[str]) -> dict[str, str | int | None]:
+    parsed_lines = []
+    for line in [*stdout_lines, *stderr_lines]:
+        parsed = _parse_haplotype_progress_line(line)
+        if parsed is not None:
+            parsed_lines.append(parsed)
+
+    current_step = None
+    current_detail = None
+    progress_percent = 5
+
+    for parsed in parsed_lines:
+        event = parsed.get("event") or ""
+        fields = parsed.get("fields") or {}
+        raw = parsed.get("raw") or ""
+        if event == "BAM_START":
+            current_step = "Starting BAM haplotyping"
+            current_detail = f"Processing {fields.get('bam') or 'BAM'}"
+        elif event == "CHROM_START":
+            chrom = fields.get("chrom") or "chromosome"
+            current_step = f"Processing {chrom}"
+            variants = fields.get("informative_variants")
+            if variants not in (None, ""):
+                current_detail = f"{fields.get('bam') or 'BAM'}: {chrom} with {variants} informative variants"
+            else:
+                current_detail = raw
+        elif event == "CHROM_PROGRESS":
+            current_step = "Assigning reads"
+            current_detail = (
+                f"{fields.get('bam') or 'BAM'}: {fields.get('chrom') or 'chromosome'} "
+                f"processed {fields.get('reads') or '0'} reads"
+            )
+        elif event == "CHROM_END":
+            current_step = "Finished chromosome"
+            current_detail = (
+                f"{fields.get('bam') or 'BAM'}: {fields.get('chrom') or 'chromosome'} complete"
+            )
+        elif event == "INDEX_START":
+            current_step = "Indexing haplotyped BAMs"
+            current_detail = f"Indexing outputs for {fields.get('bam') or 'BAM'}"
+        elif event == "INDEX_END":
+            current_step = "Indexed haplotyped BAMs"
+            current_detail = f"Finished indexing outputs for {fields.get('bam') or 'BAM'}"
+        elif event == "BAM_END":
+            current_step = "Finished BAM"
+            current_detail = f"Completed haplotyping for {fields.get('bam') or 'BAM'}"
+        elif event == "COMPLETE":
+            current_step = "Haplotype complete"
+            current_detail = f"Finished {fields.get('total_bams') or 'all'} BAMs"
+
+        progress_percent = _haplotype_progress_from_fields(fields, default=progress_percent, event=event)
+
+    if current_step is None:
+        latest_line = next((line.strip() for line in reversed(stdout_lines) if line.strip()), "")
+        latest_err = next((line.strip() for line in reversed(stderr_lines) if line.strip()), "")
+        if latest_line:
+            current_step = "Running haplotype script"
+            current_detail = latest_line
+            progress_percent = 50
+        elif latest_err:
+            current_step = "Running haplotype script"
+            current_detail = latest_err
+            progress_percent = 50
+        else:
+            current_step = "Preparing haplotype workflow"
+            current_detail = "Launching haplotype_with_vcf.py"
+            progress_percent = 5
+
+    return {
+        "current_step": current_step,
+        "current_step_detail": current_detail,
+        "progress_percent": progress_percent,
+        "message": current_detail or current_step,
+    }
+
+
 def _build_live_script_status(job) -> dict[str, str | int | None]:
     stdout_lines = _tail_log_lines(getattr(job, "log_file", None), max_lines=80)
     stderr_lines = _tail_log_lines(getattr(job, "stderr_log", None), max_lines=40)
@@ -1043,6 +1181,8 @@ def _build_live_script_status(job) -> dict[str, str | int | None]:
 
     if _is_reconcile_script_job(job, report=report):
         return _infer_reconcile_progress(stdout_lines, stderr_lines)
+    if _is_haplotype_script_job(job, report=report):
+        return _infer_haplotype_progress(stdout_lines, stderr_lines)
 
     latest_stdout = next((line.strip() for line in reversed(stdout_lines) if line.strip()), "")
     latest_stderr = next((line.strip() for line in reversed(stderr_lines) if line.strip()), "")

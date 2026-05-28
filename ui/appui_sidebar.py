@@ -83,10 +83,13 @@ def render_sidebar(
             if st.button("/help remote slurm", key="help_prompt_help_remote_slurm", width="stretch"):
                 st.session_state["_help_prompt"] = "/help remote slurm"
                 st.rerun()
+            if st.button("/help /haplotype", key="help_prompt_help_haplotype", width="stretch"):
+                st.session_state["_help_prompt"] = "/help /haplotype"
+                st.rerun()
             if st.button("/help /list files", key="help_prompt_help_list_files", width="stretch"):
                 st.session_state["_help_prompt"] = "/help /list files"
                 st.rerun()
-            st.caption("Ask naturally too: `How do I stage a sample on hpc3?`, `How do I run Dogme with a staged sample?`, `How do I sync workflow12?`")
+            st.caption("Ask naturally too: `How do I stage a sample on hpc3?`, `How do I run Dogme with a staged sample?`, `How do I sync workflow12?`, `How do I haplotype workflow7 with a VCF?`")
             st.caption("**Inventory**")
             if st.button("/list samples", key="help_prompt_list_samples", width="stretch"):
                 st.session_state["_help_prompt"] = "/list samples"
@@ -115,6 +118,9 @@ def render_sidebar(
             if st.button("how do I use remote slurm", key="help_prompt_slurm", width="stretch"):
                 st.session_state["_help_prompt"] = "how do i use remote slurm"
                 st.rerun()
+            if st.button("how do I haplotype with a VCF", key="help_prompt_haplotype_workflow", width="stretch"):
+                st.session_state["_help_prompt"] = "how do i haplotype workflow7 with a vcf"
+                st.rerun()
             if st.button("how do I stage on hpc3", key="help_prompt_stage_hpc3", width="stretch"):
                 st.session_state["_help_prompt"] = "how do i stage a sample on hpc3"
                 st.rerun()
@@ -133,6 +139,7 @@ def render_sidebar(
             st.caption("`/rename <workflow> <new_name>`  ·  `/delete [workflow[, workflow2, ...]]`")
             st.caption("omit the workflow to use the active workflow for `reanalyze`, `rerun`, `delete`, and `sync-workflow`")
             st.caption("`/import-workflow <path> --remote`  ·  `--full-copy` optional")
+            st.caption("`/haplotype RNA workflow7 /data/parents.vcf.gz`  ·  `haplotype RNA workflow7 with file /data/parents.vcf.gz`")
             st.caption("**Dataframes**")
             if st.button("list dfs", key="help_prompt_list_dfs", width="stretch"):
                 st.session_state["_help_prompt"] = "list dfs"

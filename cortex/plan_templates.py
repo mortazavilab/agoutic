@@ -1128,6 +1128,187 @@ def _template_reconcile_bams(params: dict) -> dict:
     }
 
 
+def _template_haplotype_with_vcf(params: dict) -> dict:
+    """Deterministic plan for workflow-aware BAM haplotyping with a VCF."""
+    assay_mode = str(params.get("input_type") or params.get("mode") or "").strip().upper() or "RNA"
+    output_directory = params.get("output_directory", "")
+    work_dir = params.get("work_dir", "")
+    workflow_dirs = [str(item) for item in params.get("workflow_dirs", []) if isinstance(item, str) and item]
+    vcf_path = str(params.get("vcf_path") or "").strip()
+
+    if not output_directory:
+        if workflow_dirs:
+            workflow_roots = [os.path.dirname(path.rstrip("/")) or "/" for path in workflow_dirs]
+            output_directory = os.path.commonpath(workflow_roots)
+        elif work_dir:
+            output_directory = os.path.dirname(work_dir.rstrip("/")) or work_dir
+
+    steps = []
+    idx = 0
+
+    locate_tool_calls = []
+    discover_subdir = "annot" if assay_mode in {"RNA", "CDNA"} else "bams"
+    if workflow_dirs:
+        for workflow_dir in workflow_dirs:
+            locate_tool_calls.append(
+                {
+                    "source_key": "analyzer",
+                    "tool": "list_job_files",
+                    "params": {
+                        "work_dir": f"{workflow_dir.rstrip('/')}/{discover_subdir}",
+                        "extensions": ".bam",
+                        "max_depth": 1,
+                        "allow_missing": True,
+                    },
+                }
+            )
+    elif work_dir:
+        locate_tool_calls.append(
+            {
+                "source_key": "analyzer",
+                "tool": "list_job_files",
+                "params": {
+                    "work_dir": f"{work_dir.rstrip('/')}/{discover_subdir}",
+                    "extensions": ".bam",
+                    "max_depth": 1,
+                    "allow_missing": True,
+                },
+            }
+        )
+
+    s_locate = _make_step(
+        "LOCATE_DATA",
+        "Locate BAM candidates for haplotyping",
+        idx,
+        tool_calls=locate_tool_calls,
+    )
+    steps.append(s_locate)
+    idx += 1
+
+    preflight_args = ["--json", "--preflight-only", "--mode", assay_mode]
+    if vcf_path:
+        preflight_args.extend(["--vcf", vcf_path])
+    if workflow_dirs:
+        for workflow_dir in workflow_dirs:
+            preflight_args.extend(["--workflow-dir", workflow_dir])
+    elif work_dir:
+        preflight_args.extend(["--workflow-dir", work_dir])
+    if output_directory:
+        preflight_args.extend(["--output-dir", output_directory])
+
+    s_preflight = _make_step(
+        "CHECK_EXISTING",
+        "Run haplotype preflight before approval",
+        idx,
+        depends_on=[s_locate["id"]],
+        tool_calls=[
+            {
+                "source_key": "launchpad",
+                "tool": "run_allowlisted_script",
+                "params": {
+                    "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                    "script_args": preflight_args,
+                },
+            }
+        ],
+    )
+    steps.append(s_preflight)
+    idx += 1
+
+    s_approve = _make_step(
+        "REQUEST_APPROVAL",
+        "Approve haplotype-with-VCF execution",
+        idx,
+        requires_approval=True,
+        depends_on=[s_preflight["id"]],
+    )
+    steps.append(s_approve)
+    idx += 1
+
+    script_args = ["--json", "--mode", assay_mode]
+    if vcf_path:
+        script_args.extend(["--vcf", vcf_path])
+    if workflow_dirs:
+        for workflow_dir in workflow_dirs:
+            script_args.extend(["--workflow-dir", workflow_dir])
+    elif work_dir:
+        script_args.extend(["--workflow-dir", work_dir])
+    if output_directory:
+        script_args.extend(["--output-dir", output_directory])
+
+    s_run = _make_step(
+        "RUN_SCRIPT",
+        "Run haplotype-with-VCF script",
+        idx,
+        requires_approval=True,
+        depends_on=[s_approve["id"]],
+        tool_calls=[
+            {
+                "source_key": "launchpad",
+                "tool": "run_allowlisted_script",
+                "params": {
+                    "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                    "script_args": script_args,
+                },
+            }
+        ],
+    )
+    steps.append(s_run)
+    idx += 1
+
+    s_locate_out = _make_step(
+        "LOCATE_DATA",
+        "List haplotype output files for parsing",
+        idx,
+        depends_on=[s_run["id"]],
+        tool_calls=[
+            {
+                "source_key": "analyzer",
+                "tool": "list_job_files",
+                "params": {
+                    "work_dir": output_directory or work_dir or "",
+                    "max_depth": 2,
+                    "allow_missing": True,
+                },
+            }
+        ],
+    )
+    steps.append(s_locate_out)
+    idx += 1
+
+    s_parse = _make_step(
+        "PARSE_OUTPUT_FILE",
+        "Parse haplotype result tables",
+        idx,
+        depends_on=[s_locate_out["id"]],
+    )
+    steps.append(s_parse)
+    idx += 1
+
+    s_summary = _make_step(
+        "WRITE_SUMMARY",
+        "Summarize haplotype outputs and generated files",
+        idx,
+        depends_on=[s_parse["id"]],
+    )
+    steps.append(s_summary)
+
+    return {
+        "plan_type": "haplotype_with_vcf",
+        "title": "Haplotype long-read BAMs with a VCF",
+        "goal": params.get("goal", "Label long-read BAM reads with haplotype or genotype assignments using a VCF"),
+        "workflow_type": "haplotype_with_vcf",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "input_type": assay_mode,
+        "vcf_path": vcf_path,
+        "output_directory": output_directory,
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
 def _template_compare_workflows(params: dict) -> dict:
     """
     Deterministic plan for comparing two workflow/job outputs.

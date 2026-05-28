@@ -6,7 +6,7 @@ from pathlib import Path
 _APPUI_STATE_PATH = Path(__file__).resolve().parents[2] / "ui" / "appui_state.py"
 
 
-def _load_function(name: str):
+def _load_function(name: str, extra_globals: dict | None = None):
     source = _APPUI_STATE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(_APPUI_STATE_PATH))
     fn_node = next(
@@ -14,6 +14,8 @@ def _load_function(name: str):
         if isinstance(node, ast.FunctionDef) and node.name == name
     )
     namespace: dict = {}
+    if extra_globals:
+        namespace.update(extra_globals)
     mod = ast.Module(body=[fn_node], type_ignores=[])
     exec(compile(mod, filename=str(_APPUI_STATE_PATH), mode="exec"), namespace)
     return namespace[name]
@@ -34,6 +36,51 @@ class TestLocalHelpIntent:
         fn = _load_function("_is_help_intent")
 
         assert fn("how do i compare reconcile samples") is False
+
+
+class _FakeContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeStreamlit:
+    def __init__(self):
+        self.markdowns: list[str] = []
+
+    def container(self, **_kwargs):
+        return _FakeContext()
+
+    def expander(self, *_args, **_kwargs):
+        return _FakeContext()
+
+    def markdown(self, text):
+        self.markdowns.append(str(text))
+
+    def divider(self):
+        return None
+
+
+class TestLocalHelpResponse:
+    def test_local_help_mentions_haplotype_prompting(self):
+        fake_st = _FakeStreamlit()
+        fn = _load_function(
+            "_render_local_help_response",
+            {
+                "st": fake_st,
+                "section_header": lambda *_args, **_kwargs: None,
+                "metadata_row": lambda *_args, **_kwargs: None,
+            },
+        )
+
+        fn()
+
+        rendered = "\n".join(fake_st.markdowns)
+        assert "/help /haplotype" in rendered
+        assert "/haplotype <DNA|RNA|cDNA> <workflow> <vcf>" in rendered
+        assert "haplotype workflow7 with a VCF" in rendered
 
 
 class TestShareIntent:

@@ -8,6 +8,7 @@ from cortex.planner import (
     _detect_plan_type,
     _extract_plan_params,
     _template_compare_region_overlaps,
+    _template_haplotype_with_vcf,
     _template_run_de_pipeline,
     _template_run_wf_pore_c,
     _template_reconcile_bams,
@@ -70,6 +71,14 @@ def test_detect_plan_type_matches_reconcile_the_bams_request():
     assert _detect_plan_type("I want to reconcile the bams of C2C12r1 and C2C12r3") == "reconcile_bams"
 
 
+def test_detect_plan_type_matches_haplotype_request():
+    assert _detect_plan_type("haplotype RNA workflow7 with file ./parent.vcf") == "haplotype_with_vcf"
+
+
+def test_detect_plan_type_matches_haplotype_slash_request():
+    assert _detect_plan_type("/haplotype DNA workflow7 ./parent.vcf") == "haplotype_with_vcf"
+
+
 def test_detect_plan_type_matches_region_overlap_request():
     assert (
         _detect_plan_type(
@@ -115,6 +124,55 @@ def test_generate_plan_uses_deterministic_region_overlap_template():
         "PARSE_OUTPUT_FILE",
         "GENERATE_PLOT",
     ]
+
+
+def test_extract_plan_params_haplotype_sets_mode_workflow_and_vcf():
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    params = _extract_plan_params(
+        "haplotype RNA workflow7 with file ./parent.vcf",
+        state,
+        "haplotype_with_vcf",
+        project_dir="/tmp/project",
+    )
+
+    assert params["input_type"] == "RNA"
+    assert params["vcf_path"] == "./parent.vcf"
+    assert params["work_dir"] == "/tmp/project/workflow7"
+    assert params["workflow_dirs"] == ["/tmp/project/workflow7"]
+
+
+def test_haplotype_template_orders_preflight_before_approval_and_run():
+    plan = _template_haplotype_with_vcf(
+        {
+            "work_dir": "/tmp/project/workflow7",
+            "vcf_path": "./parent.vcf",
+            "input_type": "RNA",
+            "output_directory": "/tmp/project/workflow8",
+        }
+    )
+    kinds = [step["kind"] for step in plan["steps"]]
+
+    assert plan["plan_type"] == "haplotype_with_vcf"
+    assert kinds == [
+        "LOCATE_DATA",
+        "CHECK_EXISTING",
+        "REQUEST_APPROVAL",
+        "RUN_SCRIPT",
+        "LOCATE_DATA",
+        "PARSE_OUTPUT_FILE",
+        "WRITE_SUMMARY",
+    ]
+
+    preflight_args = plan["steps"][1]["tool_calls"][0]["params"]["script_args"]
+    run_args = plan["steps"][3]["tool_calls"][0]["params"]["script_args"]
+    assert preflight_args[:4] == ["--json", "--preflight-only", "--mode", "RNA"]
+    assert "./parent.vcf" in preflight_args
+    assert run_args[:3] == ["--json", "--mode", "RNA"]
 
 
 def test_extract_plan_params_run_wf_pore_c_sets_preview_defaults(tmp_path, monkeypatch):

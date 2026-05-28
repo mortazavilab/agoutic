@@ -15,6 +15,8 @@ Covers:
 import asyncio
 import datetime
 import json
+import sys
+import types
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +27,26 @@ import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
+
+class _FakeEncoding:
+    def encode(self, text: str):
+        return list(text or "")
+
+
+if "tiktoken" not in sys.modules:
+    sys.modules["tiktoken"] = types.SimpleNamespace(
+        get_encoding=lambda _name: _FakeEncoding(),
+        Encoding=_FakeEncoding,
+    )
+
+
+if "pandas" not in sys.modules:
+    sys.modules["pandas"] = types.SimpleNamespace(
+        DataFrame=object,
+        Series=object,
+        read_csv=lambda *_args, **_kwargs: None,
+    )
 
 from common.database import Base
 import cortex.job_polling as job_polling_module
@@ -2662,6 +2684,148 @@ async def test_ensure_workflow_plan_approval_gate_builds_reconcile_specific_payl
     assert gate_payload["extracted_params"]["annotation_gtf"] == "/refs/mm39.gtf"
     assert gate_payload["extracted_params"]["bam_count"] == 2
     assert gate_payload["extracted_params"]["output_directory"] == "/proj/reconcile"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_builds_haplotype_specific_payload(session_factory, seed_data):
+    preflight_payload = {
+        "success": True,
+        "status": "preflight_ready",
+        "message": "Haplotype preflight validation passed. Ready for approval.",
+        "mode": "RNA",
+        "assignment_mode": "two_sample",
+        "vcf": {
+            "path": "/proj/refs/parents.vcf.gz",
+            "available_samples": ["parentA", "parentB"],
+            "selected_samples": ["parentA", "parentB"],
+        },
+        "labels": {
+            "label_a": "parentA",
+            "label_b": "parentB",
+            "ambiguous": "ambiguous",
+        },
+        "inputs": {
+            "count": 2,
+            "bams": [
+                {
+                    "name": "sample1.mm39.annotated.bam",
+                    "path": "/proj/workflow7/annot/sample1.mm39.annotated.bam",
+                    "workflow_dir": "/proj/workflow7",
+                    "workflow_type": "dogme_rna",
+                },
+                {
+                    "name": "sample2.mm39.annotated.bam",
+                    "path": "/proj/workflow8/annot/sample2.mm39.annotated.bam",
+                    "workflow_dir": "/proj/workflow8",
+                    "workflow_type": "dogme_rna",
+                },
+            ],
+        },
+        "thresholds": {
+            "min_informative_sites": 2,
+            "min_mapq": 0,
+        },
+        "execution_defaults": {
+            "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+            "underlying_script_id": "haplotype_with_vcf/haplotype_with_vcf",
+            "progress_read_interval": 100000,
+        },
+        "outputs": {
+            "output_root": "/proj/workflow9",
+            "artifacts": [],
+        },
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "haplotype_with_vcf",
+            "skill": "haplotype_with_vcf",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_haplotype",
+            "output_directory": "/proj/workflow9",
+            "steps": [
+                {
+                    "id": "preflight_haplotype",
+                    "kind": "CHECK_EXISTING",
+                    "title": "Validate haplotype inputs",
+                    "status": "COMPLETED",
+                    "result": [
+                        {
+                            "tool": "run_allowlisted_script",
+                            "result": {
+                                "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                                "stdout": json.dumps(preflight_payload),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "id": "approve_haplotype",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve haplotype execution",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "depends_on": ["preflight_haplotype"],
+                },
+                {
+                    "id": "run_haplotype",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run haplotype script",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "depends_on": ["approve_haplotype"],
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                                "script_args": [
+                                    "--workflow-dir", "/proj/workflow7",
+                                    "--workflow-dir", "/proj/workflow8",
+                                    "--output-dir", "/proj/workflow9",
+                                    "--vcf", "/proj/refs/parents.vcf.gz",
+                                    "--mode", "RNA",
+                                    "--json",
+                                ],
+                            },
+                        }
+                    ],
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["gate_action"] == "haplotype_with_vcf"
+    assert gate_payload["skill"] == "haplotype_with_vcf"
+    assert gate_payload["extracted_params"]["run_type"] == "script"
+    assert gate_payload["extracted_params"]["script_id"] == "haplotype_with_vcf/haplotype_with_vcf"
+    assert gate_payload["extracted_params"]["mode"] == "RNA"
+    assert gate_payload["extracted_params"]["assignment_mode"] == "two_sample"
+    assert gate_payload["extracted_params"]["vcf_selected_samples"] == ["parentA", "parentB"]
+    assert gate_payload["extracted_params"]["label_a"] == "parentA"
+    assert gate_payload["extracted_params"]["bam_count"] == 2
+    assert gate_payload["extracted_params"]["output_directory"] == "/proj/workflow9"
+    assert [item["name"] for item in gate_payload["extracted_params"]["bam_inputs"]] == [
+        "sample1.mm39.annotated.bam",
+        "sample2.mm39.annotated.bam",
+    ]
+    assert "sample1.mm39.annotated.bam" in gate_payload["label"]
     sess.close()
 
 

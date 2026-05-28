@@ -117,6 +117,7 @@ Natural-language equivalents are also supported when phrased explicitly as skill
 
 - `what skills are available?`
 - `tell me about the differential expression skill`
+- `tell me about the haplotype_with_vcf skill`
 - `switch to the IGVF Search skill`
 
 These commands and English-query equivalents read the same manifest metadata that powers skill routing and planning.
@@ -419,6 +420,8 @@ live in one place and be included by multiple skills.
 | `differential_expression` | differential_expression/SKILL.md | DE analysis via edgePython |
 | `xgenepy_analysis` | xgenepy_analysis/SKILL.md | Local XgenePy cis/trans analysis |
 | `enrichment_analysis` | enrichment_analysis/SKILL.md | GO/pathway enrichment |
+| `reconcile_bams` | reconcile_bams/SKILL.md | Cross-workflow annotated BAM reconciliation |
+| `haplotype_with_vcf` | haplotype_with_vcf/SKILL.md | Workflow-aware DNA/RNA/cDNA haplotyping with an indexed VCF |
 | `remote_execution` | remote_execution/SKILL.md | Remote SLURM execution |
 
 Every registered skill above is auto-discovered from its folder-local `manifest.yaml`.

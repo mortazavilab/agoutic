@@ -1,6 +1,6 @@
 # AGOUTIC Cortex: Agent Engine
 
-**Docs Current For:** AGOUTIC 3.6.9  
+**Docs Current For:** AGOUTIC 3.7.0
 **Service Version:** 1.0  
 **Status:** Active Development 
 
@@ -364,6 +364,8 @@ Skills are Markdown files in `skills/<skill_key>/SKILL.md` that define workflows
 - **skills/run_dogme_cdna/SKILL.md** - cDNA isoform workflow
 - **skills/ENCODE_LongRead/SKILL.md** - ENCODE consortium workflow
 - **skills/analyze_local_sample/SKILL.md** - Sample intake workflow
+- **skills/reconcile_bams/SKILL.md** - Cross-workflow annotated BAM reconciliation
+- **skills/haplotype_with_vcf/SKILL.md** - Workflow-aware DNA/RNA/cDNA haplotyping with an indexed VCF
 
 ### Loading Skills
 

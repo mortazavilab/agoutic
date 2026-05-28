@@ -21,6 +21,14 @@ class _NoopEngine:
             "run GO enrichment analysis on the upregulated genes",
             "run_enrichment",
         ),
+        (
+            "haplotype RNA workflow7 with file ./parent.vcf",
+            "haplotype_with_vcf",
+        ),
+        (
+            "/haplotype DNA workflow7 ./parent.vcf",
+            "haplotype_with_vcf",
+        ),
     ],
 )
 def test_manifest_detection_matches_expected_plan_type(message, expected_plan_type):
@@ -85,3 +93,30 @@ def test_generate_plan_warns_when_required_manifest_service_is_unavailable(monke
     assert plan is not None
     assert plan["service_warnings"]
     assert "edgepython" in plan["service_warnings"][0]
+
+
+def test_generate_plan_adds_manifest_metadata_to_haplotype_plan():
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    plan = generate_plan(
+        "haplotype RNA workflow7 with file ./parent.vcf",
+        "analyze_job_results",
+        state,
+        _NoopEngine(),
+        conversation_history=[],
+        project_dir="/tmp/project",
+    )
+
+    assert plan is not None
+    assert plan["planning_skill"] == "haplotype_with_vcf"
+    assert plan["estimated_runtime"] == "slow"
+    assert plan["input_type"] == "RNA"
+    assert plan["vcf_path"] == "./parent.vcf"
+
+    run_step = next(step for step in plan["steps"] if step["kind"] == "RUN_SCRIPT")
+    assert run_step["skill_key"] == "haplotype_with_vcf"
+    assert run_step["tool_calls"][0]["params"]["script_id"] == "haplotype_with_vcf/haplotype_with_vcf"

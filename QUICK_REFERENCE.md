@@ -158,7 +158,7 @@ mkdir -p $AGOUTIC_DATA/database $AGOUTIC_DATA/launchpad_work $AGOUTIC_DATA/launc
 Slash commands currently fall into two buckets:
 
 - **Deterministic quick exits** — help commands, skill commands, workflow commands, inventory commands, and all memory commands are handled by the backend without calling the LLM.
-- **Planner-routed commands** — `/de` enters the differential-expression planning flow and can still ask follow-up questions when required inputs are missing.
+- **Planner-routed commands** — `/de` and `/haplotype` enter approval-gated planning flows and can still ask follow-up questions when required inputs are missing.
 
 ### Help Commands
 
@@ -172,9 +172,10 @@ Natural-language prompt coaching is also supported for common AGOUTIC tasks, for
 - `how do I stage a sample on hpc3`
 - `how do I prompt you to run Dogme with a staged sample`
 - `how do I sync workflow12 back from the cluster`
+- `how do I haplotype workflow7 with a VCF`
 - `how do I use /list files`
 
-Prompt-coach coverage currently includes slash commands, skills, workflow import, remote SLURM stage/run/sync flows, differential expression, and dataframe/plotting workflows.
+Prompt-coach coverage currently includes slash commands, skills, workflow import, remote SLURM stage/run/sync flows, differential expression, VCF haplotyping, and dataframe/plotting workflows.
 
 ### Skill Commands
 
@@ -236,6 +237,24 @@ The Streamlit My Data page now surfaces the same inventories in tabs for Local S
 | `/de` | `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2` | Run edgePython differential expression from the current workflow abundance context with explicit sample groups |
 
 Use natural-language DE requests when you want to point at a dataframe or counts file, or when you want AGOUTIC to clarify missing groups before running the plan.
+
+### Haplotype With VCF Slash Command
+
+| Command | Syntax | Description |
+|---|---|---|
+| `/haplotype` | `/haplotype RNA workflow7 /data/parents.vcf.gz` | Haplotype DNA, RNA, or cDNA workflow BAMs against an indexed VCF; approval shows the exact BAM inputs, selected VCF samples, labels, and output workflow |
+
+Natural language equivalents are also supported, for example:
+
+- `haplotype RNA workflow7 with file /data/parents.vcf.gz`
+- `haplotype DNA workflow5 /data/family.vcf.gz`
+
+Input resolution rules:
+
+- RNA and cDNA workflows use `annot/*.annotated.bam`
+- DNA workflows use mapped BAMs from `bams/`
+- Reconcile workflows use root-level `*.annotated.bam` outputs
+- The VCF must already be indexed with `.tbi` or `.csi`
 
 ### Memory Slash Commands
 

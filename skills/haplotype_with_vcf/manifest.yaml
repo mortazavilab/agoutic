@@ -1,0 +1,32 @@
+display_name: Haplotype With VCF
+description: Label long-read DNA or RNA BAMs with haplotype or genotype assignment using an indexed VCF.
+category: execution
+source:
+  type: service
+  key: launchpad
+required_services:
+  - launchpad
+expected_inputs:
+  - workflow_uuids
+  - bam_paths
+  - vcf_path
+  - input_type
+output_types:
+  - file
+  - report
+sample_types:
+  - DNA
+  - RNA
+  - cDNA
+estimated_runtime: slow
+plan_type: haplotype_with_vcf
+trigger_patterns:
+  - '(?:^|\b)haplotype\s+(?:DNA|RNA|cDNA)\s+workflow\d+\s+(?:with\s+file\s+)?\S+\.vcf(?:\.gz)?\b'
+  - '(?:haplotyp(?:e|ing)|label)\s+.+\s+(?:with|using)\s+.+\.vcf(?:\.gz)?\b'
+  - '(?:parental|genotype|haplotype)\s+(?:assignment|label(?:ing)?)\s+.+\.vcf(?:\.gz)?\b'
+slash_commands:
+  - /haplotype
+mcp_tool_chain:
+  - source_key: launchpad
+    tool: run_allowlisted_script
+classification_priority: 11

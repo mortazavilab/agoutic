@@ -53,6 +53,14 @@ def _is_reconcile_script_submission(job_data: dict) -> bool:
     return Path(script_path).name in {"reconcile_bams.py", "reconcileBams.py"}
 
 
+def _is_haplotype_script_submission(job_data: dict) -> bool:
+    script_id = str(job_data.get("script_id") or "").strip()
+    if script_id == "haplotype_with_vcf/haplotype_with_vcf":
+        return True
+    script_path = str(job_data.get("script_path") or "").strip()
+    return Path(script_path).name == "haplotype_with_vcf.py"
+
+
 def _submission_client_timeout_seconds(run_type: str, submission_payload: dict) -> float:
     if run_type != "script":
         return 900.0
@@ -69,7 +77,7 @@ def _submission_client_timeout_seconds(run_type: str, submission_payload: dict) 
 
 
 def _should_submit_script_as_job(job_data: dict) -> bool:
-    return _is_reconcile_script_submission(job_data)
+    return _is_reconcile_script_submission(job_data) or _is_haplotype_script_submission(job_data)
 
 
 def _bounded_reconcile_threads(raw_value: int | None = None) -> int:
@@ -153,6 +161,49 @@ def _build_script_submission_payload(job_data: dict) -> dict:
         submission_payload["output_directory"] = output_directory
 
     return submission_payload
+
+
+def _build_haplotype_script_args(job_params: dict) -> list[str]:
+    bam_inputs = job_params.get("bam_inputs") or []
+    bam_paths = [
+        item.get("path")
+        for item in bam_inputs
+        if isinstance(item, dict) and item.get("path")
+    ]
+    if not bam_paths:
+        raise ValueError("Haplotype approval is missing BAM inputs.")
+
+    vcf_path = str(job_params.get("vcf_path") or "").strip()
+    if not vcf_path:
+        raise ValueError("Haplotype approval is missing the VCF path.")
+
+    mode = str(job_params.get("mode") or "").strip()
+    if not mode:
+        raise ValueError("Haplotype approval is missing the assay mode.")
+
+    output_dir = str(job_params.get("output_directory") or job_params.get("input_directory") or ".").strip() or "."
+    script_args: list[str] = ["--json", "--output-dir", output_dir, "--vcf", vcf_path, "--mode", mode]
+    for bam_path in bam_paths:
+        script_args.extend(["--input-bam", bam_path])
+
+    for sample_name in job_params.get("vcf_selected_samples") or []:
+        if sample_name not in (None, ""):
+            script_args.extend(["--vcf-sample", str(sample_name)])
+
+    scalar_flags = [
+        ("label_a", "--label-a"),
+        ("label_b", "--label-b"),
+        ("min_informative_sites", "--min-informative-sites"),
+        ("min_mapq", "--min-mapq"),
+        ("progress_read_interval", "--progress-read-interval"),
+    ]
+    for field, flag in scalar_flags:
+        value = job_params.get(field)
+        if value is None or value == "":
+            continue
+        script_args.extend([flag, str(value)])
+
+    return script_args
 
 
 def _apply_workflow_specific_step_updates(workflow_payload: dict, job_params: dict) -> None:
@@ -454,6 +505,10 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             job_params = dict(job_params)
             job_params["script_id"] = "reconcile_bams/reconcile_bams"
             job_params["script_args"] = _build_reconcile_script_args(job_params)
+        elif run_type == "script" and gate_action == "haplotype_with_vcf":
+            job_params = dict(job_params)
+            job_params["script_id"] = "haplotype_with_vcf/haplotype_with_vcf"
+            job_params["script_args"] = _build_haplotype_script_args(job_params)
 
         # Normalize remote execution parameters for Dogme jobs only.
         if run_type != "script":

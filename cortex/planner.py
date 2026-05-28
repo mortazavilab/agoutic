@@ -55,6 +55,7 @@ from cortex.plan_templates import (  # noqa: F401 — re-exported
     _template_compare_region_overlaps,
     _template_compare_workflows,
     _template_download_analyze,
+    _template_haplotype_with_vcf,
     _template_parse_plot_interpret,
     _template_reconcile_bams,
     _template_remote_stage_workflow,
@@ -199,6 +200,8 @@ def _deterministic_template_for_plan_type(plan_type: str, params: dict) -> dict 
         return _template_remote_stage_workflow(params)
     if plan_type == "reconcile_bams":
         return _template_reconcile_bams(params)
+    if plan_type == "haplotype_with_vcf":
+        return _template_haplotype_with_vcf(params)
     return None
 
 
@@ -730,6 +733,14 @@ def generate_plan(
     if plan_type == "reconcile_bams":
         plan = _apply_manifest_planning_metadata(
             _template_reconcile_bams(params),
+            plan_type=plan_type,
+            params=params,
+        )
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return _finalize_plan(plan, conv_state)
+    if plan_type == "haplotype_with_vcf":
+        plan = _apply_manifest_planning_metadata(
+            _template_haplotype_with_vcf(params),
             plan_type=plan_type,
             params=params,
         )

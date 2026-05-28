@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Release:** 3.6.10
+**Release:** 3.7.0
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -212,6 +212,8 @@ The analysis layer returns:
 - `Summarize the QC for workflow2`
 - `List the important files in workflow1/annot`
 - `Parse the bedMethyl output and summarize methylation patterns`
+- `Haplotype RNA workflow7 with file /data/parents.vcf.gz`
+- `/haplotype DNA workflow5 /data/family.vcf.gz`
 - `Show the top expressed genes from this result file`
 - `Run differential expression between control and treatment`
 - `Compare the treated samples treated_1 and treated_2 to the control samples ctrl_1 and ctrl_2`
@@ -220,6 +222,15 @@ The analysis layer returns:
 - `Annotate these Ensembl IDs`
 - `Run GO enrichment on the upregulated genes`
 - `Compare workflow1 and workflow2 outputs`
+
+### Haplotype Reads With An Indexed VCF
+
+AGOUTIC can haplotype long-read DNA, RNA, or cDNA workflow BAMs against an indexed VCF through the `haplotype_with_vcf` skill.
+
+- Slash command: `/haplotype RNA workflow7 /data/parents.vcf.gz`
+- Natural language: `haplotype RNA workflow7 with file /data/parents.vcf.gz`
+- DNA workflows resolve mapped BAMs from `bams/`, RNA/cDNA workflows resolve annotated BAMs from `annot/`, and reconcile workflows use root-level `*.annotated.bam` files.
+- The approval gate lists the exact BAM names, the selected VCF sample or sample pair, assignment labels, and the destination `workflowN` before execution starts.
 
 ### Visualization Support
 
@@ -333,7 +344,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   AGOUTIC System v3.6.9                     │
+│                   AGOUTIC System v3.7.0                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -952,6 +963,8 @@ Pre-defined bioinformatics workflows are available in `skills/`:
 - **download_files/SKILL.md** - File download orchestration
 - **differential_expression/SKILL.md** - edgePython DE pipeline (with gene annotation)
 - **enrichment_analysis/SKILL.md** - GO & pathway enrichment analysis
+- **reconcile_bams/SKILL.md** - Cross-workflow annotated BAM reconciliation
+- **haplotype_with_vcf/SKILL.md** - Workflow-aware DNA/RNA/cDNA haplotyping with an indexed VCF
 - **remote_execution/SKILL.md** - Remote execution workflow
 - **shared/SKILL_ROUTING_PATTERN.md** and **shared/DOGME_QUICK_WORKFLOW_GUIDE.md** - Shared reference docs
 
@@ -982,7 +995,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.6.9 — prompt-coach `/help` guidance, unified inventory/My Data discovery, reference-catalog approval options, wf-pore-c Phase 3 completion, and remote SLURM defaults/approval fixes now ship together in the current AGOUTIC release
+- **Release**: 3.7.0 — workflow-aware VCF haplotyping for DNA/RNA/cDNA, `/haplotype` plus natural-language routing, live haplotype script progress, and refreshed user help/tutorial surfaces now ship together in the current AGOUTIC release
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

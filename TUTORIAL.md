@@ -1,4 +1,4 @@
-# AGOUTIC Tutorial: SSH Profiles, Remote SLURM Runs, Reconcile, and Result Sync
+# AGOUTIC Tutorial: SSH Profiles, Remote SLURM Runs, Reconcile, Haplotype With VCF, and Result Sync
 
 This tutorial walks through the full user flow for running AGOUTIC on a SLURM HPC cluster:
 
@@ -8,6 +8,7 @@ This tutorial walks through the full user flow for running AGOUTIC on a SLURM HP
 4. Launch Dogme workflows on SLURM.
 5. Sync results back to the local AGOUTIC host.
 6. Run `reconcile_bams` across completed workflows.
+7. Haplotype workflow BAMs with an indexed VCF.
 
 For API-level setup details, see [`docs/cluster_slurm_setup.md`](docs/cluster_slurm_setup.md). For execution-mode reference behavior, see [`docs/user_guide_execution_modes.md`](docs/user_guide_execution_modes.md).
 
@@ -291,6 +292,30 @@ Useful follow-up prompts:
 
 AGOUTIC prefers workflow-local `reconciled.gtf` when present so downstream annotation and plotting stay aligned with the reconciled output.
 
+## Step 11: Haplotype Reads With An Indexed VCF
+
+Use haplotyping when you already have local-accessible mapped or annotated BAMs plus an indexed VCF that distinguishes the samples or parental genotypes you want to assign against.
+
+Recommended prerequisites:
+
+- the source workflow outputs are local-accessible on the AGOUTIC host
+- every source BAM is coordinate-sorted and indexed
+- the VCF is indexed with `.tbi` or `.csi`
+- you know whether the source workflow should be treated as `DNA`, `RNA`, or `cDNA`
+
+Typical prompts:
+
+- _`/haplotype RNA workflow4 /data/parents.vcf.gz`_
+- _`haplotype RNA workflow4 with file /data/parents.vcf.gz`_
+- _`/haplotype DNA workflow2 /data/family.vcf.gz`_
+
+What AGOUTIC does:
+
+- resolves BAMs from `annot/` for RNA/cDNA Dogme workflows, `bams/` for DNA Dogme workflows, or root-level `*.annotated.bam` files for reconcile outputs
+- runs a preflight validation step to confirm BAM sort/index state, indexed VCF access, and compatible VCF sample layout
+- asks for approval before execution, showing the exact BAM names, selected VCF samples, assignment labels, thresholds, and destination workflow
+- writes combined and split haplotyped BAMs plus BAM indexes and summary TSVs into a new `workflowN` directory
+
 ## Troubleshooting Short List
 
 ### The SSH profile will not test successfully
@@ -314,6 +339,13 @@ AGOUTIC prefers workflow-local `reconciled.gtf` when present so downstream annot
 - confirm AGOUTIC can resolve one shared annotation GTF
 - sync remote-only results back locally before attempting reconcile
 
+### Haplotype will not approve
+
+- confirm the workflow contains the expected BAM type for the requested mode (`annot/*.annotated.bam` for RNA/cDNA, `bams/*.bam` for DNA)
+- confirm every selected BAM is coordinate-sorted and indexed
+- confirm the VCF path is correct and already has a `.tbi` or `.csi` index
+- if the VCF has more than two samples, be prepared to select one sample or an explicit sample pair during approval
+
 ### Results are remote-only and analysis does not work
 
 Run a manual sync first, then retry the analysis or reconcile request.
@@ -329,5 +361,6 @@ If you are setting this up for the first time, use this sequence:
 5. Wait for the automatic sync to complete.
 6. Run `list workflows` and summarize the finished workflow.
 7. After you have at least two compatible workflows, run reconcile across them.
+8. If you have an indexed VCF and compatible BAM outputs, run `/haplotype RNA workflowN /path/to/parents.vcf.gz` or the matching DNA form.
 
 That path exercises SSH, staging, SLURM submit, copy-back, workflow discovery, and reconcile without requiring manual recovery steps on the first try.

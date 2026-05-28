@@ -251,8 +251,8 @@ def _render_local_help_response() -> None:
             st.markdown("3. Review approval parameters and approve to execute.")
         with st.expander("Prompt Coach", expanded=False):
             st.markdown("- Use `/help` for an overview of AGOUTIC prompting patterns.")
-            st.markdown("- Use `/help <topic>` for task-specific guidance such as `/help remote slurm`, `/help /list files`, or `/help remote_execution`.")
-            st.markdown("- Natural language also works: `how do I stage a sample on hpc3`, `how do I prompt you to run Dogme with a staged sample`, `how do I sync workflow12 back from the cluster`.")
+            st.markdown("- Use `/help <topic>` for task-specific guidance such as `/help remote slurm`, `/help /haplotype`, `/help /list files`, or `/help remote_execution`.")
+            st.markdown("- Natural language also works: `how do I stage a sample on hpc3`, `how do I prompt you to run Dogme with a staged sample`, `how do I sync workflow12 back from the cluster`, `how do I haplotype workflow7 with a VCF`.")
             st.markdown("- Prompt-coach answers include what to provide, example prompts, useful slash commands, and what AGOUTIC will do internally.")
         with st.expander("Common Actions", expanded=False):
             st.markdown("- run dna workflow for sample X from /path")
@@ -264,11 +264,13 @@ def _render_local_help_response() -> None:
             st.markdown("- show job status and next steps")
             st.markdown("- parse results for run UUID")
             st.markdown("- compare reconcile abundance samples with edgePython")
+            st.markdown("- haplotype workflow BAMs with an indexed VCF")
         with st.expander("Slash Commands", expanded=False):
             st.markdown("- Help: `/help`, `/help <topic>`, `/commands`")
             st.markdown("- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`")
             st.markdown("- Inventory: `/list samples`, `/list staged [--profile NAME]`, `/list imported`, `/list dfs`, `/list workflows`, `/list files [target] [--project] [--depth N]`")
             st.markdown("- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`")
+            st.markdown("- Haplotyping: `/haplotype <DNA|RNA|cDNA> <workflow> <vcf>`")
             st.markdown("- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`")
             st.markdown("- Memory: `/remember`, `/remember-global`, `/remember-df`, `/memories`, `/forget`, `/pin`, `/unpin`, `/restore`, `/annotate`, `/search-memories`, `/upgrade-to-global`")
             st.markdown("- Hyphenated memory commands also accept underscore variants such as `/remember_global`, `/remember_df`, and `/upgrade_global`")
