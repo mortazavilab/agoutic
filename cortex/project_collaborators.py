@@ -6,7 +6,7 @@ import datetime
 import uuid
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from cortex.models import Project, ProjectAccess, User
 from cortex.schemas import ProjectCollaboratorOut
@@ -167,6 +167,68 @@ def update_project_collaborator_role(session, project_id: str, user_id: str, rol
     session.commit()
     session.refresh(access)
     return project, user, access
+
+
+def transfer_project_ownership(session, project_id: str, new_owner_user_id: str) -> tuple[Project, User, User, ProjectAccess, ProjectAccess]:
+    project = _get_project_or_404(session, project_id)
+    if new_owner_user_id == project.owner_id:
+        raise HTTPException(status_code=409, detail="That user already owns this project.")
+
+    new_owner_access = _get_membership_or_none(session, project_id, new_owner_user_id)
+    if not new_owner_access:
+        raise HTTPException(status_code=404, detail="Collaborator not found")
+    if new_owner_access.role == "owner":
+        raise HTTPException(status_code=409, detail="That user already owns this project.")
+
+    previous_owner_access = _get_membership_or_none(session, project_id, project.owner_id)
+    if not previous_owner_access:
+        raise HTTPException(status_code=409, detail="Current owner membership is missing.")
+
+    previous_owner = session.execute(select(User).where(User.id == project.owner_id)).scalar_one_or_none()
+    if not previous_owner:
+        raise HTTPException(status_code=404, detail="Current owner not found")
+
+    new_owner = session.execute(select(User).where(User.id == new_owner_user_id)).scalar_one_or_none()
+    if not new_owner:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    normalized_name = " ".join(str(project.name or "").strip().split()).lower()
+    duplicate_name = session.execute(
+        select(Project.id)
+        .where(Project.owner_id == new_owner_user_id)
+        .where(func.lower(func.trim(Project.name)) == normalized_name)
+        .where(Project.id != project_id)
+    ).scalar_one_or_none()
+    if duplicate_name:
+        raise HTTPException(
+            status_code=409,
+            detail="Ownership transfer would conflict with another project name already owned by that user.",
+        )
+
+    if project.slug:
+        duplicate_slug = session.execute(
+            select(Project.id)
+            .where(Project.owner_id == new_owner_user_id)
+            .where(Project.slug == project.slug)
+            .where(Project.id != project_id)
+        ).scalar_one_or_none()
+        if duplicate_slug:
+            raise HTTPException(
+                status_code=409,
+                detail="Ownership transfer would conflict with another project slug already owned by that user.",
+            )
+
+    now = _utcnow()
+    previous_owner_access.role = "editor"
+    previous_owner_access.updated_at = now
+    previous_owner_access.project_name = project.name
+
+    new_owner_access.role = "owner"
+    new_owner_access.updated_at = now
+    new_owner_access.project_name = project.name
+
+    project.owner_id = new_owner_user_id
+    return project, previous_owner, new_owner, previous_owner_access, new_owner_access
 
 
 def remove_project_collaborator(session, project_id: str, user_id: str) -> tuple[Project, User, str]:

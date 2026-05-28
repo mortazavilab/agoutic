@@ -14,6 +14,8 @@
 
 - **The pinned shared-project collaborator banner now uses an opaque background and a collapsed-by-default expandable summary, so chat content no longer bleeds through it and the full collaborator roster only expands when needed**
 
+- **Owners and admins can now transfer project ownership to an existing viewer or editor collaborator from the Projects page, and the collaborator surface now groups editors and viewers explicitly so role-based membership is easier to scan**
+
 ### Documentation
 
 - **Updated the main README to describe the shipped collaboration model, including owner/editor/viewer behavior, chat-driven sharing, Projects-page collaborator management, and viewer read-only UI gating**

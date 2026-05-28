@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Release:** 3.6.9
+**Release:** 3.6.10
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -31,7 +31,8 @@ and the Streamlit sharing UI.
 AGOUTIC projects now support multi-user collaboration with project-scoped
 viewer, editor, and owner roles.
 
-- Owners can add collaborators directly from chat or from the Projects page.
+- Owners can add collaborators directly from chat or from the Projects page,
+  and can transfer ownership to an existing viewer or editor collaborator.
 - Editors can work in shared projects and keep using normal mutating project actions.
 - Viewers can open shared conversation history, inspect project files and jobs,
   and browse project state in a read-only mode.
@@ -44,10 +45,13 @@ The current collaboration UI surfaces are:
   current project roster with role and activity labels.
 - Sidebar and chat shell: owned vs shared projects are labeled explicitly,
   viewer-only sessions have chat submission, uploads, and clear-chat disabled, and
-  a `list users` sidebar button exposes the current collaborator roster.
+  a `list users` sidebar button exposes the current collaborator roster. Shared
+  owner/admin chat views also keep a pinned collaborator summary available while
+  the conversation scrolls.
 - Projects page: the project table shows access labels, owner/admin-only mutating
-  controls stay gated, and the Collaborators tab supports add, update, and remove
-  actions plus full roster visibility for all project members.
+  controls stay gated, and the Collaborators tab supports add, update, remove,
+  and ownership-transfer actions. Collaborator rosters are grouped by editors
+  and viewers to make role-based access easier to scan.
 
 Collaboration is project-scoped rather than conversation-scoped. Authorized
 members can reopen shared project conversations and continue follow-up work in

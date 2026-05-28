@@ -625,6 +625,78 @@ class TestProjectCollaborators:
         resp = client.delete(f"/projects/{project['id']}/collaborators/editor-uid")
         assert resp.status_code == 403
 
+    def test_owner_can_transfer_ownership_to_existing_collaborator_and_move_project_dir(self, client, test_session_factory, tmp_path):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="editor-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="editor",
+            invited_by="test-uid",
+        )
+
+        old_dir = tmp_path / "users" / "testuser" / project["slug"] / "data"
+        old_dir.mkdir(parents=True, exist_ok=True)
+        (old_dir / "reads.fastq").write_text("ACGT")
+
+        transfer_resp = client.post(
+            f"/projects/{project['id']}/transfer-ownership",
+            json={"user_id": "editor-uid"},
+        )
+
+        assert transfer_resp.status_code == 200
+        assert transfer_resp.json()["status"] == "transferred"
+        assert transfer_resp.json()["role"] == "owner"
+
+        owner_roster = client.get(f"/projects/{project['id']}/collaborators")
+        assert owner_roster.status_code == 200
+        owner_roles = {item["email"]: item["role"] for item in owner_roster.json()["collaborators"]}
+        assert owner_roles["editor@example.com"] == "owner"
+        assert owner_roles["test@example.com"] == "editor"
+
+        self._set_session(client, "editor-session")
+        new_owner_projects = client.get("/projects")
+        assert new_owner_projects.status_code == 200
+        new_owner_project = next(item for item in new_owner_projects.json()["projects"] if item["id"] == project["id"])
+        assert new_owner_project["role"] == "owner"
+
+        new_dir = tmp_path / "users" / "editoruser" / project["slug"] / "data" / "reads.fastq"
+        assert new_dir.read_text() == "ACGT"
+        assert not (tmp_path / "users" / "testuser" / project["slug"]).exists()
+
+    def test_non_owner_cannot_transfer_ownership(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="editor-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="editor",
+            invited_by="test-uid",
+        )
+
+        self._set_session(client, "editor-session")
+        transfer_resp = client.post(
+            f"/projects/{project['id']}/transfer-ownership",
+            json={"user_id": "test-uid"},
+        )
+        assert transfer_resp.status_code == 403
+
     def test_collaborator_can_leave_and_owner_cannot(self, client, test_session_factory):
         project = self._create_project(client)
         _seed_user_with_session(

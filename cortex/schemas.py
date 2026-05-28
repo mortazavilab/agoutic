@@ -288,6 +288,10 @@ class ProjectCollaboratorUpdateRequest(BaseModel):
     role: Literal["viewer", "editor"]
 
 
+class ProjectOwnershipTransferRequest(BaseModel):
+    user_id: str = Field(..., min_length=1)
+
+
 class ProjectCollaboratorMutationOut(BaseModel):
     status: str
     project_id: str

@@ -28,6 +28,7 @@ from cortex.project_collaborators import (
     leave_project,
     list_project_collaborators,
     remove_project_collaborator,
+    transfer_project_ownership,
     update_project_collaborator_role,
 )
 from cortex.schemas import (
@@ -35,6 +36,7 @@ from cortex.schemas import (
     ProjectCollaboratorCreateRequest,
     ProjectCollaboratorListOut,
     ProjectCollaboratorMutationOut,
+    ProjectOwnershipTransferRequest,
     ProjectCollaboratorUpdateRequest,
     ProjectLeaveResponse,
     ProjectTaskListOut,
@@ -337,6 +339,49 @@ async def delete_project_collaborator(project_id: str, user_id: str, request: Re
             "email": collaborator.email,
             "role": removed_role,
         }
+    finally:
+        session.close()
+
+
+@router.post("/projects/{project_id}/transfer-ownership", response_model=ProjectCollaboratorMutationOut)
+async def post_project_ownership_transfer(project_id: str, body: ProjectOwnershipTransferRequest, request: Request):
+    """Transfer canonical project ownership to an existing viewer or editor collaborator."""
+    from cortex.user_jail import transfer_project_dir
+
+    user = request.state.user
+    require_project_owner_or_admin(project_id, user)
+
+    session = _db.SessionLocal()
+    try:
+        project, previous_owner, new_owner, _previous_owner_access, new_owner_access = transfer_project_ownership(
+            session,
+            project_id,
+            str(body.user_id),
+        )
+        transfer_project_dir(
+            old_username=previous_owner.username,
+            new_username=new_owner.username,
+            old_owner_id=previous_owner.id,
+            new_owner_id=new_owner.id,
+            project_slug=project.slug,
+            project_id=project.id,
+        )
+        session.commit()
+        session.refresh(project)
+        session.refresh(new_owner_access)
+        return {
+            "status": "transferred",
+            "project_id": project.id,
+            "user_id": new_owner.id,
+            "email": new_owner.email,
+            "role": new_owner_access.role,
+        }
+    except HTTPException:
+        session.rollback()
+        raise
+    except PermissionError as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc))
     finally:
         session.close()
 

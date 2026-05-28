@@ -118,6 +118,39 @@ def _project_page_collaborator_summary(*, can_manage: bool, collaborators: list[
         ],
     }
 
+
+def _project_page_collaborator_groups(collaborators: list[dict] | None) -> dict[str, list[str]]:
+    grouped = {"owner": [], "editor": [], "viewer": []}
+    for collaborator in collaborators or []:
+        role_key = "owner" if collaborator.get("is_owner") else str(collaborator.get("role") or "viewer").strip().lower()
+        if role_key not in grouped:
+            continue
+        label = str(collaborator.get("email") or collaborator.get("display_name") or collaborator.get("username") or "—")
+        role_label = "Owner" if role_key == "owner" else role_key.title()
+        grouped[role_key].append(f"{label} · {role_label}")
+    return grouped
+
+
+def _project_ownership_transfer_candidates(collaborators: list[dict] | None) -> list[dict]:
+    candidates = []
+    for collaborator in collaborators or []:
+        if collaborator.get("is_owner"):
+            continue
+        role = str(collaborator.get("role") or "viewer").strip().lower()
+        if role not in {"viewer", "editor"}:
+            continue
+        email = str(collaborator.get("email") or collaborator.get("display_name") or collaborator.get("username") or "—")
+        user_id = str(collaborator.get("user_id") or "").strip()
+        if not user_id:
+            continue
+        candidates.append({
+            "label": f"{email} · {role.title()}",
+            "user_id": user_id,
+            "role": role,
+        })
+    candidates.sort(key=lambda item: (0 if item["role"] == "editor" else 1, item["label"].lower()))
+    return candidates
+
 # ── Disk Usage Summary ───────────────────────────────────────────────
 try:
     disk_resp = make_authenticated_request("GET", f"{API_URL}/user/disk-usage", timeout=5)
@@ -387,6 +420,8 @@ selected_collaborator_summary = _project_page_collaborator_summary(
     can_manage=selected_can_manage,
     collaborators=selected_collaborators,
 )
+selected_collaborator_groups = _project_page_collaborator_groups(selected_collaborators)
+selected_transfer_candidates = _project_ownership_transfer_candidates(selected_collaborators)
 
 if _current_active_project == selected_id:
     st.info(f"Active chat project: {selected_project_name}")
@@ -405,8 +440,14 @@ status_chip(
 if selected_collaborator_summary:
     with st.expander(selected_collaborator_summary["label"], expanded=True):
         st.caption("Visible here so shared-project membership is easy to scan.")
-        for line in selected_collaborator_summary["lines"]:
-            st.caption(line)
+        if selected_collaborator_groups["editor"]:
+            st.markdown(f"**Editors ({len(selected_collaborator_groups['editor'])})**")
+            for line in selected_collaborator_groups["editor"]:
+                st.caption(line)
+        if selected_collaborator_groups["viewer"]:
+            st.markdown(f"**Viewers ({len(selected_collaborator_groups['viewer'])})**")
+            for line in selected_collaborator_groups["viewer"]:
+                st.caption(line)
         st.caption("Manage access in the Collaborators tab below.")
 
 switch_col, chat_col = st.columns(2)
@@ -726,8 +767,41 @@ with tab_collabs:
                         st.rerun()
                     else:
                         st.error(add_resp.text)
+
+                if selected_transfer_candidates:
+                    st.caption("Transfer ownership to an existing editor or viewer. The current owner becomes an editor.")
+                    transfer_options = {item["label"]: item["user_id"] for item in selected_transfer_candidates}
+                    with st.form(key=f"transfer_collaborator_owner_{selected_id}"):
+                        transfer_target_label = st.selectbox(
+                            "Transfer ownership to",
+                            list(transfer_options.keys()),
+                            key=f"collab_transfer_owner_target_{selected_id}",
+                        )
+                        transfer_submit = st.form_submit_button("Transfer ownership")
+
+                    if transfer_submit:
+                        transfer_resp = make_authenticated_request(
+                            "POST",
+                            f"{API_URL}/projects/{selected_id}/transfer-ownership",
+                            json={"user_id": transfer_options[transfer_target_label]},
+                            timeout=10,
+                        )
+                        if transfer_resp.status_code == 200:
+                            st.success(f"Transferred ownership to {transfer_target_label}.")
+                            st.rerun()
+                        else:
+                            st.error(transfer_resp.text)
             else:
                 st.caption("Shared collaborators can see the full roster and recent activity here.")
+
+            if selected_collaborator_groups["editor"]:
+                st.markdown(f"**Editors ({len(selected_collaborator_groups['editor'])})**")
+                for line in selected_collaborator_groups["editor"]:
+                    st.caption(line)
+            if selected_collaborator_groups["viewer"]:
+                st.markdown(f"**Viewers ({len(selected_collaborator_groups['viewer'])})**")
+                for line in selected_collaborator_groups["viewer"]:
+                    st.caption(line)
 
             if not collaborators:
                 st.info("No collaborators found for this project.")

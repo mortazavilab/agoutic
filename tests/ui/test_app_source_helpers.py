@@ -834,6 +834,39 @@ class TestProjectsPageCollaboratorSummary:
 
         assert result is None
 
+    def test_groups_editors_and_viewers_for_summary_display(self):
+        fn = _load_projects_page_function("_project_page_collaborator_groups")
+
+        result = fn(
+            [
+                {"email": "owner@example.com", "role": "owner", "is_owner": True},
+                {"email": "editor@example.com", "role": "editor", "is_owner": False},
+                {"email": "viewer@example.com", "role": "viewer", "is_owner": False},
+            ]
+        )
+
+        assert result == {
+            "owner": ["owner@example.com · Owner"],
+            "editor": ["editor@example.com · Editor"],
+            "viewer": ["viewer@example.com · Viewer"],
+        }
+
+    def test_ownership_transfer_candidates_include_editors_and_viewers_only(self):
+        fn = _load_projects_page_function("_project_ownership_transfer_candidates")
+
+        result = fn(
+            [
+                {"user_id": "owner-1", "email": "owner@example.com", "role": "owner", "is_owner": True},
+                {"user_id": "editor-1", "email": "editor@example.com", "role": "editor", "is_owner": False},
+                {"user_id": "viewer-1", "email": "viewer@example.com", "role": "viewer", "is_owner": False},
+            ]
+        )
+
+        assert result == [
+            {"label": "editor@example.com · Editor", "user_id": "editor-1", "role": "editor"},
+            {"label": "viewer@example.com · Viewer", "user_id": "viewer-1", "role": "viewer"},
+        ]
+
 
 class TestStagingBlockNeedsRefresh:
     def test_running_block_refreshes_quickly_without_transfer_snapshot(self):
