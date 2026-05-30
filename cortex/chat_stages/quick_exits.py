@@ -39,12 +39,16 @@ from cortex.workflow_commands import (
 logger = get_logger(__name__)
 
 
+def _normalize_quick_exit_text(message: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[?.!,]+$", "", str(message or "").strip().lower())).strip()
+
+
 def _slash_commands_markdown() -> str:
     return render_slash_commands_markdown()
 
 
 def _is_slash_commands_request(message: str) -> bool:
-    msg = str(message or "").strip().lower()
+    msg = _normalize_quick_exit_text(message)
     return msg in {
         "/commands",
         "/slash-commands",
@@ -58,7 +62,7 @@ def _is_slash_commands_request(message: str) -> bool:
 
 
 def _is_capabilities_request(message: str) -> bool:
-    msg = str(message or "").strip().lower()
+    msg = _normalize_quick_exit_text(message)
     return msg in {
         "what can you do",
         "what are your capabilities",

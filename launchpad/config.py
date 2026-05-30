@@ -119,6 +119,7 @@ def resolve_dogme_accuracy(mode: str | None, accuracy: str | None) -> str:
 class JobStatus(str, Enum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
+    STALE = "STALE"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"

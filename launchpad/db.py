@@ -358,7 +358,7 @@ async def update_job_status(
             job.workflow_usage_json = workflow_usage
             job.workflow_usage_synced_at = workflow_usage_synced_at or datetime.utcnow()
         normalized_status = str(status or "").upper()
-        if normalized_status in {"COMPLETED", "FAILED", "CANCELLED"} and getattr(job, "completed_at", None) is None:
+        if normalized_status in {"COMPLETED", "FAILED", "CANCELLED", "STALE"} and getattr(job, "completed_at", None) is None:
             job.completed_at = datetime.utcnow()
         await session.commit()
         await session.refresh(job)

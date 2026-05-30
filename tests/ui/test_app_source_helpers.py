@@ -1226,6 +1226,18 @@ class TestWorkflowStatusPresentation:
 
         assert fn("DELETED") == ("pending", "Deleted", "🗑️")
 
+    def test_stale_workflow_uses_warning_chip(self):
+        fn = _load_function("_workflow_status_presentation")
+
+        assert fn("STALE") == ("warning", "Stale", "⚠️")
+
+
+class TestProjectsPageHelpers:
+    def test_projects_status_badge_formats_stale(self):
+        fn = _load_projects_page_function("_status_badge")
+
+        assert fn("STALE") == "⚠️ Stale"
+
 
 class TestTaskHelpers:
     def test_get_all_tasks_returns_grouped_collection(self):
@@ -1552,12 +1564,12 @@ class TestHelpIntent:
     def test_recognizes_grouped_de_help_shortcut(self):
         fn = _load_function("_is_help_intent")
 
-        assert fn("how do i compare reconcile samples") is True
+        assert fn("how do i compare reconcile samples") is False
 
     def test_recognizes_show_slash_commands_help_shortcut(self):
         fn = _load_function("_is_help_intent")
 
-        assert fn("show slash commands") is True
+        assert fn("show slash commands") is False
 
     def test_does_not_treat_actual_de_request_as_help(self):
         fn = _load_function("_is_help_intent")
@@ -1977,6 +1989,8 @@ class TestRenderWorkflowStepDataframes:
                 "progress_stats": progress_stats,
                 "segmented_progress": lambda *args, **kwargs: None,
                 "timeline": lambda *args, **kwargs: None,
+                "_workflow_usage_metrics": lambda workflow_usage: {},
+                "_workflow_usage_message": lambda workflow_usage: "",
             },
         )
 
@@ -2048,6 +2062,7 @@ class TestRenderWorkflowStepDataframes:
             divider=MagicMock(),
             success=MagicMock(),
             button=MagicMock(return_value=False),
+            text_input=MagicMock(return_value="workflow12"),
             columns=MagicMock(side_effect=lambda n: [_ContextManagerStub() for _ in range(n)]),
         )
         progress_stats = MagicMock()
@@ -2513,6 +2528,18 @@ class TestBlockRequiresFullRefresh:
                 "job_status": {"status": "COMPLETED"},
             },
         }) is True
+
+    def test_completed_import_with_stale_transfer_does_not_require_full_refresh(self):
+        fn = _load_function("_block_requires_full_refresh")
+
+        assert fn({
+            "type": "EXECUTION_JOB",
+            "status": "DONE",
+            "payload": {
+                "imported_source_kind": "slurm",
+                "job_status": {"status": "COMPLETED", "transfer_state": "stale"},
+            },
+        }) is False
 
 
 class TestCachedJobStatus:

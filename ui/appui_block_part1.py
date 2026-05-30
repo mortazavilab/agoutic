@@ -612,6 +612,9 @@ def render_block_part1(
                     st.info(f"📥 **Sync in progress** — {_sync_detail or 'transferring files…'}", icon="⏳")
                 elif _sync_state == "outputs_downloaded":
                     st.success("✅ Results synced successfully.")
+                elif _sync_state == "stale":
+                    _detail = _sync_detail or _sync_message or "The transfer was marked stale by maintenance cleanup."
+                    st.warning(f"⚠️ Sync marked stale: {_detail}")
                 elif _sync_state == "transfer_failed":
                     _detail = _sync_detail or _sync_message
                     if _detail:

@@ -2129,6 +2129,36 @@ class TestStartupRecovery:
         assert captured_kwargs == {"initial_delay_seconds": 0.0}
 
     @pytest.mark.asyncio
+    async def test_recovery_treats_stale_inner_job_status_as_terminal(self, session_factory, seed_data):
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "restart-run-stale",
+                "job_status": {"status": "STALE", "progress_percent": 0},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling.poll_job_status") as mock_poll, \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            await _recover_orphaned_background_tasks()
+
+        assert mock_poll.call_count == 0
+        assert mock_create_task.call_count == 0
+
+        sess = session_factory()
+        refreshed = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).one()
+        assert refreshed.status == "FAILED"
+        sess.close()
+
+    @pytest.mark.asyncio
     async def test_resumes_orphaned_staging_poll_when_task_id_is_persisted(self, session_factory, seed_data):
         sess = session_factory()
         workflow_block = _create_block_internal(
@@ -3609,6 +3639,46 @@ class TestPollJobStatus:
         sess.close()
 
     @pytest.mark.anyio
+    async def test_updates_block_on_stale_status(self, session_factory, seed_data):
+        """Polling treats STALE as terminal and stops without auto-analysis."""
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess, "proj-bg", "EXECUTION_JOB",
+            {
+                "run_uuid": "stale-test",
+                "job_status": {"status": "RUNNING", "progress_percent": 50},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            {"status": "STALE", "progress_percent": 0, "message": "Marked stale by maintenance cleanup."},
+            {"logs": [{"message": "Marked stale"}]},
+        ])
+        mock_auto = AsyncMock()
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+             patch("cortex.job_polling._auto_trigger_analysis", mock_auto):
+            mock_sleep.return_value = None
+            await poll_job_status("proj-bg", job_block.id, "stale-test")
+
+        assert mock_auto.await_count == 0
+
+        sess = session_factory()
+        updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
+        payload = get_block_payload(updated)
+        assert updated.status == "FAILED"
+        assert payload["job_status"]["status"] == "STALE"
+        sess.close()
+
+    @pytest.mark.anyio
     async def test_updates_block_when_log_fetch_fails(self, session_factory, seed_data):
         """A log-fetch failure should not discard a successful status sample."""
         job_polling_module._latest_job_status_by_run_uuid.clear()
@@ -3948,6 +4018,26 @@ class TestJobStatusProxyCache:
         assert merged["result_destination"] == "local"
         assert merged["transfer_state"] == "pending_import"
         assert merged["progress_percent"] >= 99
+
+    def test_prefer_richer_job_status_does_not_preserve_when_transfer_marked_stale(self):
+        previous_status = {
+            "status": "RUNNING",
+            "progress_percent": 99,
+            "message": "Copying results back to the local workflow...",
+            "result_destination": "local",
+            "transfer_state": "pending_import",
+        }
+        incoming_status = {
+            "status": "COMPLETED",
+            "progress_percent": 100,
+            "message": "Result transfer marked stale by maintenance cleanup.",
+            "result_destination": "local",
+            "transfer_state": "stale",
+        }
+
+        merged = _prefer_richer_job_status(previous_status, incoming_status)
+
+        assert merged == incoming_status
 
     @pytest.mark.anyio
     async def test_poll_job_status_keeps_import_sync_running_when_completed_snapshot_omits_transfer_fields(self, session_factory, seed_data):
@@ -4491,6 +4581,7 @@ class TestJobStatusProxyCache:
 def test_completed_job_results_ready_requires_outputs_downloaded_for_local_destinations():
     assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "local", "transfer_state": "outputs_downloaded"}) is True
     assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "both", "transfer_state": "downloading_outputs"}) is False
+    assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "local", "transfer_state": "stale"}) is False
     assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "remote", "transfer_state": "none"}) is True
 
 

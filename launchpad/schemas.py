@@ -386,7 +386,7 @@ class StageTaskResumeResponse(BaseModel):
 class StagingTaskStatusResponse(BaseModel):
     """Current state of a background staging task."""
     task_id: str
-    status: str  # queued | running | completed | failed | cancelled
+    status: str  # queued | running | completed | failed | cancelled | stale
     progress: dict[str, Any] = Field(default_factory=dict)
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None

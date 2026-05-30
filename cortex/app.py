@@ -232,11 +232,11 @@ async def _recover_orphaned_background_tasks() -> None:
             inner_status = payload.get("job_status", {}).get("status", "")
             if not run_uuid:
                 continue
-            if inner_status in ("COMPLETED", "FAILED"):
+            if inner_status in ("COMPLETED", "FAILED", "STALE"):
                 block.status = "DONE" if inner_status == "COMPLETED" else "FAILED"
                 recovery_session.commit()
                 logger.info(
-                    "Startup recovery: marked stale RUNNING block as done",
+                    "Startup recovery: reconciled stale RUNNING block to terminal state",
                     run_uuid=run_uuid,
                     inner_status=inner_status,
                 )
@@ -1586,7 +1586,7 @@ async def resubmit_job(run_uuid: str, request: Request):
         ).scalar_one_or_none()
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
-        if job.status not in ("COMPLETED", "FAILED", "CANCELLED", "DELETED"):
+        if job.status not in ("COMPLETED", "FAILED", "CANCELLED", "STALE", "DELETED"):
             raise HTTPException(status_code=400, detail=f"Cannot resubmit a {job.status} job")
 
         # Reconstruct the original parameters

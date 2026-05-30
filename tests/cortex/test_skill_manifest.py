@@ -26,8 +26,16 @@ from cortex.skill_manifest import (
 # ---------------------------------------------------------------------------
 
 class TestRegistryIntegrity:
-    def test_all_16_skills_registered(self):
-        assert len(SKILL_MANIFESTS) == 16
+    def test_all_skill_folders_registered(self):
+        skills_root = Path(__file__).resolve().parents[2] / "skills"
+        expected_count = len(
+            [
+                child
+                for child in skills_root.iterdir()
+                if child.is_dir() and (child / "SKILL.md").exists()
+            ]
+        )
+        assert len(SKILL_MANIFESTS) == expected_count
 
     def test_every_skill_has_folder_local_yaml_manifest(self):
         skills_root = Path(__file__).resolve().parents[2] / "skills"

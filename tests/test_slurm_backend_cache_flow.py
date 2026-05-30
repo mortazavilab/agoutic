@@ -389,9 +389,9 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
     assert '"${AGOUTIC_NEXTFLOW_BIN:-nextflow}" run mortazavilab/dogme' in submit_script_payloads[0]
     assert "-c /remote/eli/agoutic/proj-1/workflow4/nextflow.config" in submit_script_payloads[0]
 
-    # Controller CPU values come from profile defaults; GPU values also use profile defaults.
-    assert "cpuAccount = 'cpu-default'" in config_write[0]
-    assert "cpuPartition = 'cpu-part-default'" in config_write[0]
+    # The workflow config should reflect the approved request overrides.
+    assert "cpuAccount = 'cpu-request'" in config_write[0]
+    assert "cpuPartition = 'cpu-part-request'" in config_write[0]
     assert "gpuAccount = 'gpu-default'" in config_write[0]
     assert "gpuPartition = 'gpu-part-default'" in config_write[0]
 

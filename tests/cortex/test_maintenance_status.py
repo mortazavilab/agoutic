@@ -4,10 +4,10 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import sessionmaker
 
-from cortex.maintenance_status import build_snapshot, main
+from cortex.maintenance_status import build_snapshot, main, mark_stale_jobs, mark_stale_jobs_main
 from cortex.models import Conversation, ConversationMessage, Project, User
 from launchpad.config import JobStatus
-from launchpad.models import DogmeJob
+from launchpad.models import DogmeJob, StagingTask
 
 
 NOW = datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc)
@@ -86,6 +86,31 @@ def _add_job(
     db_session.add(job)
     db_session.commit()
     return job
+
+
+def _add_staging_task(
+    db_session,
+    *,
+    user: User,
+    project: Project,
+    status: str,
+    created_at: datetime,
+    sample_name: str = "sample-a",
+):
+    task = StagingTask(
+        task_id=f"stg-{status}-{int(created_at.timestamp())}",
+        status=status,
+        created_at=created_at.timestamp(),
+        updated_at=created_at.timestamp(),
+        params_json={
+            "user_id": user.id,
+            "project_id": project.id,
+            "sample_name": sample_name,
+        },
+    )
+    db_session.add(task)
+    db_session.commit()
+    return task
 
 
 def test_empty_state_recommends_safe_to_restart(db_session):
@@ -189,6 +214,91 @@ def test_active_job_max_age_parameter_marks_two_hour_job_as_stale(db_session):
     assert [entry["run_uuid"] for entry in stale_snapshot["stale_jobs"]] == [job.run_uuid]
 
 
+def test_mark_stale_jobs_updates_old_active_rows(db_session):
+    user, project = _seed_user_and_project(db_session)
+    old_job = _add_job(
+        db_session,
+        user=user,
+        project=project,
+        status=JobStatus.RUNNING.value,
+        submitted_at=NOW - timedelta(days=10),
+        started_at=NOW - timedelta(days=9),
+    )
+
+    updates = mark_stale_jobs(db_session, now=NOW)
+
+    db_session.refresh(old_job)
+    assert [entry["run_uuid"] for entry in updates["jobs"]] == [old_job.run_uuid]
+    assert updates["jobs"][0]["previous_state"] == JobStatus.RUNNING.value
+    assert updates["transfers"] == []
+    assert old_job.status == JobStatus.STALE.value
+    assert old_job.completed_at is not None
+    assert old_job.completed_at.replace(tzinfo=timezone.utc) == NOW
+
+
+def test_mark_stale_jobs_leaves_recent_and_terminal_rows_unchanged(db_session):
+    user, project = _seed_user_and_project(db_session)
+    recent_job = _add_job(
+        db_session,
+        user=user,
+        project=project,
+        status=JobStatus.RUNNING.value,
+        submitted_at=NOW - timedelta(hours=2),
+        started_at=NOW - timedelta(hours=1),
+    )
+    completed_job = _add_job(
+        db_session,
+        user=user,
+        project=project,
+        status=JobStatus.COMPLETED.value,
+        submitted_at=NOW - timedelta(days=8),
+        started_at=NOW - timedelta(days=8, hours=1),
+    )
+
+    updates = mark_stale_jobs(db_session, now=NOW)
+
+    db_session.refresh(recent_job)
+    db_session.refresh(completed_job)
+    assert updates == {"jobs": [], "transfers": []}
+    assert recent_job.status == JobStatus.RUNNING.value
+    assert completed_job.status == JobStatus.COMPLETED.value
+
+
+def test_mark_stale_jobs_updates_old_transfer_rows_and_snapshot_excludes_them(db_session):
+    user, project = _seed_user_and_project(db_session)
+    transfer_job = _add_job(
+        db_session,
+        user=user,
+        project=project,
+        status=JobStatus.COMPLETED.value,
+        submitted_at=NOW - timedelta(days=17),
+        started_at=NOW - timedelta(days=16),
+    )
+    transfer_job.transfer_state = "inputs_uploaded"
+    old_staging_task = _add_staging_task(
+        db_session,
+        user=user,
+        project=project,
+        status="running",
+        created_at=NOW - timedelta(days=15),
+        sample_name="sample-staging",
+    )
+    db_session.commit()
+
+    updates = mark_stale_jobs(db_session, now=NOW)
+
+    db_session.refresh(transfer_job)
+    db_session.refresh(old_staging_task)
+    assert updates["jobs"] == []
+    assert {entry["source"] for entry in updates["transfers"]} == {"dogme_job", "staging_task"}
+    assert transfer_job.transfer_state == "stale"
+    assert old_staging_task.status == "stale"
+
+    snapshot = build_snapshot(db_session, now=NOW)
+    assert snapshot["transfers"] == []
+    assert snapshot["stale_transfers"] == []
+
+
 def test_chat_active_state_recommends_wait(db_session):
     user, project = _seed_user_and_project(db_session)
     _add_conversation_message(
@@ -249,6 +359,24 @@ def test_quiet_mode_outputs_single_recommendation_line(db_session):
 
     assert exit_code == 0
     assert output.getvalue().strip() == "SAFE TO RESTART"
+
+
+def test_mark_stale_jobs_main_quiet_outputs_updated_count(db_session):
+    user, project = _seed_user_and_project(db_session)
+    _add_job(
+        db_session,
+        user=user,
+        project=project,
+        status=JobStatus.PENDING.value,
+        submitted_at=NOW - timedelta(days=9),
+        started_at=NOW - timedelta(days=8),
+    )
+    output = io.StringIO()
+
+    exit_code = mark_stale_jobs_main(["--quiet"], session_factory=_session_factory(db_session), stdout=output)
+
+    assert exit_code == 0
+    assert output.getvalue().strip() == "1"
 
 
 def test_broken_pipe_guard_returns_zero_without_breaking_normal_output(db_session):

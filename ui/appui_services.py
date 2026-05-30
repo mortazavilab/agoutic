@@ -320,7 +320,7 @@ def _workflow_highlight_steps(workflow_block: dict) -> list[dict]:
 def _block_requires_full_refresh(block: dict) -> bool:
     """Return True when a block needs whole-page reruns, not just fragment refresh."""
     active_result_sync_states = {"pending_import", "downloading_outputs"}
-    terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled"}
+    terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
     if not isinstance(block, dict):
         return False
     btype = block.get("type")
@@ -407,6 +407,8 @@ def _workflow_status_presentation(raw_status: str) -> tuple[str, str, str]:
         return "complete", raw_status.replace("_", " ").title(), "✅"
     if normalized == "deleted":
         return "pending", raw_status.replace("_", " ").title(), "🗑️"
+    if normalized == "stale":
+        return "warning", raw_status.replace("_", " ").title(), "⚠️"
     if normalized in {"failed", "rejected", "cancelled"}:
         return "failed", raw_status.replace("_", " ").title(), "❌"
     if normalized in {"running", "active"}:

@@ -127,7 +127,7 @@ def _validate_llm_output(
             if blk.type == "EXECUTION_JOB" and blk.status == "RUNNING":
                 _blk_pl = get_block_payload(blk)
                 _inner_status = _blk_pl.get("job_status", {}).get("status", "")
-                if _inner_status in ("COMPLETED", "FAILED"):
+                if _inner_status in ("COMPLETED", "FAILED", "STALE"):
                     # Block status is stale (likely due to server restart).
                     # Job is actually done — allow the skill switch.
                     break

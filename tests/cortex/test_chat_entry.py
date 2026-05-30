@@ -240,7 +240,9 @@ class TestCapabilitiesResponse:
         })
         assert resp.status_code == 200
         data = resp.json()
-        assert "what i can help you with" in data["agent_block"]["payload"]["markdown"].lower()
+        markdown = data["agent_block"]["payload"]["markdown"].lower()
+        assert "help: prompting agoutic" in markdown
+        assert "/commands" in markdown
 
     def test_show_capabilities(self, client):
         resp = client.post("/chat", json={

@@ -105,7 +105,8 @@ async def test_delete_job_rejects_unsafe_non_workflow_directory(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_rerun_job_local_reuses_workflow_identity_and_archives_previous_names(monkeypatch, tmp_path):
+@pytest.mark.parametrize("source_status", [launchpad_app.JobStatus.COMPLETED, launchpad_app.JobStatus.STALE])
+async def test_rerun_job_local_reuses_workflow_identity_and_archives_previous_names(monkeypatch, tmp_path, source_status):
     fake_session = _FakeSession()
     rerun_job = SimpleNamespace(
         run_uuid="rerun-1",
@@ -137,7 +138,7 @@ async def test_rerun_job_local_reuses_workflow_identity_and_archives_previous_na
         modifications="5mCG_5hmCG,6mA",
         parent_block_id="block-1",
         user_id="user-1",
-        status=launchpad_app.JobStatus.COMPLETED,
+        status=source_status,
         execution_mode="local",
         ssh_profile_id=None,
         slurm_account=None,

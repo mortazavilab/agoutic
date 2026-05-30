@@ -158,10 +158,12 @@ def poll_status(server_url: str, run_uuid: str):
                     print("\n" + "=" * 80)
                     print("Press Ctrl+C to stop monitoring (job will continue)")
                     
-                    if status in ["COMPLETED", "FAILED"]:
+                    if status in ["COMPLETED", "FAILED", "STALE"]:
                         print("\n")
                         if status == "COMPLETED":
                             print("🎉 Job Finished Successfully!")
+                        elif status == "STALE":
+                            print("⚠️ Job Marked Stale.")
                         else:
                             print("💥 Job Failed.")
                         break

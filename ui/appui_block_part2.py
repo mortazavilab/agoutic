@@ -911,7 +911,7 @@ def render_block_part2(
             # previous poll already saw the transfer become active.
             _cached_transfer = (st.session_state.get(f"_transfer_state_{run_uuid}") or "").strip().lower()
             _active_result_sync_states = {"pending_import", "downloading_outputs"}
-            _terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled"}
+            _terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
             _imported_source_kind_hint = str(
                 (content.get("job_status", {}) or {}).get("imported_source_kind")
                 or content.get("imported_source_kind")
@@ -1006,7 +1006,7 @@ def render_block_part2(
                 show_resume_sync = bool(
                     run_uuid and (
                         (imported_source_kind and import_warning)
-                        or transfer_state == "sync_cancelled"
+                        or transfer_state in {"sync_cancelled", "stale"}
                     )
                 )
                 resume_sync_in_progress = sync_cancel_available
@@ -1083,7 +1083,7 @@ def render_block_part2(
                         finalize_state = "running"
                     elif run_stage in {"completed"} or transfer_state in {"outputs_downloaded"}:
                         finalize_state = "complete"
-                    elif run_stage in {"failed", "cancelled"} or transfer_state in {"transfer_failed", "sync_cancelled"}:
+                    elif run_stage in {"failed", "cancelled"} or transfer_state in {"transfer_failed", "sync_cancelled", "stale"}:
                         finalize_state = "failed"
 
                 elif is_done:
@@ -1114,7 +1114,7 @@ def render_block_part2(
                         sync_state = "complete"
                     elif transfer_state in _active_result_sync_states or run_stage == "syncing_results":
                         sync_state = "active"
-                    elif transfer_state in {"transfer_failed", "sync_cancelled"}:
+                    elif transfer_state in {"transfer_failed", "sync_cancelled", "stale"}:
                         sync_state = "failed"
                     elif run_stage in {"completed"} and result_destination in {"remote", ""}:
                         sync_state = "complete"
@@ -1449,7 +1449,7 @@ def render_block_part2(
                             except Exception as _e:
                                 st.error(f"Error: {_e}")
                     with _resub_col:
-                        if transfer_state == "sync_cancelled":
+                        if transfer_state in {"sync_cancelled", "stale"}:
                             if st.button("Resume Sync", key=f"cancelled_sync_resume_{block_id}"):
                                 try:
                                     _sync_resp = make_authenticated_request(

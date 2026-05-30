@@ -36,7 +36,7 @@ class StagingTaskState:
     """Mutable in-memory state for a single background staging task."""
 
     task_id: str
-    status: str = "queued"  # queued | running | completed | failed | cancelled
+    status: str = "queued"  # queued | running | completed | failed | cancelled | stale
     progress: dict = field(default_factory=dict)
     result: dict | None = None
     error: str | None = None
@@ -117,7 +117,7 @@ def staging_task_state_from_record(record: Any) -> StagingTaskState:
 
 
 def _is_terminal_status(status: str) -> bool:
-    return status in {"completed", "failed", "cancelled"}
+    return status in {"completed", "failed", "cancelled", "stale"}
 
 
 def running_task_count() -> int:
@@ -366,7 +366,7 @@ async def requeue_staging_task(
 async def resume_staging_task(task_id: str) -> StagingTaskState:
     return await requeue_staging_task(
         task_id,
-        allowed_statuses={"failed", "cancelled"},
+        allowed_statuses={"failed", "cancelled", "stale"},
         action_name="resumed",
         cancel_active=True,
     )

@@ -2118,12 +2118,12 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 **_job_timing_payload(job),
             }
         
-        terminal_statuses = (JobStatus.DELETED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        terminal_statuses = (JobStatus.DELETED, JobStatus.STALE, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
         pending_local_result_sync = (
             job.execution_mode == "slurm"
             and job.status == JobStatus.COMPLETED
             and (job.result_destination or "").strip().lower() in {"local", "both"}
-            and (job.transfer_state or "") != "outputs_downloaded"
+            and (job.transfer_state or "").strip().lower() not in {"outputs_downloaded", "stale"}
         )
         if pending_local_result_sync:
             # Fast path: job already COMPLETED on the cluster — skip the
@@ -2160,11 +2160,29 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         if job.status in terminal_statuses:
             warning_message = import_warning_message(getattr(job, "imported_source_complete", None))
             work_directory = _effective_job_work_directory(job)
+            default_message = "Job marked stale." if job.status == JobStatus.STALE else f"Job {job.status.lower()}."
+            stale_transfer_message = None
+            terminal_transfer_state = (job.transfer_state or "").strip().lower()
+            if (
+                job.status == JobStatus.COMPLETED
+                and job.execution_mode == "slurm"
+                and (job.result_destination or "").strip().lower() in {"local", "both"}
+                and terminal_transfer_state == "outputs_downloaded"
+            ):
+                default_message = "Results synchronized to the local workflow directory."
+            elif (
+                job.status == JobStatus.COMPLETED
+                and job.execution_mode == "slurm"
+                and (job.result_destination or "").strip().lower() in {"local", "both"}
+                and terminal_transfer_state == "stale"
+            ):
+                stale_transfer_message = "Result transfer marked stale by maintenance cleanup. Run sync again to retry copy-back."
+                default_message = stale_transfer_message
             base_payload = {
                 "run_uuid": run_uuid,
                 "status": job.status,
                 "progress_percent": 100 if job.status == JobStatus.COMPLETED else 0,
-                "message": job.error_message or warning_message or f"Job {job.status.lower()}.",
+                "message": job.error_message or warning_message or default_message,
                 "tasks": {},
                 "work_directory": work_directory,
                 **_workflow_usage_payload(job),
@@ -2172,7 +2190,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 **_job_timing_payload(job),
             }
             if job.execution_mode == "slurm":
-                if job.status in {JobStatus.FAILED, JobStatus.CANCELLED}:
+                if job.status in {JobStatus.FAILED, JobStatus.CANCELLED} and terminal_transfer_state not in {"transfer_failed", "sync_cancelled", "stale"}:
                     backend = get_backend("slurm")
                     status_data = await backend.check_status(run_uuid)
                     if not _slurm_status_poll_failed(status_data):
@@ -2185,8 +2203,13 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                         "slurm_job_id": job.slurm_job_id,
                         "slurm_state": job.slurm_state,
                         "transfer_state": job.transfer_state,
-                        "transfer_detail": job.error_message if (job.transfer_state or "").strip().lower() == "transfer_failed" else None,
+                        "transfer_detail": (
+                            job.error_message
+                            if terminal_transfer_state == "transfer_failed"
+                            else stale_transfer_message
+                        ),
                         "result_destination": job.result_destination,
+                        **_workflow_usage_payload(job),
                     }
                 )
             return base_payload
@@ -2510,7 +2533,7 @@ async def delete_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        _terminal = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        _terminal = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.STALE)
         if job.status not in _terminal:
             raise HTTPException(
                 status_code=400,
@@ -2575,7 +2598,7 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         if not source_job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        allowed_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        allowed_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.STALE)
         if source_job.status not in allowed_statuses:
             raise HTTPException(
                 status_code=400,
@@ -2773,7 +2796,7 @@ async def rename_job_workflow(
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        terminal_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        terminal_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.STALE)
         if job.status not in terminal_statuses:
             raise HTTPException(
                 status_code=400,

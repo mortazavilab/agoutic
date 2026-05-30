@@ -24,6 +24,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from common.database import Base
+from launchpad.config import JobStatus
+from launchpad.models import DogmeJob
 from cortex.models import (
     User, Session as SessionModel, Project, ProjectAccess,
     ProjectBlock, Conversation, ConversationMessage,
@@ -477,6 +479,18 @@ class TestProjectStats:
             payload_json=json.dumps({"text": "hello"}),
         )
         sess.add(blk)
+        sess.add(
+            DogmeJob(
+                run_uuid="stats-stale-run",
+                project_id="proj-1",
+                user_id="user-1",
+                workflow_key="dogme",
+                workflow_display_name="dogme",
+                sample_name="stats-sample",
+                input_directory="/tmp/input",
+                status=JobStatus.STALE.value,
+            )
+        )
         sess.commit()
         sess.close()
 
@@ -491,6 +505,7 @@ class TestProjectStats:
         data = resp.json()
         assert data["project_id"] == "proj-1"
         assert data["message_count"] >= 1
+        assert data["stale_count"] == 1
         assert "token_usage" in data
         assert data["disk_usage_bytes"] > 0
 

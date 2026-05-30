@@ -26,7 +26,7 @@ class TestDogmeMode:
 
 class TestJobStatus:
     def test_all_statuses(self):
-        expected = {"PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "DELETED"}
+        expected = {"PENDING", "RUNNING", "STALE", "COMPLETED", "FAILED", "CANCELLED", "DELETED"}
         actual = {s.value for s in JobStatus}
         assert actual == expected
 

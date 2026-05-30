@@ -753,6 +753,7 @@ async def get_project_stats(project_id: str, request: Request):
         total_completed = 0
         total_failed = 0
         total_running = 0
+        total_stale = 0
         for row in jobs_result:
             status = row[3] or "UNKNOWN"
             if status == "COMPLETED":
@@ -761,6 +762,8 @@ async def get_project_stats(project_id: str, request: Request):
                 total_failed += 1
             elif status == "RUNNING":
                 total_running += 1
+            elif status == "STALE":
+                total_stale += 1
 
             submitted_at = row[4]
             started_at = row[5]
@@ -863,6 +866,7 @@ async def get_project_stats(project_id: str, request: Request):
             "completed_count": total_completed,
             "failed_count": total_failed,
             "running_count": total_running,
+            "stale_count": total_stale,
             "disk_usage_bytes": disk_bytes,
             "disk_usage_mb": round(disk_bytes / (1024 * 1024), 2),
             "file_count": file_count,

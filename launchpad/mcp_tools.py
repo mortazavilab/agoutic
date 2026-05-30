@@ -576,7 +576,7 @@ class LaunchpadMCPTools:
         Returns:
             {
                 "run_uuid": str,
-                "status": "PENDING" | "RUNNING" | "COMPLETED" | "FAILED",
+                "status": "PENDING" | "RUNNING" | "STALE" | "COMPLETED" | "FAILED",
                 "progress_percent": int (0-100),
                 "message": str
             }

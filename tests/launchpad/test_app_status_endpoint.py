@@ -90,6 +90,133 @@ async def test_get_job_status_returns_terminal_slurm_db_state_without_repoll(mon
 
 
 @pytest.mark.asyncio
+async def test_get_job_status_returns_stale_db_state_without_repoll(monkeypatch):
+    fake_session = _FakeSession()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-stale"
+        return SimpleNamespace(
+            run_uuid="run-stale",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.STALE,
+            progress_percent=0,
+            error_message="Marked stale by maintenance cleanup.",
+            run_stage="completed",
+            slurm_job_id="50052940",
+            slurm_state="UNKNOWN",
+            transfer_state=None,
+            result_destination="local",
+            nextflow_work_dir="/local/project/workflow9",
+            remote_work_dir="/remote/project/workflow9",
+            workflow_usage_json=None,
+            workflow_usage_synced_at=None,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+        )
+
+    def fail_get_backend(mode):
+        raise AssertionError(f"backend polling should be skipped for stale jobs, got {mode}")
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", fail_get_backend)
+
+    payload = await launchpad_app.get_job_status("run-stale")
+
+    assert payload["status"] == launchpad_app.JobStatus.STALE
+    assert payload["progress_percent"] == 0
+    assert payload["message"] == "Marked stale by maintenance cleanup."
+    assert payload["execution_mode"] == "slurm"
+    assert payload["work_directory"] == "/local/project/workflow9"
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_reports_sync_completion_message(monkeypatch):
+    fake_session = _FakeSession()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-sync-complete"
+        return SimpleNamespace(
+            run_uuid="run-sync-complete",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.COMPLETED,
+            progress_percent=100,
+            error_message=None,
+            run_stage="completed",
+            slurm_job_id="50052941",
+            slurm_state="COMPLETED",
+            transfer_state="outputs_downloaded",
+            result_destination="local",
+            nextflow_work_dir="/local/project/workflow10",
+            remote_work_dir="/remote/project/workflow10",
+            workflow_usage_json=None,
+            workflow_usage_synced_at=None,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+            imported_source_complete=None,
+        )
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "_backfill_terminal_slurm_workflow_usage", AsyncMock())
+
+    payload = await launchpad_app.get_job_status("run-sync-complete")
+
+    assert payload["status"] == launchpad_app.JobStatus.COMPLETED
+    assert payload["message"] == "Results synchronized to the local workflow directory."
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_reports_stale_transfer_message_without_repoll(monkeypatch):
+    fake_session = _FakeSession()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-transfer-stale"
+        return SimpleNamespace(
+            run_uuid="run-transfer-stale",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.COMPLETED,
+            progress_percent=100,
+            error_message=None,
+            run_stage="completed",
+            slurm_job_id="50052942",
+            slurm_state="COMPLETED",
+            transfer_state="stale",
+            result_destination="local",
+            nextflow_work_dir="/local/project/workflow11",
+            remote_work_dir="/remote/project/workflow11",
+            workflow_usage_json=None,
+            workflow_usage_synced_at=None,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+            imported_source_complete=None,
+        )
+
+    def fail_get_backend(mode):
+        raise AssertionError(f"backend polling should be skipped for stale transfers, got {mode}")
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", fail_get_backend)
+    monkeypatch.setattr(launchpad_app, "_backfill_terminal_slurm_workflow_usage", AsyncMock())
+
+    payload = await launchpad_app.get_job_status("run-transfer-stale")
+
+    assert payload["status"] == launchpad_app.JobStatus.COMPLETED
+    assert payload["transfer_state"] == "stale"
+    assert payload["message"] == "Result transfer marked stale by maintenance cleanup. Run sync again to retry copy-back."
+
+
+@pytest.mark.asyncio
 async def test_get_job_status_repolls_terminal_failed_slurm_job_for_task_summary(monkeypatch):
     fake_session = _FakeSession()
     synced_at = datetime(2026, 5, 25, 5, 12, 12, tzinfo=timezone.utc)

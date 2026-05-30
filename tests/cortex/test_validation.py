@@ -63,12 +63,13 @@ class TestSkillSwitchDuringJob:
         assert "[[SKILL_SWITCH_TO:" not in cleaned
         assert any("SKILL_SWITCH" in v for v in violations)
 
-    def test_skill_switch_allowed_when_job_completed(self):
-        """SKILL_SWITCH should be allowed when inner status is COMPLETED (stale block)."""
+    @pytest.mark.parametrize("inner_status", ["COMPLETED", "STALE"])
+    def test_skill_switch_allowed_when_job_completed(self, inner_status):
+        """SKILL_SWITCH should be allowed when inner status is already terminal."""
         block = FakeBlock(
             type="EXECUTION_JOB",
             status="RUNNING",  # Block status is stale
-            payload={"job_status": {"status": "COMPLETED"}, "run_uuid": "abc"},
+            payload={"job_status": {"status": inner_status}, "run_uuid": "abc"},
         )
         response = "Switching [[SKILL_SWITCH_TO: welcome]] now"
         cleaned, violations = _validate_llm_output(response, "run_dogme_dna", [block])

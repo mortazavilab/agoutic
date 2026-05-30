@@ -74,6 +74,18 @@ ensure_gene_caches() {
     fi
 }
 
+run_mark_stale_jobs() {
+    log "Marking orphaned stale job rows before startup..."
+    cd "$AGOUTIC_CODE" || return 1
+    python scripts/cortex/mark_stale_jobs.py
+}
+
+run_maintenance_status_report() {
+    log "Maintenance readiness report:"
+    cd "$AGOUTIC_CODE" || return 1
+    python scripts/cortex/maintenance_status.py
+}
+
 log() {
     echo -e "${BLUE}[AGOUTIC]${NC} $1"
 }
@@ -408,6 +420,10 @@ cmd_start() {
         return 1
     fi
 
+    if ! run_mark_stale_jobs; then
+        warn "Failed to mark stale job rows before startup; continuing startup."
+    fi
+
     # Launchpad - REST API (Nextflow/Dogme job execution)
     start_process "launchpad-rest" \
         "python -m uvicorn launchpad.app:app --host 0.0.0.0 --port $LAUNCHPAD_PORT"
@@ -498,6 +514,11 @@ cmd_status() {
             error "$label: not running (port: $port)"
         fi
     done
+
+    echo ""
+    if ! run_maintenance_status_report; then
+        warn "Maintenance readiness report failed. Run python scripts/cortex/maintenance_status.py manually."
+    fi
     echo ""
 }
 

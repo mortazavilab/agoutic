@@ -680,6 +680,77 @@ async def test_execute_workflow_command_forces_sync_after_imported_outputs_downl
 
 
 @pytest.mark.asyncio
+async def test_execute_workflow_command_sync_updates_execution_block_and_starts_polling(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-15",
+            workflow_alias="workflow15",
+            workflow_folder_name="workflow15",
+            workflow_display_name="sample-15",
+            sample_name="sample-15",
+            imported_source_kind="slurm",
+            transfer_state="outputs_downloaded",
+            status="COMPLETED",
+            submitted_at=15,
+        )
+    ]
+    fake_client = _FakeAsyncClient(
+        post_response=_FakeResponse(
+            status_code=200,
+            payload={
+                "message": "Result synchronization started. Monitor progress via job status polling.",
+                "transfer_state": "downloading_outputs",
+            },
+        )
+    )
+    apply_calls = []
+    fake_poll = AsyncMock()
+
+    def fake_apply(session, *, project_id, run_uuid, transfer_state, message, import_warning):
+        apply_calls.append(
+            {
+                "session": session,
+                "project_id": project_id,
+                "run_uuid": run_uuid,
+                "transfer_state": transfer_state,
+                "message": message,
+                "import_warning": import_warning,
+            }
+        )
+        return [SimpleNamespace(id="block-15")]
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_rest_base_url", lambda: "http://launchpad")
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_internal_headers", lambda: {"X-Internal-Secret": "secret"})
+    monkeypatch.setattr("cortex.workflow_commands.httpx.AsyncClient", lambda timeout: fake_client)
+    monkeypatch.setattr("cortex.workflow_commands._apply_result_sync_status_update", fake_apply)
+    monkeypatch.setattr("cortex.workflow_commands.poll_job_status", fake_poll)
+    monkeypatch.setattr("cortex.workflow_commands.asyncio.create_task", fake_create_task)
+
+    message = await execute_workflow_command(
+        _FakeSession(jobs),
+        WorkflowCommand(action="sync", workflow_ref="workflow15"),
+        project_id="proj-1",
+    )
+
+    assert "Result synchronization started" in message
+    assert apply_calls == [
+        {
+            "session": apply_calls[0]["session"],
+            "project_id": "proj-1",
+            "run_uuid": "run-15",
+            "transfer_state": "downloading_outputs",
+            "message": "Result synchronization started. Monitor progress via job status polling.",
+            "import_warning": None,
+        }
+    ]
+    fake_poll.assert_called_once_with("proj-1", "block-15", "run-15")
+
+
+@pytest.mark.asyncio
 async def test_execute_workflow_command_cancels_sync(monkeypatch):
     jobs = [
         SimpleNamespace(

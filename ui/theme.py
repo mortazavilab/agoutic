@@ -61,6 +61,7 @@ def status_color(status: str) -> str:
         "queued": COLOR_TEXT_SECONDARY,
         "running": COLOR_WARNING,
         "active": COLOR_WARNING,
+        "stale": COLOR_WARNING,
         "blocked": COLOR_INFO,
         "failed": COLOR_ERROR,
         "cancelled": COLOR_TEXT_MUTED,

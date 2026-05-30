@@ -24,6 +24,7 @@ logger = get_logger(__name__)
 _TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
 _JOB_STATUS_CACHE_MAX_AGE_SECONDS = 30.0
 _ACTIVE_RESULT_SYNC_STATES = {"pending_import", "downloading_outputs"}
+_TERMINAL_RESULT_SYNC_STATES = {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
 _latest_job_status_by_run_uuid: dict[str, dict] = {}
 
 
@@ -74,7 +75,7 @@ def _prefer_richer_job_status(previous_status: dict | None, incoming_status: dic
         if (
             previous_transfer_state in _ACTIVE_RESULT_SYNC_STATES
             and incoming_status_value == "COMPLETED"
-            and incoming_transfer_state not in {"outputs_downloaded", "transfer_failed", "sync_cancelled"}
+            and incoming_transfer_state not in _TERMINAL_RESULT_SYNC_STATES
         ):
             preserved = copy.deepcopy(incoming_status)
             for key in (
@@ -243,9 +244,12 @@ async def poll_job_status(
                     # Update block status based on job status
                     job_status = status_data.get("status", "UNKNOWN")
                     completed_ready_for_analysis = _completed_job_results_ready(status_data)
-                    if job_status == "COMPLETED" and completed_ready_for_analysis:
+                    completed_sync_terminal = _completed_job_result_sync_is_terminal(status_data)
+                    if job_status == "COMPLETED" and (completed_ready_for_analysis or completed_sync_terminal):
                         block.status = "DONE"
                     elif job_status == "FAILED":
+                        block.status = "FAILED"
+                    elif job_status == "STALE":
                         block.status = "FAILED"
                     elif job_status == "CANCELLED":
                         block.status = "CANCELLED"
@@ -261,7 +265,7 @@ async def poll_job_status(
                     logger.info("Job status updated", run_uuid=run_uuid, job_status=job_status, progress=status_data.get("progress_percent", 0))
 
                     # Stop polling if job is done
-                    if job_status in {"FAILED", "CANCELLED"} or (job_status == "COMPLETED" and completed_ready_for_analysis):
+                    if job_status in {"FAILED", "CANCELLED", "STALE"} or (job_status == "COMPLETED" and (completed_ready_for_analysis or completed_sync_terminal)):
                         logger.info("Job finished", run_uuid=run_uuid, job_status=job_status)
 
                         workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
@@ -342,6 +346,17 @@ def _completed_job_results_ready(status_data: dict | None) -> bool:
     if result_destination not in {"local", "both"}:
         return True
     return (status_data.get("transfer_state") or "") == "outputs_downloaded"
+
+
+def _completed_job_result_sync_is_terminal(status_data: dict | None) -> bool:
+    if not isinstance(status_data, dict):
+        return False
+    if status_data.get("status") != "COMPLETED":
+        return False
+    result_destination = (status_data.get("result_destination") or "").strip().lower()
+    if result_destination not in {"local", "both"}:
+        return False
+    return (status_data.get("transfer_state") or "").strip().lower() in _TERMINAL_RESULT_SYNC_STATES
 
 
 def _resolved_job_work_directory(existing_work_directory: str | None, status_data: dict | None) -> str | None:

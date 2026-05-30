@@ -928,7 +928,7 @@ class SlurmBackend:
                 return []
 
             segments: list[str] = []
-            for match in re.finditer(r"(\[[^\]]+\]\s+.*?)(?=\s+\[[^\]]+\]\s+|$)", stripped):
+            for match in re.finditer(r"(\[[^\]/\s]+/[^\]\s]+\]\s+.*?)(?=\s+\[[^\]/\s]+/[^\]\s]+\]\s+|$)", stripped):
                 segment = match.group(1).strip()
                 if "]" not in segment:
                     continue
@@ -1194,6 +1194,8 @@ class SlurmBackend:
             return "CANCELLED", "Result synchronization cancelled. Run sync again to resume copying outputs."
         if transfer_state == "transfer_failed":
             return "FAILED", "Remote job completed, but copying results back to the local workflow failed."
+        if transfer_state == "stale":
+            return "FAILED", "Result synchronization was marked stale by maintenance cleanup. Run sync again to retry copy-back."
 
         task = self._result_sync_tasks.get(run_uuid)
         if task is None or task.done():
@@ -1978,8 +1980,8 @@ class SlurmBackend:
         The controller only orchestrates the workflow; GPU requests belong to
         the individual pipeline tasks configured in nextflow.config.
         """
-        cpu_account = (params.slurm_account or profile.default_slurm_account or "default").strip() or "default"
-        cpu_partition = (params.slurm_partition or profile.default_slurm_partition or "standard").strip() or "standard"
+        cpu_account = (profile.default_slurm_account or params.slurm_account or "default").strip() or "default"
+        cpu_partition = (profile.default_slurm_partition or params.slurm_partition or "standard").strip() or "standard"
         return cpu_account, cpu_partition
 
     async def _write_remote_nextflow_config(

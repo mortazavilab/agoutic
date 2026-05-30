@@ -82,7 +82,7 @@ class DogmeJob(Base):
     remote_work_dir: Mapped[str | None] = mapped_column(String, nullable=True)
     remote_output_dir: Mapped[str | None] = mapped_column(String, nullable=True)
     result_destination: Mapped[str | None] = mapped_column(String, nullable=True)  # "remote", "local", "both"
-    transfer_state: Mapped[str | None] = mapped_column(String, nullable=True)  # "none","uploading_inputs","inputs_uploaded","downloading_outputs","outputs_downloaded","transfer_failed"
+    transfer_state: Mapped[str | None] = mapped_column(String, nullable=True)  # "none","uploading_inputs","inputs_uploaded","downloading_outputs","outputs_downloaded","transfer_failed","sync_cancelled","stale"
     run_stage: Mapped[str | None] = mapped_column(String, nullable=True)  # Detailed stage label
     cache_preflight_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     reference_cache_status: Mapped[str | None] = mapped_column(String, nullable=True)  # "reused","staged","refreshed","skipped"

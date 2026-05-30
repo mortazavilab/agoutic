@@ -16,8 +16,14 @@ from launchpad.schemas import SubmitJobRequest
 
 
 class _FakeSession:
-    def __init__(self):
+    def __init__(self, *, maintenance_mode: bool = False, user_roles: dict[str, str] | None = None):
         self.close_calls = 0
+        self._user_roles = dict(user_roles or {})
+        self._settings = {
+            "maintenance_mode": SystemSetting(key="maintenance_mode", value="true" if maintenance_mode else "false"),
+            "maintenance_message": SystemSetting(key="maintenance_message", value=""),
+            "maintenance_starts_at": SystemSetting(key="maintenance_starts_at", value=""),
+        }
 
     async def __aenter__(self):
         return self
@@ -28,8 +34,40 @@ class _FakeSession:
     async def commit(self):
         return None
 
+    async def rollback(self):
+        return None
+
     async def refresh(self, _obj):
         return None
+
+    def add(self, row):
+        if isinstance(row, SystemSetting):
+            self._settings[row.key] = row
+
+    def add_all(self, rows):
+        for row in rows:
+            self.add(row)
+
+    async def execute(self, statement):
+        descriptions = list(getattr(statement, "column_descriptions", []) or [])
+        if not descriptions:
+            return _ExecuteResult([])
+
+        first = descriptions[0]
+        entity = first.get("entity")
+        expr = first.get("expr")
+        expr_key = getattr(expr, "key", None)
+
+        if entity is SystemSetting:
+            return _ExecuteResult(list(self._settings.values()))
+        if entity is DogmeJob:
+            return _ExecuteResult([])
+        if entity is User and expr_key == "role":
+            roles = list(self._user_roles.values())
+            return _ExecuteResult(roles[:1])
+        if entity is User and expr_key == "email":
+            return _ExecuteResult([])
+        return _ExecuteResult([])
 
     async def close(self):
         self.close_calls += 1
@@ -45,6 +83,9 @@ class _ScalarResult:
     def __init__(self, rows):
         self._rows = rows
 
+    def __iter__(self):
+        return iter(self._rows)
+
     def all(self):
         return list(self._rows)
 
@@ -55,6 +96,9 @@ class _ExecuteResult:
 
     def scalars(self):
         return _ScalarResult(self._rows)
+
+    def scalar_one_or_none(self):
+        return self._rows[0] if self._rows else None
 
 
 @pytest.fixture()
@@ -1031,11 +1075,6 @@ async def test_submit_wf_pore_c_job_closes_session_on_failure(monkeypatch, tmp_p
 @pytest.mark.asyncio
 async def test_health_check_closes_session(monkeypatch):
     fake_session = _FakeSession()
-
-    async def fake_execute(_query):
-        return _ExecuteResult([])
-
-    fake_session.execute = fake_execute
     monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
 
     result = await launchpad_app.health_check()

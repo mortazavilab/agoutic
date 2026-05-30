@@ -10,6 +10,18 @@
 
 - **Added maintenance mode. Admins can toggle it ON or OFF from the Admin Activity tab, putting AGOUTIC into a state where new chat submissions, workflow/job imports, and transfer or job submissions are blocked for non-admin users while existing in-flight work continues uninterrupted. Blocked submissions return HTTP 503 with a clear error payload, a non-dismissible maintenance banner appears for all users with the configured message and optional countdown, read-only operations remain available during maintenance, the maintenance flag is exposed in `/health` for monitoring, and admins remain exempt so they can manage the maintenance window.**
 
+- **Added persistent Launchpad `STALE` job handling plus `scripts/cortex/mark_stale_jobs.py`, which marks orphaned `PENDING` or `RUNNING` job rows older than one week as `STALE` and marks stale transfer rows older than two weeks as `stale`; Cortex, Launchpad, and the UI now treat both states as terminal instead of active, project stats/UI surfaces show how many stale jobs exist in a project, and stale local-result syncs now surface an explicit retry message instead of polling forever.**
+
+- **`agoutic_servers.sh` now wires the maintenance helpers into normal operations: `start` and `restart` run stale-row cleanup automatically before services launch, and `--status` appends the maintenance readiness report instead of requiring operators to invoke the scripts manually.**
+
+### Bug Fixes
+
+- **Remote result synchronization now behaves consistently after copy-back reaches a terminal state: manual sync requests update existing workflow cards immediately, completed SLURM jobs stop polling once local-result sync is terminal, stale syncs surface explicit retry guidance, and stale workflows can now be resumed, renamed, rerun, or deleted like other finished workflows.**
+
+- **Remote SLURM submission now preserves the user's approved resource overrides in generated workflow configs: any CPU or GPU account/partition changed in the approval gate now flows into the rendered `nextflow.config`, while the Nextflow controller sbatch job still falls back to the SSH profile's CPU defaults when no override is supplied; live SLURM parsing also no longer mistakes `[100%]`-style Nextflow progress markers for task boundaries, so near-terminal task counts stay accurate.**
+
+- **Prompt and workflow-status UX is more resilient: punctuated capability prompts such as `What can you do?` now hit the quick-exit response path, and `STALE` workflows or sync states render with warning styling plus resume-sync affordances instead of appearing active or silently finished.**
+
 ### Documentation
 
 - **Updated the local-sample intake skills to document FASTQ-backed Dogme cDNA submissions, including the supported `fastqCDNA` path, sample-name derivation, FASTQ-only cDNA defaulting, and the explicit redirect away from result-analysis skills for new FASTQ submission requests.**

@@ -822,6 +822,7 @@ def render_block(block, expected_project_id: str = ""):
             "FAILED": ("failed", "Failed", "❌"),
             "RUNNING": ("running", "Running", "🔄"),
             "PENDING": ("pending", "Pending", "⏳"),
+            "STALE": ("warning", "Stale", "⚠️"),
             "CANCELLED": ("warning", "Cancelled", "🛑"),
             "DELETED": ("pending", "Deleted", "🗑️"),
         }
@@ -833,6 +834,8 @@ def render_block(block, expected_project_id: str = ""):
             return "complete", raw_status.replace("_", " ").title(), "✅"
         if normalized == "deleted":
             return "pending", raw_status.replace("_", " ").title(), "🗑️"
+        if normalized == "stale":
+            return "warning", raw_status.replace("_", " ").title(), "⚠️"
         if normalized in {"failed", "rejected", "cancelled"}:
             return "failed", raw_status.replace("_", " ").title(), "❌"
         if normalized in {"running", "active"}:
@@ -1005,7 +1008,7 @@ def _render_chat():
         _has_pending_submission = False
         _has_finished_job = False
         _active_result_sync_states = {"pending_import", "downloading_outputs"}
-        _terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled"}
+        _terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
         for blk in blocks:
             btype = blk.get("type")
             bstatus = blk.get("status")

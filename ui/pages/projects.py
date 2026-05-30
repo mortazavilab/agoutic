@@ -91,6 +91,7 @@ def _status_badge(status: str) -> str:
         "FAILED": "❌ Failed",
         "RUNNING": "⏳ Running",
         "PENDING": "⏳ Pending",
+        "STALE": "⚠️ Stale",
         "CANCELLED": "🛑 Cancelled",
         "DELETED": "🗑️ Deleted",
     }.get(normalized, f"❓ {normalized.title()}")
@@ -515,7 +516,7 @@ with tab_stats:
         )
         if stats_resp.status_code == 200:
             stats = stats_resp.json()
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5 = st.columns(5)
             with c1:
                 st.metric("Jobs", stats.get("job_count", 0))
             with c2:
@@ -525,6 +526,8 @@ with tab_stats:
                 st.metric("Messages", stats.get("message_count", 0))
             with c4:
                 st.metric("Conversations", stats.get("conversation_count", 0))
+            with c5:
+                st.metric("Stale Jobs", stats.get("stale_count", 0))
         else:
             st.warning(f"Stats unavailable ({stats_resp.status_code})")
     except Exception as e:

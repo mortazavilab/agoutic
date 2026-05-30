@@ -19,7 +19,7 @@ from cortex.db_helpers import _create_block_internal
 from cortex.job_polling import _auto_trigger_analysis, poll_job_status
 from cortex.llm_validators import get_block_payload
 from cortex.models import Project, ProjectBlock, User
-from cortex.remote_orchestration import _launchpad_internal_headers, _launchpad_rest_base_url
+from cortex.remote_orchestration import _launchpad_internal_headers, _launchpad_rest_base_url, _update_project_block_payload
 
 
 @dataclass
@@ -133,6 +133,76 @@ def _job_results_ready(job) -> bool:
     if result_destination not in {"local", "both"}:
         return True
     return str(getattr(job, "transfer_state", "") or "") == "outputs_downloaded"
+
+
+def _apply_result_sync_status_update(
+    session: Session,
+    *,
+    project_id: str,
+    run_uuid: str,
+    transfer_state: str,
+    message: str,
+    import_warning: str | None,
+) -> list[ProjectBlock]:
+    if not hasattr(session, "query"):
+        return []
+
+    matched_blocks: list[ProjectBlock] = []
+    blocks = (
+        session.query(ProjectBlock)
+        .filter(ProjectBlock.project_id == project_id)
+        .filter(ProjectBlock.type == "EXECUTION_JOB")
+        .all()
+    )
+    for block in blocks:
+        payload = get_block_payload(block)
+        if payload.get("run_uuid") != run_uuid:
+            continue
+
+        job_status = payload.get("job_status") if isinstance(payload.get("job_status"), dict) else {}
+        if not isinstance(job_status, dict):
+            job_status = {}
+
+        block_status = None
+        if transfer_state == "downloading_outputs":
+            job_status["status"] = "RUNNING"
+            job_status["progress_percent"] = 99
+            block_status = "RUNNING"
+        elif transfer_state == "transfer_failed":
+            job_status["status"] = "FAILED"
+            job_status["progress_percent"] = 0
+            block_status = "FAILED"
+        elif transfer_state == "outputs_downloaded":
+            job_status["status"] = "COMPLETED"
+            job_status["progress_percent"] = 100
+            block_status = "DONE"
+        elif transfer_state == "sync_cancelled":
+            job_status["status"] = "CANCELLED"
+            job_status["progress_percent"] = 0
+            block_status = "DONE"
+        elif transfer_state == "stale":
+            job_status["status"] = "FAILED"
+            job_status["progress_percent"] = 0
+            block_status = "DONE"
+
+        if transfer_state:
+            job_status["transfer_state"] = transfer_state
+        if message:
+            job_status["message"] = message
+        if import_warning is not None:
+            job_status["import_warning_message"] = import_warning
+
+        updates: dict = {"job_status": job_status}
+        if message:
+            updates["message"] = message
+        if import_warning is not None:
+            updates["import_warning_message"] = import_warning
+
+        updated_block = _update_project_block_payload(session, block.id, updates, status=block_status)
+        if updated_block is not None:
+            matched_blocks.append(updated_block)
+
+    return matched_blocks
 
 
 def _normalize_workflow_ref(ref: str) -> str:
@@ -574,6 +644,18 @@ async def execute_workflow_command(
                     payload = resp.json() or {}
                     warning = str(payload.get("import_warning_message") or "").strip()
                     message = payload.get("message") or f"Sync started for `{workflow_ref}`."
+                    live_transfer_state = str(payload.get("transfer_state") or "").strip().lower()
+                    matched_blocks = _apply_result_sync_status_update(
+                        session,
+                        project_id=project_id,
+                        run_uuid=str(getattr(job, "run_uuid", "") or ""),
+                        transfer_state=live_transfer_state,
+                        message=str(message),
+                        import_warning=warning or None,
+                    )
+                    if live_transfer_state == "downloading_outputs":
+                        for block in matched_blocks:
+                            asyncio.create_task(poll_job_status(project_id, block.id, str(getattr(job, "run_uuid", "") or "")))
                     messages.append(f"{message} {warning}".strip())
                     continue
 

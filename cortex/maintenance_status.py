@@ -16,14 +16,18 @@ from launchpad.models import DogmeJob, StagingTask
 
 
 DEFAULT_ACTIVE_JOB_MAX_AGE_HOURS = 168
+DEFAULT_STALE_TRANSFER_MARK_AGE_HOURS = 336
 ACTIVE_JOB_STATUSES = (JobStatus.PENDING.value, JobStatus.RUNNING.value)
+STALE_JOB_STATUS = JobStatus.STALE.value
 ACTIVE_JOB_TRANSFER_STATES = (
     "uploading_inputs",
     "inputs_uploaded",
     "pending_import",
     "downloading_outputs",
 )
+STALE_TRANSFER_STATE = "stale"
 ACTIVE_STAGING_TASK_STATUSES = ("queued", "running")
+STALE_STAGING_TASK_STATUS = "stale"
 
 
 def utc_now() -> datetime:
@@ -254,6 +258,199 @@ def collect_running_jobs(
     active_jobs.sort(key=lambda item: item["runtime_seconds"] or -1, reverse=True)
     stale_jobs.sort(key=lambda item: item["runtime_seconds"] or -1, reverse=True)
     return active_jobs, stale_jobs
+
+
+def _mark_stale_job_rows(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    active_job_max_age_hours: int = DEFAULT_ACTIVE_JOB_MAX_AGE_HOURS,
+) -> list[dict[str, Any]]:
+    current_time = now or utc_now()
+    rows = session.execute(
+        select(
+            DogmeJob,
+            User.email,
+            Project.name,
+        )
+        .select_from(DogmeJob)
+        .outerjoin(User, User.id == DogmeJob.user_id)
+        .outerjoin(Project, Project.id == DogmeJob.project_id)
+        .where(DogmeJob.status.in_(ACTIVE_JOB_STATUSES))
+    ).all()
+
+    updated_jobs: list[dict[str, Any]] = []
+    for job, owner_email, project_name in rows:
+        started_at = _normalize_datetime(job.started_at) or _normalize_datetime(job.submitted_at)
+        if not _is_stale(started_at, now=current_time, max_age_hours=active_job_max_age_hours):
+            continue
+
+        runtime_seconds = _runtime_seconds(started_at, now=current_time)
+        previous_state = str(job.status or "")
+        workflow_type = str(
+            getattr(job, "workflow_display_name", None)
+            or getattr(job, "workflow_key", None)
+            or getattr(job, "workflow_folder_name", None)
+            or "unknown"
+        )
+        job.status = STALE_JOB_STATUS
+        if getattr(job, "completed_at", None) is None:
+            job.completed_at = current_time
+        updated_jobs.append(
+            {
+                "run_uuid": job.run_uuid,
+                "run_uuid_short": job.run_uuid[:8],
+                "workflow_type": workflow_type,
+                "owner_email": str(owner_email or "—"),
+                "project_name": str(project_name or "—"),
+                "previous_state": previous_state,
+                "state": STALE_JOB_STATUS,
+                "started_at": _isoformat(started_at),
+                "runtime_duration": _human_duration(runtime_seconds),
+                "runtime_seconds": runtime_seconds,
+            }
+        )
+
+    updated_jobs.sort(key=lambda item: item["runtime_seconds"] or -1, reverse=True)
+    return updated_jobs
+
+
+def _mark_stale_transfers(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    active_transfer_max_age_hours: int = DEFAULT_STALE_TRANSFER_MARK_AGE_HOURS,
+) -> list[dict[str, Any]]:
+    current_time = now or utc_now()
+    updated_transfers: list[dict[str, Any]] = []
+
+    job_rows = session.execute(
+        select(
+            DogmeJob,
+            User.email,
+            Project.name,
+        )
+        .select_from(DogmeJob)
+        .outerjoin(User, User.id == DogmeJob.user_id)
+        .outerjoin(Project, Project.id == DogmeJob.project_id)
+        .where(DogmeJob.transfer_state.in_(ACTIVE_JOB_TRANSFER_STATES))
+    ).all()
+    for job, owner_email, project_name in job_rows:
+        started_at = _normalize_datetime(job.started_at) or _normalize_datetime(job.submitted_at)
+        if not _is_stale(started_at, now=current_time, max_age_hours=active_transfer_max_age_hours):
+            continue
+
+        runtime_seconds = _runtime_seconds(started_at, now=current_time)
+        previous_state = str(job.transfer_state or "")
+        workflow_type = str(
+            getattr(job, "workflow_display_name", None)
+            or getattr(job, "workflow_key", None)
+            or getattr(job, "workflow_folder_name", None)
+            or "unknown"
+        )
+        job.transfer_state = STALE_TRANSFER_STATE
+        updated_transfers.append(
+            {
+                "source": "dogme_job",
+                "identifier": job.run_uuid[:8],
+                "run_uuid": job.run_uuid,
+                "workflow_type": workflow_type,
+                "owner_email": str(owner_email or "—"),
+                "project_name": str(project_name or "—"),
+                "previous_state": previous_state,
+                "state": STALE_TRANSFER_STATE,
+                "started_at": _isoformat(started_at),
+                "runtime_duration": _human_duration(runtime_seconds),
+                "runtime_seconds": runtime_seconds,
+            }
+        )
+
+    staging_tasks = list(
+        session.execute(
+            select(StagingTask).where(StagingTask.status.in_(ACTIVE_STAGING_TASK_STATUSES))
+        ).scalars()
+    )
+    parsed_params: dict[str, dict[str, Any]] = {}
+    user_ids: set[str] = set()
+    project_ids: set[str] = set()
+    for task in staging_tasks:
+        params = _loads_dict(task.params_json)
+        parsed_params[task.task_id] = params
+        user_id = str(params.get("user_id") or "").strip()
+        project_id = str(params.get("project_id") or "").strip()
+        if user_id:
+            user_ids.add(user_id)
+        if project_id:
+            project_ids.add(project_id)
+
+    users = {
+        user.id: user
+        for user in session.execute(select(User).where(User.id.in_(list(user_ids)))).scalars()
+    } if user_ids else {}
+    projects = {
+        project.id: project
+        for project in session.execute(select(Project).where(Project.id.in_(list(project_ids)))).scalars()
+    } if project_ids else {}
+
+    for task in staging_tasks:
+        created_at = _normalize_datetime(task.created_at)
+        if not _is_stale(created_at, now=current_time, max_age_hours=active_transfer_max_age_hours):
+            continue
+
+        params = parsed_params.get(task.task_id, {})
+        user = users.get(str(params.get("user_id") or "").strip())
+        project = projects.get(str(params.get("project_id") or "").strip())
+        duration_seconds = _runtime_seconds(created_at, now=current_time)
+        previous_state = str(task.status or "")
+        task.status = STALE_STAGING_TASK_STATUS
+        task.updated_at = current_time.timestamp()
+        if not getattr(task, "error", None):
+            task.error = "Staging transfer marked stale by maintenance cleanup."
+        updated_transfers.append(
+            {
+                "source": "staging_task",
+                "identifier": task.task_id,
+                "workflow_type": str(params.get("sample_name") or params.get("mode") or "staging"),
+                "owner_email": str(getattr(user, "email", "—") or "—"),
+                "project_name": str(getattr(project, "name", "—") or "—"),
+                "previous_state": previous_state,
+                "state": STALE_STAGING_TASK_STATUS,
+                "started_at": _isoformat(created_at),
+                "runtime_duration": _human_duration(duration_seconds),
+                "runtime_seconds": duration_seconds,
+            }
+        )
+
+    updated_transfers.sort(key=lambda item: item["runtime_seconds"] or -1, reverse=True)
+    return updated_transfers
+
+
+def mark_stale_jobs(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    active_job_max_age_hours: int = DEFAULT_ACTIVE_JOB_MAX_AGE_HOURS,
+    active_transfer_max_age_hours: int = DEFAULT_STALE_TRANSFER_MARK_AGE_HOURS,
+) -> dict[str, list[dict[str, Any]]]:
+    current_time = now or utc_now()
+    updated_jobs = _mark_stale_job_rows(
+        session,
+        now=current_time,
+        active_job_max_age_hours=active_job_max_age_hours,
+    )
+    updated_transfers = _mark_stale_transfers(
+        session,
+        now=current_time,
+        active_transfer_max_age_hours=active_transfer_max_age_hours,
+    )
+
+    if updated_jobs or updated_transfers:
+        session.commit()
+
+    return {
+        "jobs": updated_jobs,
+        "transfers": updated_transfers,
+    }
 
 
 def collect_active_chats(
@@ -551,6 +748,73 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--quiet", action="store_true")
     return parser
+
+
+def build_stale_job_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Mark orphaned AGOUTIC job rows as STALE")
+    parser.add_argument("--active-job-max-age", type=int, default=DEFAULT_ACTIVE_JOB_MAX_AGE_HOURS)
+    parser.add_argument("--active-transfer-max-age", type=int, default=DEFAULT_STALE_TRANSFER_MARK_AGE_HOURS)
+    parser.add_argument("--quiet", action="store_true")
+    return parser
+
+
+def mark_stale_jobs_main(
+    argv: list[str] | None = None,
+    *,
+    session_factory=SessionLocal,
+    stdout: TextIO | None = None,
+) -> int:
+    parser = build_stale_job_arg_parser()
+    args = parser.parse_args(argv)
+    out = stdout or sys.stdout
+
+    session = session_factory()
+    try:
+        updates = mark_stale_jobs(
+            session,
+            active_job_max_age_hours=args.active_job_max_age,
+            active_transfer_max_age_hours=args.active_transfer_max_age,
+        )
+    finally:
+        session.close()
+
+    updated_jobs = updates["jobs"]
+    updated_transfers = updates["transfers"]
+    total_updates = len(updated_jobs) + len(updated_transfers)
+
+    try:
+        if args.quiet:
+            out.write(f"{total_updates}\n")
+            return 0
+
+        if not updated_jobs and not updated_transfers:
+            out.write(
+                f"No orphaned PENDING/RUNNING job rows older than {args.active_job_max_age} hour(s) or transfer rows older than {args.active_transfer_max_age} hour(s) were marked stale.\n"
+            )
+            return 0
+
+        if updated_jobs:
+            out.write(
+                f"Marked {len(updated_jobs)} orphaned job row(s) as STALE (age > {args.active_job_max_age} hours):\n"
+            )
+            for job in updated_jobs:
+                out.write(
+                    f"- {job['run_uuid_short']} | {job['workflow_type']} | {job['owner_email']} | {job['project_name']} | was {job['previous_state']} | runtime {job['runtime_duration']}\n"
+                )
+
+        if updated_transfers:
+            if updated_jobs:
+                out.write("\n")
+            out.write(
+                f"Marked {len(updated_transfers)} stale transfer row(s) (age > {args.active_transfer_max_age} hours):\n"
+            )
+            for transfer in updated_transfers:
+                out.write(
+                    f"- {transfer['source']} | {transfer['identifier']} | {transfer['workflow_type']} | {transfer['owner_email']} | {transfer['project_name']} | was {transfer['previous_state']} | runtime {transfer['runtime_duration']}\n"
+                )
+    except BrokenPipeError:
+        return 0
+    return 0
 
 
 def main(

@@ -5,12 +5,62 @@ from fastapi import HTTPException
 
 import launchpad.app as launchpad_app
 from launchpad import config as launchpad_config
+from cortex.models import SystemSetting
 from launchpad.schemas import SubmitJobRequest, WorkflowPreviewRequest
 
 
 class _FakeSession:
+    def __init__(self):
+        self._settings = {
+            "maintenance_mode": SystemSetting(key="maintenance_mode", value="false"),
+            "maintenance_message": SystemSetting(key="maintenance_message", value=""),
+            "maintenance_starts_at": SystemSetting(key="maintenance_starts_at", value=""),
+        }
+
+    async def execute(self, statement):
+        descriptions = list(getattr(statement, "column_descriptions", []) or [])
+        if descriptions and descriptions[0].get("entity") is SystemSetting:
+            return _ExecuteResult(list(self._settings.values()))
+        return _ExecuteResult([])
+
+    def add(self, row):
+        if isinstance(row, SystemSetting):
+            self._settings[row.key] = row
+
+    def add_all(self, rows):
+        for row in rows:
+            self.add(row)
+
+    async def commit(self):
+        return None
+
+    async def rollback(self):
+        return None
+
     async def close(self):
         return None
+
+
+class _ScalarResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def all(self):
+        return list(self._rows)
+
+
+class _ExecuteResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return _ScalarResult(self._rows)
+
+    def scalar_one_or_none(self):
+        return self._rows[0] if self._rows else None
 
 
 @pytest.mark.asyncio
