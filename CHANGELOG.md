@@ -2,11 +2,21 @@
 
 ### Features
 
+- **Dogme approval, submission, and staging now support single-file cDNA FASTQ intake via `fastqCDNA`: chat extraction recognizes FASTQ requests, approval gates default to FASTQ-backed cDNA when project `data/` contains a lone FASTQ, local and remote staging alias the approved sample name under `fastqs/`, and unsupported FASTQ+RNA/DNA requests now stop behind an explicit blocking choice instead of silently drifting into an invalid mode.**
+
 - **Added `scripts/cortex/maintenance_status.py` so operators can check recent user activity, running jobs, and active chats before any maintenance action. Read-only, supports plain text and JSON output, includes `--active-job-max-age` stale-row filtering for orphaned RUNNING/PENDING job records, and approximates activity from chat and job records since AGOUTIC does not track presence.**
 
 - **Added an admin-only Activity tab in the admin page showing recently active users, currently running jobs, and active chat sessions in real time, with a color-coded SAFE TO RESTART / WAIT banner. Reuses the same data collection and recommendation logic as `scripts/cortex/maintenance_status.py`. Auto-refreshes every 30 seconds with configurable interval and thresholds.**
 
 - **Added maintenance mode. Admins can toggle it ON or OFF from the Admin Activity tab, putting AGOUTIC into a state where new chat submissions, workflow/job imports, and transfer or job submissions are blocked for non-admin users while existing in-flight work continues uninterrupted. Blocked submissions return HTTP 503 with a clear error payload, a non-dismissible maintenance banner appears for all users with the configured message and optional countdown, read-only operations remain available during maintenance, the maintenance flag is exposed in `/health` for monitoring, and admins remain exempt so they can manage the maintenance window.**
+
+### Documentation
+
+- **Updated the local-sample intake skills to document FASTQ-backed Dogme cDNA submissions, including the supported `fastqCDNA` path, sample-name derivation, FASTQ-only cDNA defaulting, and the explicit redirect away from result-analysis skills for new FASTQ submission requests.**
+
+### Tests
+
+- **Added focused regression coverage for FASTQ detection/prefill extraction, approval-gate FASTQ defaults and blocking clarification behavior, local `fastqCDNA` alias staging, remote FASTQ alias staging, and project-data fallback resolution, while preserving existing pod5/BAM Dogme submission behavior.**
 
 ## [3.7.0] - 2026-05-28
 

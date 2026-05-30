@@ -251,6 +251,57 @@ async def test_dogme_remote_stage_inputs_preserves_default_linking_for_non_remap
 
 
 @pytest.mark.asyncio
+async def test_dogme_remote_stage_inputs_uses_fastq_cdna_alias_for_fastq_input():
+    executor = get_workflow_executor("dogme")
+    params = SubmitParams(
+        sample_name="JamshidApproved",
+        input_type="fastq",
+        entry_point="fastqCDNA",
+        data_cache_path="/remote/cache/reads.fastq.gz",
+        remote_work_dir="/remote/project/workflow1",
+    )
+    conn = _FakeWriteConn()
+
+    stage_result = await executor.remote_stage_inputs(
+        request=params,
+        params=params,
+        profile=_make_profile(),
+        conn=conn,
+        run_uuid="run-1",
+    )
+
+    commands = [command for command, _ in conn.run_calls]
+    assert stage_result["workflow_remote_input"] == "/remote/project/workflow1/fastqs"
+    assert any("JamshidApproved.fastq.gz" in command for command in commands)
+
+
+@pytest.mark.asyncio
+async def test_dogme_remote_stage_inputs_fastq_cdna_command_enforces_single_fastq_rule_for_directories():
+    executor = get_workflow_executor("dogme")
+    params = SubmitParams(
+        sample_name="JamshidApproved",
+        input_type="fastq",
+        entry_point="fastqCDNA",
+        data_cache_path="/remote/cache/fingerprint1234",
+        remote_work_dir="/remote/project/workflow1",
+    )
+    conn = _FakeWriteConn()
+
+    await executor.remote_stage_inputs(
+        request=params,
+        params=params,
+        profile=_make_profile(),
+        conn=conn,
+        run_uuid="run-1",
+    )
+
+    command = conn.run_calls[0][0]
+    assert "find /remote/cache/fingerprint1234" in command
+    assert "Dogme fastqCDNA currently supports one FASTQ file per sample" in command
+    assert "JamshidApproved.fastq.gz" in command
+
+
+@pytest.mark.asyncio
 async def test_submit_wf_pore_c_stages_executor_inputs_and_builds_remote_command(monkeypatch, tmp_path):
     import launchpad.backends.slurm_backend as slurm_backend_module
 

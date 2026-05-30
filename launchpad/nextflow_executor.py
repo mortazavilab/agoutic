@@ -122,6 +122,11 @@ _OPENCHROMATIN_LIBRARY_FILE_SUFFIXES = (
     "libstdc++.so.6",
     "libgcc_s.so.1",
 )
+_DOGME_FASTQ_SUFFIXES = (".fastq.gz", ".fq.gz", ".fastq", ".fq")
+_DOGME_FASTQ_SINGLE_INPUT_ERROR = (
+    "Dogme fastqCDNA currently supports one FASTQ file per sample. "
+    "Concatenate your files manually, or contact the admin to enable multi-FASTQ support."
+)
 
 
 def resolve_slurm_cpu_memory_gb(memory_gb: int | None) -> int:
@@ -213,6 +218,38 @@ def _default_dna_openchromatin_runtime_exports() -> list[str]:
         "export LD_LIBRARY_PATH=/opt/conda/lib:${LIBTORCH}/lib:${LD_LIBRARY_PATH:-}",
         "export DYLD_LIBRARY_PATH=${LIBTORCH}/lib:${DYLD_LIBRARY_PATH:-}",
     ]
+
+
+def _looks_like_fastq_file(path_value: Path) -> bool:
+    lower_name = path_value.name.lower()
+    return any(lower_name.endswith(suffix) for suffix in _DOGME_FASTQ_SUFFIXES)
+
+
+def _resolve_dogme_fastq_input(input_dir: str) -> Path:
+    input_path = Path(input_dir)
+    if input_path.is_dir():
+        fastq_files = sorted(
+            child for child in input_path.iterdir()
+            if child.is_file() and _looks_like_fastq_file(child)
+        )
+        if not fastq_files:
+            raise RuntimeError(f"No FASTQ files found in directory: {input_dir}")
+        if len(fastq_files) != 1:
+            raise RuntimeError(_DOGME_FASTQ_SINGLE_INPUT_ERROR)
+        return fastq_files[0]
+
+    if not input_path.exists():
+        raise RuntimeError(f"FASTQ file not found: {input_dir}")
+    if not _looks_like_fastq_file(input_path):
+        raise RuntimeError(f"Expected a FASTQ file for fastqCDNA input: {input_dir}")
+    return input_path
+
+
+def _dogme_fastq_alias_suffix(path_value: Path) -> str:
+    lower_name = path_value.name.lower()
+    if lower_name.endswith((".fastq.gz", ".fq.gz")):
+        return ".fastq.gz"
+    return ".fastq"
 
 
 def _resolve_task_scoped_dogme_exports(profile_content: str) -> list[str]:
@@ -1251,6 +1288,25 @@ class NextflowExecutor:
             # Input_dir should point to existing work directory with outputs
             logger.info("Report generation using existing outputs", input_dir=input_dir)
             # No symlink needed, just use the directory as-is
+
+        elif entry_point == "fastqCDNA" or input_type == "fastq":
+            # fastqCDNA stages exactly one FASTQ as fastqs/{sample}.fastq[.gz].
+            # The alias always uses the approved sample name rather than the source filename.
+            fastqs_dir = work_dir / "fastqs"
+            fastqs_dir.mkdir(parents=True, exist_ok=True)
+
+            fastq_file = _resolve_dogme_fastq_input(input_dir)
+            fastq_link = fastqs_dir / f"{sample_name}{_dogme_fastq_alias_suffix(fastq_file)}"
+            try:
+                if fastq_link.exists() or fastq_link.is_symlink():
+                    fastq_link.unlink()
+                fastq_link.symlink_to(fastq_file.resolve())
+                logger.info("Created FASTQ symlink for fastqCDNA", link=str(fastq_link), target=str(fastq_file))
+            except Exception as e:
+                raise RuntimeError(f"Failed to create FASTQ symlink: {e}")
+
+            if entry_point is None:
+                entry_point = "fastqCDNA"
         
         elif input_type == "bam":
             # Default BAM handling (assume unmapped, use remap)

@@ -41,6 +41,10 @@ _OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS = (
         "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
     ),
 )
+_DOGME_FASTQ_SINGLE_INPUT_ERROR = (
+    "Dogme fastqCDNA currently supports one FASTQ file per sample. "
+    "Concatenate your files manually, or contact the admin to enable multi-FASTQ support."
+)
 
 
 def _normalize_reference_id(reference_id: str) -> str:
@@ -108,6 +112,31 @@ class DogmeWorkflowExecutor(WorkflowExecutor):
             await conn.run(f"rm -rf {shlex.quote(alias_dir)}", check=True)
             await conn.run(f"mkdir -p {shlex.quote(alias_dir)}", check=True)
             await conn.run(f"ln -sfn {shlex.quote(remote_input)} {shlex.quote(alias_path)}", check=True)
+        elif input_type == "fastq" and (params.entry_point or "").strip().lower() == "fastqcdna":
+            approved_sample = sample_name_or_default(
+                getattr(params, "sample_name", None) or getattr(request, "sample_name", None),
+                fallback_path=remote_input,
+            )
+            alias_dir = link_path
+            alias_prefix = str(PurePosixPath(alias_dir) / approved_sample)
+            command = (
+                f"rm -rf {shlex.quote(alias_dir)} && "
+                f"mkdir -p {shlex.quote(alias_dir)} && "
+                f"if [ -d {shlex.quote(remote_input)} ]; then "
+                f"candidates=$(find {shlex.quote(remote_input)} -maxdepth 1 -type f \\( "
+                f"-name '*.fastq' -o -name '*.fastq.gz' -o -name '*.fq' -o -name '*.fq.gz' \\) | LC_ALL=C sort); "
+                f"candidate_count=$(printf '%s\\n' \"$candidates\" | sed '/^$/d' | wc -l | tr -d ' '); "
+                f"if [ \"$candidate_count\" -eq 0 ]; then echo {shlex.quote(f'No FASTQ files found in directory: {remote_input}')} >&2; exit 1; fi; "
+                f"if [ \"$candidate_count\" -ne 1 ]; then echo {shlex.quote(_DOGME_FASTQ_SINGLE_INPUT_ERROR)} >&2; exit 1; fi; "
+                f"candidate=$(printf '%s\\n' \"$candidates\" | sed -n '1p'); "
+                f"else candidate={shlex.quote(remote_input)}; fi; "
+                f"case \"$candidate\" in "
+                f"*.fastq.gz|*.fq.gz) alias_path={shlex.quote(alias_prefix + '.fastq.gz')} ;; "
+                f"*.fastq|*.fq) alias_path={shlex.quote(alias_prefix + '.fastq')} ;; "
+                f"*) echo {shlex.quote(f'Expected a FASTQ file for fastqCDNA input: {remote_input}')} >&2; exit 1 ;; "
+                f"esac; ln -sfn \"$candidate\" \"$alias_path\""
+            )
+            await conn.run(command, check=True)
         else:
             await conn.run(f"ln -sfn {shlex.quote(remote_input)} {shlex.quote(link_path)}", check=True)
 

@@ -25,6 +25,8 @@ This skill provides **downstream analysis interpretation** for completed Dogme c
   - "Analyze my pod5 files"
   - "Run Dogme on my data"
   - "Submit a new cDNA job"
+  - "Run Dogme cDNA on this FASTQ"
+  - "I have a cDNA fastq.gz file"
 
 - **ENCODE data lookup** → `[[SKILL_SWITCH_TO: encode_search]]`
   - "How many BAM files are there for ENCSR160HKZ?"
@@ -46,6 +48,8 @@ This skill provides **downstream analysis interpretation** for completed Dogme c
 - **ENCODE accessions/experiments** → `[[SKILL_SWITCH_TO: encode_search]]`
 - **Different job results** → `[[SKILL_SWITCH_TO: analyze_job_results]]`
 - **General help / unclear intent** → `[[SKILL_SWITCH_TO: welcome]]`
+
+If the user is asking to submit a new job from FASTQ input, do not explain cDNA results here. Switch immediately to `analyze_local_sample`. Dogme FASTQ intake is only supported there via the `fastqCDNA` submission path.
 
 **When uncertain:** If the question is clearly outside cDNA result interpretation, switch to the appropriate skill rather than saying "I can't help."
 

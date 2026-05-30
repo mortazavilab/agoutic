@@ -1357,6 +1357,41 @@ class TestSubmitJobAfterApproval:
         assert "bguser" in submitted_dir or "bg-proj" in submitted_dir
 
     @pytest.mark.asyncio
+    async def test_fastq_cdna_resolves_single_project_fastq_file(self, session_factory, seed_data, tmp_path):
+        """fastqCDNA input_directory resolves to the single FASTQ in project data/ when the placeholder is used."""
+        data_dir = tmp_path / "users" / "bguser" / "bg-proj" / "data"
+        data_dir.mkdir(parents=True)
+        fastq_file = data_dir / "jamshid.fastq.gz"
+        fastq_file.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "extracted_params": {
+                "sample_name": "jamshid",
+                "mode": "CDNA",
+                "input_type": "fastq",
+                "entry_point": "fastqCDNA",
+                "input_directory": "/data/samples/test",
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "fastq-uuid", "work_directory": "/work/fastq",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.AGOUTIC_DATA", str(tmp_path)), \
+             patch("cortex.remote_orchestration.AGOUTIC_DATA", str(tmp_path)), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        call_args = mock_client.call_tool.call_args
+        assert call_args.kwargs.get("input_directory") == str(fastq_file)
+
+    @pytest.mark.asyncio
     async def test_local_sample_is_staged_before_submission(self, session_factory, seed_data, tmp_path):
         """Local sample intake copies data into the user's central data folder before Dogme submission."""
         source_dir = tmp_path / "incoming" / "pod5"

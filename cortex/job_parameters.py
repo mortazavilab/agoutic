@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -33,6 +34,76 @@ _REMOTE_INPUT_PATTERNS = [
 
 _RELATIVE_INPUT_PATH_PATTERN = r'(?<!/)\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq|fq|fast5))\b'
 _ABSOLUTE_INPUT_PATH_PATTERN = r'(?:(?<=^)|(?<=[\s"\'(]))(/[^\s,]+(?:/[^\s,]+)*)'
+
+
+def _input_type_signals(*, user_text_original: str, user_text: str) -> dict[str, bool]:
+    original_lower = str(user_text_original or "").lower()
+    lowered = str(user_text or "").lower()
+    return {
+        "pod5": any(token in original_lower or token in lowered for token in (".pod5", ".fast5", " pod5", "pod5 ", "fast5")),
+        "bam": ".bam" in original_lower or " bam" in lowered or lowered.startswith("bam "),
+        "fastq": any(token in original_lower or token in lowered for token in (".fastq", ".fq", " fastq", "fastq ", " fq ")),
+    }
+
+
+def _fastq_approval_clarification(*, kind: str, requested_mode: str | None = None) -> dict:
+    if kind == "prefill_cdna":
+        return {
+            "kind": kind,
+            "blocking": False,
+            "assistant_text": (
+                "I found FASTQ input in this project. Dogme only supports FASTQ input for cDNA mode. "
+                "I prefilled the approval for cDNA fastqCDNA below. If you intended RNA or DNA instead, "
+                "switch the input to pod5 or BAM before submitting."
+            ),
+            "banner_text": (
+                "FASTQ input is only supported for Dogme cDNA mode. "
+                "The approval below has been prefilled for fastqCDNA."
+            ),
+            "options": [],
+        }
+
+    normalized_mode = str(requested_mode or "RNA").strip().upper() or "RNA"
+    return {
+        "kind": kind,
+        "blocking": True,
+        "requested_mode": normalized_mode,
+        "assistant_text": (
+            "Dogme only supports FASTQ input for cDNA mode. "
+            f"Your request mentions FASTQ together with {normalized_mode}. "
+            "Choose one of the options below before submitting: keep FASTQ and switch to cDNA fastqCDNA, "
+            f"or keep {normalized_mode} and provide pod5/BAM instead."
+        ),
+        "banner_text": (
+            "FASTQ input is only supported for Dogme cDNA mode. "
+            f"To continue, either switch this request to cDNA fastqCDNA or change the input type to pod5/BAM for {normalized_mode}."
+        ),
+        "options": [
+            {"id": "use_fastq_cdna", "label": "Use FASTQ for cDNA (fastqCDNA)"},
+            {"id": "provide_supported_input", "label": f"I will provide pod5/BAM for {normalized_mode}"},
+        ],
+    }
+
+
+def _fastq_prefill_params() -> dict[str, str]:
+    return {
+        "input_type": "fastq",
+        "entry_point": "fastqCDNA",
+        "mode": "CDNA",
+    }
+
+
+def _sample_name_from_input_path(input_path: str | None) -> str | None:
+    cleaned = str(input_path or "").strip()
+    if not cleaned or cleaned.startswith("remote:"):
+        return None
+    path = Path(cleaned)
+    filename = path.name
+    lower_name = filename.lower()
+    for suffix in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
+        if lower_name.endswith(suffix):
+            return filename[: -len(suffix)] or None
+    return None
 
 
 def _looks_like_slash_command_message(user_text: str) -> bool:
@@ -219,11 +290,15 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     params = {
         "sample_name": None,
         "mode": None,
+        "mode_explicit": False,
         "input_directory": None,
         "input_directory_explicit": False,
         "remote_input_path": None,
         "input_type": "pod5",  # Default to pod5
+        "input_type_explicit": False,
         "entry_point": None,  # Dogme entry point
+        "approval_prefill": None,
+        "approval_clarification": None,
         "reference_genome": [],  # Now a list for multi-genome support
         "modifications": None,
         # Advanced parameters (optional)
@@ -328,6 +403,12 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     if gpus_match:
         params["slurm_gpus"] = int(gpus_match.group(1))
 
+    input_signals = _input_type_signals(
+        user_text_original=all_user_text_original,
+        user_text=all_user_text,
+    )
+    params["input_type_explicit"] = any(input_signals.values())
+
     # Detect Dogme entry point from conversation
     if "only basecall" in all_user_text or "just basecalling" in all_user_text or "basecall only" in all_user_text:
         params["entry_point"] = "basecall"
@@ -357,6 +438,8 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
             params["input_type"] = "bam"
     elif ".fastq" in all_user_text_original or ".fq" in all_user_text_original or "fastq" in all_user_text:
         params["input_type"] = "fastq"
+    elif input_signals["pod5"] and not input_signals["bam"] and not input_signals["fastq"]:
+        params["input_type"] = "pod5"
 
     # Detect genome from keywords - support multiple genomes
     genome_keywords = list(GENOME_ALIASES.keys())
@@ -390,10 +473,13 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     # Detect mode from keywords
     if "rna" in all_user_text and "cdna" not in all_user_text:
         params["mode"] = "RNA"
+        params["mode_explicit"] = True
     elif "cdna" in all_user_text:
         params["mode"] = "CDNA"
+        params["mode_explicit"] = True
     elif "dna" in all_user_text or "genomic" in all_user_text or "fiber" in all_user_text:
         params["mode"] = "DNA"
+        params["mode_explicit"] = True
     else:
         params["mode"] = "DNA"  # Default to DNA
 
@@ -432,6 +518,20 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         params["input_directory"] = f"remote:{remote_input_path}"
     else:
         params["input_directory"] = "/data/samples/test"
+
+    if params["input_type"] == "fastq":
+        if params["mode"] == "CDNA":
+            params["entry_point"] = "fastqCDNA"
+            params["approval_prefill"] = _fastq_prefill_params()
+        elif params["mode_explicit"] and params["mode"] in {"RNA", "DNA"}:
+            params["approval_clarification"] = _fastq_approval_clarification(
+                kind="blocking_mode_conflict",
+                requested_mode=params["mode"],
+            )
+        else:
+            params["mode"] = "CDNA"
+            params["approval_prefill"] = _fastq_prefill_params()
+            params["approval_clarification"] = _fastq_approval_clarification(kind="prefill_cdna")
 
     # Extract sample name from context
     # Search user messages in REVERSE order (most recent first) so a new
@@ -477,6 +577,11 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
                         and "/" not in potential_name):
                         params["sample_name"] = potential_name
                         break
+
+    if not params["sample_name"]:
+        inferred_fastq_sample_name = _sample_name_from_input_path(params.get("input_directory"))
+        if params["input_type"] == "fastq" and inferred_fastq_sample_name:
+            params["sample_name"] = inferred_fastq_sample_name
 
     if not params["sample_name"]:
         # Use genome type + project timestamp as default

@@ -980,3 +980,116 @@ class TestGenericWorkflowSubmission:
         assert not staged_input.is_symlink()
         assert staged_input.read_text(encoding="utf-8") == input_path.read_text(encoding="utf-8")
         assert str(staged_input) in captured["cmd"]
+
+
+class TestDogmeFastqCdnaSubmission:
+    @pytest.mark.asyncio
+    async def test_submit_job_stages_fastq_cdna_alias_using_approved_sample_name(self, monkeypatch, tmp_path):
+        nextflow_bin = tmp_path / "bin" / "nextflow"
+        nextflow_bin.parent.mkdir(parents=True, exist_ok=True)
+        nextflow_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        dogme_repo = tmp_path / "dogme"
+        dogme_repo.mkdir(parents=True, exist_ok=True)
+        (dogme_repo / "dogme.nf").write_text("nextflow.enable.dsl=2\n", encoding="utf-8")
+
+        input_path = tmp_path / "inputs" / "reads.fastq.gz"
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        input_path.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        captured: dict[str, object] = {}
+
+        class _FakeProcess:
+            pid = 2222
+
+            async def wait(self):
+                return 0
+
+        async def fake_subprocess_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["cwd"] = kwargs["cwd"]
+            return _FakeProcess()
+
+        def fake_create_task(coro):
+            captured.setdefault("tasks", []).append(coro)
+            coro.close()
+            return SimpleNamespace()
+
+        monkeypatch.setattr(nextflow_module, "DOGME_REPO", dogme_repo)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_subprocess_exec", fake_subprocess_exec)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_task", fake_create_task)
+
+        executor = NextflowExecutor()
+        executor.nextflow_bin = nextflow_bin
+        executor.work_dir = tmp_path / "launchpad-work"
+        executor.work_dir.mkdir(parents=True, exist_ok=True)
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        request = SimpleNamespace(
+            sample_name="JamshidApproved",
+            mode="CDNA",
+            input_directory=str(input_path),
+            input_type="fastq",
+        )
+
+        run_uuid, work_dir = await executor.submit_job(
+            run_uuid="run-fastq-cdna",
+            workflow_key="dogme",
+            workflow_executor=get_workflow_executor("dogme"),
+            request=request,
+            sample_name="JamshidApproved",
+            mode="CDNA",
+            input_type="fastq",
+            input_dir=str(input_path),
+            reference_genome=["mm39"],
+            entry_point="fastqCDNA",
+            workflow_index=1,
+            username="alice",
+            project_slug="proj-1",
+        )
+
+        staged_fastq = work_dir / "fastqs" / "JamshidApproved.fastq.gz"
+
+        assert run_uuid == "run-fastq-cdna"
+        assert staged_fastq.is_symlink()
+        assert staged_fastq.resolve() == input_path.resolve()
+        assert "-entry" in captured["cmd"]
+        assert "fastqCDNA" in captured["cmd"]
+        assert (work_dir / "dogme.profile").exists()
+        assert (work_dir / "nextflow.config").exists()
+        assert (work_dir / ".nextflow_pid").read_text() == "2222"
+
+    @pytest.mark.asyncio
+    async def test_submit_job_rejects_multiple_fastqs_for_fastq_cdna(self, tmp_path):
+        nextflow_bin = tmp_path / "bin" / "nextflow"
+        nextflow_bin.parent.mkdir(parents=True, exist_ok=True)
+        nextflow_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        input_dir = tmp_path / "inputs"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        (input_dir / "lane1.fastq.gz").write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+        (input_dir / "lane2.fastq.gz").write_text("@read\nTGCA\n+\n!!!!\n", encoding="utf-8")
+
+        executor = NextflowExecutor()
+        executor.nextflow_bin = nextflow_bin
+        executor.work_dir = tmp_path / "launchpad-work"
+        executor.work_dir.mkdir(parents=True, exist_ok=True)
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        with pytest.raises(RuntimeError, match="Dogme fastqCDNA currently supports one FASTQ file per sample"):
+            await executor.submit_job(
+                run_uuid="run-fastq-cdna-error",
+                workflow_key="dogme",
+                workflow_executor=get_workflow_executor("dogme"),
+                request=SimpleNamespace(sample_name="JamshidApproved", mode="CDNA", input_directory=str(input_dir), input_type="fastq"),
+                sample_name="JamshidApproved",
+                mode="CDNA",
+                input_type="fastq",
+                input_dir=str(input_dir),
+                reference_genome=["mm39"],
+                entry_point="fastqCDNA",
+                workflow_index=1,
+                username="alice",
+                project_slug="proj-1",
+            )

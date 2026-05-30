@@ -1,6 +1,7 @@
 import ast
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 
 PART1_PATH = Path(__file__).resolve().parents[2] / "ui" / "appui_block_part1.py"
@@ -27,6 +28,10 @@ def _load_part1_namespace() -> dict:
         "_approval_input_path_label",
         "_approval_input_path_help",
         "_approval_path_summary_rows",
+        "_approval_project_data_inventory",
+        "_approval_fastq_sample_name",
+        "_approval_has_generic_sample_name",
+        "_approval_dogme_fastq_state",
         "_wf_pore_c_output_flag_values",
         "_approval_gate_field_visibility",
         "_split_cluster_modkit_paths",
@@ -375,3 +380,119 @@ def test_wf_pore_c_output_flag_values_force_paired_end_when_bed_enabled():
         "coverage": False,
         "paired_end": True,
     }
+
+
+def test_approval_project_data_inventory_filters_to_project_data_fastq_and_pod5():
+    namespace = _load_part1_namespace()
+
+    def fake_request(method, url, timeout=5):
+        assert method == "GET"
+        assert url.endswith("/projects/proj-1/files")
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "files": [
+                    {"path": "data/sample.fastq.gz", "name": "sample.fastq.gz"},
+                    {"path": "data/sample.pod5", "name": "sample.pod5"},
+                    {"path": "workflow1/report.html", "name": "report.html"},
+                ]
+            },
+        )
+
+    inventory = namespace["_approval_project_data_inventory"](
+        "http://api.test",
+        fake_request,
+        "proj-1",
+    )
+
+    assert inventory == {
+        "fastq_paths": ["data/sample.fastq.gz"],
+        "pod5_paths": ["data/sample.pod5"],
+    }
+
+
+def test_approval_dogme_fastq_state_defaults_to_fastq_cdna_when_project_has_only_fastq():
+    namespace = _load_part1_namespace()
+
+    def fake_request(method, url, timeout=5):
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "files": [
+                    {"path": "data/jamshid.fastq.gz", "name": "jamshid.fastq.gz"},
+                ]
+            },
+        )
+
+    state = namespace["_approval_dogme_fastq_state"](
+        {"workflow_key": "dogme", "sample_name": "mouse_sample_proj-1"},
+        api_url="http://api.test",
+        request_fn=fake_request,
+        project_id="proj-1",
+    )
+
+    assert state["default_input_type"] == "fastq"
+    assert state["default_mode"] == "CDNA"
+    assert state["default_entry_point"] == "fastqCDNA"
+    assert state["default_sample_name"] == "jamshid"
+
+
+def test_approval_dogme_fastq_state_keeps_pod5_default_when_project_has_pod5_and_fastq():
+    namespace = _load_part1_namespace()
+
+    def fake_request(method, url, timeout=5):
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "files": [
+                    {"path": "data/jamshid.fastq.gz", "name": "jamshid.fastq.gz"},
+                    {"path": "data/run1.pod5", "name": "run1.pod5"},
+                ]
+            },
+        )
+
+    state = namespace["_approval_dogme_fastq_state"](
+        {"workflow_key": "dogme", "sample_name": "mouse_sample_proj-1"},
+        api_url="http://api.test",
+        request_fn=fake_request,
+        project_id="proj-1",
+    )
+
+    assert state["default_input_type"] == "pod5"
+    assert state["default_mode"] == "DNA"
+
+
+def test_approval_dogme_fastq_state_preserves_explicit_fastq_request_when_pod5_is_present():
+    namespace = _load_part1_namespace()
+
+    def fake_request(method, url, timeout=5):
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "files": [
+                    {"path": "data/jamshid.fastq.gz", "name": "jamshid.fastq.gz"},
+                    {"path": "data/run1.pod5", "name": "run1.pod5"},
+                ]
+            },
+        )
+
+    state = namespace["_approval_dogme_fastq_state"](
+        {
+            "workflow_key": "dogme",
+            "sample_name": "Jamshid",
+            "input_type": "fastq",
+            "input_type_explicit": True,
+            "approval_prefill": {
+                "input_type": "fastq",
+                "entry_point": "fastqCDNA",
+                "mode": "CDNA",
+            },
+        },
+        api_url="http://api.test",
+        request_fn=fake_request,
+        project_id="proj-1",
+    )
+
+    assert state["default_input_type"] == "fastq"
+    assert state["default_mode"] == "CDNA"
+    assert state["default_entry_point"] == "fastqCDNA"

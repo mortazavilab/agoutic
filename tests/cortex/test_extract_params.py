@@ -365,6 +365,55 @@ class TestInputType:
         assert result["input_type"] == "fastq"
 
     @pytest.mark.asyncio
+    async def test_fastq_cdna_sets_fastq_cdna_entry_point(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Run Dogme cDNA on sample.fastq.gz"})
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["input_type"] == "fastq"
+        assert result["mode"] == "CDNA"
+        assert result["entry_point"] == "fastqCDNA"
+        assert result["approval_prefill"] == {
+            "input_type": "fastq",
+            "entry_point": "fastqCDNA",
+            "mode": "CDNA",
+        }
+
+    @pytest.mark.asyncio
+    async def test_fastq_without_mode_prefills_cdna_clarification(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Please analyze reads.fastq.gz"})
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["input_type"] == "fastq"
+        assert result["mode"] == "CDNA"
+        assert result["entry_point"] is None
+        assert result["approval_clarification"]["blocking"] is False
+        assert "prefilled" in result["approval_clarification"]["assistant_text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_fastq_rna_sets_blocking_clarification(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Analyze this fastq for RNA mode"})
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["input_type"] == "fastq"
+        assert result["mode"] == "RNA"
+        assert result["entry_point"] is None
+        assert result["approval_clarification"]["blocking"] is True
+        assert result["approval_clarification"]["requested_mode"] == "RNA"
+        assert result["approval_clarification"]["options"] == [
+            {"id": "use_fastq_cdna", "label": "Use FASTQ for cDNA (fastqCDNA)"},
+            {"id": "provide_supported_input", "label": "I will provide pod5/BAM for RNA"},
+        ]
+
+    @pytest.mark.asyncio
     async def test_bam_remap(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "I have unmapped bam files"})
         sess = self.sf()

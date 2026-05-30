@@ -115,6 +115,117 @@ def _wf_pore_c_output_flag_values(raw_flags) -> dict[str, bool]:
     return flags
 
 
+def _approval_project_data_inventory(api_url: str, request_fn, project_id: str | None) -> dict[str, list[str]]:
+    inventory = {"fastq_paths": [], "pod5_paths": []}
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return inventory
+
+    try:
+        response = request_fn("GET", f"{api_url}/projects/{normalized_project_id}/files", timeout=5)
+    except Exception:
+        return inventory
+
+    if getattr(response, "status_code", None) != 200:
+        return inventory
+
+    try:
+        payload = response.json()
+    except Exception:
+        return inventory
+
+    for item in payload.get("files") or []:
+        if not isinstance(item, dict):
+            continue
+        rel_path = str(item.get("path") or "").strip()
+        if not rel_path.startswith("data/"):
+            continue
+        filename = str(item.get("name") or os.path.basename(rel_path)).strip()
+        lower_name = filename.lower()
+        if lower_name.endswith((".fastq", ".fastq.gz", ".fq", ".fq.gz")):
+            if rel_path not in inventory["fastq_paths"]:
+                inventory["fastq_paths"].append(rel_path)
+        if lower_name.endswith((".pod5", ".fast5")):
+            if rel_path not in inventory["pod5_paths"]:
+                inventory["pod5_paths"].append(rel_path)
+    return inventory
+
+
+def _approval_fastq_sample_name(candidate_path: str | None) -> str:
+    filename = os.path.basename(str(candidate_path or "").strip())
+    lower_name = filename.lower()
+    for suffix in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
+        if lower_name.endswith(suffix):
+            return filename[: -len(suffix)]
+    return ""
+
+
+def _approval_has_generic_sample_name(sample_name: str | None) -> bool:
+    cleaned = str(sample_name or "").strip().lower()
+    if not cleaned:
+        return True
+    return cleaned == "sample" or "_sample_" in cleaned
+
+
+def _approval_dogme_fastq_state(
+    extracted_params: dict | None,
+    *,
+    api_url: str,
+    request_fn,
+    project_id: str | None,
+) -> dict[str, object]:
+    params = extracted_params or {}
+    clarification = params.get("approval_clarification") if isinstance(params.get("approval_clarification"), dict) else None
+    prefill = params.get("approval_prefill") if isinstance(params.get("approval_prefill"), dict) else {}
+    inventory = _approval_project_data_inventory(api_url, request_fn, project_id)
+
+    has_fastq = bool(inventory["fastq_paths"])
+    has_pod5 = bool(inventory["pod5_paths"])
+    explicit_input_request = bool(params.get("input_type_explicit"))
+
+    default_input_type = str(params.get("input_type") or "pod5").strip().lower() or "pod5"
+    default_mode = str(params.get("mode") or "DNA").strip().upper() or "DNA"
+    default_entry_point = str(params.get("entry_point") or "(auto)").strip() or "(auto)"
+
+    if clarification and clarification.get("blocking"):
+        default_input_type = "fastq"
+        default_mode = "CDNA"
+        default_entry_point = "fastqCDNA"
+    elif prefill:
+        default_input_type = str(prefill.get("input_type") or default_input_type).strip().lower() or default_input_type
+        default_mode = str(prefill.get("mode") or default_mode).strip().upper() or default_mode
+        default_entry_point = str(prefill.get("entry_point") or default_entry_point).strip() or default_entry_point
+    else:
+        # Approval default policy: symlinked files in project data/ count the same as regular files.
+        # If both pod5 and FASTQ are present and the user did not explicitly request one,
+        # keep pod5 as the default because it remains the primary Dogme path.
+        if not explicit_input_request and has_fastq and not has_pod5:
+            default_input_type = "fastq"
+            default_mode = "CDNA"
+            default_entry_point = "fastqCDNA"
+        elif not explicit_input_request and has_fastq and has_pod5:
+            default_input_type = "pod5"
+            if default_entry_point == "fastqCDNA":
+                default_entry_point = "(auto)"
+
+    default_sample_name = ""
+    if default_input_type == "fastq" and len(inventory["fastq_paths"]) == 1:
+        current_sample_name = str(params.get("sample_name") or "").strip()
+        if _approval_has_generic_sample_name(current_sample_name):
+            default_sample_name = _approval_fastq_sample_name(inventory["fastq_paths"][0])
+
+    return {
+        "clarification": clarification,
+        "has_fastq": has_fastq,
+        "has_pod5": has_pod5,
+        "fastq_paths": inventory["fastq_paths"],
+        "default_input_type": default_input_type,
+        "default_mode": default_mode,
+        "default_entry_point": default_entry_point,
+        "default_sample_name": default_sample_name,
+    }
+
+
 def _approval_gate_field_visibility(extracted_params: dict | None, *, gate_action: str) -> dict[str, bool | str]:
     workflow_key = _approval_workflow_key(extracted_params)
     is_remote_stage = str(gate_action or "").strip().lower() == "remote_stage"
@@ -1284,13 +1395,26 @@ def render_block_part1(
                     st.write("**📋 Extracted Parameters** (edit if needed):")
                     _field_visibility = _approval_gate_field_visibility(extracted_params, gate_action=_gate_action)
                     _workflow_key = str(_field_visibility["workflow_key"])
+                    _active_project_id = st.session_state.get("active_project_id")
+                    _dogme_fastq_state = _approval_dogme_fastq_state(
+                        extracted_params,
+                        api_url=API_URL,
+                        request_fn=make_authenticated_request,
+                        project_id=_active_project_id,
+                    ) if _workflow_key == "dogme" else {}
                     
                     with st.form(key=f"params_form_{block_id}"):
                         grouped_section("Core Run Settings")
+                        _submit_block_reason = None
+
+                        _sample_name_default = extracted_params.get("sample_name", "")
+                        if _workflow_key == "dogme" and _dogme_fastq_state.get("default_sample_name"):
+                            _sample_name_default = _dogme_fastq_state["default_sample_name"]
+
                         # Sample name
                         sample_name = st.text_input(
                             "Sample Name",
-                            value=extracted_params.get("sample_name", ""),
+                            value=_sample_name_default,
                             help="Name for this sample"
                         )
                         
@@ -1303,31 +1427,91 @@ def render_block_part1(
                         cutter = _WF_PORE_C_DEFAULT_CUTTER
                         output_flags = {}
 
+                        _blocking_fastq_clarification = None
+                        _blocking_fastq_resolution = ""
+                        if _workflow_key == "dogme":
+                            _clarification = _dogme_fastq_state.get("clarification")
+                            if isinstance(_clarification, dict) and _clarification.get("blocking"):
+                                _blocking_fastq_clarification = _clarification
+                                st.warning(_clarification.get("banner_text") or "FASTQ input is only supported for Dogme cDNA mode.")
+                                _resolution_labels = [option.get("label", "") for option in _clarification.get("options") or [] if option.get("label")]
+                                _blocking_fastq_resolution = st.selectbox(
+                                    "Required action",
+                                    [""] + _resolution_labels,
+                                    index=0,
+                                    help="Choose how to resolve this FASTQ request before approving the run.",
+                                    key=f"fastq_resolution_{block_id}",
+                                )
+                                if not _blocking_fastq_resolution:
+                                    _submit_block_reason = _clarification.get("banner_text") or "Choose how to resolve the FASTQ request before submitting."
+
+                        # Input type
+                        if _workflow_key == "dogme":
+                            input_type_options = ["pod5", "bam", "fastq"]
+                            current_input_type = _dogme_fastq_state.get("default_input_type") or extracted_params.get("input_type", "pod5")
+                            if _blocking_fastq_resolution:
+                                if _blocking_fastq_resolution == "Use FASTQ for cDNA (fastqCDNA)":
+                                    current_input_type = "fastq"
+                                else:
+                                    current_input_type = "pod5"
+                        else:
+                            input_type_options = ["bam", "fastq"]
+                            current_input_type = extracted_params.get("input_type", "bam")
+                        input_type_index = input_type_options.index(current_input_type) if current_input_type in input_type_options else 0
+                        input_type = st.selectbox("Input Type", input_type_options, index=input_type_index)
+
                         if _field_visibility["show_mode"]:
-                            mode_options = ["DNA", "RNA", "CDNA"]
-                            current_mode = extracted_params.get("mode", "DNA")
+                            if _workflow_key == "dogme" and input_type == "fastq":
+                                mode_options = ["CDNA"]
+                                current_mode = "CDNA"
+                            else:
+                                mode_options = ["DNA", "RNA", "CDNA"]
+                                current_mode = extracted_params.get("mode", "DNA")
+                                if _workflow_key == "dogme":
+                                    current_mode = _dogme_fastq_state.get("default_mode") or current_mode
+                                    if _blocking_fastq_resolution and _blocking_fastq_resolution != "Use FASTQ for cDNA (fastqCDNA)":
+                                        current_mode = (_blocking_fastq_clarification or {}).get("requested_mode") or current_mode
                             mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
                             mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
                         else:
                             st.caption("Workflow: `wf-pore-c`")
                         
-                        # Input type
-                        input_type_options = ["pod5", "bam"] if _workflow_key != "wf_pore_c" else ["bam", "fastq"]
-                        current_input_type = extracted_params.get("input_type", "pod5" if _workflow_key != "wf_pore_c" else "bam")
-                        input_type_index = input_type_options.index(current_input_type) if current_input_type in input_type_options else 0
-                        input_type = st.selectbox("Input Type", input_type_options, index=input_type_index)
-                        
                         # Entry point (Dogme workflow)
                         if _field_visibility["show_entry_point"]:
-                            entry_point_options = ["(auto)", "basecall", "remap", "modkit", "annotateRNA", "reports"]
-                            current_entry = extracted_params.get("entry_point") or "(auto)"
+                            if _workflow_key == "dogme" and input_type == "fastq":
+                                entry_point_options = ["fastqCDNA"]
+                                current_entry = "fastqCDNA"
+                            else:
+                                entry_point_options = ["(auto)", "basecall", "remap", "modkit", "annotateRNA", "reports"]
+                                current_entry = extracted_params.get("entry_point") or "(auto)"
+                                if _workflow_key == "dogme":
+                                    current_entry = _dogme_fastq_state.get("default_entry_point") or current_entry
+                                    if current_entry == "fastqCDNA" and input_type != "fastq":
+                                        current_entry = "(auto)"
                             entry_index = entry_point_options.index(current_entry) if current_entry in entry_point_options else 0
                             entry_point = st.selectbox(
                                 "Pipeline Entry Point",
                                 entry_point_options,
                                 index=entry_index,
-                                help="main=(auto) full pipeline, basecall=only basecalling, remap=from unmapped BAM, modkit=modifications only, annotateRNA=transcript annotation, reports=generate reports"
+                                help=(
+                                    "Dogme FASTQ input is only supported through fastqCDNA."
+                                    if _workflow_key == "dogme" and input_type == "fastq"
+                                    else "main=(auto) full pipeline, basecall=only basecalling, remap=from unmapped BAM, modkit=modifications only, annotateRNA=transcript annotation, reports=generate reports"
+                                )
                             )
+
+                        if _workflow_key == "dogme" and input_type == "fastq":
+                            _nonblocking_clarification = _dogme_fastq_state.get("clarification")
+                            if isinstance(_nonblocking_clarification, dict) and not _nonblocking_clarification.get("blocking"):
+                                st.info(_nonblocking_clarification.get("banner_text") or "FASTQ input is only supported for Dogme cDNA mode.")
+                            st.caption("FASTQ input is submitted through Dogme `fastqCDNA` and staged as `fastqs/{sample_name}.fastq[.gz]` using the approved sample name.")
+
+                        if _workflow_key == "dogme" and input_type == "fastq" and mode != "CDNA":
+                            _submit_block_reason = (
+                                "FASTQ input is only supported for Dogme cDNA mode. "
+                                f"Change the mode to CDNA or switch the input type away from FASTQ for {mode}."
+                            )
+                            st.warning(_submit_block_reason)
                         
                         _staged_remote_input_path = extracted_params.get("staged_remote_input_path") or ""
                         if _staged_remote_input_path:
@@ -1738,11 +1922,13 @@ def render_block_part1(
                                 )
                         
                         st.divider()
+                        if _submit_block_reason:
+                            st.caption("Approve is disabled until the FASTQ input conflict is resolved.")
                         
                         # Action buttons
                         col1, col2 = st.columns(2)
                         
-                        submit_approve = col1.form_submit_button("✅ Approve", width="stretch")
+                        submit_approve = col1.form_submit_button("✅ Approve", width="stretch", disabled=bool(_submit_block_reason))
                         submit_reject = col2.form_submit_button("❌ Reject", width="stretch")
                         
                         if submit_approve:

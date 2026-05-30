@@ -772,20 +772,35 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
         if _resume_dir:
             job_data["resume_from_dir"] = _resume_dir
 
-        # For BAM remap: if no valid input_directory was found, resolve to project data/ dir
-        # This handles "run dogme from downloaded BAM" where BAMs are in projectdir/data/
+        # For BAM remap and fastqCDNA: if no valid input_directory was found, resolve to project data/.
+        # Uploaded files already appear in project data/ as symlinks to the user's central data folder.
         _input_dir = job_data["input_directory"]
+        if _username and _project_slug:
+            _project_data_dir = Path(AGOUTIC_DATA) / "users" / _username / _project_slug / "data"
+        else:
+            _project_data_dir = Path(AGOUTIC_DATA) / "users" / owner_id / project_id / "data"
+
         if (job_data.get("input_type") == "bam"
             and job_data.get("entry_point") == "remap"
             and (_input_dir == "/data/samples/test" or not Path(_input_dir).exists())):
-            if _username and _project_slug:
-                _project_data_dir = str(Path(AGOUTIC_DATA) / "users" / _username / _project_slug / "data")
-            else:
-                _project_data_dir = str(Path(AGOUTIC_DATA) / "users" / owner_id / project_id / "data")
-            if Path(_project_data_dir).exists():
-                job_data["input_directory"] = _project_data_dir
-                logger.info("Resolved BAM input to project data dir",
-                           input_directory=_project_data_dir)
+            if _project_data_dir.exists():
+                job_data["input_directory"] = str(_project_data_dir)
+                logger.info("Resolved BAM input to project data dir", input_directory=str(_project_data_dir))
+
+        if (job_data.get("input_type") == "fastq"
+            and job_data.get("entry_point") == "fastqCDNA"
+            and (_input_dir == "/data/samples/test" or not Path(_input_dir).exists())):
+            if _project_data_dir.exists():
+                _fastq_candidates = sorted(
+                    path for path in _project_data_dir.iterdir()
+                    if path.is_file() and path.name.lower().endswith((".fastq", ".fastq.gz", ".fq", ".fq.gz"))
+                )
+                if len(_fastq_candidates) == 1:
+                    job_data["input_directory"] = str(_fastq_candidates[0])
+                    logger.info("Resolved fastqCDNA input to single project FASTQ", input_directory=str(_fastq_candidates[0]))
+                else:
+                    job_data["input_directory"] = str(_project_data_dir)
+                    logger.info("Resolved fastqCDNA input to project data dir", input_directory=str(_project_data_dir), fastq_candidates=len(_fastq_candidates))
 
         logger.info("Job parameters prepared", source="edited" if gate_payload.get('edited_params') else "extracted",
                     job_data=job_data)
