@@ -1,5 +1,5 @@
 display_name: Haplotype With VCF
-description: Label long-read DNA or RNA BAMs with haplotype or genotype assignment using an indexed VCF.
+description: Label long-read DNA or RNA BAMs with haplotype or genotype assignment using a VCF, auto-preparing compression and indexing when needed.
 category: execution
 source:
   type: service
@@ -21,7 +21,8 @@ sample_types:
 estimated_runtime: slow
 plan_type: haplotype_with_vcf
 trigger_patterns:
-  - '(?:^|\b)haplotype\s+(?:DNA|RNA|cDNA)\s+workflow\d+\s+(?:with\s+file\s+)?\S+\.vcf(?:\.gz)?\b'
+  - '(?:^/haplotype\b|^haplotype\b)\s+(?:DNA|RNA|cDNA)\s+(?:(?:[a-z0-9][a-z0-9_-]*)\s*:\s*)?workflow\d+\b(?=.*(?:--vcf-sample\b|(?:with\s+file\s+)?\S+\.vcf(?:\.gz)?\b))'
+  - '(?:^/haplotype\b|^haplotype\b).*\b(?:mouse|mm39)\b.*\b(?:(?:[a-z0-9][a-z0-9_-]*)\s*:\s*)?workflow\d+\b'
   - '(?:haplotyp(?:e|ing)|label)\s+.+\s+(?:with|using)\s+.+\.vcf(?:\.gz)?\b'
   - '(?:parental|genotype|haplotype)\s+(?:assignment|label(?:ing)?)\s+.+\.vcf(?:\.gz)?\b'
 slash_commands:

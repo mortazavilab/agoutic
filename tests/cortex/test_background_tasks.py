@@ -78,7 +78,7 @@ from cortex.job_polling import (
     _prefer_richer_job_status,
     _resolved_job_work_directory,
 )
-from cortex.workflow_submission import submit_job_after_approval
+from cortex.workflow_submission import _build_haplotype_script_args, _build_script_submission_payload, submit_job_after_approval
 from cortex.planner import _template_remote_stage_workflow
 from cortex.remote_orchestration import (
     _find_remote_staged_sample,
@@ -2809,8 +2809,10 @@ async def test_ensure_workflow_plan_approval_gate_builds_haplotype_specific_payl
             "path": "/proj/refs/parents.vcf.gz",
             "available_samples": ["parentA", "parentB"],
             "selected_samples": ["parentA", "parentB"],
+            "selected_sample_sources": {"parentA": "parentA", "parentB": "parentB"},
         },
         "labels": {
+            "assignment_labels": ["parentA", "parentB"],
             "label_a": "parentA",
             "label_b": "parentB",
             "ambiguous": "ambiguous",
@@ -2895,6 +2897,7 @@ async def test_ensure_workflow_plan_approval_gate_builds_haplotype_specific_payl
                             "tool": "run_allowlisted_script",
                             "params": {
                                 "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                                "timeout_seconds": 43200.0,
                                 "script_args": [
                                     "--workflow-dir", "/proj/workflow7",
                                     "--workflow-dir", "/proj/workflow8",
@@ -2928,15 +2931,202 @@ async def test_ensure_workflow_plan_approval_gate_builds_haplotype_specific_payl
     assert gate_payload["extracted_params"]["mode"] == "RNA"
     assert gate_payload["extracted_params"]["assignment_mode"] == "two_sample"
     assert gate_payload["extracted_params"]["vcf_selected_samples"] == ["parentA", "parentB"]
+    assert gate_payload["extracted_params"]["assignment_labels"] == ["parentA", "parentB"]
+    assert gate_payload["extracted_params"]["vcf_selected_sample_sources"] == {
+        "parentA": "parentA",
+        "parentB": "parentB",
+    }
     assert gate_payload["extracted_params"]["label_a"] == "parentA"
     assert gate_payload["extracted_params"]["bam_count"] == 2
     assert gate_payload["extracted_params"]["output_directory"] == "/proj/workflow9"
+    assert gate_payload["extracted_params"]["timeout_seconds"] == 43200.0
     assert [item["name"] for item in gate_payload["extracted_params"]["bam_inputs"]] == [
         "sample1.mm39.annotated.bam",
         "sample2.mm39.annotated.bam",
     ]
     assert "sample1.mm39.annotated.bam" in gate_payload["label"]
     sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_marks_defaulted_haplotype_founder_vcf(session_factory, seed_data):
+    preflight_payload = {
+        "success": True,
+        "status": "preflight_ready",
+        "message": "Haplotype preflight validation passed. Ready for approval.",
+        "mode": "RNA",
+        "assignment_mode": "founder_panel",
+        "vcf": {
+            "path": "/proj/refs/mm39/mgp_REL2021_snps_founders.vcf.gz",
+            "available_samples": ["C57BL_6J", "A_J", "CAST_EiJ", "PWK_PhJ"],
+            "selected_samples": ["C57BL_6J", "CAST_EiJ"],
+            "selected_sample_sources": {"C57BL_6J": None, "CAST_EiJ": "CAST_EiJ"},
+        },
+        "labels": {
+            "assignment_labels": ["C57BL_6J", "CAST_EiJ"],
+            "label_a": "C57BL_6J",
+            "label_b": "CAST_EiJ",
+            "ambiguous": "ambiguous",
+        },
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {
+                    "name": "sample1.mm39.annotated.bam",
+                    "path": "/proj/workflow7/annot/sample1.mm39.annotated.bam",
+                    "workflow_dir": "/proj/workflow7",
+                    "workflow_type": "dogme_rna",
+                }
+            ],
+        },
+        "thresholds": {
+            "min_informative_sites": 2,
+            "min_mapq": 0,
+        },
+        "execution_defaults": {
+            "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+            "underlying_script_id": "haplotype_with_vcf/haplotype_with_vcf",
+            "progress_read_interval": 100000,
+        },
+        "outputs": {
+            "output_root": "/proj/workflow9",
+            "artifacts": [],
+        },
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "haplotype_with_vcf",
+            "skill": "haplotype_with_vcf",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_haplotype",
+            "reference_genome": "mm39",
+            "vcf_defaulted": True,
+            "output_directory": "/proj/workflow9",
+            "steps": [
+                {
+                    "id": "preflight_haplotype",
+                    "kind": "CHECK_EXISTING",
+                    "title": "Validate haplotype inputs",
+                    "status": "COMPLETED",
+                    "result": [
+                        {
+                            "tool": "run_allowlisted_script",
+                            "result": {
+                                "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                                "stdout": json.dumps(preflight_payload),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "id": "approve_haplotype",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve haplotype execution",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "depends_on": ["preflight_haplotype"],
+                },
+                {
+                    "id": "run_haplotype",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run haplotype script",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "depends_on": ["approve_haplotype"],
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                                "script_args": [
+                                    "--workflow-dir", "/proj/workflow7",
+                                    "--output-dir", "/proj/workflow9",
+                                    "--vcf", "/proj/refs/mm39/mgp_REL2021_snps_founders.vcf.gz",
+                                    "--vcf-sample", "C57BL_6J",
+                                    "--vcf-sample", "CAST_EiJ",
+                                    "--mode", "RNA",
+                                    "--json",
+                                ],
+                            },
+                        }
+                    ],
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["extracted_params"]["reference_genome"] == "mm39"
+    assert gate_payload["extracted_params"]["vcf_defaulted"] is True
+    assert gate_payload["extracted_params"]["vcf_path"] == "/proj/refs/mm39/mgp_REL2021_snps_founders.vcf.gz"
+    assert gate_payload["extracted_params"]["assignment_mode"] == "founder_panel"
+    assert gate_payload["extracted_params"]["assignment_labels"] == ["C57BL_6J", "CAST_EiJ"]
+    assert gate_payload["extracted_params"]["vcf_selected_sample_sources"] == {
+        "C57BL_6J": None,
+        "CAST_EiJ": "CAST_EiJ",
+    }
+    assert "default mm39 founder VCF" in gate_payload["label"]
+    sess.close()
+
+
+def test_build_haplotype_script_args_defaults_founder_vcf_and_skips_label_flags(monkeypatch):
+    monkeypatch.setattr(
+        "cortex.workflow_submission.default_haplotype_vcf_for_reference",
+        lambda reference: "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz" if reference == "mm39" else None,
+    )
+
+    script_args = _build_haplotype_script_args(
+        {
+            "bam_inputs": [{"path": "/proj/workflow7/annot/sample1.mm39.annotated.bam"}],
+            "mode": "RNA",
+            "assignment_mode": "founder_panel",
+            "reference_genome": "mm39",
+            "vcf_selected_samples": ["C57BL_6J", "CAST_EiJ"],
+            "label_a": "C57BL_6J",
+            "label_b": "CAST_EiJ",
+            "output_directory": "/proj/workflow9",
+        }
+    )
+
+    assert script_args[:6] == [
+        "--json",
+        "--output-dir",
+        "/proj/workflow9",
+        "--vcf",
+        "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz",
+        "--mode",
+    ]
+    assert script_args.count("--vcf-sample") == 2
+    assert "--label-a" not in script_args
+    assert "--label-b" not in script_args
+
+
+def test_build_script_submission_payload_forwards_timeout_seconds():
+    payload = _build_script_submission_payload(
+        {
+            "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+            "script_args": ["--json", "--mode", "RNA"],
+            "output_directory": "/proj/workflow9",
+            "timeout_seconds": 43200.0,
+        }
+    )
+
+    assert payload["timeout_seconds"] == 43200.0
 
 
 @pytest.mark.asyncio

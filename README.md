@@ -213,7 +213,9 @@ The analysis layer returns:
 - `List the important files in workflow1/annot`
 - `Parse the bedMethyl output and summarize methylation patterns`
 - `Haplotype RNA workflow7 with file /data/parents.vcf.gz`
+- `Haplotype mouse sample B6 Cast F1 workflow7`
 - `/haplotype DNA workflow5 /data/family.vcf.gz`
+- `/haplotype RNA workflow7 --vcf-sample B6,CAST`
 - `Show the top expressed genes from this result file`
 - `Run differential expression between control and treatment`
 - `Compare the treated samples treated_1 and treated_2 to the control samples ctrl_1 and ctrl_2`
@@ -223,14 +225,22 @@ The analysis layer returns:
 - `Run GO enrichment on the upregulated genes`
 - `Compare workflow1 and workflow2 outputs`
 
-### Haplotype Reads With An Indexed VCF
+### Haplotype Reads With A VCF
 
-AGOUTIC can haplotype long-read DNA, RNA, or cDNA workflow BAMs against an indexed VCF through the `haplotype_with_vcf` skill.
+AGOUTIC can haplotype long-read DNA, RNA, or cDNA workflow BAMs against a VCF through the `haplotype_with_vcf` skill.
 
 - Slash command: `/haplotype RNA workflow7 /data/parents.vcf.gz`
 - Natural language: `haplotype RNA workflow7 with file /data/parents.vcf.gz`
+- Mouse founder-mode natural language: `haplotype mouse sample B6 Cast F1 workflow7`
+- Mouse founder-mode slash command: `/haplotype RNA workflow7 --vcf-sample B6,CAST`
+- Cross-project workflow reference: `haplotype B6CASTF1 RNA mouse sample otherproject:workflow7`
 - DNA workflows resolve mapped BAMs from `bams/`, RNA/cDNA workflows resolve annotated BAMs from `annot/`, and reconcile workflows use root-level `*.annotated.bam` files.
-- The approval gate lists the exact BAM names, the selected VCF sample or sample pair, assignment labels, and the destination `workflowN` before execution starts.
+- Cross-project haplotype requests can target another project's workflow with `project_name:workflowN` while still writing outputs into a new workflow under the active project unless you explicitly override the destination.
+- Plain `.vcf` inputs are compressed to `.vcf.gz` and indexed automatically when AGOUTIC can write beside the source file; `.vcf.gz` inputs missing `.tbi` or `.csi` are auto-indexed.
+- Mouse/mm39 founder-panel requests can omit the VCF. In that case AGOUTIC resolves `mgp_REL2021_snps_founders.vcf.gz` from the same directory as the configured mm39 reference FASTA.
+- Mouse founder aliases are case-insensitive and ignore `/`, `_`, `-`, and spaces. `ref`, `B6`, `C57BL6`, and `C57BL6/J` all resolve to `C57BL_6J`; `CAST`, `CAST/J`, and `CAST_EiJ` resolve to `CAST_EiJ`.
+- Founder-pair restrictions can be written as repeated `--vcf-sample` flags, comma-separated `--vcf-sample B6,CAST`, F1 shorthand such as `B6CastF1` or `B6 Cast F1`, or natural language such as `haplotype mouse between B6 and CAST workflow7`.
+- The approval gate lists the exact BAM names, the selected VCF sample or founder subset, the resolved VCF path, assignment labels, and the destination `workflowN` before execution starts.
 
 ### Visualization Support
 
@@ -274,7 +284,12 @@ AGOUTIC enforces access control at every layer:
 # Create environment
 conda env create -f environment.yml
 conda activate agoutic_core
+
+# Or update an existing environment in place
+conda env update -n agoutic_core -f environment.yml --prune
 ```
+
+The environment now includes `htslib` (`bgzip`, `tabix`) and `bcftools` so AGOUTIC can auto-compress and index VCF inputs for haplotyping and operators still have standard VCF command-line tooling available. `bcftools` is resolved from `bioconda`, so one-off manual installs should use `conda-forge` plus `bioconda` with strict channel priority.
 
 ### Run the System
 

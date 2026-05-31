@@ -178,6 +178,31 @@ if "mm39" in AVAILABLE_GENOMES:
         "mm10": "mm39",
     })
 
+DEFAULT_MM39_HAPLOTYPE_FOUNDER_VCF_NAME = "mgp_REL2021_snps_founders.vcf.gz"
+
+
+def canonical_reference_genome(reference_id: str | None) -> str | None:
+    raw_value = str(reference_id or "").strip()
+    if not raw_value:
+        return None
+    return GENOME_ALIASES.get(raw_value.lower()) or (raw_value if raw_value in AVAILABLE_GENOMES else None)
+
+
+def default_haplotype_vcf_for_reference(reference_id: str | None) -> str | None:
+    canonical = canonical_reference_genome(reference_id)
+    if canonical != "mm39":
+        return None
+
+    entry = REFERENCE_GENOMES.get(canonical)
+    if not isinstance(entry, dict):
+        return None
+
+    fasta_path = entry.get("fasta")
+    if not fasta_path:
+        return None
+
+    return str(Path(fasta_path).expanduser().resolve().parent / DEFAULT_MM39_HAPLOTYPE_FOUNDER_VCF_NAME)
+
 
 def get_reference_genome_catalog() -> dict:
     """Return canonical genome ids plus alias and asset metadata."""

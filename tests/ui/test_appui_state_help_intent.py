@@ -79,8 +79,8 @@ class TestLocalHelpResponse:
 
         rendered = "\n".join(fake_st.markdowns)
         assert "/help /haplotype" in rendered
-        assert "/haplotype <DNA|RNA|cDNA> <workflow> <vcf>" in rendered
-        assert "haplotype workflow7 with a VCF" in rendered
+        assert "/haplotype <DNA|RNA|cDNA> <workflow> [vcf]" in rendered
+        assert "haplotype mouse workflow7 without typing the founder VCF path" in rendered
 
 
 class TestShareIntent:

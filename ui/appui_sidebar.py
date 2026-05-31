@@ -89,7 +89,7 @@ def render_sidebar(
             if st.button("/help /list files", key="help_prompt_help_list_files", width="stretch"):
                 st.session_state["_help_prompt"] = "/help /list files"
                 st.rerun()
-            st.caption("Ask naturally too: `How do I stage a sample on hpc3?`, `How do I run Dogme with a staged sample?`, `How do I sync workflow12?`, `How do I haplotype workflow7 with a VCF?`")
+            st.caption("Ask naturally too: `How do I stage a sample on hpc3?`, `How do I run Dogme with a staged sample?`, `How do I sync workflow12?`, `How do I haplotype workflow7 with a VCF?`, `How do I haplotype mouse workflow7 without typing the founder VCF path?`")
             st.caption("**Inventory**")
             if st.button("/list samples", key="help_prompt_list_samples", width="stretch"):
                 st.session_state["_help_prompt"] = "/list samples"

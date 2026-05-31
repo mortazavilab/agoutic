@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from common import MCPHttpClient
 from common.logging_config import get_logger
-from cortex.config import AGOUTIC_DATA, get_service_url
+from cortex.config import AGOUTIC_DATA, default_haplotype_vcf_for_reference, get_service_url
 from cortex.db import SessionLocal
 from cortex.db_helpers import _create_block_internal
 from cortex.llm_validators import get_block_payload
@@ -160,6 +160,10 @@ def _build_script_submission_payload(job_data: dict) -> dict:
     if output_directory:
         submission_payload["output_directory"] = output_directory
 
+    raw_timeout = job_data.get("timeout_seconds")
+    if raw_timeout not in (None, ""):
+        submission_payload["timeout_seconds"] = raw_timeout
+
     return submission_payload
 
 
@@ -174,6 +178,13 @@ def _build_haplotype_script_args(job_params: dict) -> list[str]:
         raise ValueError("Haplotype approval is missing BAM inputs.")
 
     vcf_path = str(job_params.get("vcf_path") or "").strip()
+    if not vcf_path:
+        vcf_path = str(
+            default_haplotype_vcf_for_reference(
+                job_params.get("reference_genome") or job_params.get("reference")
+            )
+            or ""
+        ).strip()
     if not vcf_path:
         raise ValueError("Haplotype approval is missing the VCF path.")
 
@@ -191,12 +202,12 @@ def _build_haplotype_script_args(job_params: dict) -> list[str]:
             script_args.extend(["--vcf-sample", str(sample_name)])
 
     scalar_flags = [
-        ("label_a", "--label-a"),
-        ("label_b", "--label-b"),
         ("min_informative_sites", "--min-informative-sites"),
         ("min_mapq", "--min-mapq"),
         ("progress_read_interval", "--progress-read-interval"),
     ]
+    if str(job_params.get("assignment_mode") or "").strip() != "founder_panel":
+        scalar_flags = [("label_a", "--label-a"), ("label_b", "--label-b"), *scalar_flags]
     for field, flag in scalar_flags:
         value = job_params.get(field)
         if value is None or value == "":

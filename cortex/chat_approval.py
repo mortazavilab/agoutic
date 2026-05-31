@@ -860,6 +860,8 @@ def _build_haplotype_with_vcf_plan_approval_context(workflow_block: ProjectBlock
     thresholds = {}
     bam_inputs = []
     mode = str(payload.get("input_type") or "").strip() or None
+    reference_genome = str(payload.get("reference_genome") or "").strip() or None
+    vcf_defaulted = bool(payload.get("vcf_defaulted"))
     assignment_mode = None
     outputs_info = {}
     if isinstance(preflight_payload, dict):
@@ -906,13 +908,17 @@ def _build_haplotype_with_vcf_plan_approval_context(workflow_block: ProjectBlock
         "script_working_directory": params.get("script_working_directory"),
         "sample_name": "haplotype_with_vcf",
         "mode": mode,
+        "reference_genome": reference_genome,
         "input_type": "bam",
         "input_directory": first_input_dir or ".",
         "output_directory": output_directory,
         "vcf_path": vcf_info.get("path"),
+        "vcf_defaulted": vcf_defaulted,
         "vcf_available_samples": vcf_info.get("available_samples") or [],
         "vcf_selected_samples": vcf_info.get("selected_samples") or [],
+        "vcf_selected_sample_sources": vcf_info.get("selected_sample_sources") or {},
         "assignment_mode": assignment_mode,
+        "assignment_labels": label_info.get("assignment_labels") or [],
         "label_a": label_info.get("label_a"),
         "label_b": label_info.get("label_b"),
         "ambiguous_label": label_info.get("ambiguous"),
@@ -921,12 +927,18 @@ def _build_haplotype_with_vcf_plan_approval_context(workflow_block: ProjectBlock
         "min_informative_sites": thresholds.get("min_informative_sites"),
         "min_mapq": thresholds.get("min_mapq"),
         "progress_read_interval": execution_defaults.get("progress_read_interval") or 100000,
+        "timeout_seconds": params.get("timeout_seconds"),
         "underlying_script_id": execution_defaults.get("underlying_script_id") or "haplotype_with_vcf/haplotype_with_vcf",
         "preflight_summary": preflight_payload,
         "gate_action": "haplotype_with_vcf",
     }
 
     gate_label = f"Do you authorize the Agent to haplotype these {mode or 'selected'} BAMs with the selected VCF?"
+    if vcf_defaulted and reference_genome:
+        gate_label = (
+            f"Do you authorize the Agent to haplotype these {mode or 'selected'} BAMs "
+            f"with the default {reference_genome} founder VCF?"
+        )
     if displayed_names:
         gate_label = f"{gate_label} BAMs: {displayed_names}"
     return {

@@ -142,15 +142,18 @@ class TestExecuteHelpCommand:
         assert "intake wizard" in markdown.lower()
         assert "Sample types" in markdown
 
-    def test_haplotype_command_help_mentions_indexed_vcf_and_approval(self):
+    def test_haplotype_command_help_mentions_auto_prepared_vcf_and_approval(self):
         markdown = execute_help_command(
             HelpCommand(action="topic", topic_ref="/haplotype"),
             active_skill="welcome",
         )
 
         assert "/haplotype" in markdown
-        assert "indexed vcf" in markdown.lower()
+        assert "vcf" in markdown.lower()
+        assert "automatically" in markdown.lower()
         assert "approval" in markdown.lower()
+        assert "mm39 founder vcf" in markdown.lower()
+        assert "b6,cast" in markdown.lower()
 
     def test_haplotype_skill_help_uses_override_examples(self):
         markdown = execute_help_command(
@@ -161,6 +164,9 @@ class TestExecuteHelpCommand:
         assert "Haplotype With VCF Skill" in markdown
         assert "workflow7" in markdown.lower()
         assert "/haplotype" in markdown
+        assert "b6 cast f1" in markdown.lower()
+        assert "mm39 founder vcf" in markdown.lower()
+        assert "otherproject:workflow7" in markdown.lower()
 
 
 class TestRenderSlashCommandsMarkdown:
@@ -173,4 +179,4 @@ class TestRenderSlashCommandsMarkdown:
     def test_slash_catalog_mentions_haplotype_command(self):
         markdown = render_slash_commands_markdown()
 
-        assert "/haplotype <DNA|RNA|cDNA> <workflow> <vcf>" in markdown
+        assert "/haplotype <DNA|RNA|cDNA> <workflow> [vcf]" in markdown

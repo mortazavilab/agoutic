@@ -4,6 +4,12 @@
 
 - **Dogme approval, submission, and staging now support single-file cDNA FASTQ intake via `fastqCDNA`: chat extraction recognizes FASTQ requests, approval gates default to FASTQ-backed cDNA when project `data/` contains a lone FASTQ, local and remote staging alias the approved sample name under `fastqs/`, and unsupported FASTQ+RNA/DNA requests now stop behind an explicit blocking choice instead of silently drifting into an invalid mode.**
 
+- **`haplotype_with_vcf` now auto-prepares VCF inputs during preflight and execution: plain `.vcf` inputs are compressed to `.vcf.gz`, missing `.tbi` or `.csi` indexes are built automatically, and the shipped environment now includes `htslib` (`bgzip`, `tabix`) plus `bcftools` so operators have standard VCF tooling available across haplotyping workflows.**
+
+- **`haplotype_with_vcf` now supports mouse founder-panel haplotyping with canonical founder alias normalization, pairwise founder restriction through repeated or comma-separated `--vcf-sample` flags, F1 shorthand such as `B6CastF1` or `B6 Cast F1`, free-text founder phrases such as `between B6 and CAST` or `B6 vs CAST`, multiallelic founder-aware assignment, per-founder split BAMs with canonical labels, and default mm39 founder VCF resolution beside the configured mm39 reference when mouse founder requests omit the VCF path.**
+
+- **`haplotype_with_vcf` now accepts cross-project workflow references such as `otherproject:workflow7`, resolving the source BAMs from that project while keeping the default output workflow in the active project unless the destination is explicitly overridden.**
+
 - **Added `scripts/cortex/maintenance_status.py` so operators can check recent user activity, running jobs, and active chats before any maintenance action. Read-only, supports plain text and JSON output, includes `--active-job-max-age` stale-row filtering for orphaned RUNNING/PENDING job records, and approximates activity from chat and job records since AGOUTIC does not track presence.**
 
 - **Added an admin-only Activity tab in the admin page showing recently active users, currently running jobs, and active chat sessions in real time, with a color-coded SAFE TO RESTART / WAIT banner. Reuses the same data collection and recommendation logic as `scripts/cortex/maintenance_status.py`. Auto-refreshes every 30 seconds with configurable interval and thresholds.**
@@ -16,6 +22,10 @@
 
 ### Bug Fixes
 
+- **Haplotype founder-mode approvals now render the correct workflow-specific controls and founder subset: the approval gate no longer falls back to generic Dogme fields, and prompts such as `Haplotype mouse RNA sample B6 Cast F1 in project:workflowN` now keep the requested founder pair instead of silently expanding to every founder in the panel.**
+
+- **Haplotype execution now handles real BAM/VCF compatibility and runtime constraints more robustly: contig aliases such as `chr1` versus `1` or `chrM` versus `MT` are normalized during VCF lookup so informative sites are discovered correctly, preflight no longer times out by performing a full founder-VCF variant scan before approval, and approved haplotype runs now carry an explicit extended script timeout instead of inheriting Launchpad's 60-second default.**
+
 - **Remote result synchronization now behaves consistently after copy-back reaches a terminal state: manual sync requests update existing workflow cards immediately, completed SLURM jobs stop polling once local-result sync is terminal, stale syncs surface explicit retry guidance, and stale workflows can now be resumed, renamed, rerun, or deleted like other finished workflows.**
 
 - **Remote SLURM submission now preserves the user's approved resource overrides in generated workflow configs: any CPU or GPU account/partition changed in the approval gate now flows into the rendered `nextflow.config`, while the Nextflow controller sbatch job still falls back to the SSH profile's CPU defaults when no override is supplied; live SLURM parsing also no longer mistakes `[100%]`-style Nextflow progress markers for task boundaries, so near-terminal task counts stay accurate.**
@@ -26,9 +36,19 @@
 
 - **Updated the local-sample intake skills to document FASTQ-backed Dogme cDNA submissions, including the supported `fastqCDNA` path, sample-name derivation, FASTQ-only cDNA defaulting, and the explicit redirect away from result-analysis skills for new FASTQ submission requests.**
 
+- **Updated the haplotype skill/help/docs to explain that AGOUTIC now accepts plain `.vcf` or `.vcf.gz` inputs and auto-builds compressed/indexed sidecars when the source directory is writable.**
+
+- **Updated the haplotype help, slash-command catalog, skill markdown, and README to document mouse founder-panel routing, optional omitted-VCF mm39 founder defaults, canonical founder aliases, F1 shorthand, and broader natural-language founder phrasing.**
+
 ### Tests
 
 - **Added focused regression coverage for FASTQ detection/prefill extraction, approval-gate FASTQ defaults and blocking clarification behavior, local `fastqCDNA` alias staging, remote FASTQ alias staging, and project-data fallback resolution, while preserving existing pod5/BAM Dogme submission behavior.**
+
+- **Added focused haplotype regression coverage for plain `.vcf` auto-compression/index creation and `.vcf.gz` auto-index creation, alongside help-text assertions that keep the live haplotype guidance aligned with the shipped behavior.**
+
+- **Added focused haplotype regression coverage for founder-panel script execution, optional default-mm39-founder-VCF planner extraction, broader founder free-text parsing, approval-gate founder payloads, and help-surface wording for the updated `/haplotype` behavior.**
+
+- **Added focused haplotype regression coverage for founder-pair approval parsing with `mouse RNA sample ...` phrasing, `chr` versus non-`chr` BAM/VCF contig alias matching, fast preflight behavior that skips execution-scale founder-VCF scans, and timeout propagation from the haplotype plan through approval into Launchpad script submission.**
 
 ## [3.7.0] - 2026-05-28
 

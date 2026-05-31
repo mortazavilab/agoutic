@@ -28,6 +28,9 @@ def _load_part1_namespace() -> dict:
         "_approval_input_path_label",
         "_approval_input_path_help",
         "_approval_path_summary_rows",
+        "_approval_haplotype_sample_label",
+        "_approval_haplotype_summary_rows",
+        "_build_haplotype_approval_params",
         "_approval_project_data_inventory",
         "_approval_fastq_sample_name",
         "_approval_has_generic_sample_name",
@@ -364,6 +367,69 @@ def test_approval_path_summary_rows_include_staged_remote_path():
         "Staged Sample Source Directory": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
         "Staged Remote Path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2",
     }
+
+
+def test_approval_haplotype_summary_rows_show_vcf_founders_and_bams():
+    namespace = _load_part1_namespace()
+
+    rows = namespace["_approval_haplotype_summary_rows"](
+        {
+            "mode": "RNA",
+            "reference_genome": "mm39",
+            "assignment_mode": "founder_panel",
+            "vcf_defaulted": True,
+            "vcf_path": "/proj/refs/mm39/mgp_REL2021_snps_founders.vcf.gz",
+            "vcf_selected_samples": ["C57BL_6J", "CAST_EiJ"],
+            "output_directory": "/proj/workflow9",
+            "bam_inputs": [
+                {"name": "sample1.mm39.annotated.bam"},
+                {"path": "/proj/workflow7/annot/sample2.mm39.annotated.bam"},
+            ],
+        }
+    )
+
+    assert rows == {
+        "Mode": "RNA",
+        "Reference Genome": "mm39",
+        "Assignment Mode": "Founder Panel",
+        "Resolved Founder VCF": "/proj/refs/mm39/mgp_REL2021_snps_founders.vcf.gz",
+        "Selected Founders": "C57BL_6J, CAST_EiJ",
+        "Output Directory": "/proj/workflow9",
+        "Input BAMs": "sample1.mm39.annotated.bam, sample2.mm39.annotated.bam",
+    }
+
+
+def test_build_haplotype_approval_params_updates_relevant_fields_only():
+    namespace = _load_part1_namespace()
+
+    edited = namespace["_build_haplotype_approval_params"](
+        {
+            "gate_action": "haplotype_with_vcf",
+            "assignment_mode": "founder_panel",
+            "vcf_path": "/proj/old.vcf.gz",
+            "output_directory": "/proj/workflow9",
+            "vcf_selected_samples": ["C57BL_6J", "CAST_EiJ"],
+            "vcf_selected_sample_sources": {"C57BL_6J": None, "CAST_EiJ": "CAST_EiJ"},
+            "assignment_labels": ["C57BL_6J", "CAST_EiJ"],
+        },
+        vcf_path=" /proj/new.vcf.gz ",
+        output_directory=" /proj/workflow10 ",
+        selected_samples_text="C57BL_6J, PWK_PhJ",
+        min_informative_sites=3,
+        min_mapq=12,
+    )
+
+    assert edited["gate_action"] == "haplotype_with_vcf"
+    assert edited["vcf_path"] == "/proj/new.vcf.gz"
+    assert edited["output_directory"] == "/proj/workflow10"
+    assert edited["vcf_selected_samples"] == ["C57BL_6J", "PWK_PhJ"]
+    assert edited["assignment_labels"] == ["C57BL_6J", "PWK_PhJ"]
+    assert edited["vcf_selected_sample_sources"] == {
+        "C57BL_6J": None,
+        "PWK_PhJ": "PWK_PhJ",
+    }
+    assert edited["min_informative_sites"] == 3
+    assert edited["min_mapq"] == 12
 
 
 def test_wf_pore_c_output_flag_values_force_paired_end_when_bed_enabled():

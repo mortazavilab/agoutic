@@ -421,7 +421,7 @@ live in one place and be included by multiple skills.
 | `xgenepy_analysis` | xgenepy_analysis/SKILL.md | Local XgenePy cis/trans analysis |
 | `enrichment_analysis` | enrichment_analysis/SKILL.md | GO/pathway enrichment |
 | `reconcile_bams` | reconcile_bams/SKILL.md | Cross-workflow annotated BAM reconciliation |
-| `haplotype_with_vcf` | haplotype_with_vcf/SKILL.md | Workflow-aware DNA/RNA/cDNA haplotyping with an indexed VCF |
+| `haplotype_with_vcf` | haplotype_with_vcf/SKILL.md | Workflow-aware DNA/RNA/cDNA haplotyping with VCF auto-compression and indexing |
 | `remote_execution` | remote_execution/SKILL.md | Remote SLURM execution |
 
 Every registered skill above is auto-discovered from its folder-local `manifest.yaml`.

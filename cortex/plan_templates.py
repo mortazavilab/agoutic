@@ -19,6 +19,9 @@ from cortex.skill_manifest import get_tool_call_spec
 logger = get_logger(__name__)
 
 
+HAPLOTYPE_SCRIPT_TIMEOUT_SECONDS = 43200.0
+
+
 # ---------------------------------------------------------------------------
 # Step / plan ID helpers
 # ---------------------------------------------------------------------------
@@ -1135,6 +1138,9 @@ def _template_haplotype_with_vcf(params: dict) -> dict:
     work_dir = params.get("work_dir", "")
     workflow_dirs = [str(item) for item in params.get("workflow_dirs", []) if isinstance(item, str) and item]
     vcf_path = str(params.get("vcf_path") or "").strip()
+    vcf_selected_samples = [str(item) for item in params.get("vcf_selected_samples", []) if isinstance(item, str) and item]
+    reference_genome = str(params.get("reference_genome") or "").strip() or None
+    vcf_defaulted = bool(params.get("vcf_defaulted"))
 
     if not output_directory:
         if workflow_dirs:
@@ -1188,6 +1194,8 @@ def _template_haplotype_with_vcf(params: dict) -> dict:
     preflight_args = ["--json", "--preflight-only", "--mode", assay_mode]
     if vcf_path:
         preflight_args.extend(["--vcf", vcf_path])
+    for sample_name in vcf_selected_samples:
+        preflight_args.extend(["--vcf-sample", sample_name])
     if workflow_dirs:
         for workflow_dir in workflow_dirs:
             preflight_args.extend(["--workflow-dir", workflow_dir])
@@ -1228,6 +1236,8 @@ def _template_haplotype_with_vcf(params: dict) -> dict:
     script_args = ["--json", "--mode", assay_mode]
     if vcf_path:
         script_args.extend(["--vcf", vcf_path])
+    for sample_name in vcf_selected_samples:
+        script_args.extend(["--vcf-sample", sample_name])
     if workflow_dirs:
         for workflow_dir in workflow_dirs:
             script_args.extend(["--workflow-dir", workflow_dir])
@@ -1249,6 +1259,7 @@ def _template_haplotype_with_vcf(params: dict) -> dict:
                 "params": {
                     "script_id": "haplotype_with_vcf/haplotype_with_vcf",
                     "script_args": script_args,
+                    "timeout_seconds": HAPLOTYPE_SCRIPT_TIMEOUT_SECONDS,
                 },
             }
         ],
@@ -1302,7 +1313,10 @@ def _template_haplotype_with_vcf(params: dict) -> dict:
         "status": "PENDING",
         "current_step_id": steps[0]["id"],
         "input_type": assay_mode,
+        "reference_genome": reference_genome,
         "vcf_path": vcf_path,
+        "vcf_defaulted": vcf_defaulted,
+        "vcf_selected_samples": vcf_selected_samples,
         "output_directory": output_directory,
         "steps": steps,
         "artifacts": [],

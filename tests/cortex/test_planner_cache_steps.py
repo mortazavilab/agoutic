@@ -3,6 +3,7 @@
 import pytest
 
 from cortex.schemas import ConversationState
+from cortex.plan_classifier import _detect_plan_type_from_manifests
 from cortex.plan_params import build_de_group_clarification
 from cortex.planner import (
     _detect_plan_type,
@@ -79,6 +80,12 @@ def test_detect_plan_type_matches_haplotype_slash_request():
     assert _detect_plan_type("/haplotype DNA workflow7 ./parent.vcf") == "haplotype_with_vcf"
 
 
+def test_detect_plan_type_matches_haplotype_mouse_founder_cross_project_request():
+    message = "Haplotype mouse sample B6 Cast F1 in erisa-drna:workflow5"
+    assert _detect_plan_type_from_manifests(message) == "haplotype_with_vcf"
+    assert _detect_plan_type(message) == "haplotype_with_vcf"
+
+
 def test_detect_plan_type_matches_region_overlap_request():
     assert (
         _detect_plan_type(
@@ -146,6 +153,40 @@ def test_extract_plan_params_haplotype_sets_mode_workflow_and_vcf():
     assert params["workflow_dirs"] == ["/tmp/project/workflow7"]
 
 
+def test_extract_plan_params_haplotype_supports_cross_project_workflow_ref(tmp_path, monkeypatch):
+    owner_root = tmp_path / "owner"
+    current_project = owner_root / "currentproject"
+    other_project = owner_root / "otherproject"
+    (current_project / "workflow10").mkdir(parents=True)
+    (other_project / "workflow7").mkdir(parents=True)
+
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir=str(current_project / "workflow10"),
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: str(other_project / "mgp_REL2021_snps_founders.vcf.gz") if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "haplotype B6CASTF1 RNA mouse sample otherproject:workflow7",
+        state,
+        "haplotype_with_vcf",
+        project_dir=str(current_project),
+    )
+
+    assert params["input_type"] == "RNA"
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+    assert params["workflow_dirs"] == [str(other_project / "workflow7")]
+    assert params["work_dir"] == str(other_project / "workflow7")
+    assert params["output_directory"] == str(current_project / "workflow11")
+
+
 def test_haplotype_template_orders_preflight_before_approval_and_run():
     plan = _template_haplotype_with_vcf(
         {
@@ -173,6 +214,166 @@ def test_haplotype_template_orders_preflight_before_approval_and_run():
     assert preflight_args[:4] == ["--json", "--preflight-only", "--mode", "RNA"]
     assert "./parent.vcf" in preflight_args
     assert run_args[:3] == ["--json", "--mode", "RNA"]
+    assert plan["steps"][3]["tool_calls"][0]["params"]["timeout_seconds"] == 43200.0
+
+
+def test_extract_plan_params_haplotype_mouse_defaults_founder_vcf_and_samples(monkeypatch):
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz" if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "haplotype mouse sample CASTB6F1 workflow7",
+        state,
+        "haplotype_with_vcf",
+        project_dir="/tmp/project",
+    )
+
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_path"] == "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz"
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+    assert params["work_dir"] == "/tmp/project/workflow7"
+
+
+def test_extract_plan_params_haplotype_mouse_supports_spaced_f1_phrase(monkeypatch):
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz" if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "haplotype mouse sample B6 Cast F1 workflow7",
+        state,
+        "haplotype_with_vcf",
+        project_dir="/tmp/project",
+    )
+
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+
+
+def test_extract_plan_params_haplotype_mouse_supports_mode_before_spaced_f1_cross_project_ref(tmp_path, monkeypatch):
+    owner_root = tmp_path / "owner"
+    current_project = owner_root / "testhaplo"
+    other_project = owner_root / "erisa-drna"
+    (current_project / "workflow10").mkdir(parents=True)
+    (other_project / "workflow5").mkdir(parents=True)
+
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir=str(current_project / "workflow10"),
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: str(other_project / "mgp_REL2021_snps_founders.vcf.gz") if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "Haplotype mouse RNA sample B6 Cast F1 in erisa-drna:workflow5",
+        state,
+        "haplotype_with_vcf",
+        project_dir=str(current_project),
+    )
+
+    assert params["input_type"] == "RNA"
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+    assert params["workflow_dirs"] == [str(other_project / "workflow5")]
+
+
+def test_extract_plan_params_haplotype_mouse_supports_between_pair_phrase(monkeypatch):
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz" if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "haplotype mouse between B6 and CAST workflow7",
+        state,
+        "haplotype_with_vcf",
+        project_dir="/tmp/project",
+    )
+
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+
+
+def test_extract_plan_params_haplotype_mouse_supports_vs_pair_phrase(monkeypatch):
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz" if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "haplotype mouse B6 vs CAST workflow7",
+        state,
+        "haplotype_with_vcf",
+        project_dir="/tmp/project",
+    )
+
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+
+
+def test_haplotype_template_threads_founder_samples_into_preflight_and_run():
+    plan = _template_haplotype_with_vcf(
+        {
+            "work_dir": "/tmp/project/workflow7",
+            "vcf_path": "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz",
+            "vcf_defaulted": True,
+            "vcf_selected_samples": ["C57BL_6J", "CAST_EiJ"],
+            "reference_genome": "mm39",
+            "input_type": "RNA",
+            "output_directory": "/tmp/project/workflow8",
+        }
+    )
+
+    assert plan["reference_genome"] == "mm39"
+    assert plan["vcf_defaulted"] is True
+    assert plan["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+
+    preflight_args = plan["steps"][1]["tool_calls"][0]["params"]["script_args"]
+    run_args = plan["steps"][3]["tool_calls"][0]["params"]["script_args"]
+
+    assert preflight_args.count("--vcf-sample") == 2
+    assert preflight_args[-4:] == ["--output-dir", "/tmp/project/workflow8"] or "--output-dir" in preflight_args
+    assert "--vcf" in preflight_args
+    assert run_args.count("--vcf-sample") == 2
+    assert run_args[run_args.index("--vcf") + 1] == "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz"
+
+
 
 
 def test_extract_plan_params_run_wf_pore_c_sets_preview_defaults(tmp_path, monkeypatch):

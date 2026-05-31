@@ -292,15 +292,15 @@ Useful follow-up prompts:
 
 AGOUTIC prefers workflow-local `reconciled.gtf` when present so downstream annotation and plotting stay aligned with the reconciled output.
 
-## Step 11: Haplotype Reads With An Indexed VCF
+## Step 11: Haplotype Reads With A VCF
 
-Use haplotyping when you already have local-accessible mapped or annotated BAMs plus an indexed VCF that distinguishes the samples or parental genotypes you want to assign against.
+Use haplotyping when you already have local-accessible mapped or annotated BAMs plus a VCF that distinguishes the samples or parental genotypes you want to assign against.
 
 Recommended prerequisites:
 
 - the source workflow outputs are local-accessible on the AGOUTIC host
 - every source BAM is coordinate-sorted and indexed
-- the VCF is indexed with `.tbi` or `.csi`
+- the VCF path is local-accessible, and AGOUTIC can write beside it if a plain `.vcf` still needs compression or indexing
 - you know whether the source workflow should be treated as `DNA`, `RNA`, or `cDNA`
 
 Typical prompts:
@@ -312,7 +312,7 @@ Typical prompts:
 What AGOUTIC does:
 
 - resolves BAMs from `annot/` for RNA/cDNA Dogme workflows, `bams/` for DNA Dogme workflows, or root-level `*.annotated.bam` files for reconcile outputs
-- runs a preflight validation step to confirm BAM sort/index state, indexed VCF access, and compatible VCF sample layout
+- runs a preflight validation step to confirm BAM sort/index state, auto-prepare `.vcf.gz` plus `.tbi` when needed, and validate compatible VCF sample layout
 - asks for approval before execution, showing the exact BAM names, selected VCF samples, assignment labels, thresholds, and destination workflow
 - writes combined and split haplotyped BAMs plus BAM indexes and summary TSVs into a new `workflowN` directory
 
@@ -343,7 +343,7 @@ What AGOUTIC does:
 
 - confirm the workflow contains the expected BAM type for the requested mode (`annot/*.annotated.bam` for RNA/cDNA, `bams/*.bam` for DNA)
 - confirm every selected BAM is coordinate-sorted and indexed
-- confirm the VCF path is correct and already has a `.tbi` or `.csi` index
+- confirm the VCF path is correct and AGOUTIC can create sibling `.vcf.gz`, `.tbi`, or `.csi` files when they are missing
 - if the VCF has more than two samples, be prepared to select one sample or an explicit sample pair during approval
 
 ### Results are remote-only and analysis does not work

@@ -1,9 +1,12 @@
 name: agoutic_core
 channels:
   - conda-forge
+  - bioconda
   - defaults
 dependencies:
   - python=3.12                # High performance, better async support
+  - htslib                     # Provides bgzip/tabix for VCF compression and indexing
+  - bcftools                   # Standard VCF inspection/index/subsetting utilities
   - pip
   - pip:
     # --- The Interface ---

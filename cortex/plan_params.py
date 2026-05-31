@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from common.logging_config import get_logger
-from cortex.config import GENOME_ALIASES
+from cortex.config import GENOME_ALIASES, default_haplotype_vcf_for_reference
 from cortex import user_jail
 
 if TYPE_CHECKING:
@@ -48,10 +48,187 @@ _HAPLOTYPE_VCF_HINT_RE = re.compile(
     r"(?:with\s+file|using|with)\s+(?P<path>(?:/|~|\.)?[^\s,;]+?\.vcf(?:\.gz)?)\b",
     re.IGNORECASE,
 )
+_HAPLOTYPE_VCF_SAMPLE_FLAG_RE = re.compile(r"--vcf-sample\s+(?P<sample>[^\s,;]+(?:,[^\s,;]+)?)", re.IGNORECASE)
+_HAPLOTYPE_FOUNDER_PAIR_RE = re.compile(
+    r"\bfounders?\s+(?P<first>[A-Za-z0-9/_\- ]+?)\s*(?:,|and|vs)\s*(?P<second>[A-Za-z0-9/_\- ]+?)(?=\s+workflow\d+\b|\s+(?:with|using|from|in|on)\b|[.,;]|$)",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_SAMPLE_PAIR_RE = re.compile(
+    r"\bsample\s+(?P<first>[A-Za-z0-9/_\- ]+?)\s*(?:,|and|vs)\s*(?P<second>[A-Za-z0-9/_\- ]+?)(?=\s+workflow\d+\b|\s+(?:with|using|from|in|on)\b|[.,;]|$)",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_MOUSE_SAMPLE_RE = re.compile(
+    r"\bhaplotype\s+(?:mouse|mm39)(?:\s+(?:DNA|RNA|cDNA))?\s+sample\s+(?P<sample>.+?)(?=\s+workflow\d+\b|\s+(?:with|using|from|in|on)\b|[.,;]|$)",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_MOUSE_BETWEEN_PAIR_RE = re.compile(
+    r"\bhaplotype\s+(?:mouse|mm39)\b.*?\bbetween\s+(?P<first>[A-Za-z0-9/_\- ]+?)\s+(?:and|vs)\s+(?P<second>[A-Za-z0-9/_\- ]+?)(?=\s+workflow\d+\b|\s+(?:with|using|from|in|on)\b|[.,;]|$)",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_MOUSE_VS_PAIR_RE = re.compile(
+    r"\bhaplotype\s+(?:mouse|mm39)\b.*?\b(?P<first>[A-Za-z0-9/_\- ]+?)\s+vs\s+(?P<second>[A-Za-z0-9/_\- ]+?)(?=\s+workflow\d+\b|\s+(?:with|using|from|in|on)\b|[.,;]|$)",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_F1_TOKEN_RE = re.compile(r"\b(?P<sample>[A-Za-z0-9/_-]*F1)\b", re.IGNORECASE)
+_GENOME_ALIAS_RE = re.compile(
+    r"\b(" + "|".join(sorted((re.escape(alias) for alias in GENOME_ALIASES), key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+) if GENOME_ALIASES else re.compile(r"$^")
 _PORE_C_SAMPLE_SHEET_RE = re.compile(
     r"(?:sample[_ ]sheet|samplesheet)\s+(?:at|in|from|path)?\s*[=:]?\s*(?P<path>\S+\.(?:csv|tsv|txt))",
     re.IGNORECASE,
 )
+
+_MOUSE_FOUNDER_ALIAS_TO_CANONICAL = {
+    "ref": "C57BL_6J",
+    "b6": "C57BL_6J",
+    "c57bl6": "C57BL_6J",
+    "c57bl6j": "C57BL_6J",
+    "aj": "A_J",
+    "a": "A_J",
+    "129s1": "129S1_SvImJ",
+    "129s1svimj": "129S1_SvImJ",
+    "nod": "NOD_ShiLtJ",
+    "nodshiltj": "NOD_ShiLtJ",
+    "nzo": "NZO_HlLtJ",
+    "nzohlltj": "NZO_HlLtJ",
+    "cast": "CAST_EiJ",
+    "casteij": "CAST_EiJ",
+    "pwk": "PWK_PhJ",
+    "pwkphj": "PWK_PhJ",
+    "wsb": "WSB_EiJ",
+    "wsbeij": "WSB_EiJ",
+}
+_MOUSE_FOUNDER_ORDER = ["C57BL_6J", "A_J", "129S1_SvImJ", "NOD_ShiLtJ", "NZO_HlLtJ", "CAST_EiJ", "PWK_PhJ", "WSB_EiJ"]
+_MOUSE_FOUNDER_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+_MOUSE_FOUNDER_SEPARATOR_RE = re.compile(r"[\s/_-]+")
+_MOUSE_F1_SUFFIX_RE = re.compile(r"f1$", re.IGNORECASE)
+_MOUSE_FOUNDER_F1_KEYS = sorted(
+    _MOUSE_FOUNDER_ALIAS_TO_CANONICAL.items(),
+    key=lambda item: (-len(item[0]), item[0]),
+)
+
+
+def _collapse_mouse_founder_token(value: str) -> str:
+    return _MOUSE_FOUNDER_NON_ALNUM_RE.sub("", str(value or "").strip().lower())
+
+
+def _mouse_founder_lookup_keys(value: str) -> tuple[str, ...]:
+    raw_value = str(value or "").strip().lower()
+    if not raw_value:
+        return ()
+    keys: list[str] = []
+    collapsed = _collapse_mouse_founder_token(raw_value)
+    if collapsed:
+        keys.append(collapsed)
+    prefix = _collapse_mouse_founder_token(_MOUSE_FOUNDER_SEPARATOR_RE.split(raw_value, maxsplit=1)[0])
+    if prefix and prefix not in keys:
+        keys.append(prefix)
+    return tuple(keys)
+
+
+def _resolve_mouse_founder_alias(value: str) -> str | None:
+    for key in _mouse_founder_lookup_keys(value):
+        canonical = _MOUSE_FOUNDER_ALIAS_TO_CANONICAL.get(key)
+        if canonical:
+            return canonical
+    return None
+
+
+def _parse_mouse_founder_f1(value: str) -> list[str] | None:
+    raw_value = str(value or "").strip()
+    if not raw_value or not _MOUSE_F1_SUFFIX_RE.search(raw_value):
+        return None
+
+    body = _MOUSE_F1_SUFFIX_RE.sub("", raw_value).strip()
+    if not body:
+        return None
+
+    parts = [token for token in _MOUSE_FOUNDER_SEPARATOR_RE.split(body) if token]
+    if len(parts) == 2:
+        first = _resolve_mouse_founder_alias(parts[0])
+        second = _resolve_mouse_founder_alias(parts[1])
+        if first and second and first != second:
+            return [label for label in _MOUSE_FOUNDER_ORDER if label in {first, second}]
+        return None
+
+    collapsed = _collapse_mouse_founder_token(body)
+    if not collapsed:
+        return None
+
+    for prefix, first in _MOUSE_FOUNDER_F1_KEYS:
+        if not collapsed.startswith(prefix):
+            continue
+        remainder = collapsed[len(prefix):]
+        if not remainder:
+            continue
+        second = _MOUSE_FOUNDER_ALIAS_TO_CANONICAL.get(remainder)
+        if second and second != first:
+            return [label for label in _MOUSE_FOUNDER_ORDER if label in {first, second}]
+    return None
+
+
+def _clean_haplotype_founder_token(value: str) -> str:
+    return str(value or "").strip().strip('"').strip("'").rstrip(".,;:!?")
+
+
+def _extract_haplotype_founder_samples(message: str) -> list[str]:
+    requested_tokens: list[str] = []
+    for match in _HAPLOTYPE_VCF_SAMPLE_FLAG_RE.finditer(message):
+        requested_tokens.extend(
+            _clean_haplotype_founder_token(part)
+            for part in match.group("sample").split(",")
+            if _clean_haplotype_founder_token(part)
+        )
+
+    for pattern in (
+        _HAPLOTYPE_FOUNDER_PAIR_RE,
+        _HAPLOTYPE_SAMPLE_PAIR_RE,
+        _HAPLOTYPE_MOUSE_BETWEEN_PAIR_RE,
+        _HAPLOTYPE_MOUSE_VS_PAIR_RE,
+    ):
+        pair_match = pattern.search(message)
+        if not pair_match:
+            continue
+        requested_tokens.extend(
+            [
+                _clean_haplotype_founder_token(pair_match.group("first")),
+                _clean_haplotype_founder_token(pair_match.group("second")),
+            ]
+        )
+        break
+
+    mouse_sample_match = _HAPLOTYPE_MOUSE_SAMPLE_RE.search(message)
+    if mouse_sample_match:
+        requested_tokens.append(_clean_haplotype_founder_token(mouse_sample_match.group("sample")))
+
+    for match in _HAPLOTYPE_F1_TOKEN_RE.finditer(message):
+        token = _clean_haplotype_founder_token(match.group("sample"))
+        if token and token not in requested_tokens:
+            requested_tokens.append(token)
+
+    resolved: list[str] = []
+    for token in requested_tokens:
+        founder_pair = _parse_mouse_founder_f1(token)
+        if founder_pair:
+            for founder in founder_pair:
+                if founder not in resolved:
+                    resolved.append(founder)
+            continue
+        founder = _resolve_mouse_founder_alias(token)
+        if founder and founder not in resolved:
+            resolved.append(founder)
+
+    return [label for label in _MOUSE_FOUNDER_ORDER if label in resolved]
+
+
+def _extract_mentioned_reference_genomes(message: str) -> list[str]:
+    mentioned_references: list[str] = []
+    for match in _GENOME_ALIAS_RE.findall(message):
+        canonical = GENOME_ALIASES.get(str(match).strip().lower())
+        if canonical and canonical not in mentioned_references:
+            mentioned_references.append(canonical)
+    return mentioned_references
 
 
 def _clean_overlap_display_label(label_text: str) -> str:
@@ -123,13 +300,20 @@ def _project_owner_root(project_dir: str, default_work_dir: str = "") -> str:
 
 
 def _resolve_project_workflow_ref(ref: str, project_dir: str, default_work_dir: str = "") -> str:
+    workflow_dir = _resolve_project_workflow_dir(ref, project_dir, default_work_dir)
+    if workflow_dir == ref:
+        return ref
+    return f"{workflow_dir}/openChromatin"
+
+
+def _resolve_project_workflow_dir(ref: str, project_dir: str, default_work_dir: str = "") -> str:
     match = _PROJECT_WORKFLOW_REF_RE.fullmatch((ref or "").strip())
     if not match:
         return ref
     owner_root = _project_owner_root(project_dir, default_work_dir)
     if not owner_root:
         return ref
-    return f"{owner_root.rstrip('/')}/{match.group('project')}/{match.group('workflow')}/openChromatin"
+    return f"{owner_root.rstrip('/')}/{match.group('project')}/{match.group('workflow')}"
 
 
 def _resolve_existing_path(path_value: str, conv_state: "ConversationState", project_dir: str) -> str:
@@ -723,18 +907,44 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             raw_mode = mode_match.group(1).strip().lower()
             params["input_type"] = "cDNA" if raw_mode == "cdna" else raw_mode.upper()
 
+        default_work_dir = str(getattr(conv_state, "work_dir", "") or "")
+
+        mentioned_references = _extract_mentioned_reference_genomes(message)
+        if len(mentioned_references) == 1:
+            params["reference_genome"] = mentioned_references[0]
+
         vcf_match = _HAPLOTYPE_VCF_HINT_RE.search(message) or _PORE_C_VCF_PATH_RE.search(message)
         if vcf_match:
             params["vcf_path"] = _trim_path_token(vcf_match.group("path"))
 
+        founder_samples = _extract_haplotype_founder_samples(message)
+        if founder_samples:
+            params["vcf_selected_samples"] = founder_samples
+            params.setdefault("reference_genome", "mm39")
+
+        if not params.get("vcf_path"):
+            default_reference = params.get("reference_genome")
+            default_vcf = default_haplotype_vcf_for_reference(default_reference)
+            if default_vcf:
+                params["vcf_path"] = default_vcf
+                params["vcf_defaulted"] = True
+
+        project_ref_matches = list(_PROJECT_WORKFLOW_REF_RE.finditer(message or ""))
+        project_ref_workflow_names = {match.group("workflow").strip().lower() for match in project_ref_matches}
         workflow_tokens = [match.strip() for match in _HAPLOTYPE_WORKFLOW_RE.findall(message)]
-        if workflow_tokens:
+        if workflow_tokens or project_ref_matches:
             workflow_dirs: list[str] = []
+            for match in project_ref_matches:
+                resolved = _resolve_project_workflow_dir(match.group(0), project_dir, default_work_dir)
+                if isinstance(resolved, str) and resolved and resolved not in workflow_dirs:
+                    workflow_dirs.append(resolved)
             for workflow_name in workflow_tokens:
+                if workflow_name.lower() in project_ref_workflow_names:
+                    continue
                 if project_dir:
                     workflow_dirs.append(str(Path(project_dir) / workflow_name))
-                elif getattr(conv_state, "work_dir", ""):
-                    base = Path(str(getattr(conv_state, "work_dir", ""))).resolve().parent
+                elif default_work_dir:
+                    base = Path(default_work_dir).resolve().parent
                     workflow_dirs.append(str((base / workflow_name).resolve()))
             if workflow_dirs:
                 params["workflow_dirs"] = workflow_dirs

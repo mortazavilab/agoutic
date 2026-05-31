@@ -242,7 +242,7 @@ Use natural-language DE requests when you want to point at a dataframe or counts
 
 | Command | Syntax | Description |
 |---|---|---|
-| `/haplotype` | `/haplotype RNA workflow7 /data/parents.vcf.gz` | Haplotype DNA, RNA, or cDNA workflow BAMs against an indexed VCF; approval shows the exact BAM inputs, selected VCF samples, labels, and output workflow |
+| `/haplotype` | `/haplotype RNA workflow7 /data/parents.vcf.gz` | Haplotype DNA, RNA, or cDNA workflow BAMs against a VCF; AGOUTIC auto-compresses plain `.vcf` inputs and auto-builds missing VCF indexes when it can write beside the source file, and approval shows the exact BAM inputs, selected VCF samples, labels, and output workflow |
 
 Natural language equivalents are also supported, for example:
 
@@ -254,7 +254,7 @@ Input resolution rules:
 - RNA and cDNA workflows use `annot/*.annotated.bam`
 - DNA workflows use mapped BAMs from `bams/`
 - Reconcile workflows use root-level `*.annotated.bam` outputs
-- The VCF must already be indexed with `.tbi` or `.csi`
+- Plain `.vcf` inputs are auto-compressed to `.vcf.gz` and indexed, and `.vcf.gz` inputs missing `.tbi` or `.csi` are auto-indexed when the source directory is writable
 
 ### Memory Slash Commands
 

@@ -331,6 +331,98 @@ def _approval_path_summary_rows(extracted_params: dict | None, *, gate_action: s
     return rows
 
 
+def _approval_haplotype_sample_label(extracted_params: dict | None) -> str:
+    params = extracted_params or {}
+    assignment_mode = str(params.get("assignment_mode") or "").strip().lower()
+    if assignment_mode == "founder_panel":
+        return "Selected Founders"
+    return "Selected VCF Samples"
+
+
+def _approval_haplotype_summary_rows(extracted_params: dict | None) -> dict[str, str]:
+    params = extracted_params or {}
+    rows: dict[str, str] = {}
+
+    mode = str(params.get("mode") or "").strip()
+    if mode:
+        rows["Mode"] = mode
+
+    reference = params.get("reference_genome")
+    if isinstance(reference, list):
+        reference_text = ", ".join(str(item).strip() for item in reference if str(item).strip())
+    else:
+        reference_text = str(reference or "").strip()
+    if reference_text:
+        rows["Reference Genome"] = reference_text
+
+    assignment_mode = str(params.get("assignment_mode") or "").strip()
+    if assignment_mode:
+        rows["Assignment Mode"] = assignment_mode.replace("_", " ").title()
+
+    vcf_path = str(params.get("vcf_path") or "").strip()
+    if vcf_path:
+        rows["Resolved Founder VCF" if params.get("vcf_defaulted") else "VCF Path"] = vcf_path
+
+    selected_samples = params.get("vcf_selected_samples") if isinstance(params.get("vcf_selected_samples"), list) else []
+    if selected_samples:
+        rows[_approval_haplotype_sample_label(params)] = ", ".join(str(item) for item in selected_samples if str(item).strip())
+
+    output_directory = str(params.get("output_directory") or "").strip()
+    if output_directory:
+        rows["Output Directory"] = output_directory
+
+    bam_inputs = params.get("bam_inputs") if isinstance(params.get("bam_inputs"), list) else []
+    bam_names: list[str] = []
+    for item in bam_inputs:
+        if not isinstance(item, dict):
+            continue
+        bam_name = str(item.get("name") or "").strip()
+        if not bam_name:
+            bam_name = os.path.basename(str(item.get("path") or "").strip())
+        if bam_name:
+            bam_names.append(bam_name)
+    if bam_names:
+        rows["Input BAMs"] = ", ".join(bam_names)
+
+    return rows
+
+
+def _build_haplotype_approval_params(
+    extracted_params: dict | None,
+    *,
+    vcf_path: str,
+    output_directory: str,
+    selected_samples_text: str,
+    min_informative_sites: int,
+    min_mapq: int,
+) -> dict:
+    edited_params = dict(extracted_params or {})
+
+    resolved_vcf_path = str(vcf_path or "").strip() or str(edited_params.get("vcf_path") or "").strip()
+    if resolved_vcf_path:
+        edited_params["vcf_path"] = resolved_vcf_path
+
+    resolved_output_directory = str(output_directory or "").strip() or str(edited_params.get("output_directory") or "").strip()
+    if resolved_output_directory:
+        edited_params["output_directory"] = resolved_output_directory
+
+    parsed_samples = [item.strip() for item in str(selected_samples_text or "").split(",") if item.strip()]
+    if parsed_samples:
+        edited_params["vcf_selected_samples"] = parsed_samples
+        if str(edited_params.get("assignment_mode") or "").strip().lower() == "founder_panel":
+            edited_params["assignment_labels"] = parsed_samples
+        sample_sources = edited_params.get("vcf_selected_sample_sources")
+        if isinstance(sample_sources, dict):
+            edited_params["vcf_selected_sample_sources"] = {
+                sample: sample_sources.get(sample, sample)
+                for sample in parsed_samples
+            }
+
+    edited_params["min_informative_sites"] = int(min_informative_sites)
+    edited_params["min_mapq"] = int(min_mapq)
+    return edited_params
+
+
 def _approval_gate_reference_genome_catalog(api_url: str, request_fn, raw_value=None) -> dict:
     fallback: list[str] = []
     if isinstance(raw_value, str):
@@ -720,19 +812,22 @@ def render_block_part1(
             _src_params = approved_params if isinstance(approved_params, dict) else extracted_params
             _summary_gate_action = extracted_params.get("gate_action") or content.get("gate_action", "job")
             if isinstance(_src_params, dict):
-                for _k in [
-                    "sample_name",
-                    "mode",
-                    "input_type",
-                    "execution_mode",
-                    "entry_point",
-                    "result_destination",
-                    "ssh_profile_nickname",
-                    "remote_base_path",
-                ]:
-                    _v = _src_params.get(_k)
-                    if _v not in (None, "", [], {}):
-                        _summary[_k.replace("_", " ").title()] = _v
+                if _summary_gate_action == "haplotype_with_vcf":
+                    _summary.update(_approval_haplotype_summary_rows(_src_params))
+                else:
+                    for _k in [
+                        "sample_name",
+                        "mode",
+                        "input_type",
+                        "execution_mode",
+                        "entry_point",
+                        "result_destination",
+                        "ssh_profile_nickname",
+                        "remote_base_path",
+                    ]:
+                        _v = _src_params.get(_k)
+                        if _v not in (None, "", [], {}):
+                            _summary[_k.replace("_", " ").title()] = _v
                 _summary.update(_approval_path_summary_rows(_src_params, gate_action=_summary_gate_action))
                 _summary["Gate Action"] = _summary_gate_action
                 if (extracted_params.get("gate_action") or content.get("gate_action")) == "compare_region_overlaps":
@@ -1247,6 +1342,106 @@ def render_block_part1(
                                     "filter_known": bool(filter_known),
                                     "script_id": "reconcile_bams/reconcile_bams",
                                 }
+                            )
+                            payload_update = dict(content)
+                            payload_update["edited_params"] = edited_params
+                            resp = make_authenticated_request(
+                                "PATCH",
+                                f"{API_URL}/block/{block_id}",
+                                json={"status": "APPROVED", "payload": payload_update}
+                            )
+                            if resp.status_code == 200:
+                                _prime_post_approval_refresh_state()
+                                st.rerun()
+                            else:
+                                try:
+                                    error_detail = resp.json().get("detail") or resp.text
+                                except Exception:
+                                    error_detail = resp.text
+                                st.error(f"Approval failed: {error_detail}")
+
+                        if submit_reject:
+                            st.session_state[f"rejecting_{block_id}"] = True
+                            st.rerun()
+
+                elif _gate_action == "haplotype_with_vcf" and extracted_params:
+                    preflight_summary = extracted_params.get("preflight_summary") or {}
+                    bam_inputs = extracted_params.get("bam_inputs") if isinstance(extracted_params.get("bam_inputs"), list) else []
+                    assignment_mode = str(extracted_params.get("assignment_mode") or "").strip()
+                    reference_genome = extracted_params.get("reference_genome") or ""
+                    vcf_defaulted = bool(extracted_params.get("vcf_defaulted"))
+                    vcf_path_default = str(extracted_params.get("vcf_path") or "").strip()
+                    selected_samples_default = extracted_params.get("vcf_selected_samples") if isinstance(extracted_params.get("vcf_selected_samples"), list) else []
+                    selected_samples_text_default = ", ".join(str(item) for item in selected_samples_default if str(item).strip())
+                    output_directory_default = str(extracted_params.get("output_directory") or "").strip()
+                    min_informative_sites_default = int(extracted_params.get("min_informative_sites") or 2)
+                    min_mapq_default = int(extracted_params.get("min_mapq") or 0)
+
+                    with st.form(key=f"haplotype_form_{block_id}"):
+                        grouped_section("Haplotype Summary")
+                        if reference_genome:
+                            st.write(f"**Reference Genome**: `{reference_genome}`")
+                        if assignment_mode:
+                            st.write(f"**Assignment Mode**: `{assignment_mode.replace('_', ' ').title()}`")
+                        if vcf_defaulted:
+                            st.info("This run will use the default founder VCF resolved from the selected reference assets.")
+
+                        grouped_section("Resolved Inputs")
+                        vcf_path = st.text_input(
+                            "VCF Path",
+                            value=vcf_path_default,
+                            help="Indexed VCF that will be used for haplotyping.",
+                        )
+                        selected_samples_text = st.text_input(
+                            _approval_haplotype_sample_label(extracted_params),
+                            value=selected_samples_text_default,
+                            help="Comma-separated VCF samples or canonical founder labels that will be passed to the haplotype script.",
+                        )
+                        output_directory = st.text_input(
+                            "Output Directory",
+                            value=output_directory_default,
+                            help="Workflow directory where haplotyped BAMs and summaries will be written.",
+                        )
+                        col1, col2 = st.columns(2)
+                        min_informative_sites = col1.number_input(
+                            "Min Informative Sites",
+                            min_value=1,
+                            value=min_informative_sites_default,
+                            step=1,
+                        )
+                        min_mapq = col2.number_input(
+                            "Min MAPQ",
+                            min_value=0,
+                            value=min_mapq_default,
+                            step=1,
+                        )
+
+                        grouped_section("Validated BAM Inputs")
+                        st.write(f"{len(bam_inputs)} BAM(s) passed preflight validation.")
+                        for bam in bam_inputs:
+                            if not isinstance(bam, dict):
+                                continue
+                            sample_label = bam.get("sample") or bam.get("name") or os.path.basename(str(bam.get("path") or ""))
+                            bam_path = bam.get("path") or ""
+                            st.caption(f"{sample_label}: `{bam_path}`")
+
+                        message = preflight_summary.get("message") if isinstance(preflight_summary, dict) else None
+                        if message:
+                            st.info(message)
+
+                        st.divider()
+                        col1, col2 = st.columns(2)
+                        submit_approve = col1.form_submit_button("✅ Approve Haplotype", width="stretch")
+                        submit_reject = col2.form_submit_button("❌ Reject", width="stretch")
+
+                        if submit_approve:
+                            edited_params = _build_haplotype_approval_params(
+                                extracted_params,
+                                vcf_path=vcf_path,
+                                output_directory=output_directory,
+                                selected_samples_text=selected_samples_text,
+                                min_informative_sites=int(min_informative_sites),
+                                min_mapq=int(min_mapq),
                             )
                             payload_update = dict(content)
                             payload_update["edited_params"] = edited_params

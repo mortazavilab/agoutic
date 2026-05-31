@@ -120,3 +120,45 @@ def test_generate_plan_adds_manifest_metadata_to_haplotype_plan():
     run_step = next(step for step in plan["steps"] if step["kind"] == "RUN_SCRIPT")
     assert run_step["skill_key"] == "haplotype_with_vcf"
     assert run_step["tool_calls"][0]["params"]["script_id"] == "haplotype_with_vcf/haplotype_with_vcf"
+
+
+def test_generate_plan_adds_manifest_metadata_to_mouse_founder_cross_project_haplotype_plan(tmp_path, monkeypatch):
+    owner_root = tmp_path / "owner"
+    current_project = owner_root / "testhaplo"
+    other_project = owner_root / "erisa-drna"
+    (current_project / "workflow10").mkdir(parents=True)
+    (other_project / "workflow5").mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: str(other_project / "mgp_REL2021_snps_founders.vcf.gz") if reference == "mm39" else None,
+    )
+
+    state = ConversationState(
+        active_skill="haplotype_with_vcf",
+        active_project="proj-1",
+        work_dir=str(current_project / "workflow10"),
+    )
+
+    plan = generate_plan(
+        "Haplotype mouse sample B6 Cast F1 in erisa-drna:workflow5",
+        "haplotype_with_vcf",
+        state,
+        _NoopEngine(),
+        conversation_history=[],
+        project_dir=str(current_project),
+    )
+
+    assert plan is not None
+    assert plan["planning_skill"] == "haplotype_with_vcf"
+    assert plan["input_type"] == "RNA"
+    assert plan["vcf_defaulted"] is True
+    assert plan["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+    assert plan["output_directory"] == str(current_project / "workflow11")
+
+    locate_step = next(step for step in plan["steps"] if step["kind"] == "LOCATE_DATA")
+    assert locate_step["tool_calls"][0]["params"]["work_dir"] == str(other_project / "workflow5" / "annot")
+
+    run_step = next(step for step in plan["steps"] if step["kind"] == "RUN_SCRIPT")
+    assert run_step["tool_calls"][0]["params"]["script_args"][:3] == ["--json", "--mode", "RNA"]
+    assert str(other_project / "workflow5") in run_step["tool_calls"][0]["params"]["script_args"]
