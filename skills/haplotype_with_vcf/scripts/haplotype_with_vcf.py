@@ -1082,6 +1082,61 @@ def _write_tsv(path: Path, header: list[str], rows: list[list[object]]) -> None:
         writer.writerows(rows)
 
 
+def _pivot_feature_label_counts(
+    feature_counts: dict[tuple[str, str], int],
+) -> dict[str, Counter[str]]:
+    counts_by_feature: defaultdict[str, Counter[str]] = defaultdict(Counter)
+    for (feature_id, label), count in feature_counts.items():
+        counts_by_feature[feature_id][label] += int(count)
+    return dict(counts_by_feature)
+
+
+def _wide_feature_summary_rows(
+    feature_counts: dict[tuple[str, str], int],
+    *,
+    labels: list[str],
+) -> list[list[object]]:
+    rows_by_feature = _pivot_feature_label_counts(feature_counts)
+    rows: list[list[object]] = []
+    for feature_id in sorted(rows_by_feature):
+        label_counts = [int(rows_by_feature[feature_id].get(label, 0)) for label in labels]
+        rows.append([feature_id, *label_counts, sum(label_counts)])
+    return rows
+
+
+def _summarize_transcript_gene_id(gene_counts: Counter[str]) -> str | None:
+    resolved_gene_ids = [gene_id for gene_id in sorted(gene_counts) if gene_id]
+    if not resolved_gene_ids:
+        return None
+    if len(resolved_gene_ids) == 1:
+        return resolved_gene_ids[0]
+    return None
+
+
+def _wide_transcript_summary_rows(
+    transcript_counts: dict[tuple[str, str], int],
+    *,
+    transcript_gene_counts: dict[str, Counter[str]],
+    labels: list[str],
+) -> list[list[object]]:
+    rows_by_transcript = _pivot_feature_label_counts(transcript_counts)
+    rows: list[list[object]] = []
+    for transcript_id in sorted(rows_by_transcript):
+        gene_id = _summarize_transcript_gene_id(transcript_gene_counts.get(transcript_id, Counter()))
+        if not gene_id:
+            continue
+        label_counts = [int(rows_by_transcript[transcript_id].get(label, 0)) for label in labels]
+        rows.append(
+            [
+                transcript_id,
+                gene_id,
+                *label_counts,
+                sum(label_counts),
+            ]
+        )
+    return rows
+
+
 def _index_bam(path: Path) -> Path:
     pysam.index(str(path))
     return Path(f"{path}.bai")
@@ -1126,6 +1181,7 @@ def _process_bam(
     global_counts: Counter[str] = Counter()
     gene_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
     transcript_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
+    transcript_gene_counts: defaultdict[str, Counter[str]] = defaultdict(Counter)
     skipped_contigs: list[str] = []
 
     with pysam.VariantFile(str(vcf_path)) as vcf_file, pysam.AlignmentFile(str(bam_path), "rb") as bam_file:
@@ -1199,10 +1255,14 @@ def _process_bam(
                     global_counts["total_reads"] += 1
 
                     if assay_mode in RNA_MODES:
-                        if read.has_tag("GX"):
-                            gene_counts[(str(read.get_tag("GX")), final_label)] += 1
-                        if read.has_tag("TX"):
-                            transcript_counts[(str(read.get_tag("TX")), final_label)] += 1
+                        gene_id = str(read.get_tag("GX")) if read.has_tag("GX") else ""
+                        transcript_id = str(read.get_tag("TX")) if read.has_tag("TX") else ""
+                        if gene_id:
+                            gene_counts[(gene_id, final_label)] += 1
+                        if transcript_id:
+                            transcript_counts[(transcript_id, final_label)] += 1
+                            if gene_id:
+                                transcript_gene_counts[transcript_id][gene_id] += 1
 
                     if contig_reads % progress_read_interval == 0:
                         _emit_progress(
@@ -1277,12 +1337,17 @@ def _process_bam(
     gene_summary_path = None
     transcript_summary_path = None
     if assay_mode in RNA_MODES:
-        gene_rows = [[gene_id, label, count] for (gene_id, label), count in sorted(gene_counts.items())]
-        transcript_rows = [[transcript_id, label, count] for (transcript_id, label), count in sorted(transcript_counts.items())]
+        summary_labels = [*assignment_labels, ambiguous_label]
+        gene_rows = _wide_feature_summary_rows(gene_counts, labels=summary_labels)
+        transcript_rows = _wide_transcript_summary_rows(
+            transcript_counts,
+            transcript_gene_counts=transcript_gene_counts,
+            labels=summary_labels,
+        )
         gene_summary_path = output_dir / f"{output_stem}.genes.tsv"
         transcript_summary_path = output_dir / f"{output_stem}.transcripts.tsv"
-        _write_tsv(gene_summary_path, ["gene_id", "label", "count"], gene_rows)
-        _write_tsv(transcript_summary_path, ["transcript_id", "label", "count"], transcript_rows)
+        _write_tsv(gene_summary_path, ["gene_id", *summary_labels, "total"], gene_rows)
+        _write_tsv(transcript_summary_path, ["transcript_id", "gene_id", *summary_labels, "total"], transcript_rows)
 
     _emit_progress(
         "BAM_END",

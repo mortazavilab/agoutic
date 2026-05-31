@@ -26,6 +26,8 @@
 
 - **Haplotype execution now handles real BAM/VCF compatibility and runtime constraints more robustly: contig aliases such as `chr1` versus `1` or `chrM` versus `MT` are normalized during VCF lookup so informative sites are discovered correctly, preflight no longer times out by performing a full founder-VCF variant scan before approval, and approved haplotype runs now carry an explicit extended script timeout instead of inheriting Launchpad's 60-second default.**
 
+- **Haplotype RNA summary outputs now write wide per-feature tables instead of long `feature/label/count` rows: `*.genes.tsv` now emits `gene_id` followed by one column per assignment label plus `ambiguous` and `total`, and `*.transcripts.tsv` now emits only single-gene transcript rows as `transcript_id`, `gene_id`, per-label columns, `ambiguous`, and `total`.**
+
 - **Remote result synchronization now behaves consistently after copy-back reaches a terminal state: manual sync requests update existing workflow cards immediately, completed SLURM jobs stop polling once local-result sync is terminal, stale syncs surface explicit retry guidance, and stale workflows can now be resumed, renamed, rerun, or deleted like other finished workflows.**
 
 - **Remote SLURM submission now preserves the user's approved resource overrides in generated workflow configs: any CPU or GPU account/partition changed in the approval gate now flows into the rendered `nextflow.config`, while the Nextflow controller sbatch job still falls back to the SSH profile's CPU defaults when no override is supplied; live SLURM parsing also no longer mistakes `[100%]`-style Nextflow progress markers for task boundaries, so near-terminal task counts stay accurate.**
@@ -49,6 +51,8 @@
 - **Added focused haplotype regression coverage for founder-panel script execution, optional default-mm39-founder-VCF planner extraction, broader founder free-text parsing, approval-gate founder payloads, and help-surface wording for the updated `/haplotype` behavior.**
 
 - **Added focused haplotype regression coverage for founder-pair approval parsing with `mouse RNA sample ...` phrasing, `chr` versus non-`chr` BAM/VCF contig alias matching, fast preflight behavior that skips execution-scale founder-VCF scans, and timeout propagation from the haplotype plan through approval into Launchpad script submission.**
+
+- **Added focused haplotype regression coverage for the wide RNA `genes.tsv` and `transcripts.tsv` output layout, including transcript-to-gene attribution for single-gene rows, omission of multi-gene transcript buckets, and per-label plus `ambiguous`/`total` columns.**
 
 ## [3.7.0] - 2026-05-28
 

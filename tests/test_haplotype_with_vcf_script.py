@@ -2,6 +2,7 @@ import json
 import importlib.util
 import subprocess
 import sys
+import csv
 from pathlib import Path
 
 import pysam
@@ -206,6 +207,20 @@ def test_haplotype_with_vcf_runs_and_writes_tagged_outputs(tmp_path):
     assert (output_workflow / "sample1.mm39.annotated.chromosomes.tsv").exists()
     assert (output_workflow / "sample1.mm39.annotated.genes.tsv").exists()
     assert (output_workflow / "sample1.mm39.annotated.transcripts.tsv").exists()
+
+    with (output_workflow / "sample1.mm39.annotated.genes.tsv").open("r", encoding="utf-8", newline="") as handle:
+        gene_rows = list(csv.reader(handle, delimiter="\t"))
+    assert gene_rows == [
+        ["gene_id", "parentA", "parentB", "ambiguous", "total"],
+        ["GENE1", "1", "1", "1", "3"],
+    ]
+
+    with (output_workflow / "sample1.mm39.annotated.transcripts.tsv").open("r", encoding="utf-8", newline="") as handle:
+        transcript_rows = list(csv.reader(handle, delimiter="\t"))
+    assert transcript_rows == [
+        ["transcript_id", "gene_id", "parentA", "parentB", "ambiguous", "total"],
+        ["TX1", "GENE1", "1", "1", "1", "3"],
+    ]
 
 
 def test_haplotype_with_vcf_preflight_auto_indexes_compressed_vcf(tmp_path):
@@ -505,3 +520,55 @@ def test_haplotype_with_vcf_preflight_skips_full_variant_counting(tmp_path, monk
     assert payload["success"] is True
     assert payload["contigs"]["preflight_variant_scan_skipped"] is True
     assert payload["contigs"]["matched_bam_contig_count"] == 1
+
+
+def test_haplotype_with_vcf_transcript_summary_omits_multi_gene_rows(tmp_path):
+    workflow_dir = tmp_path / "workflow7"
+    annot_dir = workflow_dir / "annot"
+    annot_dir.mkdir(parents=True)
+    bam_path = annot_dir / "sample1.mm39.annotated.bam"
+
+    header = {
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [{"SN": "chr1", "LN": 1000}],
+    }
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header) as bam_file:
+        read_specs = [
+            ("read_parent_a", "AACCA", "GENE1", "ANTISENSE"),
+            ("read_parent_b", "AGCTA", "GENE2", "ANTISENSE"),
+            ("read_ambiguous", "AACTA", "GENE3", "ANTISENSE"),
+        ]
+        for query_name, sequence, gene_id, transcript_id in read_specs:
+            read = pysam.AlignedSegment()
+            read.query_name = query_name
+            read.query_sequence = sequence
+            read.flag = 0
+            read.reference_id = 0
+            read.reference_start = 10
+            read.mapping_quality = 60
+            read.cigar = ((0, len(sequence)),)
+            read.query_qualities = pysam.qualitystring_to_array("I" * len(sequence))
+            read.set_tag("GX", gene_id)
+            read.set_tag("TX", transcript_id)
+            bam_file.write(read)
+    pysam.index(str(bam_path))
+
+    vcf_path = _make_vcf(tmp_path / "parents.vcf.gz")
+    output_workflow = tmp_path / "workflow9"
+
+    result = _run_script(
+        "--workflow-dir", str(workflow_dir),
+        "--mode", "RNA",
+        "--vcf", str(vcf_path),
+        "--output-dir", str(output_workflow),
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+
+    with (output_workflow / "sample1.mm39.annotated.transcripts.tsv").open("r", encoding="utf-8", newline="") as handle:
+        transcript_rows = list(csv.reader(handle, delimiter="\t"))
+
+    assert transcript_rows == [
+        ["transcript_id", "gene_id", "parentA", "parentB", "ambiguous", "total"],
+    ]
