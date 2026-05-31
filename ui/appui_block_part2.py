@@ -1232,16 +1232,16 @@ def render_block_part2(
                         else:
                             st.caption("Delete unavailable until the workflow folder is known.")
                     with _rerun_col:
-                        if st.button("↻ Rerun Workflow", key=f"completed_rerun_{block_id}"):
+                        if st.button("↻ Resume Workflow", key=f"completed_rerun_{block_id}"):
                             try:
                                 _rerun_resp = make_authenticated_request(
                                     "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
                                 )
                                 if _rerun_resp.status_code == 200:
-                                    st.success("Workflow rerun submitted.")
+                                    st.success("Workflow resume submitted.")
                                     st.rerun()
                                 else:
-                                    st.error(f"Rerun failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
+                                    st.error(f"Resume failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
                             except Exception as _e:
                                 st.error(f"Error: {_e}")
                     if _sync_col is not None:
@@ -1436,16 +1436,16 @@ def render_block_part2(
                         else:
                             st.caption("Delete unavailable until the workflow folder is known.")
                     with _rerun_col:
-                        if st.button("↻ Rerun Workflow", key=f"cancel_rerun_{block_id}"):
+                        if st.button("↻ Resume Workflow", key=f"cancel_rerun_{block_id}"):
                             try:
                                 _rerun_resp = make_authenticated_request(
                                     "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
                                 )
                                 if _rerun_resp.status_code == 200:
-                                    st.success("Workflow rerun submitted.")
+                                    st.success("Workflow resume submitted.")
                                     st.rerun()
                                 else:
-                                    st.error(f"Rerun failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
+                                    st.error(f"Resume failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
                             except Exception as _e:
                                 st.error(f"Error: {_e}")
                     with _resub_col:
@@ -1683,16 +1683,16 @@ def render_block_part2(
                         else:
                             st.caption("Delete unavailable until the workflow folder is known.")
                     with _rerun_col:
-                        if st.button("↻ Rerun Workflow", key=f"failed_rerun_{block_id}"):
+                        if st.button("↻ Resume Workflow", key=f"failed_rerun_{block_id}"):
                             try:
                                 _rerun_resp = make_authenticated_request(
                                     "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
                                 )
                                 if _rerun_resp.status_code == 200:
-                                    st.success("Workflow rerun submitted.")
+                                    st.success("Workflow resume submitted.")
                                     st.rerun()
                                 else:
-                                    st.error(f"Rerun failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
+                                    st.error(f"Resume failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
                             except Exception as _e:
                                 st.error(f"Error: {_e}")
                     with _resubmit_col:

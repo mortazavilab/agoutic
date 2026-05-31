@@ -1406,11 +1406,10 @@ class NextflowExecutor:
             "-with-trace", str(work_dir / f"{sample_name}_trace.txt"),
         ])
         
-        # Add rerun/resume flag when reusing an existing workflow directory
+        # Reusing an existing workflow directory always requires Nextflow -resume.
         if is_resume:
-            rerun_flag = "-rerun" if rerun_in_place else "-resume"
-            cmd.append(rerun_flag)
-            logger.info("Adding workflow reuse flag", flag=rerun_flag, work_dir=str(work_dir))
+            cmd.append("-resume")
+            logger.info("Adding workflow reuse flag", flag="-resume", work_dir=str(work_dir))
         
         if not (DOGME_REPO / "dogme.nf").exists():
             raise RuntimeError(f"Dogme dogme.nf not found at: {DOGME_REPO / 'dogme.nf'}")

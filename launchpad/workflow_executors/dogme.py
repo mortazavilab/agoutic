@@ -444,7 +444,7 @@ class DogmeWorkflowExecutor(WorkflowExecutor):
         if params.entry_point:
             cmd_parts.append(f"-entry {shlex.quote(params.entry_point)}")
         if rerun_in_place:
-            cmd_parts.append("-rerun")
+            cmd_parts.append("-resume")
         return " \\\n+    ".join(cmd_parts)
 
     def remote_result_sync_spec(

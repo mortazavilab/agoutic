@@ -22,6 +22,8 @@
 
 ### Bug Fixes
 
+- **Dogme workflow retries now use the valid Nextflow `-resume` flag instead of the non-existent `-rerun` flag when reusing an existing workflow directory, and workflow action buttons now label this operation as `Resume Workflow` in the UI to match actual behavior.**
+
 - **Haplotype founder-mode approvals now render the correct workflow-specific controls and founder subset: the approval gate no longer falls back to generic Dogme fields, and prompts such as `Haplotype mouse RNA sample B6 Cast F1 in project:workflowN` now keep the requested founder pair instead of silently expanding to every founder in the panel.**
 
 - **Haplotype execution now handles real BAM/VCF compatibility and runtime constraints more robustly: contig aliases such as `chr1` versus `1` or `chrM` versus `MT` are normalized during VCF lookup so informative sites are discovered correctly, preflight no longer times out by performing a full founder-VCF variant scan before approval, and approved haplotype runs now carry an explicit extended script timeout instead of inheriting Launchpad's 60-second default.**

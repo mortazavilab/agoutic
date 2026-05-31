@@ -182,7 +182,7 @@ async def test_rerun_job_local_reuses_workflow_identity_and_archives_previous_na
 
     async def fake_submit_job(**kwargs):
         executor_kwargs.update(kwargs)
-        return ("nextflow run ... -rerun", work_dir)
+        return ("nextflow run ... -resume", work_dir)
 
     async def fake_monitor_job(_run_uuid, _work_dir):
         return None

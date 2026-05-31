@@ -495,7 +495,7 @@ class SlurmBackend:
         local_work_dir: str | None = None,
         archive_sample_names: list[str] | None = None,
     ) -> str:
-        """Rerun an existing remote workflow directory in place with Nextflow -rerun."""
+        """Rerun an existing remote workflow directory in place with Nextflow -resume."""
         profile = await self._load_profile(params.ssh_profile_id, params.user_id)
         controller_account, controller_partition = self._resolve_controller_resources(params, profile)
 
