@@ -12,7 +12,7 @@
 
 - **`clean remote workflows` now expands only to tracked workflows, preventing project-wide remote cleanup from drifting into untracked local workflow folders that cannot be cleaned over SSH.**
 
-- **Both local and remote workflow cleanup now run asynchronously in Launchpad, so large `bedMethyl` gzip operations and remote SSH cleanup do not block the chat request or end in a spurious timeout error; job status/help surfaces now call out `CLEANING_LOCAL`, `CLEANING_REMOTE`, `CLEANED_LOCAL`, `CLEANED_REMOTE`, and `CLEAN_FAILED`.**
+- **Both local and remote workflow cleanup now run asynchronously in Launchpad, so large `bedMethyl` gzip operations and remote SSH cleanup do not block the chat request or end in a spurious timeout error; job status/help surfaces now call out `CLEANING_LOCAL`, `CLEANING_REMOTE`, `CLEANED_LOCAL`, `CLEANED_REMOTE`, and `CLEAN_FAILED`. Both local and remote workflow cleanup can now run in parallel.**
 
 ### Documentation
 

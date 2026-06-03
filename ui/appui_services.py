@@ -358,7 +358,8 @@ def _block_requires_full_refresh(block: dict) -> bool:
             run_uuid = str(clean_run.get("run_uuid") or "").strip()
             if not run_uuid:
                 continue
-            clean_stage = str(st.session_state.get(f"_clean_stage_{run_uuid}") or "").strip().upper()
+            clean_scope = "remote" if clean_run.get("remote") else "local"
+            clean_stage = str(st.session_state.get(f"_clean_stage_{run_uuid}_{clean_scope}") or "").strip().upper()
             if clean_stage in {"CLEANING_LOCAL", "CLEANING_REMOTE"}:
                 return True
     return False

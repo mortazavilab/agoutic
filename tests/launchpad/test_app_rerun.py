@@ -237,6 +237,53 @@ async def test_clean_job_data_remote_uses_ssh_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_clean_job_data_allows_parallel_local_and_remote_clean_for_same_workflow(monkeypatch):
+    fake_session = _FakeSession()
+    job = SimpleNamespace(
+        run_uuid="clean-dup-1",
+        status=launchpad_app.JobStatus.COMPLETED,
+        workflow_folder_name="workflow13",
+        nextflow_work_dir="/local/project/workflow13",
+        output_directory="/local/project/workflow13",
+        remote_work_dir="/remote/project/workflow13",
+        remote_output_dir=None,
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+    )
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "clean-dup-1"
+        return job
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "_workflow_clean_tasks", {("clean-dup-1", True): SimpleNamespace(done=lambda: False)})
+    monkeypatch.setattr(launchpad_app, "_workflow_clean_status", {})
+
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+        return SimpleNamespace(done=lambda: False)
+
+    async def fake_update_job_fields(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_app.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(launchpad_app, "update_job_fields", fake_update_job_fields)
+
+    result = await launchpad_app.clean_job_data("clean-dup-1", remote=False)
+
+    assert result["status"] == "cleaning"
+    assert result["remote"] is False
+    assert result["run_stage"] == "CLEANING_LOCAL"
+    assert scheduled
+    assert launchpad_app._workflow_clean_status[("clean-dup-1", False)]["run_stage"] == "CLEANING_LOCAL"
+
+
+@pytest.mark.asyncio
 async def test_clean_job_data_remote_requires_remote_metadata(monkeypatch):
     fake_session = _FakeSession()
     job = SimpleNamespace(

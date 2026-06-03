@@ -115,7 +115,21 @@ setup_logging("launchpad-rest")
 logger = get_logger(__name__)
 
 _workflow_clean_tasks: dict[tuple[str, bool], asyncio.Task] = {}
+_workflow_clean_status: dict[tuple[str, bool], dict[str, object]] = {}
 _REMOTE_CLEAN_TIMEOUT_SECONDS = float(os.getenv("LAUNCHPAD_REMOTE_CLEAN_TIMEOUT_SECONDS", "86400"))
+
+
+def _set_clean_status(*, run_uuid: str, remote: bool, status: str, run_stage: str, message: str) -> dict[str, object]:
+    payload = {
+        "run_uuid": run_uuid,
+        "remote": remote,
+        "status": status,
+        "run_stage": run_stage,
+        "message": message,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _workflow_clean_status[(run_uuid, remote)] = payload
+    return payload
 
 # --- APP SETUP ---
 app = FastAPI(
@@ -325,6 +339,13 @@ async def _set_job_clean_run_stage(run_uuid: str, *, run_stage: str | None, erro
 async def _run_clean_job_background(*, run_uuid: str, remote: bool) -> None:
     task_key = (run_uuid, remote)
     try:
+        _set_clean_status(
+            run_uuid=run_uuid,
+            remote=remote,
+            status="RUNNING",
+            run_stage="CLEANING_REMOTE" if remote else "CLEANING_LOCAL",
+            message="Cleaning remote workflow artifacts in the background." if remote else "Cleaning local workflow artifacts in the background.",
+        )
         await _set_job_clean_run_stage(
             run_uuid,
             run_stage="CLEANING_REMOTE" if remote else "CLEANING_LOCAL",
@@ -355,11 +376,25 @@ async def _run_clean_job_background(*, run_uuid: str, remote: bool) -> None:
                 gzipped_bed_files=int(cleanup_result.get("gzipped_bed_files") or 0),
             )
             await add_log_entry(session, run_uuid, "INFO", message, source="api")
+            _set_clean_status(
+                run_uuid=run_uuid,
+                remote=remote,
+                status="COMPLETED",
+                run_stage="CLEANED_REMOTE" if remote else "CLEANED_LOCAL",
+                message=message,
+            )
             await _set_job_clean_run_stage(run_uuid, run_stage="CLEANED_REMOTE" if remote else "CLEANED_LOCAL", error_message=None)
         finally:
             await session.close()
     except Exception as exc:
         logger.error("Workflow clean task failed", run_uuid=run_uuid, remote=remote, error=str(exc))
+        _set_clean_status(
+            run_uuid=run_uuid,
+            remote=remote,
+            status="FAILED",
+            run_stage="CLEAN_FAILED",
+            message=str(exc) or "Workflow clean failed.",
+        )
         await _set_job_clean_run_stage(run_uuid, run_stage="CLEAN_FAILED", error_message=str(exc))
         try:
             session = SessionLocal()
@@ -2881,6 +2916,17 @@ async def clean_job_data(
 
         task = asyncio.create_task(_run_clean_job_background(run_uuid=run_uuid, remote=remote))
         _workflow_clean_tasks[task_key] = task
+        _set_clean_status(
+            run_uuid=run_uuid,
+            remote=remote,
+            status="RUNNING",
+            run_stage="CLEANING_REMOTE" if remote else "CLEANING_LOCAL",
+            message=(
+                "Cleaning remote workflow artifacts in the background."
+                if remote
+                else "Cleaning local workflow artifacts in the background."
+            ),
+        )
         await _set_job_clean_run_stage(run_uuid, run_stage="CLEANING_REMOTE" if remote else "CLEANING_LOCAL", error_message=None)
 
         message = (
@@ -2896,6 +2942,17 @@ async def clean_job_data(
         }
     finally:
         await session.close()
+
+
+@app.get("/jobs/{run_uuid}/clean-status")
+async def get_job_clean_status(
+    run_uuid: str = FastAPIPath(..., min_length=1),
+    remote: bool = Query(False),
+):
+    payload = _workflow_clean_status.get((run_uuid, bool(remote)))
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Clean status not found")
+    return payload
 
 
 @app.post("/jobs/{run_uuid}/rerun", response_model=JobSubmitResponse)

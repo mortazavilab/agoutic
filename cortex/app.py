@@ -504,6 +504,38 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
         raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
 
 
+@app.get("/jobs/{run_uuid}/clean-status")
+async def get_job_clean_status_proxy(run_uuid: str, request: Request, remote: bool = False):
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
+
+    from cortex.config import INTERNAL_API_SECRET
+    launchpad_rest = SERVICE_REGISTRY.get("launchpad", {}).get(
+        "rest_url", os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
+    )
+    headers = {}
+    if INTERNAL_API_SECRET:
+        headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+
+    status_proxy_timeout = float(os.getenv("CORTEX_JOB_STATUS_PROXY_TIMEOUT_SECONDS", "150"))
+
+    try:
+        async with httpx.AsyncClient(timeout=status_proxy_timeout) as client:
+            resp = await client.get(
+                f"{launchpad_rest}/jobs/{run_uuid}/clean-status",
+                headers=headers,
+                params={"remote": str(bool(remote)).lower()},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Clean status not found")
+        raise HTTPException(status_code=502, detail=f"Launchpad clean-status proxy failed: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
+
+
 class StageTaskBlockActionBody(BaseModel):
     project_id: str
     block_id: str

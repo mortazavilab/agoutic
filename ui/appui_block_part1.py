@@ -732,13 +732,23 @@ def render_block_part1(
                     ).strip()
                     _clean_message = str(_clean_run.get("message") or "").strip()
                     _clean_stage = ""
+                    _clean_scope = "remote" if _clean_run.get("remote") else "local"
                     if _clean_run_uuid:
-                        _clean_status, _ = get_cached_job_status(_clean_run_uuid)
-                        if isinstance(_clean_status, dict):
-                            _clean_stage = str(_clean_status.get("run_stage") or "").strip().upper()
-                            if _clean_stage:
-                                st.session_state[f"_clean_stage_{_clean_run_uuid}"] = _clean_stage
-                            _clean_message = str(_clean_status.get("message") or _clean_message).strip()
+                        try:
+                            _clean_resp = make_authenticated_request(
+                                "GET",
+                                f"{API_URL}/jobs/{_clean_run_uuid}/clean-status?remote={'true' if _clean_run.get('remote') else 'false'}",
+                                timeout=5,
+                            )
+                            if getattr(_clean_resp, "status_code", None) == 200:
+                                _clean_status = _clean_resp.json()
+                                if isinstance(_clean_status, dict):
+                                    _clean_stage = str(_clean_status.get("run_stage") or "").strip().upper()
+                                    if _clean_stage:
+                                        st.session_state[f"_clean_stage_{_clean_run_uuid}_{_clean_scope}"] = _clean_stage
+                                    _clean_message = str(_clean_status.get("message") or _clean_message).strip()
+                        except Exception:
+                            pass
                     if _clean_stage in {"CLEANED_LOCAL", "CLEANED_REMOTE"}:
                         st.success(f"✅ `{_clean_label}` — {_clean_message or _clean_stage.replace('_', ' ').title()}")
                     elif _clean_stage == "CLEAN_FAILED":

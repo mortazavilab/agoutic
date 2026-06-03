@@ -295,6 +295,25 @@ async def test_get_job_status_reports_cleaned_local_message_without_old_error(mo
 
 
 @pytest.mark.asyncio
+async def test_get_job_clean_status_returns_mode_specific_payload(monkeypatch):
+    launchpad_app._workflow_clean_status.clear()
+    launchpad_app._workflow_clean_status[("run-clean-status", True)] = {
+        "run_uuid": "run-clean-status",
+        "remote": True,
+        "status": "RUNNING",
+        "run_stage": "CLEANING_REMOTE",
+        "message": "Cleaning remote workflow artifacts in the background.",
+        "updated_at": "2026-06-02T00:00:00+00:00",
+    }
+
+    payload = await launchpad_app.get_job_clean_status("run-clean-status", remote=True)
+
+    assert payload["run_uuid"] == "run-clean-status"
+    assert payload["remote"] is True
+    assert payload["run_stage"] == "CLEANING_REMOTE"
+
+
+@pytest.mark.asyncio
 async def test_get_job_status_repolls_terminal_failed_slurm_job_for_task_summary(monkeypatch):
     fake_session = _FakeSession()
     synced_at = datetime(2026, 5, 25, 5, 12, 12, tzinfo=timezone.utc)
