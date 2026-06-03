@@ -24,8 +24,11 @@ class _FakeMCPClient:
 
 
 class _FakeSession:
+    def __init__(self, jobs=None):
+        self._jobs = list(jobs or [])
+
     def execute(self, _query):
-        raise AssertionError("Unexpected DB execute call in this test")
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(self._jobs)))
 
 
 def _history_blocks(work_dir: str = "/tmp/proj/workflow10"):
@@ -246,6 +249,68 @@ async def test_execute_list_files_uses_active_workflow_context(monkeypatch):
             "list_job_files",
             {
                 "work_dir": "/tmp/proj/workflow10",
+                "max_depth": None,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_list_files_prefers_tracked_local_workflow_dir_over_remote_history(monkeypatch):
+    fake_client = _FakeMCPClient(
+        [
+            {
+                "success": True,
+                "work_dir": "/media/backup_disk/agoutic_root/users/ali-mortazavi/testsl201/workflow1",
+                "file_count": 1,
+                "files": [
+                    {"path": "inventory_report.tsv", "name": "inventory_report.tsv", "size": 420, "modified_time": "2026-03-19T14:11:00Z"},
+                ],
+            }
+        ]
+    )
+    jobs = [
+        SimpleNamespace(
+            project_id="proj-1",
+            run_uuid="03f68c22-03f8-43c7-9186-a839e94a95eb",
+            workflow_alias="workflow1",
+            workflow_folder_name="workflow1",
+            workflow_display_name="Jamshid3",
+            sample_name="Jamshid3",
+            output_directory="/media/backup_disk/agoutic_root/users/ali-mortazavi/testsl201/workflow1",
+            nextflow_work_dir="/media/backup_disk/agoutic_root/users/ali-mortazavi/testsl201/workflow1",
+            remote_work_dir="/share/crsp/lab/seyedam/share/agoutic/seyedam/testsl201/workflow1",
+            submitted_at=1,
+        )
+    ]
+    history_blocks = [
+        SimpleNamespace(
+            type="EXECUTION_JOB",
+            payload_json=(
+                '{"work_directory": "/share/crsp/lab/seyedam/share/agoutic/seyedam/testsl201/workflow1", '
+                '"run_uuid": "03f68c22-03f8-43c7-9186-a839e94a95eb", "sample_name": "Jamshid3", "mode": "CDNA"}'
+            ),
+        )
+    ]
+
+    monkeypatch.setattr("cortex.list_commands.get_service_url", lambda _key: "http://analyzer")
+    monkeypatch.setattr("cortex.list_commands.MCPHttpClient", lambda name, base_url: fake_client)
+
+    markdown = await execute_list_command(
+        _FakeSession(jobs),
+        ListCommand(action="files"),
+        user_id="user-1",
+        project_id="proj-1",
+        project_dir="/tmp/proj",
+        history_blocks=history_blocks,
+    )
+
+    assert "inventory_report.tsv" in markdown
+    assert fake_client.calls == [
+        (
+            "list_job_files",
+            {
+                "work_dir": "/media/backup_disk/agoutic_root/users/ali-mortazavi/testsl201/workflow1",
                 "max_depth": None,
             },
         )

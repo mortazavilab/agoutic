@@ -3,10 +3,12 @@ Launchpad: FastAPI application for Dogme/Nextflow job execution.
 Receives job submissions from Cortex and manages pipeline execution.
 """
 import asyncio
+import gzip
 import json
 import os
 import re
 import signal
+import shutil
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -47,6 +49,7 @@ from launchpad.db import (
     get_workflow_identity_for_path,
     resolve_job_by_workflow_label,
     update_job_status,
+    update_job_fields,
     add_log_entry,
     get_job_logs,
     job_to_dict,
@@ -111,6 +114,9 @@ from launchpad.script_execution import (
 setup_logging("launchpad-rest")
 logger = get_logger(__name__)
 
+_workflow_clean_tasks: dict[tuple[str, bool], asyncio.Task] = {}
+_REMOTE_CLEAN_TIMEOUT_SECONDS = float(os.getenv("LAUNCHPAD_REMOTE_CLEAN_TIMEOUT_SECONDS", "86400"))
+
 # --- APP SETUP ---
 app = FastAPI(
     title="AGOUTIC Launchpad",
@@ -167,6 +173,204 @@ def _resolve_deletable_workflow_dir(job) -> Path | None:
             continue
         return candidate
     return None
+
+
+def _resolve_cleanable_remote_workflow_dir(job) -> str | None:
+    expected_folder_name = str(getattr(job, "workflow_folder_name", "") or "").strip()
+    candidate_values = [
+        getattr(job, "remote_work_dir", None),
+        getattr(job, "remote_output_dir", None),
+    ]
+    seen: set[str] = set()
+    for raw_value in candidate_values:
+        cleaned = _sanitize_work_directory(raw_value)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        candidate = str(PurePosixPath(cleaned))
+        if not candidate.startswith("/"):
+            continue
+        candidate_name = PurePosixPath(candidate).name
+        if expected_folder_name:
+            if candidate_name != expected_folder_name:
+                continue
+        elif not _WORKFLOW_FOLDER_RE.fullmatch(candidate_name):
+            continue
+        return candidate
+    return None
+
+
+def _count_local_files(path: Path) -> int:
+    file_count = 0
+    for _root, _dirs, files in os.walk(path):
+        file_count += len(files)
+    return file_count
+
+
+def _gzip_local_bedmethyl_files(workflow_dir: Path) -> int:
+    bedmethyl_dir = workflow_dir / "bedMethyl"
+    if not bedmethyl_dir.exists() or not bedmethyl_dir.is_dir() or bedmethyl_dir.is_symlink():
+        return 0
+
+    gzipped_count = 0
+    for child in sorted(bedmethyl_dir.iterdir(), key=lambda item: item.name):
+        if child.is_symlink() or not child.is_file() or child.suffix.lower() != ".bed":
+            continue
+        gzip_path = child.with_name(f"{child.name}.gz")
+        tmp_gzip_path = child.with_name(f"{child.name}.gz.tmp")
+        with child.open("rb") as src, gzip.open(tmp_gzip_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        tmp_gzip_path.replace(gzip_path)
+        child.unlink()
+        gzipped_count += 1
+    return gzipped_count
+
+
+def _cleanup_local_workflow_contents(workflow_dir: Path) -> dict[str, object]:
+    gzipped_count = _gzip_local_bedmethyl_files(workflow_dir)
+    removed_dirs: list[str] = []
+    removed_file_count = 0
+
+    for child in sorted(workflow_dir.iterdir(), key=lambda item: item.name):
+        if child.is_symlink() or not child.is_dir():
+            continue
+        if child.name != "work" and not child.name.startswith("dor"):
+            continue
+        removed_file_count += _count_local_files(child)
+        shutil.rmtree(child)
+        removed_dirs.append(child.name)
+
+    return {
+        "gzipped_bed_files": gzipped_count,
+        "removed_dirs": removed_dirs,
+        "removed_file_count": removed_file_count,
+    }
+
+
+def _cleanup_message(folder_name: str, *, remote: bool, removed_dirs: list[str], removed_file_count: int, gzipped_bed_files: int) -> str:
+    details: list[str] = []
+    if gzipped_bed_files:
+        noun = "file" if gzipped_bed_files == 1 else "files"
+        details.append(f"gzipped {gzipped_bed_files} `bedMethyl` BED {noun}")
+    if removed_dirs:
+        details.append(f"removed {', '.join(f'`{name}`' for name in removed_dirs)} ({removed_file_count} files)")
+
+    if not details:
+        return f"No cleanup targets were found for `{folder_name}`."
+
+    prefix = "Remotely cleaned" if remote else "Cleaned"
+    return f"{prefix} `{folder_name}`: {'; '.join(details)}."
+
+
+async def _cleanup_remote_workflow_contents(job) -> dict[str, object]:
+    remote_work_dir = _resolve_cleanable_remote_workflow_dir(job)
+    if remote_work_dir is None:
+        raise HTTPException(status_code=409, detail="Could not determine a safe remote workflow directory to clean for this job.")
+
+    ssh_profile_id = getattr(job, "ssh_profile_id", None)
+    user_id = getattr(job, "user_id", None)
+    if not ssh_profile_id or not user_id:
+        raise HTTPException(status_code=400, detail="This workflow does not have remote execution metadata available for remote cleanup.")
+
+    ssh_profile = await get_ssh_profile(ssh_profile_id, user_id)
+    if ssh_profile is None:
+        raise HTTPException(status_code=404, detail="The SSH profile for this workflow could not be loaded.")
+
+    ssh_manager = SSHConnectionManager()
+    conn = await ssh_manager.connect(ssh_profile)
+    try:
+        if not await conn.path_exists(remote_work_dir):
+            raise HTTPException(status_code=409, detail=f"Remote workflow directory not found: {remote_work_dir}")
+        script = (
+            "python3 - <<'PY'\n"
+            "import gzip, json, os, shutil\n"
+            f"workflow_dir = {remote_work_dir!r}\n"
+            "result = {'gzipped_bed_files': 0, 'removed_dirs': [], 'removed_file_count': 0}\n"
+            "bedmethyl_dir = os.path.join(workflow_dir, 'bedMethyl')\n"
+            "if os.path.isdir(bedmethyl_dir) and not os.path.islink(bedmethyl_dir):\n"
+            "    for name in sorted(os.listdir(bedmethyl_dir)):\n"
+            "        path = os.path.join(bedmethyl_dir, name)\n"
+            "        if os.path.isfile(path) and not os.path.islink(path) and name.lower().endswith('.bed'):\n"
+            "            gzip_path = path + '.gz'\n"
+            "            tmp_gzip_path = gzip_path + '.tmp'\n"
+            "            with open(path, 'rb') as src, gzip.open(tmp_gzip_path, 'wb') as dst:\n"
+            "                shutil.copyfileobj(src, dst)\n"
+            "            os.replace(tmp_gzip_path, gzip_path)\n"
+            "            os.remove(path)\n"
+            "            result['gzipped_bed_files'] += 1\n"
+            "if os.path.isdir(workflow_dir) and not os.path.islink(workflow_dir):\n"
+            "    for name in sorted(os.listdir(workflow_dir)):\n"
+            "        path = os.path.join(workflow_dir, name)\n"
+            "        if (name == 'work' or name.startswith('dor')) and os.path.isdir(path) and not os.path.islink(path):\n"
+            "            for _root, _dirs, files in os.walk(path):\n"
+            "                result['removed_file_count'] += len(files)\n"
+            "            shutil.rmtree(path)\n"
+            "            result['removed_dirs'].append(name)\n"
+            "print(json.dumps(result))\n"
+            "PY"
+        )
+        raw_result = await conn.run_checked(script, timeout_seconds=_REMOTE_CLEAN_TIMEOUT_SECONDS)
+        return json.loads(raw_result or "{}")
+    finally:
+        await conn.close()
+
+
+async def _set_job_clean_run_stage(run_uuid: str, *, run_stage: str | None, error_message: str | None = None) -> None:
+    fields: dict[str, object | None] = {"run_stage": run_stage}
+    if error_message is not None:
+        fields["error_message"] = error_message
+    await update_job_fields(run_uuid, fields)
+
+
+async def _run_clean_job_background(*, run_uuid: str, remote: bool) -> None:
+    task_key = (run_uuid, remote)
+    try:
+        await _set_job_clean_run_stage(
+            run_uuid,
+            run_stage="CLEANING_REMOTE" if remote else "CLEANING_LOCAL",
+            error_message=None,
+        )
+
+        session = SessionLocal()
+        try:
+            job = await get_job(session, run_uuid)
+            if not job:
+                raise RuntimeError(f"Job not found: {run_uuid}")
+
+            if remote:
+                cleanup_result = await _cleanup_remote_workflow_contents(job)
+                folder_name = str(getattr(job, "workflow_folder_name", "") or PurePosixPath(_resolve_cleanable_remote_workflow_dir(job) or "workflow").name)
+            else:
+                workflow_dir = _resolve_deletable_workflow_dir(job)
+                if workflow_dir is None:
+                    raise RuntimeError("Could not determine a safe workflow directory to clean for this job.")
+                cleanup_result = _cleanup_local_workflow_contents(workflow_dir)
+                folder_name = str(getattr(job, "workflow_folder_name", "") or workflow_dir.name)
+
+            message = _cleanup_message(
+                folder_name,
+                remote=remote,
+                removed_dirs=list(cleanup_result.get("removed_dirs") or []),
+                removed_file_count=int(cleanup_result.get("removed_file_count") or 0),
+                gzipped_bed_files=int(cleanup_result.get("gzipped_bed_files") or 0),
+            )
+            await add_log_entry(session, run_uuid, "INFO", message, source="api")
+            await _set_job_clean_run_stage(run_uuid, run_stage="CLEANED_REMOTE" if remote else "CLEANED_LOCAL", error_message=None)
+        finally:
+            await session.close()
+    except Exception as exc:
+        logger.error("Workflow clean task failed", run_uuid=run_uuid, remote=remote, error=str(exc))
+        await _set_job_clean_run_stage(run_uuid, run_stage="CLEAN_FAILED", error_message=str(exc))
+        try:
+            session = SessionLocal()
+            try:
+                await add_log_entry(session, run_uuid, "ERROR", f"Workflow clean failed: {exc}", source="api")
+            finally:
+                await session.close()
+        except Exception:
+            logger.warning("Failed to persist workflow clean failure log", run_uuid=run_uuid, remote=remote, exc_info=True)
+    finally:
+        _workflow_clean_tasks.pop(task_key, None)
 
 
 def _job_timing_payload(job) -> dict[str, str | int | None]:
@@ -2117,6 +2321,47 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "work_directory": _effective_job_work_directory(job),
                 **_job_timing_payload(job),
             }
+
+        clean_run_stage = str(getattr(job, "run_stage", "") or "").strip().upper()
+        if clean_run_stage in {"CLEANING_LOCAL", "CLEANING_REMOTE", "CLEANED_LOCAL", "CLEANED_REMOTE", "CLEAN_FAILED"}:
+            clean_remote = clean_run_stage.endswith("_REMOTE")
+            clean_running = clean_run_stage.startswith("CLEANING_")
+            clean_failed = clean_run_stage == "CLEAN_FAILED"
+            clean_message = (
+                str(getattr(job, "error_message", "") or "").strip()
+                if clean_failed
+                else (
+                    "Cleaning remote workflow artifacts in the background."
+                    if clean_running and clean_remote
+                    else "Cleaning local workflow artifacts in the background."
+                    if clean_running
+                    else "Remote workflow cleanup completed."
+                    if clean_remote
+                    else "Local workflow cleanup completed."
+                )
+            ) or "Workflow clean failed."
+            clean_payload = {
+                "run_uuid": run_uuid,
+                "status": "FAILED" if clean_failed else ("RUNNING" if clean_running else "COMPLETED"),
+                "progress_percent": 0 if clean_failed else (95 if clean_running else 100),
+                "message": clean_message,
+                "tasks": {},
+                "execution_mode": getattr(job, "execution_mode", None) or "local",
+                "run_stage": clean_run_stage,
+                "work_directory": _effective_job_work_directory(job),
+                **_import_status_payload(job),
+                **_job_timing_payload(job),
+            }
+            if getattr(job, "execution_mode", None) == "slurm":
+                clean_payload.update(
+                    {
+                        "slurm_job_id": job.slurm_job_id,
+                        "slurm_state": job.slurm_state,
+                        "transfer_state": job.transfer_state,
+                        "result_destination": job.result_destination,
+                    }
+                )
+            return clean_payload
         
         terminal_statuses = (JobStatus.DELETED, JobStatus.STALE, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
         pending_local_result_sync = (
@@ -2584,6 +2829,71 @@ async def delete_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             "file_count": _file_count,
         }
 
+    finally:
+        await session.close()
+
+
+@app.post("/jobs/{run_uuid}/clean")
+async def clean_job_data(
+    run_uuid: str = FastAPIPath(..., min_length=1),
+    remote: bool = Query(False),
+):
+    """Remove cleanable workflow subdirectories while preserving the workflow root and bedMethyl outputs."""
+    remote = remote if isinstance(remote, bool) else False
+    session = SessionLocal()
+
+    try:
+        job = await get_job(session, run_uuid)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        terminal_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.STALE)
+        if job.status not in terminal_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot clean job with status {job.status}. "
+                    f"Only {', '.join(status.value for status in terminal_statuses)} jobs can be cleaned."
+                ),
+            )
+
+        if remote:
+            if _resolve_cleanable_remote_workflow_dir(job) is None:
+                raise HTTPException(status_code=409, detail="Could not determine a safe remote workflow directory to clean for this job.")
+            if not getattr(job, "ssh_profile_id", None) or not getattr(job, "user_id", None):
+                raise HTTPException(status_code=400, detail="This workflow does not have remote execution metadata available for remote cleanup.")
+            folder_name = str(getattr(job, "workflow_folder_name", "") or PurePosixPath(_resolve_cleanable_remote_workflow_dir(job) or "workflow").name)
+        else:
+            workflow_dir = _resolve_deletable_workflow_dir(job)
+            if workflow_dir is None:
+                raise HTTPException(status_code=409, detail="Could not determine a safe workflow directory to clean for this job.")
+            folder_name = str(getattr(job, "workflow_folder_name", "") or workflow_dir.name)
+
+        task_key = (run_uuid, remote)
+        active_task = _workflow_clean_tasks.get(task_key)
+        if active_task is not None and not active_task.done():
+            return {
+                "status": "cleaning",
+                "run_uuid": run_uuid,
+                "remote": remote,
+                "message": f"Workflow clean is already running for `{folder_name}`.",
+            }
+
+        task = asyncio.create_task(_run_clean_job_background(run_uuid=run_uuid, remote=remote))
+        _workflow_clean_tasks[task_key] = task
+        await _set_job_clean_run_stage(run_uuid, run_stage="CLEANING_REMOTE" if remote else "CLEANING_LOCAL", error_message=None)
+
+        message = (
+            f"Started {'remote ' if remote else ''}clean for `{folder_name}`. "
+            "The workflow clean is running in the background; check job status or logs for completion."
+        )
+        return {
+            "status": "cleaning",
+            "run_uuid": run_uuid,
+            "remote": remote,
+            "message": message,
+            "run_stage": "CLEANING_REMOTE" if remote else "CLEANING_LOCAL",
+        }
     finally:
         await session.close()
 

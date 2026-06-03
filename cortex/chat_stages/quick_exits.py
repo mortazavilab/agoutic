@@ -556,6 +556,7 @@ class WorkflowCommandStage:
 
     async def run(self, ctx: ChatContext) -> None:
         workflow_cmd = parse_workflow_command(ctx.message)
+        clean_tracking: list[dict] = []
         markdown = await execute_workflow_command(
             ctx.session,
             workflow_cmd,
@@ -563,6 +564,7 @@ class WorkflowCommandStage:
             project_dir=_resolve_workflow_command_project_dir(ctx),
             owner_id=ctx.user.id,
             model=ctx.model or "default",
+            clean_tracking=clean_tracking,
         )
         resp = await _create_prompt_response(
             ctx.session,
@@ -573,6 +575,7 @@ class WorkflowCommandStage:
             ctx.model or "default",
             markdown,
             prompt_type="workflow_command",
+            extra_payload={"_clean_runs": clean_tracking} if clean_tracking else None,
         )
         ctx.short_circuit(resp)
 
@@ -592,6 +595,7 @@ class WorkflowIntentStage:
 
     async def run(self, ctx: ChatContext) -> None:
         workflow_cmd = detect_workflow_intent(ctx.message)
+        clean_tracking: list[dict] = []
         markdown = await execute_workflow_command(
             ctx.session,
             workflow_cmd,
@@ -599,6 +603,7 @@ class WorkflowIntentStage:
             project_dir=_resolve_workflow_command_project_dir(ctx),
             owner_id=ctx.user.id,
             model=ctx.model or "default",
+            clean_tracking=clean_tracking,
         )
         resp = await _create_prompt_response(
             ctx.session,
@@ -609,6 +614,7 @@ class WorkflowIntentStage:
             ctx.model or "default",
             markdown,
             prompt_type="workflow_intent",
+            extra_payload={"_clean_runs": clean_tracking} if clean_tracking else None,
         )
         ctx.short_circuit(resp)
 

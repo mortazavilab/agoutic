@@ -89,6 +89,9 @@ def render_sidebar(
             if st.button("/help /list files", key="help_prompt_help_list_files", width="stretch"):
                 st.session_state["_help_prompt"] = "/help /list files"
                 st.rerun()
+            if st.button("/help /clean", key="help_prompt_help_clean", width="stretch"):
+                st.session_state["_help_prompt"] = "/help /clean"
+                st.rerun()
             st.caption("Ask naturally too: `How do I stage a sample on hpc3?`, `How do I run Dogme with a staged sample?`, `How do I sync workflow12?`, `How do I haplotype workflow7 with a VCF?`, `How do I haplotype mouse workflow7 without typing the founder VCF path?`")
             st.caption("**Inventory**")
             if st.button("/list samples", key="help_prompt_list_samples", width="stretch"):
@@ -137,7 +140,9 @@ def render_sidebar(
             st.caption("`/use <workflow>`  ·  `/reanalyze [workflow[, workflow2, ...]]`")
             st.caption("`/rerun [workflow[, workflow2, ...]]`  ·  `/sync-workflow [workflow[, workflow2, ...]]`")
             st.caption("`/rename <workflow> <new_name>`  ·  `/delete [workflow[, workflow2, ...]]`")
-            st.caption("omit the workflow to use the active workflow for `reanalyze`, `rerun`, `delete`, and `sync-workflow`")
+            st.caption("`/clean [remote] [workflow[, workflow2, ...]]`  ·  `/clean workflows`")
+            st.caption("omit the workflow to use the active workflow for `reanalyze`, `rerun`, `delete`, `clean`, and `sync-workflow`")
+            st.caption("`/clean` runs in the background for both local and remote workflows. Watch job status/logs for `CLEANING_LOCAL`, `CLEANING_REMOTE`, `CLEANED_LOCAL`, `CLEANED_REMOTE`, or `CLEAN_FAILED`.")
             st.caption("`/import-workflow <path> --remote`  ·  `--full-copy` optional")
             st.caption("`/haplotype RNA workflow7 /data/parents.vcf.gz`  ·  `haplotype RNA workflow7 with file /data/parents.vcf.gz`")
             st.caption("**Dataframes**")

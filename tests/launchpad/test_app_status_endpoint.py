@@ -217,6 +217,84 @@ async def test_get_job_status_reports_stale_transfer_message_without_repoll(monk
 
 
 @pytest.mark.asyncio
+async def test_get_job_status_reports_cleaning_remote_message_without_repoll(monkeypatch):
+    fake_session = _FakeSession()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-cleaning-remote"
+        return SimpleNamespace(
+            run_uuid="run-cleaning-remote",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.FAILED,
+            progress_percent=0,
+            error_message="old rsync failure",
+            run_stage="CLEANING_REMOTE",
+            slurm_job_id="50052943",
+            slurm_state="FAILED",
+            transfer_state="transfer_failed",
+            result_destination="local",
+            nextflow_work_dir="/local/project/workflow12",
+            remote_work_dir="/remote/project/workflow12",
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+            imported_source_complete=None,
+        )
+
+    def fail_get_backend(mode):
+        raise AssertionError(f"backend polling should be skipped for clean status, got {mode}")
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", fail_get_backend)
+
+    payload = await launchpad_app.get_job_status("run-cleaning-remote")
+
+    assert payload["status"] == "RUNNING"
+    assert payload["run_stage"] == "CLEANING_REMOTE"
+    assert payload["message"] == "Cleaning remote workflow artifacts in the background."
+
+
+@pytest.mark.asyncio
+async def test_get_job_status_reports_cleaned_local_message_without_old_error(monkeypatch):
+    fake_session = _FakeSession()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-cleaned-local"
+        return SimpleNamespace(
+            run_uuid="run-cleaned-local",
+            execution_mode="local",
+            status=launchpad_app.JobStatus.FAILED,
+            progress_percent=0,
+            error_message="Job failed — exit code 1",
+            run_stage="CLEANED_LOCAL",
+            slurm_job_id=None,
+            slurm_state=None,
+            transfer_state=None,
+            result_destination=None,
+            nextflow_work_dir="/local/project/workflow13",
+            remote_work_dir=None,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+            imported_source_complete=None,
+        )
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+
+    payload = await launchpad_app.get_job_status("run-cleaned-local")
+
+    assert payload["status"] == "COMPLETED"
+    assert payload["run_stage"] == "CLEANED_LOCAL"
+    assert payload["message"] == "Local workflow cleanup completed."
+
+
+@pytest.mark.asyncio
 async def test_get_job_status_repolls_terminal_failed_slurm_job_for_task_summary(monkeypatch):
     fake_session = _FakeSession()
     synced_at = datetime(2026, 5, 25, 5, 12, 12, tzinfo=timezone.utc)

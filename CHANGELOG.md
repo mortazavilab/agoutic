@@ -1,5 +1,27 @@
 ## [Unreleased]
 
+## [3.7.1] - 2026-06-01
+
+### Features
+
+- **Added deterministic workflow cleanup commands for both local and remote results: `/clean workflowN`, `/clean remote workflowN`, multi-workflow refs, and `clean workflows` now preserve each workflow root, gzip each loose `bedMethyl/*.bed` file individually, and remove only immediate-child `work/` plus `dor*` directories.**
+
+### Bug Fixes
+
+- **`/list files` now prefers tracked local workflow directories from Launchpad rows over stale remote `work_dir` context, so remote-run workflows that have local outputs no longer fail with remote-path-only analyzer lookups after commands such as `clean remote workflowN`.**
+
+- **`clean remote workflows` now expands only to tracked workflows, preventing project-wide remote cleanup from drifting into untracked local workflow folders that cannot be cleaned over SSH.**
+
+- **Both local and remote workflow cleanup now run asynchronously in Launchpad, so large `bedMethyl` gzip operations and remote SSH cleanup do not block the chat request or end in a spurious timeout error; job status/help surfaces now call out `CLEANING_LOCAL`, `CLEANING_REMOTE`, `CLEANED_LOCAL`, `CLEANED_REMOTE`, and `CLEAN_FAILED`.**
+
+### Documentation
+
+- **Updated the UI help panels, slash-command surfaces, quick reference, and README/version markers for the 3.7.1 release and the new workflow cleanup command family.**
+
+### Tests
+
+- **Added focused regression coverage for tracked-local-versus-remote `/list files` resolution and for `clean remote workflows` project-wide expansion.**
+
 ### Features
 
 - **Dogme approval, submission, and staging now support single-file cDNA FASTQ intake via `fastqCDNA`: chat extraction recognizes FASTQ requests, approval gates default to FASTQ-backed cDNA when project `data/` contains a lone FASTQ, local and remote staging alias the approved sample name under `fastqs/`, and unsupported FASTQ+RNA/DNA requests now stop behind an explicit blocking choice instead of silently drifting into an invalid mode.**

@@ -210,6 +210,7 @@ async def _create_prompt_response(
     model_name: str,
     markdown: str,
     prompt_type: str | None = None,
+    extra_payload: dict | None = None,
 ):
     """Create a deterministic AGENT_PLAN response for prompt inspection or clarification."""
     payload = {
@@ -229,6 +230,8 @@ async def _create_prompt_response(
             "active_skill": active_skill,
         },
     }
+    if isinstance(extra_payload, dict) and extra_payload:
+        payload.update(extra_payload)
     agent_block = _create_block_internal(
         session,
         req.project_id,

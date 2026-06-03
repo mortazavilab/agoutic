@@ -105,6 +105,285 @@ async def test_delete_job_rejects_unsafe_non_workflow_directory(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
+async def test_clean_job_data_gzips_each_bed_file_and_removes_cleanup_dirs(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    workflow_dir = tmp_path / "workflow8"
+    workflow_dir.mkdir()
+    work_dir = workflow_dir / "work"
+    work_dir.mkdir()
+    (work_dir / "trace.txt").write_text("ok", encoding="utf-8")
+    dor_dir = workflow_dir / "dor-cache"
+    dor_dir.mkdir()
+    (dor_dir / "report.tsv").write_text("ok", encoding="utf-8")
+    bedmethyl_dir = workflow_dir / "bedMethyl"
+    bedmethyl_dir.mkdir()
+    (bedmethyl_dir / "sample-a.bed").write_text("a", encoding="utf-8")
+    (bedmethyl_dir / "sample-b.bed").write_text("b", encoding="utf-8")
+
+    job = SimpleNamespace(
+        run_uuid="clean-1",
+        status=launchpad_app.JobStatus.COMPLETED,
+        nextflow_work_dir=str(workflow_dir),
+        output_directory=str(workflow_dir),
+        workflow_folder_name="workflow8",
+    )
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "clean-1"
+        return job
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_update_job_fields(*_args, **_kwargs):
+        return None
+
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+        return SimpleNamespace(done=lambda: False)
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "update_job_fields", fake_update_job_fields)
+    monkeypatch.setattr(launchpad_app.asyncio, "create_task", fake_create_task)
+
+    result = await launchpad_app.clean_job_data("clean-1")
+
+    assert result["status"] == "cleaning"
+    assert result["run_stage"] == "CLEANING_LOCAL"
+    assert scheduled
+    assert work_dir.exists()
+    assert dor_dir.exists()
+    assert (bedmethyl_dir / "sample-a.bed").exists()
+    assert (bedmethyl_dir / "sample-b.bed").exists()
+
+
+@pytest.mark.asyncio
+async def test_clean_job_data_remote_uses_ssh_cleanup(monkeypatch):
+    fake_session = _FakeSession()
+    job = SimpleNamespace(
+        run_uuid="clean-2",
+        status=launchpad_app.JobStatus.FAILED,
+        workflow_folder_name="workflow9",
+        remote_work_dir="/remote/project/workflow9",
+        remote_output_dir=None,
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+    )
+    remote_commands = []
+
+    class _FakeConn:
+        async def path_exists(self, path):
+            assert path == "/remote/project/workflow9"
+            return True
+
+        async def run_checked(self, command, timeout_seconds=None):
+            remote_commands.append(command)
+            assert timeout_seconds == 86400.0
+            return '{"gzipped_bed_files": 1, "removed_dirs": ["work"], "removed_file_count": 3}'
+
+        async def close(self):
+            return None
+
+    class _FakeSSHManager:
+        async def connect(self, profile):
+            assert profile.id == "profile-1"
+            return _FakeConn()
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "clean-2"
+        return job
+
+    async def fake_get_ssh_profile(profile_id, user_id):
+        assert profile_id == "profile-1"
+        assert user_id == "user-1"
+        return SimpleNamespace(id="profile-1")
+
+    async def fake_add_log_entry(*_args, **_kwargs):
+        return None
+
+    async def fake_update_job_fields(*_args, **_kwargs):
+        return None
+
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+        return SimpleNamespace(done=lambda: False)
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_ssh_profile", fake_get_ssh_profile)
+    monkeypatch.setattr(launchpad_app, "SSHConnectionManager", lambda: _FakeSSHManager())
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "update_job_fields", fake_update_job_fields)
+    monkeypatch.setattr(launchpad_app, "_REMOTE_CLEAN_TIMEOUT_SECONDS", 86400.0)
+    monkeypatch.setattr(launchpad_app.asyncio, "create_task", fake_create_task)
+
+    result = await launchpad_app.clean_job_data("clean-2", remote=True)
+
+    assert result["remote"] is True
+    assert result["status"] == "cleaning"
+    assert result["run_stage"] == "CLEANING_REMOTE"
+    assert scheduled
+    assert remote_commands == []
+
+
+@pytest.mark.asyncio
+async def test_clean_job_data_remote_requires_remote_metadata(monkeypatch):
+    fake_session = _FakeSession()
+    job = SimpleNamespace(
+        run_uuid="clean-3",
+        status=launchpad_app.JobStatus.COMPLETED,
+        workflow_folder_name="workflow10",
+        remote_work_dir=None,
+        remote_output_dir=None,
+        ssh_profile_id=None,
+        user_id="user-1",
+    )
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "clean-3"
+        return job
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await launchpad_app.clean_job_data("clean-3", remote=True)
+
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_run_clean_job_background_gzips_each_bed_file_and_removes_cleanup_dirs(monkeypatch, tmp_path):
+    fake_session = _FakeSession()
+    workflow_dir = tmp_path / "workflow11"
+    workflow_dir.mkdir()
+    work_dir = workflow_dir / "work"
+    work_dir.mkdir()
+    (work_dir / "trace.txt").write_text("ok", encoding="utf-8")
+    dor_dir = workflow_dir / "dor-cache"
+    dor_dir.mkdir()
+    (dor_dir / "report.tsv").write_text("ok", encoding="utf-8")
+    bedmethyl_dir = workflow_dir / "bedMethyl"
+    bedmethyl_dir.mkdir()
+    (bedmethyl_dir / "sample-a.bed").write_text("a", encoding="utf-8")
+    (bedmethyl_dir / "sample-b.bed").write_text("b", encoding="utf-8")
+    updates = []
+    log_messages = []
+
+    job = SimpleNamespace(
+        run_uuid="clean-bg-1",
+        status=launchpad_app.JobStatus.COMPLETED,
+        nextflow_work_dir=str(workflow_dir),
+        output_directory=str(workflow_dir),
+        workflow_folder_name="workflow11",
+    )
+
+    async def fake_get_job(session, run_uuid):
+        assert run_uuid == "clean-bg-1"
+        return job
+
+    async def fake_update_job_fields(run_uuid, fields):
+        updates.append((run_uuid, dict(fields)))
+
+    async def fake_add_log_entry(_session, run_uuid, _level, message, source="api"):
+        log_messages.append((run_uuid, message, source))
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "update_job_fields", fake_update_job_fields)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+
+    await launchpad_app._run_clean_job_background(run_uuid="clean-bg-1", remote=False)
+
+    assert not work_dir.exists()
+    assert not dor_dir.exists()
+    assert not (bedmethyl_dir / "sample-a.bed").exists()
+    assert not (bedmethyl_dir / "sample-b.bed").exists()
+    assert (bedmethyl_dir / "sample-a.bed.gz").exists()
+    assert (bedmethyl_dir / "sample-b.bed.gz").exists()
+    assert updates[0][1]["run_stage"] == "CLEANING_LOCAL"
+    assert updates[-1][1]["run_stage"] == "CLEANED_LOCAL"
+    assert "gzipped 2 `bedMethyl` BED files" in log_messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_run_clean_job_background_remote_uses_ssh_cleanup(monkeypatch):
+    fake_session = _FakeSession()
+    updates = []
+    log_messages = []
+    job = SimpleNamespace(
+        run_uuid="clean-bg-2",
+        status=launchpad_app.JobStatus.FAILED,
+        workflow_folder_name="workflow12",
+        remote_work_dir="/remote/project/workflow12",
+        remote_output_dir=None,
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+    )
+    remote_commands = []
+
+    class _FakeConn:
+        async def path_exists(self, path):
+            assert path == "/remote/project/workflow12"
+            return True
+
+        async def run_checked(self, command, timeout_seconds=None):
+            remote_commands.append(command)
+            assert timeout_seconds == 86400.0
+            return '{"gzipped_bed_files": 1, "removed_dirs": ["work"], "removed_file_count": 3}'
+
+        async def close(self):
+            return None
+
+    class _FakeSSHManager:
+        async def connect(self, profile):
+            assert profile.id == "profile-1"
+            return _FakeConn()
+
+    async def fake_get_job(session, run_uuid):
+        assert run_uuid == "clean-bg-2"
+        return job
+
+    async def fake_get_ssh_profile(profile_id, user_id):
+        assert profile_id == "profile-1"
+        assert user_id == "user-1"
+        return SimpleNamespace(id="profile-1")
+
+    async def fake_update_job_fields(run_uuid, fields):
+        updates.append((run_uuid, dict(fields)))
+
+    async def fake_add_log_entry(_session, run_uuid, _level, message, source="api"):
+        log_messages.append((run_uuid, message, source))
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_ssh_profile", fake_get_ssh_profile)
+    monkeypatch.setattr(launchpad_app, "SSHConnectionManager", lambda: _FakeSSHManager())
+    monkeypatch.setattr(launchpad_app, "update_job_fields", fake_update_job_fields)
+    monkeypatch.setattr(launchpad_app, "add_log_entry", fake_add_log_entry)
+    monkeypatch.setattr(launchpad_app, "_REMOTE_CLEAN_TIMEOUT_SECONDS", 86400.0)
+
+    await launchpad_app._run_clean_job_background(run_uuid="clean-bg-2", remote=True)
+
+    assert updates[0][1]["run_stage"] == "CLEANING_REMOTE"
+    assert updates[-1][1]["run_stage"] == "CLEANED_REMOTE"
+    assert "python3 - <<'PY'" in remote_commands[0]
+    assert "/remote/project/workflow12" in remote_commands[0]
+    assert "Remotely cleaned `workflow12`" in log_messages[-1][1]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("source_status", [launchpad_app.JobStatus.COMPLETED, launchpad_app.JobStatus.STALE])
 async def test_rerun_job_local_reuses_workflow_identity_and_archives_previous_names(monkeypatch, tmp_path, source_status):
     fake_session = _FakeSession()

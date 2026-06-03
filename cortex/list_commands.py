@@ -258,6 +258,82 @@ def _workflow_disk_name(job) -> str:
     return str(getattr(job, "sample_name", "") or getattr(job, "run_uuid", "") or "workflow").strip()
 
 
+def _workflow_reference_candidates(job) -> list[str]:
+    candidates = [
+        getattr(job, "workflow_alias", None),
+        getattr(job, "workflow_folder_name", None),
+        getattr(job, "workflow_display_name", None),
+        getattr(job, "sample_name", None),
+    ]
+    for path_attr in ("output_directory", "nextflow_work_dir", "remote_work_dir"):
+        raw_path = str(getattr(job, path_attr, "") or "").strip().rstrip("/")
+        if not raw_path:
+            continue
+        tail = raw_path.rsplit("/", 1)[-1].strip()
+        if tail:
+            candidates.append(tail)
+    return candidates
+
+
+def _job_local_work_dir(job) -> str:
+    for path_attr in ("output_directory", "nextflow_work_dir"):
+        raw_path = str(getattr(job, path_attr, "") or "").strip().rstrip("/")
+        if raw_path:
+            return raw_path
+    return ""
+
+
+def _project_jobs(session: Session, project_id: str) -> list:
+    if not project_id:
+        return []
+    try:
+        return list(
+            session.execute(
+                select(LaunchpadDogmeJob)
+                .where(LaunchpadDogmeJob.project_id == project_id)
+                .order_by(desc(LaunchpadDogmeJob.submitted_at), desc(LaunchpadDogmeJob.run_uuid))
+            ).scalars().all()
+        )
+    except Exception:
+        return []
+
+
+def _resolve_tracked_local_work_dir(session: Session, project_id: str, *, run_uuid: str = "", workflow_ref: str = "") -> str:
+    jobs = _project_jobs(session, project_id)
+    if not jobs:
+        return ""
+
+    normalized_run_uuid = str(run_uuid or "").strip().lower()
+    if normalized_run_uuid:
+        for job in jobs:
+            if str(getattr(job, "run_uuid", "") or "").strip().lower() == normalized_run_uuid:
+                return _job_local_work_dir(job)
+
+    normalized_ref = str(workflow_ref or "").strip().lower()
+    if not normalized_ref:
+        return ""
+    for job in jobs:
+        if any(str(candidate or "").strip().lower() == normalized_ref for candidate in _workflow_reference_candidates(job) if candidate):
+            return _job_local_work_dir(job)
+    return ""
+
+
+def _localize_workflows(session: Session, project_id: str, workflows: list[dict]) -> list[dict]:
+    localized: list[dict] = []
+    for workflow in workflows:
+        localized_workflow = dict(workflow)
+        local_work_dir = _resolve_tracked_local_work_dir(
+            session,
+            project_id,
+            run_uuid=str(workflow.get("run_uuid") or ""),
+            workflow_ref=str(workflow.get("sample_name") or workflow.get("work_dir") or ""),
+        )
+        if local_work_dir:
+            localized_workflow["work_dir"] = local_work_dir
+        localized.append(localized_workflow)
+    return localized
+
+
 def _workflow_display_name(job) -> str:
     sample = str(getattr(job, "workflow_display_name", "") or getattr(job, "sample_name", "") or "").strip()
     return sample or _workflow_disk_name(job)
@@ -465,14 +541,17 @@ def _list_workflow_rows(session: Session, project_id: str, project_dir: str = ""
 
 
 def _resolve_file_list_target(
+    session: Session,
+    project_id: str,
     command: ListCommand,
     *,
     history_blocks: list | None = None,
     project_dir: str = "",
 ) -> tuple[str, int | None]:
     context = _extract_job_context_from_history(None, history_blocks=history_blocks)
-    workflows = context.get("workflows") or []
-    default_work_dir = str(context.get("work_dir") or "") or str(project_dir or "")
+    workflows = _localize_workflows(session, project_id, context.get("workflows") or [])
+    active_run_uuid = str(context.get("run_uuid") or "")
+    default_work_dir = _resolve_tracked_local_work_dir(session, project_id, run_uuid=active_run_uuid) or str(context.get("work_dir") or "") or str(project_dir or "")
     normalized_project_dir = str(project_dir or "").strip()
 
     if command.project_scope:
@@ -484,6 +563,15 @@ def _resolve_file_list_target(
 
     target_ref = str(command.target_ref or "").strip()
     if target_ref:
+        parts = target_ref.replace("\\", "/").split("/", 1)
+        workflow_head = parts[0].strip()
+        remainder = parts[1].strip("/") if len(parts) > 1 else ""
+        tracked_work_dir = _resolve_tracked_local_work_dir(session, project_id, workflow_ref=workflow_head)
+        if tracked_work_dir:
+            resolved = tracked_work_dir.rstrip("/")
+            if remainder:
+                resolved = f"{resolved}/{remainder}"
+            return resolved, command.max_depth or 1
         resolved = _resolve_workflow_path(target_ref, default_work_dir, workflows)
         return resolved, command.max_depth or 1
 
@@ -493,10 +581,12 @@ def _resolve_file_list_target(
 async def _list_file_rows(
     command: ListCommand,
     *,
+    session: Session,
+    project_id: str,
     history_blocks: list | None = None,
     project_dir: str = "",
 ) -> tuple[str, list[dict], int]:
-    work_dir, max_depth = _resolve_file_list_target(command, history_blocks=history_blocks, project_dir=project_dir)
+    work_dir, max_depth = _resolve_file_list_target(session, project_id, command, history_blocks=history_blocks, project_dir=project_dir)
     if not work_dir:
         return "", [], 0
 
@@ -646,6 +736,8 @@ async def execute_list_command(
         try:
             work_dir, rows, file_count = await _list_file_rows(
                 command,
+                session=session,
+                project_id=project_id,
                 history_blocks=history_blocks,
                 project_dir=project_dir,
             )

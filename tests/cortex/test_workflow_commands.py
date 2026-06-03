@@ -1,7 +1,22 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+import sys
+import types
+from types import SimpleNamespace
 
 import pytest
+
+
+class _FakeEncoding:
+    def encode(self, text: str):
+        return list(text or "")
+
+
+if "tiktoken" not in sys.modules:
+    sys.modules["tiktoken"] = types.SimpleNamespace(get_encoding=lambda _name: _FakeEncoding(), Encoding=_FakeEncoding)
+
+if "pandas" not in sys.modules:
+    sys.modules["pandas"] = types.SimpleNamespace(DataFrame=object, Series=object, read_csv=lambda *_args, **_kwargs: None)
 
 from cortex.workflow_commands import (
     WorkflowCommand,
@@ -28,6 +43,7 @@ class _FakeScalarResult:
 class _FakeSession:
     def __init__(self, jobs):
         self._jobs = jobs
+        self.created_blocks = []
 
     def execute(self, _query):
         return _FakeScalarResult(self._jobs)
@@ -62,6 +78,15 @@ class _FakeAsyncClient:
     async def delete(self, url, headers=None):
         self.calls.append(("DELETE", url, headers, None))
         return self.delete_response
+
+
+class _CapturingAsyncClient(_FakeAsyncClient):
+    def __init__(self, captured_timeouts, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._captured_timeouts = captured_timeouts
+
+    async def __aenter__(self):
+        return self
 
 
 class TestParseWorkflowCommand:
@@ -122,6 +147,19 @@ class TestParseWorkflowCommand:
     def test_parse_cancel_sync_slash_command(self):
         cmd = parse_workflow_command("/cancel-sync workflow7")
         assert cmd == WorkflowCommand(action="cancel_sync", workflow_ref="workflow7", workflow_refs=["workflow7"])
+
+    def test_parse_clean_slash_command(self):
+        cmd = parse_workflow_command("/clean workflow7")
+        assert cmd == WorkflowCommand(action="clean", workflow_ref="workflow7", workflow_refs=["workflow7"])
+
+    def test_parse_clean_remote_slash_command(self):
+        cmd = parse_workflow_command("/clean remote workflow7, workflow8")
+        assert cmd == WorkflowCommand(
+            action="clean",
+            workflow_ref="workflow7",
+            workflow_refs=["workflow7", "workflow8"],
+            remote=True,
+        )
 
 
 class TestDetectWorkflowIntent:
@@ -190,6 +228,19 @@ class TestDetectWorkflowIntent:
     def test_detect_natural_language_cancel_sync(self):
         cmd = detect_workflow_intent("cancel sync workflow2")
         assert cmd == WorkflowCommand(action="cancel_sync", workflow_ref="workflow2", workflow_refs=["workflow2"])
+
+    def test_detect_natural_language_clean(self):
+        cmd = detect_workflow_intent("clean workflow3")
+        assert cmd == WorkflowCommand(action="clean", workflow_ref="workflow3", workflow_refs=["workflow3"])
+
+    def test_detect_natural_language_clean_remote(self):
+        cmd = detect_workflow_intent("clean remote workflow3 workflow4")
+        assert cmd == WorkflowCommand(
+            action="clean",
+            workflow_ref="workflow3",
+            workflow_refs=["workflow3", "workflow4"],
+            remote=True,
+        )
 
 
 class TestResolveWorkflowReference:
@@ -458,6 +509,285 @@ async def test_execute_workflow_command_deletes_untracked_workflow_folder(tmp_pa
     assert not workflow_dir.exists()
     assert "Deleted untracked workflow folder `workflow21`" in message
     assert "not tracked by Launchpad" in message
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_cleans_tracked_workflows(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-22",
+            workflow_alias="workflow22",
+            workflow_folder_name="workflow22",
+            workflow_display_name="sample-22",
+            sample_name="sample-22",
+            status="COMPLETED",
+            submitted_at=22,
+        )
+    ]
+    fake_client = _FakeAsyncClient(
+        post_response=_FakeResponse(
+            status_code=200,
+            payload={"message": "Cleaned `workflow22`: gzipped 2 `bedMethyl` BED files; removed `dor-run` (4 files)."},
+        )
+    )
+
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_rest_base_url", lambda: "http://launchpad")
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_internal_headers", lambda: {"X-Internal-Secret": "secret"})
+    monkeypatch.setattr("cortex.workflow_commands.httpx.AsyncClient", lambda timeout: fake_client)
+
+    message = await execute_workflow_command(
+        _FakeSession(jobs),
+        WorkflowCommand(action="clean", workflow_ref="workflow22"),
+        project_id="proj-1",
+    )
+
+    assert "Workflow clean results:" not in message
+    assert "Cleaned `workflow22`" in message
+    assert fake_client.calls == [
+        (
+            "POST",
+            "http://launchpad/jobs/run-22/clean",
+            {"X-Internal-Secret": "secret"},
+            None,
+            {"remote": "false"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_cleans_untracked_workflow_folder_and_gzips_each_bed(tmp_path):
+    workflow_dir = tmp_path / "workflow23"
+    workflow_dir.mkdir()
+    work_dir = workflow_dir / "work"
+    work_dir.mkdir()
+    (work_dir / "trace.txt").write_text("ok", encoding="utf-8")
+    dor_dir = workflow_dir / "dor-scratch"
+    dor_dir.mkdir()
+    (dor_dir / "report.tsv").write_text("data", encoding="utf-8")
+    bedmethyl_dir = workflow_dir / "bedMethyl"
+    bedmethyl_dir.mkdir()
+    (bedmethyl_dir / "a.bed").write_text("a", encoding="utf-8")
+    (bedmethyl_dir / "b.bed").write_text("b", encoding="utf-8")
+
+    message = await execute_workflow_command(
+        _FakeSession([]),
+        WorkflowCommand(action="clean", workflow_ref="workflow23"),
+        project_id="proj-1",
+        project_dir=str(tmp_path),
+    )
+
+    assert not work_dir.exists()
+    assert not dor_dir.exists()
+    assert not (bedmethyl_dir / "a.bed").exists()
+    assert not (bedmethyl_dir / "b.bed").exists()
+    assert (bedmethyl_dir / "a.bed.gz").exists()
+    assert (bedmethyl_dir / "b.bed.gz").exists()
+    assert "gzipped 2 `bedMethyl` BED files" in message
+    assert "untracked workflow folder" in message
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_clean_workflows_targets_tracked_and_untracked(monkeypatch, tmp_path):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-24",
+            workflow_alias="workflow24",
+            workflow_folder_name="workflow24",
+            workflow_display_name="sample-24",
+            sample_name="sample-24",
+            status="COMPLETED",
+            submitted_at=24,
+        )
+    ]
+    fake_client = _FakeAsyncClient(
+        post_response=_FakeResponse(status_code=200, payload={"message": "Cleaned `workflow24`."})
+    )
+    workflow_dir = tmp_path / "workflow25"
+    workflow_dir.mkdir()
+    (workflow_dir / "work").mkdir()
+
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_rest_base_url", lambda: "http://launchpad")
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_internal_headers", lambda: {"X-Internal-Secret": "secret"})
+    monkeypatch.setattr("cortex.workflow_commands.httpx.AsyncClient", lambda timeout: fake_client)
+
+    message = await execute_workflow_command(
+        _FakeSession(jobs),
+        WorkflowCommand(action="clean", workflow_ref="workflows", workflow_refs=["workflows"]),
+        project_id="proj-1",
+        project_dir=str(tmp_path),
+    )
+
+    assert "Workflow clean results:" in message
+    assert "workflow24" in message
+    assert "workflow25" in message
+    assert fake_client.calls[0][1] == "http://launchpad/jobs/run-24/clean"
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_clean_remote_workflows_targets_tracked_only(monkeypatch, tmp_path):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-27",
+            workflow_alias="workflow27",
+            workflow_folder_name="workflow27",
+            workflow_display_name="sample-27",
+            sample_name="sample-27",
+            status="COMPLETED",
+            submitted_at=27,
+        )
+    ]
+    fake_client = _FakeAsyncClient(
+        post_response=_FakeResponse(status_code=200, payload={"message": "Remotely cleaned `workflow27`."})
+    )
+    (tmp_path / "workflow28").mkdir()
+
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_rest_base_url", lambda: "http://launchpad")
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_internal_headers", lambda: {"X-Internal-Secret": "secret"})
+    monkeypatch.setattr("cortex.workflow_commands.httpx.AsyncClient", lambda timeout: fake_client)
+
+    message = await execute_workflow_command(
+        _FakeSession(jobs),
+        WorkflowCommand(action="clean", workflow_ref="workflows", workflow_refs=["workflows"], remote=True),
+        project_id="proj-1",
+        project_dir=str(tmp_path),
+    )
+
+    assert "workflow27" in message
+    assert "workflow28" not in message
+    assert fake_client.calls == [
+        (
+            "POST",
+            "http://launchpad/jobs/run-27/clean",
+            {"X-Internal-Secret": "secret"},
+            None,
+            {"remote": "true"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_cleans_remote_workflows(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-26",
+            workflow_alias="workflow26",
+            workflow_folder_name="workflow26",
+            workflow_display_name="sample-26",
+            sample_name="sample-26",
+            status="COMPLETED",
+            submitted_at=26,
+        )
+    ]
+    fake_client = _FakeAsyncClient(
+        post_response=_FakeResponse(status_code=200, payload={"message": "Remotely cleaned `workflow26`: removed `work` (3 files)."})
+    )
+
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_rest_base_url", lambda: "http://launchpad")
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_internal_headers", lambda: {"X-Internal-Secret": "secret"})
+    monkeypatch.setattr("cortex.workflow_commands.httpx.AsyncClient", lambda timeout: fake_client)
+
+    message = await execute_workflow_command(
+        _FakeSession(jobs),
+        WorkflowCommand(action="clean", workflow_ref="workflow26", remote=True),
+        project_id="proj-1",
+    )
+
+    assert "Remotely cleaned `workflow26`" in message
+    assert fake_client.calls == [
+        (
+            "POST",
+            "http://launchpad/jobs/run-26/clean",
+            {"X-Internal-Secret": "secret"},
+            None,
+            {"remote": "true"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_remote_clean_uses_extended_timeout(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-29",
+            workflow_alias="workflow29",
+            workflow_folder_name="workflow29",
+            workflow_display_name="sample-29",
+            sample_name="sample-29",
+            status="COMPLETED",
+            submitted_at=29,
+        )
+    ]
+    captured_timeouts = []
+    fake_client = _FakeAsyncClient(post_response=_FakeResponse(status_code=200, payload={"message": "Remotely cleaned `workflow29`."}))
+
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_rest_base_url", lambda: "http://launchpad")
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_internal_headers", lambda: {"X-Internal-Secret": "secret"})
+    monkeypatch.setattr("cortex.workflow_commands._WORKFLOW_CLEAN_TIMEOUT_SECONDS", 3600.0)
+    monkeypatch.setattr(
+        "cortex.workflow_commands.httpx.AsyncClient",
+        lambda timeout: (captured_timeouts.append(timeout) or fake_client),
+    )
+
+    message = await execute_workflow_command(
+        _FakeSession(jobs),
+        WorkflowCommand(action="clean", workflow_ref="workflow29", remote=True),
+        project_id="proj-1",
+    )
+
+    assert "workflow29" in message
+    assert captured_timeouts == [3600.0]
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_command_clean_records_tracking_metadata(monkeypatch):
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-30",
+            workflow_alias="workflow30",
+            workflow_folder_name="workflow30",
+            workflow_display_name="sample-30",
+            sample_name="sample-30",
+            output_directory="/tmp/workflow30",
+            status="COMPLETED",
+            submitted_at=30,
+        )
+    ]
+    fake_client = _FakeAsyncClient(
+        post_response=_FakeResponse(
+            status_code=200,
+            payload={
+                "status": "cleaning",
+                "run_stage": "CLEANING_REMOTE",
+                "message": "Started remote clean for `workflow30`. The workflow clean is running in the background; check job status or logs for completion.",
+            },
+        )
+    )
+    clean_tracking = []
+
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_rest_base_url", lambda: "http://launchpad")
+    monkeypatch.setattr("cortex.workflow_commands._launchpad_internal_headers", lambda: {"X-Internal-Secret": "secret"})
+    monkeypatch.setattr("cortex.workflow_commands.httpx.AsyncClient", lambda timeout: fake_client)
+
+    session = _FakeSession(jobs)
+    message = await execute_workflow_command(
+        session,
+        WorkflowCommand(action="clean", workflow_ref="workflow30", remote=True),
+        project_id="proj-1",
+        owner_id="user-1",
+        model="default",
+        clean_tracking=clean_tracking,
+    )
+
+    assert "Started remote clean for `workflow30`" in message
+    assert clean_tracking == [
+        {
+            "run_uuid": "run-30",
+            "workflow_ref": "workflow30",
+            "workflow_label": "workflow30",
+            "remote": True,
+            "message": "Started remote clean for `workflow30`. The workflow clean is running in the background; check job status or logs for completion.",
+        }
+    ]
 
 
 @pytest.mark.asyncio

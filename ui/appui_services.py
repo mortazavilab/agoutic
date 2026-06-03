@@ -351,6 +351,16 @@ def _block_requires_full_refresh(block: dict) -> bool:
             cached = (st.session_state.get(f"_transfer_state_{run_uuid}") or "").strip().lower()
             if cached in active_result_sync_states:
                 return True
+        clean_runs = payload.get("_clean_runs", []) if isinstance(payload.get("_clean_runs"), list) else []
+        for clean_run in clean_runs:
+            if not isinstance(clean_run, dict):
+                continue
+            run_uuid = str(clean_run.get("run_uuid") or "").strip()
+            if not run_uuid:
+                continue
+            clean_stage = str(st.session_state.get(f"_clean_stage_{run_uuid}") or "").strip().upper()
+            if clean_stage in {"CLEANING_LOCAL", "CLEANING_REMOTE"}:
+                return True
     return False
 
 

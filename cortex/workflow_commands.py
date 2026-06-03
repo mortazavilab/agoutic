@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import os
 import re
 import shlex
@@ -22,9 +23,14 @@ from cortex.models import Project, ProjectBlock, User
 from cortex.remote_orchestration import _launchpad_internal_headers, _launchpad_rest_base_url, _update_project_block_payload
 
 
+_WORKFLOW_FOLDER_RE = re.compile(r"^workflow\d+$", re.IGNORECASE)
+_WORKFLOW_COMMAND_TIMEOUT_SECONDS = float(os.getenv("LAUNCHPAD_WORKFLOW_COMMAND_TIMEOUT", "60"))
+_WORKFLOW_CLEAN_TIMEOUT_SECONDS = float(os.getenv("LAUNCHPAD_CLEAN_TIMEOUT", "3600"))
+
+
 @dataclass
 class WorkflowCommand:
-    action: Literal["rerun", "reanalyze", "delete", "rename", "use", "import", "sync", "cancel_sync", "list_tracked"]
+    action: Literal["rerun", "reanalyze", "delete", "rename", "use", "import", "sync", "cancel_sync", "list_tracked", "clean"]
     workflow_ref: str = ""
     workflow_refs: list[str] = field(default_factory=list)
     new_name: str = ""
@@ -37,11 +43,13 @@ class WorkflowCommand:
     mode: str = ""
     reference_genome: list[str] = field(default_factory=list)
     modifications: str | None = None
+    remote: bool = False
 
 
 _SLASH_RERUN = re.compile(r"^/rerun(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_REANALYZE = re.compile(r"^/(?:reanaly[sz]e|rerun-analysis|auto-analyze)(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_DELETE = re.compile(r"^/delete(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+_SLASH_CLEAN = re.compile(r"^/clean(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_RENAME = re.compile(r"^/rename\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _SLASH_USE = re.compile(r"^/use\s+(\S+)$", re.IGNORECASE)
 _SLASH_LIST_TRACKED = re.compile(r"^/(?:list-launchpad-workflows|list-tracked-workflows)$", re.IGNORECASE)
@@ -60,6 +68,7 @@ _NL_ANALYZE_WORKFLOW = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _NL_DELETE = re.compile(r"^(?:please\s+)?delete(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
+_NL_CLEAN = re.compile(r"^(?:please\s+)?clean(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
 _NL_RENAME = re.compile(r"^(?:please\s+)?rename\s+(\S+)\s+(?:to\s+)?(.+)$", re.IGNORECASE | re.DOTALL)
 _NL_USE = re.compile(
     r"^(?:please\s+)?(?:use|switch\s+to|set\s+(?:active\s+)?workflow(?:\s+to)?)\s+(\S+)$",
@@ -96,6 +105,22 @@ def _workflow_reference_candidates(job) -> list[str]:
         if folder_name:
             candidates.append(folder_name)
     return candidates
+
+
+def _list_project_jobs(session: Session, project_id: str) -> list:
+    return list(
+        session.execute(
+            select(LaunchpadDogmeJob)
+            .where(LaunchpadDogmeJob.project_id == project_id)
+            .order_by(desc(LaunchpadDogmeJob.submitted_at), desc(LaunchpadDogmeJob.run_uuid))
+        ).scalars().all()
+    )
+
+
+def _workflow_command_timeout_seconds(command: WorkflowCommand) -> float:
+    if command.action == "clean":
+        return _WORKFLOW_CLEAN_TIMEOUT_SECONDS
+    return _WORKFLOW_COMMAND_TIMEOUT_SECONDS
 
 
 def _workflow_path_tail(job) -> str | None:
@@ -233,6 +258,21 @@ def _command_with_refs(action: str, raw_refs: str | None = None, **kwargs) -> Wo
     )
 
 
+def _clean_command_with_refs(raw_refs: str | None) -> WorkflowCommand:
+    text = str(raw_refs or "").strip()
+    remote = False
+    if text.lower().startswith("remote "):
+        remote = True
+        text = text[7:].strip()
+    refs = _parse_workflow_ref_list(text)
+    return WorkflowCommand(
+        action="clean",
+        workflow_ref=refs[0] if refs else "",
+        workflow_refs=refs,
+        remote=remote,
+    )
+
+
 def _build_workflow_command_history(session: Session, project_id: str) -> tuple[list, list[dict]]:
     history_blocks = list(
         session.execute(
@@ -293,6 +333,7 @@ def _missing_workflow_target_message(action: str) -> str:
         "reanalyze": "Try `reanalyze`, `reanalyze workflow5`, or `reanalyze workflow5, workflow6`.",
         "rerun": "Try `rerun`, `rerun workflow5`, or `rerun workflow5, workflow6`.",
         "delete": "Try `delete active workflow`, `delete workflow5`, or `delete workflow5, workflow6`.",
+        "clean": "Try `clean workflow5`, `clean remote workflow5`, or `clean workflows`.",
         "sync": "Try `sync workflow`, `sync workflow5`, or `sync workflow5, workflow6`.",
         "cancel_sync": "Try `cancel sync workflow5`.",
     }
@@ -312,6 +353,7 @@ def _combine_workflow_messages(action: str, messages: list[str]) -> str:
         "reanalyze": "Manual workflow analysis results:",
         "rerun": "Workflow rerun results:",
         "delete": "Workflow delete results:",
+        "clean": "Workflow clean results:",
         "sync": "Workflow sync results:",
         "cancel_sync": "Workflow sync-cancel results:",
     }
@@ -321,13 +363,7 @@ def _combine_workflow_messages(action: str, messages: list[str]) -> str:
 
 
 def _format_tracked_workflows(session: Session, project_id: str) -> str:
-    jobs = list(
-        session.execute(
-            select(LaunchpadDogmeJob)
-            .where(LaunchpadDogmeJob.project_id == project_id)
-            .order_by(desc(LaunchpadDogmeJob.submitted_at), desc(LaunchpadDogmeJob.run_uuid))
-        ).scalars().all()
-    )
+    jobs = _list_project_jobs(session, project_id)
     tracked_jobs = [job for job in jobs if str(getattr(job, "status", "") or "").upper() != "DELETED"]
     if not tracked_jobs:
         return (
@@ -385,6 +421,158 @@ def _delete_untracked_workflow_dir(project_dir: str | None, workflow_ref: str) -
     )
 
 
+def _count_dir_files(path: Path) -> int:
+    file_count = 0
+    for _root, _dirs, files in os.walk(path):
+        file_count += len(files)
+    return file_count
+
+
+def _gzip_bedmethyl_bed_files(workflow_dir: Path) -> int:
+    bedmethyl_dir = workflow_dir / "bedMethyl"
+    if not bedmethyl_dir.exists() or not bedmethyl_dir.is_dir() or bedmethyl_dir.is_symlink():
+        return 0
+
+    gzipped_count = 0
+    for child in sorted(bedmethyl_dir.iterdir(), key=lambda item: item.name):
+        if child.is_symlink() or not child.is_file() or child.suffix.lower() != ".bed":
+            continue
+
+        gzip_path = child.with_name(f"{child.name}.gz")
+        tmp_gzip_path = child.with_name(f"{child.name}.gz.tmp")
+        with child.open("rb") as src, gzip.open(tmp_gzip_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        tmp_gzip_path.replace(gzip_path)
+        child.unlink()
+        gzipped_count += 1
+
+    return gzipped_count
+
+
+def _cleanup_local_workflow_dir(workflow_dir: Path) -> tuple[int, list[tuple[str, int]]]:
+    gzipped_count = _gzip_bedmethyl_bed_files(workflow_dir)
+    removed_dirs: list[tuple[str, int]] = []
+
+    for child in sorted(workflow_dir.iterdir(), key=lambda item: item.name):
+        if child.is_symlink() or not child.is_dir():
+            continue
+        if child.name != "work" and not child.name.startswith("dor"):
+            continue
+
+        file_count = _count_dir_files(child)
+        shutil.rmtree(child)
+        removed_dirs.append((child.name, file_count))
+
+    return gzipped_count, removed_dirs
+
+
+def _format_cleanup_message(workflow_name: str, *, gzipped_count: int, removed_dirs: list[tuple[str, int]], remote: bool, tracked: bool) -> str:
+    scope = "Remotely cleaned" if remote else "Cleaned"
+    if not tracked:
+        scope = f"{scope} untracked workflow folder"
+
+    details: list[str] = []
+    if gzipped_count:
+        noun = "file" if gzipped_count == 1 else "files"
+        details.append(f"gzipped {gzipped_count} `bedMethyl` BED {noun}")
+    if removed_dirs:
+        removed_text = ", ".join(f"`{name}` ({file_count} files)" for name, file_count in removed_dirs)
+        details.append(f"removed {removed_text}")
+
+    if not details:
+        return f"No cleanup targets were found for `{workflow_name}`."
+    return f"{scope} `{workflow_name}`: {'; '.join(details)}."
+
+
+def _clean_untracked_workflow_dir(project_dir: str | None, workflow_ref: str) -> str | None:
+    raw_project_dir = str(project_dir or "").strip()
+    ref = str(workflow_ref or "").strip().rstrip("/")
+    if not raw_project_dir or not ref or "/" in ref or ref in {".", ".."}:
+        return None
+    if not _WORKFLOW_FOLDER_RE.fullmatch(ref):
+        return None
+
+    project_root = Path(raw_project_dir).expanduser()
+    try:
+        resolved_root = project_root.resolve()
+    except OSError:
+        return None
+
+    candidate = (resolved_root / ref).resolve()
+    if candidate.parent != resolved_root:
+        return None
+    if not candidate.exists() or not candidate.is_dir() or candidate.is_symlink():
+        return None
+
+    gzipped_count, removed_dirs = _cleanup_local_workflow_dir(candidate)
+    return _format_cleanup_message(candidate.name, gzipped_count=gzipped_count, removed_dirs=removed_dirs, remote=False, tracked=False)
+
+
+def _iter_project_workflow_dirs(project_dir: str | None) -> list[Path]:
+    raw_project_dir = str(project_dir or "").strip()
+    if not raw_project_dir:
+        return []
+
+    try:
+        resolved_root = Path(raw_project_dir).expanduser().resolve()
+    except OSError:
+        return []
+
+    workflow_dirs: list[Path] = []
+    try:
+        for child in sorted(resolved_root.iterdir(), key=lambda item: item.name):
+            try:
+                resolved_child = child.resolve()
+            except OSError:
+                continue
+            if resolved_child.parent != resolved_root:
+                continue
+            if child.is_symlink() or not child.is_dir() or not _WORKFLOW_FOLDER_RE.fullmatch(child.name):
+                continue
+            workflow_dirs.append(child)
+    except OSError:
+        return []
+
+    return workflow_dirs
+
+
+def _expand_clean_target_refs(session: Session, project_id: str, refs: list[str], project_dir: str | None, *, remote: bool) -> list[str]:
+    expanded_refs: list[str] = []
+    seen_refs: set[str] = set()
+
+    def _append(ref: str) -> None:
+        normalized = str(ref or "").strip().lower()
+        if not normalized or normalized in seen_refs:
+            return
+        seen_refs.add(normalized)
+        expanded_refs.append(str(ref).strip())
+
+    wants_all = any(str(ref or "").strip().lower() == "workflows" for ref in refs)
+    if wants_all:
+        tracked_jobs = [job for job in _list_project_jobs(session, project_id) if str(getattr(job, "status", "") or "").upper() != "DELETED"]
+        tracked_names = {
+            str(candidate).strip().lower()
+            for job in tracked_jobs
+            for candidate in _workflow_reference_candidates(job)
+            if candidate
+        }
+        for job in tracked_jobs:
+            _append(_workflow_label(job))
+        if not remote:
+            for workflow_dir in _iter_project_workflow_dirs(project_dir):
+                if workflow_dir.name.lower() in tracked_names:
+                    continue
+                _append(workflow_dir.name)
+
+    for ref in refs:
+        normalized = str(ref or "").strip().lower()
+        if normalized == "workflows":
+            continue
+        _append(ref)
+
+    return expanded_refs
+
+
 def parse_workflow_command(message: str) -> WorkflowCommand | None:
     msg = str(message or "").strip()
     if not msg.startswith("/"):
@@ -413,6 +601,10 @@ def parse_workflow_command(message: str) -> WorkflowCommand | None:
     match = _SLASH_DELETE.match(msg)
     if match:
         return _command_with_refs("delete", match.group(1))
+
+    match = _SLASH_CLEAN.match(msg)
+    if match:
+        return _clean_command_with_refs(match.group(1))
 
     match = _SLASH_RENAME.match(msg)
     if match:
@@ -461,6 +653,13 @@ def detect_workflow_intent(message: str) -> WorkflowCommand | None:
             _raw_refs = None
         return _command_with_refs("delete", _raw_refs)
 
+    match = _NL_CLEAN.match(msg)
+    if match:
+        _raw_refs = match.group(1)
+        if _raw_refs and _raw_refs.lower().strip() in {"workflow", "active workflow", "the active workflow"}:
+            _raw_refs = None
+        return _clean_command_with_refs(_raw_refs)
+
     match = _NL_RENAME.match(msg)
     if match:
         return WorkflowCommand(
@@ -506,13 +705,7 @@ def resolve_workflow_reference(session: Session, project_id: str, workflow_ref: 
     if not normalized:
         return None
 
-    jobs = list(
-        session.execute(
-            select(LaunchpadDogmeJob)
-            .where(LaunchpadDogmeJob.project_id == project_id)
-            .order_by(desc(LaunchpadDogmeJob.submitted_at), desc(LaunchpadDogmeJob.run_uuid))
-        ).scalars().all()
-    )
+    jobs = _list_project_jobs(session, project_id)
     if not jobs:
         return None
 
@@ -541,12 +734,15 @@ async def execute_workflow_command(
     project_dir: str | None = None,
     owner_id: str | None = None,
     model: str | None = None,
+    clean_tracking: list[dict] | None = None,
 ) -> str:
     if command.action == "list_tracked":
         return _format_tracked_workflows(session, project_id)
 
     target_refs = _resolve_command_refs(session, project_id, command)
-    if command.action in {"rerun", "delete", "sync", "cancel_sync"} and not target_refs:
+    if command.action == "clean":
+        target_refs = _expand_clean_target_refs(session, project_id, target_refs, project_dir, remote=bool(command.remote))
+    if command.action in {"rerun", "delete", "sync", "cancel_sync", "clean"} and not target_refs:
         return _missing_workflow_target_message(command.action)
 
     job = None
@@ -558,7 +754,7 @@ async def execute_workflow_command(
     base_url = _launchpad_rest_base_url()
     headers = _launchpad_internal_headers()
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=_workflow_command_timeout_seconds(command)) as client:
         if command.action == "import":
             if not command.source_path:
                 return (
@@ -615,7 +811,7 @@ async def execute_workflow_command(
                 message = f"{message} {warning}"
             return message
 
-        if command.action in {"sync", "cancel_sync", "rerun", "delete"}:
+        if command.action in {"sync", "cancel_sync", "rerun", "delete", "clean"}:
             messages: list[str] = []
             for workflow_ref in target_refs:
                 job = resolve_workflow_reference(session, project_id, workflow_ref)
@@ -624,8 +820,36 @@ async def execute_workflow_command(
                     if deleted_message is not None:
                         messages.append(deleted_message)
                         continue
+                if job is None and command.action == "clean" and not command.remote:
+                    cleaned_message = _clean_untracked_workflow_dir(project_dir, workflow_ref)
+                    if cleaned_message is not None:
+                        messages.append(cleaned_message)
+                        continue
                 if job is None:
                     messages.append(f"I couldn't find `{workflow_ref}` in this project.")
+                    continue
+
+                if command.action == "clean":
+                    resp = await client.post(
+                        f"{base_url}/jobs/{job.run_uuid}/clean",
+                        headers=headers,
+                        params={"remote": str(bool(command.remote)).lower()},
+                    )
+                    if resp.status_code >= 400:
+                        detail = _response_detail(resp)
+                        messages.append(f"Clean failed for `{workflow_ref}`: {detail}")
+                        continue
+                    payload = resp.json() or {}
+                    clean_message = payload.get("message") or f"Cleaned `{workflow_ref}`."
+                    _record_clean_tracking_entry(
+                        clean_tracking,
+                        job=job,
+                        workflow_ref=workflow_ref,
+                        payload=payload,
+                        remote=bool(command.remote),
+                        message=str(clean_message),
+                    )
+                    messages.append(clean_message)
                     continue
 
                 if command.action == "sync":
@@ -958,3 +1182,30 @@ def _register_imported_job_block(
     )
     if importing and run_uuid:
         asyncio.create_task(poll_job_status(project_id, block.id, run_uuid))
+
+
+def _record_clean_tracking_entry(
+    clean_tracking: list[dict] | None,
+    *,
+    job,
+    workflow_ref: str,
+    payload: dict,
+    remote: bool,
+    message: str,
+) -> None:
+    if clean_tracking is None:
+        return
+    if str(payload.get("status") or "").strip().lower() != "cleaning":
+        return
+    run_uuid = str(getattr(job, "run_uuid", "") or "").strip()
+    if not run_uuid:
+        return
+    clean_tracking.append(
+        {
+            "run_uuid": run_uuid,
+            "workflow_ref": workflow_ref,
+            "workflow_label": _workflow_label(job),
+            "remote": bool(remote),
+            "message": message,
+        }
+    )

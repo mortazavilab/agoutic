@@ -113,6 +113,7 @@ _COMMAND_CATALOG: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("/reanalyze [workflow[, workflow2, ...]]", "rerun post-run analysis for one or more workflows"),
             ("/rerun [workflow[, workflow2, ...]]", "rerun one or more workflows"),
             ("/delete [workflow[, workflow2, ...]]", "delete one or more workflows"),
+            ("/clean [remote] [workflow[, workflow2, ...]]", "gzip loose bedMethyl BEDs individually and remove work/dor* folders for one or more workflows"),
             ("/sync-workflow [workflow[, workflow2, ...]]", "retry or resume remote/imported result sync"),
             ("/cancel-sync <workflow[, workflow2, ...]>", "stop an active copy-back"),
             ("/rename <workflow> <new_name>", "rename a workflow"),
@@ -528,6 +529,22 @@ _COMMAND_GUIDES: dict[str, HelpTopic] = {
         related_skills=("remote_execution",),
         internal_steps=("Query imported workflow rows across accessible projects and render a compact table.",),
     ),
+    "clean": HelpTopic(
+        title="/clean",
+        summary="Use /clean to preserve each workflow folder while gzipping loose `bedMethyl/*.bed` files one by one and removing `work/` plus immediate-child `dor*` directories.",
+        what_to_provide=(
+            "One or more workflow references, or use `workflows` to target all tracked and untracked workflow folders in the active project.",
+            "Add `remote` immediately after `/clean` when you want the cleanup to run on the remote workflow directory instead of locally.",
+        ),
+        example_prompts=("/clean workflow12", "/clean workflow7 workflow8", "/clean remote workflow12", "/clean workflows"),
+        slash_commands=("/clean [remote] [workflow[, workflow2, ...]]", "/help /clean", "/list workflows"),
+        related_skills=("remote_execution", "analyze_job_results"),
+        internal_steps=(
+            "Resolve the workflow references against tracked jobs and, for `workflows`, any untracked immediate-child `workflow*` folders in the current project.",
+            "Gzip each loose `bedMethyl/*.bed` file individually, then remove `work/` and immediate-child `dor*` directories while keeping the workflow root and `bedMethyl/`.",
+            "For `remote` cleanup, require a remote-capable workflow and return a clear message if remote metadata is unavailable.",
+        ),
+    ),
     "sync-workflow": HelpTopic(
         title="/sync-workflow",
         summary="Use /sync-workflow to retry or continue syncing results for a remote or imported workflow that is already known to AGOUTIC.",
@@ -901,6 +918,8 @@ def _resolve_command_key(topic_ref: str) -> str | None:
         return "list-staged"
     if "/list imported" in raw or normalized.startswith("list imported"):
         return "list-imported"
+    if raw.startswith("/clean") or (explicit_command and normalized.startswith("clean ")) or normalized == "clean":
+        return "clean"
     if "/sync-workflow" in raw or (explicit_command and normalized.startswith("sync workflow")):
         return "sync-workflow"
     if "/read-file" in raw or (explicit_command and normalized.startswith("read file")):

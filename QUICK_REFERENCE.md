@@ -193,11 +193,14 @@ Prompt-coach coverage currently includes slash commands, skills, workflow import
 | `/rerun` | `/rerun workflow7` | Rerun the matching workflow/job in the current project |
 | `/rename` | `/rename workflow7 treated-r1` | Rename the matching workflow/job |
 | `/delete` | `/delete workflow7` | Delete the matching workflow/job |
+| `/clean` | `/clean workflow7` | Gzip each loose `bedMethyl/*.bed` file individually and remove `work/` plus immediate-child `dor*` folders while keeping the workflow folder |
 | `/list-launchpad-workflows` | `/list-launchpad-workflows` | List workflows that are currently tracked in Launchpad for the active project |
 | `/import-workflow` | `/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote` | Import an existing local or remote Dogme workflow into the current project as the next `workflowN`; metadata is inferred from the workflow `.config` files |
 | `/sync-workflow` | `/sync-workflow workflow12` | Retry or continue syncing outputs for a remote or imported workflow |
 
 Workflow references can match a workflow folder, workflow alias, workflow display name, or sample name.
+
+`/clean workflowN` and `/clean workflow7 workflow8` accept the same comma- or space-separated workflow references as the other workflow commands. Use `/clean workflows` to target all tracked Launchpad workflows plus any untracked immediate-child `workflow*` folders in the active project. Use `/clean remote workflowN` when you want the same cleanup performed against the remote workflow directory instead of the local copy.
 
 `/delete workflowN` can also remove an untracked on-disk `workflow*` folder when it exists as an immediate child of the current project root but has no Launchpad job row.
 

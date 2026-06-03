@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Release:** 3.7.0
+**Release:** 3.7.1
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -359,7 +359,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   AGOUTIC System v3.7.0                     │
+│                   AGOUTIC System v3.7.1                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -1010,19 +1010,9 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.7.0 — workflow-aware VCF haplotyping for DNA/RNA/cDNA, `/haplotype` plus natural-language routing, live haplotype script progress, and refreshed user help/tutorial surfaces now ship together in the current AGOUTIC release
+- **Release**: 3.7.1 — workflow cleanup now supports local and remote `clean` commands, `clean workflows`, and per-file `bedMethyl/*.bed` gzip preservation, while deterministic `/list files` prefers tracked local workflow directories after remote runs and the shipped help surfaces document the new cleanup flow
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
 - **Nextflow**: >= 23.0
 - **Status**: Active Development
-
-## 🗓️ Development Timeline
-
-- complete: Core infrastructure, dual interface, MCP integration
-- complete: Web UI job monitoring, approval gates, project management
-- complete: Plan-execute-observe-replan, gene annotation, expanded templates
-- complete: Centralized DB, Alembic migrations, enrichment tools in Analyzer
-- complete: Cortex modularisation and DE adapter integration
-- current: Manifest-driven planning, workflow-local annotation, overlap workflows, and remote execution hardening
-- next: Production deployment preparation

@@ -716,6 +716,38 @@ def render_block_part1(
                     else:
                         st.error("❌ Sync failed. You can retry with **sync results locally with force**.")
 
+            _clean_runs = content.get("_clean_runs") if isinstance(content.get("_clean_runs"), list) else []
+            if _clean_runs:
+                st.divider()
+                st.markdown("**Workflow Clean Status**")
+                for _clean_idx, _clean_run in enumerate(_clean_runs, start=1):
+                    if not isinstance(_clean_run, dict):
+                        continue
+                    _clean_run_uuid = str(_clean_run.get("run_uuid") or "").strip()
+                    _clean_label = str(
+                        _clean_run.get("workflow_ref")
+                        or _clean_run.get("workflow_label")
+                        or _clean_run_uuid
+                        or f"workflow {_clean_idx}"
+                    ).strip()
+                    _clean_message = str(_clean_run.get("message") or "").strip()
+                    _clean_stage = ""
+                    if _clean_run_uuid:
+                        _clean_status, _ = get_cached_job_status(_clean_run_uuid)
+                        if isinstance(_clean_status, dict):
+                            _clean_stage = str(_clean_status.get("run_stage") or "").strip().upper()
+                            if _clean_stage:
+                                st.session_state[f"_clean_stage_{_clean_run_uuid}"] = _clean_stage
+                            _clean_message = str(_clean_status.get("message") or _clean_message).strip()
+                    if _clean_stage in {"CLEANED_LOCAL", "CLEANED_REMOTE"}:
+                        st.success(f"✅ `{_clean_label}` — {_clean_message or _clean_stage.replace('_', ' ').title()}")
+                    elif _clean_stage == "CLEAN_FAILED":
+                        st.error(f"❌ `{_clean_label}` — {_clean_message or 'Workflow clean failed.'}")
+                    elif _clean_stage in {"CLEANING_LOCAL", "CLEANING_REMOTE"}:
+                        st.info(f"⏳ `{_clean_label}` — {_clean_message or _clean_stage.replace('_', ' ').title()}")
+                    else:
+                        st.caption(f"`{_clean_label}` — {_clean_message or 'Workflow clean started.'}")
+
             _all_blocks = st.session_state.get("blocks", [])
             _related_workflow = _find_related_workflow_plan(block, _all_blocks)
             _workflow_highlights = _workflow_highlight_steps(_related_workflow)

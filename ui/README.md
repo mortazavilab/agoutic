@@ -1,6 +1,6 @@
 # AGOUTIC UI
 
-**Release:** 3.7.0
+**Release:** 3.7.1
 **Status:** Active Development
 
 ## Overview

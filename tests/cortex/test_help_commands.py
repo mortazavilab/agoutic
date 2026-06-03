@@ -64,6 +64,12 @@ class TestResolveHelpTopic:
         assert topic.kind == "command"
         assert topic.key == "list-files"
 
+    def test_resolve_clean_slash_command(self):
+        topic = resolve_help_topic("/clean")
+
+        assert topic.kind == "command"
+        assert topic.key == "clean"
+
     def test_resolve_skill_topic(self):
         topic = resolve_help_topic("remote execution skill")
 
@@ -180,3 +186,8 @@ class TestRenderSlashCommandsMarkdown:
         markdown = render_slash_commands_markdown()
 
         assert "/haplotype <DNA|RNA|cDNA> <workflow> [vcf]" in markdown
+
+    def test_slash_catalog_mentions_clean_command(self):
+        markdown = render_slash_commands_markdown()
+
+        assert "/clean [remote] [workflow[, workflow2, ...]]" in markdown
