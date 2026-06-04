@@ -50,7 +50,12 @@ def _build_reconcile_bams_context(summary_data: dict) -> str:
     workflow_summary = summary_data.get("workflow_summary") or {}
     metadata = workflow_summary.get("metadata") or {}
     artifacts = workflow_summary.get("artifacts") or {}
+    parsed_reports = summary_data.get("parsed_reports") or {}
     warnings = summary_data.get("warnings") or []
+
+    transcript_category_counts = metadata.get("transcript_category_counts") or {}
+    novelty_category_totals = metadata.get("novelty_category_totals") or {}
+    novel_model_counts_after_filtering = metadata.get("novel_model_counts_after_filtering") or {}
 
     parts = [
         "## Workflow Summary\n"
@@ -58,6 +63,71 @@ def _build_reconcile_bams_context(summary_data: dict) -> str:
         f"Input BAM count: {metadata.get('input_bam_count') or 0}\n"
         f"Reference: {metadata.get('reference') or 'mixed or unknown'}"
     ]
+
+    if transcript_category_counts:
+        total_isoforms = sum(int(value or 0) for value in transcript_category_counts.values())
+        parts.append(
+            "\n## Isoform Summary\n"
+            f"Total transcript models / isoforms: {total_isoforms}\n"
+            + "\n".join(
+                f"- {label}: {count}"
+                for label, count in sorted(transcript_category_counts.items())
+            )
+        )
+
+    abundance_gene_count = metadata.get("gene_count")
+    abundance_isoform_count = metadata.get("isoform_count")
+    abundance_transcript_novelty_counts = metadata.get("abundance_transcript_novelty_counts") or {}
+    if abundance_gene_count is not None or abundance_isoform_count is not None:
+        parts.append("\n## Reconciled Output Counts")
+        if abundance_gene_count is not None:
+            parts.append(f"- Genes in abundance table: {abundance_gene_count}")
+        if abundance_isoform_count is not None:
+            parts.append(f"- Isoforms in abundance table: {abundance_isoform_count}")
+        for label, count in sorted(abundance_transcript_novelty_counts.items()):
+            parts.append(f"- Abundance table {label} isoforms: {count}")
+
+    gene_lines = []
+    if metadata.get("novel_gene_count") is not None:
+        gene_lines.append(f"- Novel genes: {metadata['novel_gene_count']}")
+    if metadata.get("novel_transcript_count") is not None:
+        gene_lines.append(f"- Novel isoforms: {metadata['novel_transcript_count']}")
+    if metadata.get("solo_transcript_count") is not None:
+        gene_lines.append(f"- Single-read solo transcripts: {metadata['solo_transcript_count']}")
+    if metadata.get("strand_consolidated_count"):
+        gene_lines.append(f"- Strand-corrected models consolidated: {metadata['strand_consolidated_count']}")
+    if gene_lines:
+        parts.append("\n## Gene and Isoform Counts\n" + "\n".join(gene_lines))
+
+    if novelty_category_totals:
+        parts.append("\n## Novelty Read Totals Across Samples")
+        for label, count in sorted(novelty_category_totals.items()):
+            parts.append(f"- {label}: {count}")
+
+    top_novelty_samples = metadata.get("top_novelty_samples") or []
+    if top_novelty_samples:
+        parts.append("\n## Top Samples by Reconciled Read Count")
+        for item in top_novelty_samples:
+            parts.append(
+                f"- {item.get('sample')}: {item.get('total_reads')} total reads; "
+                f"dominant class {item.get('dominant_category') or 'unknown'}"
+            )
+
+    if novel_model_counts_after_filtering:
+        parts.append("\n## Novel Model Types After Filtering")
+        if metadata.get("total_novel_after_filtering") is not None:
+            parts.append(f"- Total novel isoforms after filtering: {metadata['total_novel_after_filtering']}")
+        for label, count in sorted(novel_model_counts_after_filtering.items()):
+            parts.append(f"- {label}: {count}")
+
+    if metadata.get("filter_min_tpm") is not None:
+        parts.append(
+            "\n## Filtering\n"
+            f"- Filter scope: {metadata.get('filter_scope') or 'unknown'} transcripts\n"
+            f"- min_TPM: {metadata.get('filter_min_tpm')} in >= {metadata.get('filter_min_samples') or 0} samples\n"
+            f"- Removed novel isoforms: {metadata.get('filtered_novel_removed') or 0}\n"
+            f"- Remaining total transcripts: {metadata.get('filtered_remaining_total') or 0}"
+        )
 
     references = metadata.get("references") or []
     if references:
@@ -72,6 +142,8 @@ def _build_reconcile_bams_context(summary_data: dict) -> str:
         for label, title in (
             ("inputs_manifest", "Inputs manifest"),
             ("reconciled_bam", "Reconciled BAM outputs"),
+            ("summary_report", "Reconciled summary report"),
+            ("novelty_csv", "Novelty-by-sample CSV"),
             ("bam_index", "BAM indexes"),
             ("annotation_gtf", "Annotation GTF"),
             ("tsv_outputs", "TSV outputs"),
@@ -82,6 +154,11 @@ def _build_reconcile_bams_context(summary_data: dict) -> str:
                 f"- {title}: {_format_presence_label(bool(artifact_data.get('present')))}"
                 f"{_artifact_matches(artifact_data)}"
             )
+
+    reconciled_summary_text = str(parsed_reports.get("reconciled_summary") or "").strip()
+    if reconciled_summary_text:
+        preview_lines = reconciled_summary_text.splitlines()[:16]
+        parts.append("\n## Reconciled Summary Report Preview\n" + "\n".join(preview_lines))
 
     if warnings:
         parts.append("\n## Warnings")
@@ -262,11 +339,43 @@ def _build_reconcile_bams_static_summary(sample_name: str, summary_data: dict, w
         f"- **Reference:** {metadata.get('reference') or 'mixed or unknown'}\n"
     )
 
+    transcript_category_counts = metadata.get("transcript_category_counts") or {}
+    if transcript_category_counts:
+        total_isoforms = sum(int(value or 0) for value in transcript_category_counts.values())
+        md += f"- **Total isoforms / transcript models:** {total_isoforms}\n"
+        md += "- **Isoform classes:** " + ", ".join(
+            f"{label}={count}" for label, count in sorted(transcript_category_counts.items())
+        ) + "\n"
+
+    if metadata.get("gene_count") is not None:
+        md += f"- **Genes in abundance table:** {metadata.get('gene_count')}\n"
+    if metadata.get("isoform_count") is not None:
+        md += f"- **Isoforms in abundance table:** {metadata.get('isoform_count')}\n"
+
+    if metadata.get("novel_gene_count") is not None:
+        md += f"- **Novel genes:** {metadata.get('novel_gene_count')}\n"
+    if metadata.get("novel_transcript_count") is not None:
+        md += f"- **Novel isoforms:** {metadata.get('novel_transcript_count')}\n"
+
+    novelty_category_totals = metadata.get("novelty_category_totals") or {}
+    if novelty_category_totals:
+        md += "- **Novelty read totals:** " + ", ".join(
+            f"{label}={count}" for label, count in sorted(novelty_category_totals.items())
+        ) + "\n"
+
+    novel_model_counts_after_filtering = metadata.get("novel_model_counts_after_filtering") or {}
+    if novel_model_counts_after_filtering:
+        md += "- **Novel model types after filtering:** " + ", ".join(
+            f"{label}={count}" for label, count in sorted(novel_model_counts_after_filtering.items())
+        ) + "\n"
+
     if artifacts:
         md += "\n**Artifacts**\n"
         for label, title in (
             ("inputs_manifest", "Inputs manifest"),
             ("reconciled_bam", "Reconciled BAM outputs"),
+            ("summary_report", "Reconciled summary report"),
+            ("novelty_csv", "Novelty-by-sample CSV"),
             ("bam_index", "BAM indexes"),
             ("annotation_gtf", "Annotation GTF"),
             ("tsv_outputs", "TSV outputs"),

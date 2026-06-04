@@ -150,14 +150,43 @@ def _job_work_directory(job) -> str:
     return ""
 
 
+def _work_dir_has_result_artifacts(work_dir: str) -> bool:
+    raw_work_dir = str(work_dir or "").strip()
+    if not raw_work_dir:
+        return False
+
+    try:
+        root = Path(raw_work_dir)
+    except Exception:
+        return False
+
+    if not root.is_dir():
+        return False
+
+    try:
+        for child in root.iterdir():
+            name = child.name
+            if name == "work" or name.startswith("dor"):
+                continue
+            return True
+    except OSError:
+        return False
+
+    return False
+
+
 def _job_results_ready(job) -> bool:
     status = str(getattr(job, "status", "") or "").upper()
-    if status != "COMPLETED":
-        return False
-    result_destination = str(getattr(job, "result_destination", "") or "").strip().lower()
-    if result_destination not in {"local", "both"}:
-        return True
-    return str(getattr(job, "transfer_state", "") or "") == "outputs_downloaded"
+    if status == "COMPLETED":
+        result_destination = str(getattr(job, "result_destination", "") or "").strip().lower()
+        if result_destination not in {"local", "both"}:
+            return True
+        return str(getattr(job, "transfer_state", "") or "") == "outputs_downloaded"
+
+    if status in {"FAILED", "CANCELLED", "ERROR"}:
+        return _work_dir_has_result_artifacts(_job_work_directory(job))
+
+    return False
 
 
 def _apply_result_sync_status_update(
@@ -976,7 +1005,7 @@ async def execute_manual_workflow_analysis(
                 "mode": None,
                 "model": model or "default",
                 "work_directory": untracked_work_dir,
-                "workflow_key": "dogme",
+                "workflow_key": "",
             },
             owner_id,
             persist_request_message=False,
@@ -1002,7 +1031,7 @@ async def execute_manual_workflow_analysis(
             "mode": str(getattr(job, "mode", "") or "DNA").strip() or "DNA",
             "model": model or "default",
             "work_directory": _job_work_directory(job),
-            "workflow_key": str(getattr(job, "workflow_key", "") or "dogme").strip() or "dogme",
+            "workflow_key": str(getattr(job, "workflow_key", "") or "").strip(),
         },
         owner_id,
         persist_request_message=False,

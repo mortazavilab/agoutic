@@ -5203,12 +5203,27 @@ class TestAutoTriggerAnalysis:
         mock_mcp.call_tool = AsyncMock(return_value={
             "workflow_key": "reconcile_bams",
             "status": "COMPLETED",
+            "parsed_reports": {
+                "reconciled_summary": "reconcileBams.py version test\n=== Summary of Findings ===\n  - Known transcripts: 36181\n  - Nic transcripts: 13609\n  - Nnc transcripts: 19267"
+            },
             "workflow_summary": {
-                "metadata": {"input_bam_count": 2, "reference": "GRCh38", "samples": ["S1", "S2"]},
+                "metadata": {
+                    "input_bam_count": 2,
+                    "reference": "GRCh38",
+                    "samples": ["S1", "S2"],
+                    "gene_count": 12034,
+                    "isoform_count": 67166,
+                    "transcript_category_counts": {"KNOWN": 36181, "NIC": 13609, "NNC": 19267},
+                    "novel_gene_count": 145,
+                    "novel_transcript_count": 33021,
+                    "total_novel_after_filtering": 4108,
+                    "novel_model_counts_after_filtering": {"NIC": 1559, "NNC": 2425, "ANTISENSE": 94, "INTERGENIC": 30},
+                },
                 "artifacts": {
                     "inputs_manifest": {"present": True, "matches": ["output/reconciled.inputs.tsv"]},
                     "reconciled_bam": {"present": True, "matches": ["reconciled.bam"]},
                     "annotation_gtf": {"present": True, "matches": ["annotation.gtf"]},
+                    "summary_report": {"present": True, "matches": ["reconciled_summary.txt"]},
                 },
             },
             "warnings": [],
@@ -5243,7 +5258,51 @@ class TestAutoTriggerAnalysis:
         assert "Reconcile Analysis: reconciled" in payload.get("markdown", "")
         prompt = mock_engine.think.call_args.args[0]
         assert "reconcile_bams workflow" in prompt
-        assert "Input Manifest Summary" in prompt
+        assert "Transcript and Gene Summary" in prompt
+        assert "you must explicitly summarize them with numbers" in prompt
+        assert "Do not invent standard Dogme RNA outputs or mention bedMethyl" in prompt
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_unknown_workflow_key_does_not_force_dogme_rna_skill(self, session_factory, seed_data):
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {},
+                "artifacts": {},
+            },
+            "warnings": [],
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(return_value=(
+            "The workflow completed.",
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        ))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-unknown",
+                {"sample_name": "reconciled", "mode": "RNA", "workflow_key": "", "model": "default", "work_directory": "/work/workflow11"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        latest = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()[-1]
+        payload = get_block_payload(latest)
+        assert payload.get("skill") == "analyze_job_results"
+        prompt = mock_engine.think.call_args.args[0]
+        assert "A Dogme RNA job" not in prompt
         sess.close()
 
     @pytest.mark.asyncio
@@ -5433,15 +5492,32 @@ class TestBuildAutoAnalysisContext:
     def test_reconcile_context_uses_workflow_summary(self):
         summary = {
             "workflow_key": "reconcile_bams",
+            "parsed_reports": {
+                "reconciled_summary": "reconcileBams.py version test\n=== Summary of Findings ===\n  - Known transcripts: 120"
+            },
             "workflow_summary": {
-                "metadata": {"input_bam_count": 2, "reference": "GRCh38", "samples": ["S1", "S2"]},
-                "artifacts": {"reconciled_bam": {"present": True, "matches": ["reconciled.bam"]}},
+                "metadata": {
+                    "input_bam_count": 2,
+                    "reference": "GRCh38",
+                    "samples": ["S1", "S2"],
+                    "transcript_category_counts": {"KNOWN": 120, "NIC": 18},
+                    "novel_gene_count": 14,
+                    "novel_transcript_count": 25,
+                    "novelty_category_totals": {"KNOWN": 1900, "NIC": 230},
+                },
+                "artifacts": {
+                    "reconciled_bam": {"present": True, "matches": ["reconciled.bam"]},
+                    "summary_report": {"present": True, "matches": ["reconciled_summary.txt"]},
+                },
             },
         }
         result = _build_auto_analysis_context("s1", "DNA", "uuid", summary, {})
         assert "reconcile_bams" in result
         assert "Input BAM count: 2" in result
         assert "reconciled.bam" in result
+        assert "KNOWN: 120" in result
+        assert "Novel genes: 14" in result
+        assert "reconciled_summary.txt" in result
 
     def test_haplotype_context_uses_workflow_summary(self):
         summary = {
@@ -5499,13 +5575,22 @@ class TestBuildStaticAnalysisSummary:
             "workflow_key": "reconcile_bams",
             "status": "COMPLETED",
             "workflow_summary": {
-                "metadata": {"input_bam_count": 2, "reference": "GRCh38"},
-                "artifacts": {"inputs_manifest": {"present": True}},
+                "metadata": {
+                    "input_bam_count": 2,
+                    "reference": "GRCh38",
+                    "transcript_category_counts": {"KNOWN": 120, "NIC": 18},
+                    "novel_gene_count": 14,
+                    "novel_transcript_count": 25,
+                    "novelty_category_totals": {"KNOWN": 1900, "NIC": 230},
+                },
+                "artifacts": {"inputs_manifest": {"present": True}, "summary_report": {"present": True}},
             },
         }
         result = _build_static_analysis_summary("sample1", "DNA", "uuid", summary, work_directory="/work/workflow11")
         assert "Reconcile Summary: sample1" in result
         assert "GRCh38" in result
+        assert "KNOWN=120" in result
+        assert "Novel genes" in result
 
     def test_haplotype_static_summary(self):
         summary = {

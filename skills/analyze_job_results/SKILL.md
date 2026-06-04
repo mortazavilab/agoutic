@@ -32,7 +32,7 @@ If a workflow is marked `FAILED` or `CANCELLED` but its result files have been s
 
 ### ❌ This Skill Does NOT Handle:
 
-- **Detailed Dogme mode-specific interpretation** → Routes to mode-specific skills
+- **Detailed Dogme mode-specific interpretation** → Routes to mode-specific skills only after `workflow_key=dogme` is confirmed
   ### BAM Detail Fallback (Supported Tools Only)
 
   If the user asks for BAM details (header, mapped/unmapped, alignment summary):
@@ -44,9 +44,9 @@ If a workflow is marked `FAILED` or `CANCELLED` but its result files have been s
 
   **Never call unsupported tools such as `show_bam_details`.**
 
-  - DNA results → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
-  - RNA results → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
-  - cDNA results → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
+  - Dogme DNA results → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
+  - Dogme RNA results → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
+  - Dogme cDNA results → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
 
 - **Submitting new jobs** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
   - "Run analysis on my data"

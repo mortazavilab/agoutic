@@ -7,6 +7,9 @@
 ### Bug Fixes
 
 - **Automatic post-run analysis now routes `reconcile_bams` and `haplotype_with_vcf` workflows by `workflow_key` instead of incorrectly forcing them through Dogme DNA/RNA/cDNA skill selection; Analyzer also infers those workflow families from their on-disk layouts when older rows still report `dogme`, and `get_analysis_summary(work_dir=...)` now supports planner-owned differential-expression workflow folders that have no Launchpad job row.**
+- **Manual workflow analysis now allows terminal failed jobs to be analyzed if the local workflow directory contains result artifacts, preventing "only available after the workflow finishes" errors for jobs that failed but produced partial outputs.**
+- **Natural-language file listing now recognizes bare workflow targets (e.g., `list files workflow4`) as explicit targets, preventing them from drifting into the currently active workflow context.**
+- **Analyzer MCP tool now exposes the full structured `AnalysisSummary` contract (including `workflow_key`, `parsed_reports`, and `workflow_summary`) to Cortex, ensuring that auto-analysis routing correctly identifies non-Dogme workflows even when tracked metadata is stale.**
 
 ### Documentation
 

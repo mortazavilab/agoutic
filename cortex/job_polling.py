@@ -29,8 +29,7 @@ _latest_job_status_by_run_uuid: dict[str, dict] = {}
 
 
 def _normalized_workflow_key(value: str | None) -> str:
-    normalized = str(value or "dogme").strip().lower()
-    return normalized or "dogme"
+    return str(value or "").strip().lower()
 
 
 def _job_status_has_useful_progress(status_data: dict | None) -> bool:
@@ -500,14 +499,16 @@ async def _auto_trigger_analysis(
             "CDNA": "run_dogme_cdna",
         }
         wf_pore_c_enabled = WF_PORE_C_ENABLED and workflow_key == "wf_pore_c"
-        workflow_family = workflow_key
+        workflow_family = workflow_key or ""
         if workflow_family == "wf_pore_c" and not wf_pore_c_enabled:
             workflow_family = "dogme"
 
         if workflow_family in {"reconcile_bams", "haplotype_with_vcf", "wf_pore_c"}:
             analysis_skill = "analyze_job_results"
-        else:
+        elif workflow_family == "dogme":
             analysis_skill = mode_skill_map.get(str(mode or "").upper(), "analyze_job_results")
+        else:
+            analysis_skill = "analyze_job_results"
 
         # 4. Build data context string for the LLM
         data_context = _build_auto_analysis_context(
@@ -546,17 +547,21 @@ async def _auto_trigger_analysis(
                     f"Work directory: {work_directory}\n\n"
                     f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
                     f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
-                    f"Use only the supplied analysis data, and prefer concrete artifact presence, manifest details, references, warnings, and filenames over generalities.\n\n"
+                    f"Use only the supplied analysis data, and prefer concrete artifact presence, manifest details, references, warnings, filenames, and numeric counts over generalities.\n"
+                    f"If reconciled_summary.txt metrics are present, you must explicitly summarize them with numbers: transcript / isoform classes such as KNOWN, ISM, NIC, NNC, ANTISENSE, INTERGENIC; novel gene count; novel transcript count; and post-filter totals when available.\n"
+                    f"If reconciled_novelty_by_sample.csv or reconciled_abundance.tsv metrics are present, use them to discuss sample-level novelty totals and the number of genes / isoforms in the reconciled output.\n"
+                    f"Do not invent standard Dogme RNA outputs or mention bedMethyl, modification calling, or Direct RNA modification files unless those artifacts are explicitly present in the supplied analysis data.\n\n"
                     f"Here is the analysis summary and key result data:\n\n"
                     f"{data_context}\n\n"
                     f"Write a structured markdown report with these sections when the data support them:\n"
                     f"1. Overall Assessment\n"
                     f"2. Reconcile Outputs\n"
-                    f"3. Input Manifest Summary\n"
-                    f"4. Warnings or Missing Outputs\n"
-                    f"5. Recommended Next Steps\n"
-                    f"6. Notable Output Files\n\n"
-                    f"Be explicit about how many BAMs were reconciled, whether annotation outputs are present, and whether the references or samples look mixed."
+                    f"3. Transcript and Gene Summary\n"
+                    f"4. Input Manifest Summary\n"
+                    f"5. Warnings or Missing Outputs\n"
+                    f"6. Recommended Next Steps\n"
+                    f"7. Notable Output Files\n\n"
+                    f"Be explicit about how many BAMs were reconciled, whether annotation outputs are present, whether the references or samples look mixed, and what the summary report says numerically about isoform classes and novel models."
                 )
             elif workflow_family == "haplotype_with_vcf":
                 user_prompt = (
@@ -575,6 +580,25 @@ async def _auto_trigger_analysis(
                     f"5. Recommended Next Steps\n"
                     f"6. Notable Output Files\n\n"
                     f"Be explicit about assignment labels, ambiguous BAM outputs, and which summary TSVs are available for follow-up interpretation."
+                )
+            elif analysis_skill == "analyze_job_results":
+                user_prompt = (
+                    f"A completed workflow for sample \"{sample_name}\" is ready for post-run analysis.\n"
+                    f"Work directory: {work_directory}\n\n"
+                    f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                    f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                    f"Use only the supplied analysis data, and prefer concrete metrics, artifact presence, warnings, and filenames over generalities.\n"
+                    f"Do not assume the workflow is Dogme, Direct RNA, DNA, or cDNA unless the supplied analysis data explicitly establishes that workflow family.\n\n"
+                    f"Here is the analysis summary and key result data:\n\n"
+                    f"{data_context}\n\n"
+                    f"Write a structured markdown report with these sections when the data support them:\n"
+                    f"1. Overall Assessment\n"
+                    f"2. Key Outputs\n"
+                    f"3. Important Metrics\n"
+                    f"4. Warnings or Missing Outputs\n"
+                    f"5. Recommended Next Steps\n"
+                    f"6. Notable Output Files\n\n"
+                    f"Be explicit about what is confirmed by the available files and what remains uncertain because the workflow family is not fully identified."
                 )
             else:
                 user_prompt = (
@@ -655,6 +679,18 @@ async def _auto_trigger_analysis(
                     f"- \"Show me the haplotype summary TSV\"\n"
                     f"- \"Summarize per-chromosome haplotype counts\"\n"
                     f"- \"Which BAMs were assigned ambiguously?\"\n"
+                )
+            elif analysis_skill == "analyze_job_results":
+                final_md = (
+                    f"### Workflow Results Analysis: {sample_name}\n"
+                    f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
+                    f"**Workflow key:** unknown &nbsp;|&nbsp; "
+                    f"**Status:** COMPLETED\n\n"
+                    f"{llm_md}\n\n"
+                    f"You can ask me to dive deeper, for example:\n"
+                    f"- \"Summarize the main report\"\n"
+                    f"- \"Which output files matter most?\"\n"
+                    f"- \"What is missing or uncertain here?\"\n"
                 )
             else:
                 final_md = (

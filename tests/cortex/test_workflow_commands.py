@@ -1168,7 +1168,7 @@ async def test_execute_manual_workflow_analysis_reuses_auto_trigger(monkeypatch)
             "mode": "DNA",
             "model": "gemma-test",
             "work_directory": "/data/proj/workflow12",
-            "workflow_key": "dogme",
+            "workflow_key": "",
         },
         "user-1",
         persist_request_message=False,
@@ -1242,7 +1242,7 @@ async def test_execute_manual_workflow_analysis_supports_untracked_workflow_dir(
             "mode": None,
             "model": "gemma-test",
             "work_directory": str(workflow_dir),
-            "workflow_key": "dogme",
+            "workflow_key": "",
         },
         "user-1",
         persist_request_message=False,
@@ -1280,6 +1280,45 @@ async def test_execute_manual_workflow_analysis_requires_ready_results(monkeypat
     assert agent_block is None
     assert "only available after the workflow finishes" in error
     mock_auto.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_manual_workflow_analysis_allows_failed_job_with_local_outputs(monkeypatch, tmp_path):
+    workflow_dir = tmp_path / "workflow4"
+    workflow_dir.mkdir()
+    (workflow_dir / "annot").mkdir()
+    (workflow_dir / "qc_summary.csv").write_text("metric,value\nreads,10\n", encoding="utf-8")
+
+    jobs = [
+        SimpleNamespace(
+            run_uuid="run-4",
+            workflow_alias="workflow4",
+            workflow_folder_name="workflow4",
+            workflow_display_name="sample-4",
+            sample_name="sample-4",
+            mode="RNA",
+            nextflow_work_dir=str(workflow_dir),
+            output_directory=str(workflow_dir),
+            status="FAILED",
+            submitted_at=4,
+        )
+    ]
+    sentinel_block = object()
+    mock_auto = AsyncMock(return_value=sentinel_block)
+
+    monkeypatch.setattr("cortex.workflow_commands._auto_trigger_analysis", mock_auto)
+
+    agent_block, error = await execute_manual_workflow_analysis(
+        _FakeSession(jobs),
+        WorkflowCommand(action="reanalyze", workflow_ref="workflow4"),
+        project_id="proj-1",
+        owner_id="user-1",
+        model="gemma-test",
+    )
+
+    assert agent_block is sentinel_block
+    assert error is None
+    mock_auto.assert_awaited_once()
 
 
 # ── Parse / detect "use" ──────────────────────────────────────────────────

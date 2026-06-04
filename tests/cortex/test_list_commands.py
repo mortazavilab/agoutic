@@ -84,6 +84,10 @@ class TestDetectListIntent:
         cmd = detect_list_intent("list files in workflow7/annot")
         assert cmd == ListCommand(action="files", target_ref="workflow7/annot")
 
+    def test_detect_files_with_bare_workflow_target(self):
+        cmd = detect_list_intent("list files workflow4")
+        assert cmd == ListCommand(action="files", target_ref="workflow4")
+
 
 @pytest.mark.asyncio
 async def test_execute_list_samples_renders_inventory_rows(monkeypatch):
@@ -312,6 +316,60 @@ async def test_execute_list_files_prefers_tracked_local_workflow_dir_over_remote
             {
                 "work_dir": "/media/backup_disk/agoutic_root/users/ali-mortazavi/testsl201/workflow1",
                 "max_depth": None,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_list_files_with_explicit_workflow_target_uses_named_workflow(monkeypatch):
+    fake_client = _FakeMCPClient(
+        [
+            {
+                "success": True,
+                "work_dir": "/tmp/proj/workflow4",
+                "file_count": 1,
+                "files": [
+                    {"path": "qc_summary.csv", "name": "qc_summary.csv", "size": 128, "modified_time": "2026-05-24T12:00:00Z"},
+                ],
+            }
+        ]
+    )
+    jobs = [
+        SimpleNamespace(
+            project_id="proj-1",
+            run_uuid="run-4",
+            workflow_alias="workflow4",
+            workflow_folder_name="workflow4",
+            workflow_display_name="sample-4",
+            sample_name="sample-4",
+            output_directory="/tmp/proj/workflow4",
+            nextflow_work_dir="/tmp/proj/workflow4",
+            remote_work_dir="/remote/proj/workflow4",
+            submitted_at=4,
+        )
+    ]
+
+    monkeypatch.setattr("cortex.list_commands.get_service_url", lambda _key: "http://analyzer")
+    monkeypatch.setattr("cortex.list_commands.MCPHttpClient", lambda name, base_url: fake_client)
+
+    markdown = await execute_list_command(
+        _FakeSession(jobs),
+        ListCommand(action="files", target_ref="workflow4"),
+        user_id="user-1",
+        project_id="proj-1",
+        project_dir="/tmp/proj",
+        history_blocks=_history_blocks(work_dir="/tmp/proj/workflow9"),
+    )
+
+    assert "Files under `/tmp/proj/workflow4` (1):" in markdown
+    assert "qc_summary.csv" in markdown
+    assert fake_client.calls == [
+        (
+            "list_job_files",
+            {
+                "work_dir": "/tmp/proj/workflow4",
+                "max_depth": 1,
             },
         )
     ]

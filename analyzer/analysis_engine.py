@@ -125,7 +125,7 @@ def _workflow_key_file_patterns(
         return patterns
 
     if workflow_key == "reconcile_bams":
-        return [".inputs.tsv", ".bam", ".bai", ".gtf", ".tsv", ".txt"]
+        return [".inputs.tsv", ".bam", ".bai", ".gtf", ".tsv", ".txt", "reconciled_summary.txt", "reconciled_novelty_by_sample.csv"]
 
     if workflow_key == "haplotype_with_vcf":
         return [".haplotyped.bam", ".bai", ".summary.tsv", ".chromosomes.tsv", ".genes.tsv", ".transcripts.tsv"]
@@ -434,6 +434,21 @@ def _infer_workflow_key_from_layout(
         if any(_file_info_matches_suffix(file_info, ".inputs.tsv") for file_info in all_files):
             return "reconcile_bams"
 
+    reconcile_summary_present = any(file_info.name == "reconciled_summary.txt" for file_info in all_files)
+    reconcile_novelty_present = any(file_info.name == "reconciled_novelty_by_sample.csv" for file_info in all_files)
+    reconcile_abundance_present = any(file_info.name == "reconciled_abundance.tsv" for file_info in all_files)
+    reconciled_bam_present = any(
+        file_info.name.lower().endswith(".reconciled.bam") or file_info.name.lower() == "reconciled.bam"
+        for file_info in all_files
+    )
+    reconcile_mapping_present = any(file_info.name.lower().endswith(".mapping.tsv") for file_info in all_files)
+    if (
+        (reconcile_summary_present and reconcile_novelty_present)
+        or (reconciled_bam_present and reconcile_abundance_present)
+        or (reconciled_bam_present and reconcile_mapping_present and reconcile_summary_present)
+    ):
+        return "reconcile_bams"
+
     if work_dir is not None and (work_dir / "de_inputs").is_dir() and (work_dir / "de_results").is_dir():
         has_de_results = any(
             file_info.path.startswith("de_results/") and (
@@ -661,6 +676,179 @@ def _parse_reconcile_manifest(work_dir: Optional[Path], manifest_file: FileInfo)
     }
 
 
+def _parse_reconcile_summary_report(report_path: Path) -> Dict[str, Any]:
+    summary = {
+        "report_text": "",
+        "transcript_category_counts": {},
+        "novel_gene_count": None,
+        "novel_transcript_count": None,
+        "solo_transcript_count": None,
+        "strand_consolidated_count": None,
+        "filter_scope": None,
+        "filter_min_tpm": None,
+        "filter_min_samples": None,
+        "filtered_novel_removed": None,
+        "filtered_remaining_total": None,
+        "novel_model_counts_after_filtering": {},
+        "total_novel_after_filtering": None,
+    }
+
+    try:
+        raw_text = report_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return summary
+
+    summary["report_text"] = raw_text
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        category_match = re.match(r"^-\s+(.+?)\s+transcripts:\s+(\d+)$", line, flags=re.IGNORECASE)
+        if category_match:
+            category_name = category_match.group(1).strip().upper().replace(" ", "_")
+            summary["transcript_category_counts"][category_name] = int(category_match.group(2))
+            continue
+
+        solo_match = re.match(r"^-\s+Single-read solo transcripts \(will be filtered\):\s+(\d+)$", line, flags=re.IGNORECASE)
+        if solo_match:
+            summary["solo_transcript_count"] = int(solo_match.group(1))
+            continue
+
+        novel_gene_match = re.match(r"^-\s+Number of novel genes .*?:\s+(\d+)$", line, flags=re.IGNORECASE)
+        if novel_gene_match:
+            summary["novel_gene_count"] = int(novel_gene_match.group(1))
+            continue
+
+        novel_tx_match = re.match(r"^-\s+Number of novel transcripts .*?:\s+(\d+)$", line, flags=re.IGNORECASE)
+        if novel_tx_match:
+            summary["novel_transcript_count"] = int(novel_tx_match.group(1))
+            continue
+
+        strand_match = re.match(r"^Consolidated\s+(\d+)\s+novel models by strand correction", line, flags=re.IGNORECASE)
+        if strand_match:
+            summary["strand_consolidated_count"] = int(strand_match.group(1))
+            continue
+
+        filter_match = re.match(
+            r"^Filtered\s+(all|novel)\s+transcripts\s+by\s+min_TPM\s+([0-9.]+)\s+in\s+>=\s+(\d+)\s+samples:\s+removed\s+(\d+)\s+novel transcripts,\s+remaining total\s+(\d+)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if filter_match:
+            summary["filter_scope"] = filter_match.group(1).lower()
+            summary["filter_min_tpm"] = _safe_float(filter_match.group(2))
+            summary["filter_min_samples"] = int(filter_match.group(3))
+            summary["filtered_novel_removed"] = int(filter_match.group(4))
+            summary["filtered_remaining_total"] = int(filter_match.group(5))
+            continue
+
+        total_novel_match = re.match(r"^Total novel transcripts \(after filtering\):\s+(\d+)$", line, flags=re.IGNORECASE)
+        if total_novel_match:
+            summary["total_novel_after_filtering"] = int(total_novel_match.group(1))
+            continue
+
+        novel_model_match = re.match(r"^-\s+([A-Za-z0-9_+-]+):\s+(\d+)$", line)
+        if novel_model_match:
+            category_name = novel_model_match.group(1).strip().upper()
+            summary["novel_model_counts_after_filtering"][category_name] = int(novel_model_match.group(2))
+
+    return summary
+
+
+def _summarize_reconcile_novelty_by_sample(novelty_preview: Dict[str, Any]) -> Dict[str, Any]:
+    columns = [str(column) for column in novelty_preview.get("columns", [])]
+    rows = novelty_preview.get("data", []) or []
+    category_columns = [column for column in columns if column.lower() != "sample"]
+    category_totals: Dict[str, int] = {column: 0 for column in category_columns}
+    top_samples: List[Dict[str, Any]] = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        total_reads = 0
+        dominant_category = None
+        dominant_count = -1
+        for category in category_columns:
+            count = _safe_int(row.get(category)) or 0
+            category_totals[category] += count
+            total_reads += count
+            if count > dominant_count:
+                dominant_category = category
+                dominant_count = count
+        sample_name = str(row.get("sample") or row.get("Sample") or "").strip()
+        if sample_name:
+            top_samples.append(
+                {
+                    "sample": sample_name,
+                    "total_reads": total_reads,
+                    "dominant_category": dominant_category,
+                    "dominant_count": max(dominant_count, 0),
+                }
+            )
+
+    top_samples.sort(key=lambda item: (-int(item.get("total_reads") or 0), str(item.get("sample") or "")))
+    return {
+        "sample_count": len(rows),
+        "categories": category_columns,
+        "category_totals": category_totals,
+        "top_samples": top_samples[:5],
+    }
+
+
+def _summarize_reconcile_abundance_table(work_dir: Optional[Path], abundance_file: FileInfo) -> Dict[str, Any]:
+    preview = _parse_delimited_preview(work_dir, abundance_file, max_rows=200)
+    full_path = (work_dir / abundance_file.path) if work_dir is not None else None
+    if work_dir is None or full_path is None or not full_path.is_file():
+        return {
+            "gene_count": None,
+            "isoform_count": None,
+            "gene_novelty_counts": {},
+            "transcript_novelty_counts": {},
+            "preview": preview,
+        }
+
+    gene_ids = set()
+    transcript_ids = set()
+    gene_novelty_counts: Dict[str, int] = {}
+    transcript_novelty_counts: Dict[str, int] = {}
+
+    try:
+        with full_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            for row in reader:
+                if not isinstance(row, dict):
+                    continue
+                gene_id = str(row.get("gene_ID") or row.get("gene_id") or "").strip()
+                transcript_id = str(row.get("transcript_ID") or row.get("transcript_id") or "").strip()
+                if gene_id:
+                    gene_ids.add(gene_id)
+                if transcript_id:
+                    transcript_ids.add(transcript_id)
+                gene_novelty = str(row.get("gene_novelty") or "").strip().upper()
+                transcript_novelty = str(row.get("transcript_novelty") or "").strip().upper()
+                if gene_novelty:
+                    gene_novelty_counts[gene_novelty] = gene_novelty_counts.get(gene_novelty, 0) + 1
+                if transcript_novelty:
+                    transcript_novelty_counts[transcript_novelty] = transcript_novelty_counts.get(transcript_novelty, 0) + 1
+    except Exception:
+        return {
+            "gene_count": None,
+            "isoform_count": None,
+            "gene_novelty_counts": {},
+            "transcript_novelty_counts": {},
+            "preview": preview,
+        }
+
+    return {
+        "gene_count": len(gene_ids),
+        "isoform_count": len(transcript_ids),
+        "gene_novelty_counts": gene_novelty_counts,
+        "transcript_novelty_counts": transcript_novelty_counts,
+        "preview": preview,
+    }
+
+
 def _parse_delimited_preview(work_dir: Optional[Path], file_info: FileInfo, max_rows: int = 50) -> Dict[str, Any]:
     if work_dir is None:
         return {"columns": [], "data": [], "total_rows": 0}
@@ -693,7 +881,7 @@ def _build_reconcile_bams_summary(
     *,
     work_dir: Optional[Path],
     all_file_summary: JobFileSummary,
-) -> tuple[Dict[str, Any], List[str]]:
+) -> tuple[Dict[str, Any], Dict[str, Any], List[str]]:
     all_files = _summary_files(all_file_summary)
     warnings: List[str] = []
 
@@ -701,8 +889,63 @@ def _build_reconcile_bams_summary(
     reconcile_bams = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".bam")]
     bam_indexes = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".bai")]
     annotation_gtfs = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".gtf", ".gtf.gz")]
+    summary_report = [file_info for file_info in all_files if file_info.name == "reconciled_summary.txt"]
+    novelty_csv = [file_info for file_info in all_files if file_info.name == "reconciled_novelty_by_sample.csv"]
+    abundance_tsv = [
+        file_info for file_info in all_files
+        if _file_info_matches_suffix(file_info, ".tsv") and "abundance" in file_info.name.lower()
+    ]
     tsv_outputs = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".tsv") and file_info not in manifest_files]
     txt_reports = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".txt")]
+
+    parsed_reports: Dict[str, Any] = {}
+    report_metrics = {
+        "report_text": "",
+        "transcript_category_counts": {},
+        "novel_gene_count": None,
+        "novel_transcript_count": None,
+        "solo_transcript_count": None,
+        "strand_consolidated_count": None,
+        "filter_scope": None,
+        "filter_min_tpm": None,
+        "filter_min_samples": None,
+        "filtered_novel_removed": None,
+        "filtered_remaining_total": None,
+        "novel_model_counts_after_filtering": {},
+        "total_novel_after_filtering": None,
+    }
+    if summary_report and work_dir:
+        report_path = work_dir / summary_report[0].path
+        if report_path.is_file():
+            try:
+                report_metrics = _parse_reconcile_summary_report(report_path)
+                parsed_reports["reconciled_summary"] = report_metrics.get("report_text") or ""
+            except Exception:
+                pass
+
+    novelty_metrics = {
+        "sample_count": 0,
+        "categories": [],
+        "category_totals": {},
+        "top_samples": [],
+    }
+    if novelty_csv and work_dir:
+        novelty_preview = _parse_delimited_preview(work_dir, novelty_csv[0])
+        if novelty_preview["data"]:
+            parsed_reports["reconciled_novelty"] = novelty_preview
+            novelty_metrics = _summarize_reconcile_novelty_by_sample(novelty_preview)
+
+    abundance_metrics = {
+        "gene_count": None,
+        "isoform_count": None,
+        "gene_novelty_counts": {},
+        "transcript_novelty_counts": {},
+    }
+    if abundance_tsv:
+        abundance_metrics = _summarize_reconcile_abundance_table(work_dir, abundance_tsv[0])
+        abundance_preview = abundance_metrics.get("preview") or {"data": []}
+        if abundance_preview.get("data"):
+            parsed_reports["reconcile_abundance"] = abundance_preview
 
     manifest_summary = _parse_reconcile_manifest(work_dir, manifest_files[0]) if manifest_files else {
         "input_bam_count": 0,
@@ -720,6 +963,8 @@ def _build_reconcile_bams_summary(
         "artifacts": {
             "inputs_manifest": _artifact_summary(manifest_files),
             "reconciled_bam": _artifact_summary(reconcile_bams),
+            "summary_report": _artifact_summary(summary_report),
+            "novelty_csv": _artifact_summary(novelty_csv),
             "bam_index": _artifact_summary(bam_indexes),
             "annotation_gtf": _artifact_summary(annotation_gtfs),
             "tsv_outputs": _artifact_summary(tsv_outputs),
@@ -731,8 +976,28 @@ def _build_reconcile_bams_summary(
             "references": manifest_summary["references"],
             "samples": manifest_summary["samples"],
             "annotation_gtf": annotation_gtfs[0].path if annotation_gtfs else None,
+            "gene_count": abundance_metrics["gene_count"],
+            "isoform_count": abundance_metrics["isoform_count"],
+            "gene_novelty_counts": abundance_metrics["gene_novelty_counts"],
+            "abundance_transcript_novelty_counts": abundance_metrics["transcript_novelty_counts"],
+            "transcript_category_counts": report_metrics["transcript_category_counts"],
+            "novel_gene_count": report_metrics["novel_gene_count"],
+            "novel_transcript_count": report_metrics["novel_transcript_count"],
+            "solo_transcript_count": report_metrics["solo_transcript_count"],
+            "strand_consolidated_count": report_metrics["strand_consolidated_count"],
+            "filter_scope": report_metrics["filter_scope"],
+            "filter_min_tpm": report_metrics["filter_min_tpm"],
+            "filter_min_samples": report_metrics["filter_min_samples"],
+            "filtered_novel_removed": report_metrics["filtered_novel_removed"],
+            "filtered_remaining_total": report_metrics["filtered_remaining_total"],
+            "novel_model_counts_after_filtering": report_metrics["novel_model_counts_after_filtering"],
+            "total_novel_after_filtering": report_metrics["total_novel_after_filtering"],
+            "novelty_categories": novelty_metrics["categories"],
+            "novelty_category_totals": novelty_metrics["category_totals"],
+            "novelty_sample_count": novelty_metrics["sample_count"],
+            "top_novelty_samples": novelty_metrics["top_samples"],
         },
-    }, warnings
+    }, parsed_reports, warnings
 
 
 def _build_haplotype_with_vcf_summary(
@@ -1959,16 +2224,32 @@ def generate_analysis_summary(
         }
 
         if workflow_key == "reconcile_bams":
-            workflow_summary, summary_warnings = _build_reconcile_bams_summary(
+            workflow_summary, family_reports, summary_warnings = _build_reconcile_bams_summary(
                 work_dir=work_dir,
                 all_file_summary=all_file_summary,
             )
+            parsed_reports.update(family_reports)
             key_results["Inputs Manifest"] = "Available" if workflow_summary["artifacts"]["inputs_manifest"]["present"] else "Not found"
             key_results["Reconciled BAM"] = "Available" if workflow_summary["artifacts"]["reconciled_bam"]["present"] else "Not found"
             key_results["Annotation GTF"] = "Available" if workflow_summary["artifacts"]["annotation_gtf"]["present"] else "Not found"
+            key_results["Summary Report"] = "Available" if workflow_summary["artifacts"]["summary_report"]["present"] else "Not found"
+            key_results["Novelty by Sample"] = "Available" if workflow_summary["artifacts"]["novelty_csv"]["present"] else "Not found"
             key_results["Input BAM Count"] = workflow_summary["metadata"]["input_bam_count"]
             if workflow_summary["metadata"].get("reference"):
                 key_results["Reference"] = workflow_summary["metadata"]["reference"]
+            if workflow_summary["metadata"].get("gene_count") is not None:
+                key_results["Genes"] = workflow_summary["metadata"]["gene_count"]
+            if workflow_summary["metadata"].get("isoform_count") is not None:
+                key_results["Isoforms"] = workflow_summary["metadata"]["isoform_count"]
+            transcript_category_counts = workflow_summary["metadata"].get("transcript_category_counts") or {}
+            if transcript_category_counts:
+                key_results["Isoform Classes"] = ", ".join(
+                    f"{label}={count}" for label, count in sorted(transcript_category_counts.items())
+                )
+            if workflow_summary["metadata"].get("novel_gene_count") is not None:
+                key_results["Novel Genes"] = workflow_summary["metadata"]["novel_gene_count"]
+            if workflow_summary["metadata"].get("novel_transcript_count") is not None:
+                key_results["Novel Isoforms"] = workflow_summary["metadata"]["novel_transcript_count"]
         elif workflow_key == "differential_expression":
             workflow_summary, family_reports, summary_warnings = _build_differential_expression_summary(
                 work_dir=work_dir,

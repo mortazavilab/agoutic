@@ -535,7 +535,32 @@ class TestGenerateAnalysisSummary:
         (job_dir / "reconciled.bam").write_bytes(b"\x00" * 32)
         (job_dir / "reconciled.bam.bai").write_bytes(b"\x00" * 8)
         (job_dir / "annotation.gtf").write_text("chr1\ttest\tgene\t1\t10\t.\t+\t.\tgene_id \"g1\";\n", encoding="utf-8")
-        (job_dir / "reconcile_report.txt").write_text("done\n", encoding="utf-8")
+        (job_dir / "reconciled_summary.txt").write_text(
+            "reconcileBams.py version test\n"
+            "=== Summary of Findings ===\n"
+            "  - Known transcripts:                            120\n"
+            "  - Nic transcripts:                              18\n"
+            "  - Nnc transcripts:                               7\n"
+            "  - Number of novel genes (with AGG IDs): 14\n"
+            "  - Number of novel transcripts (with AGT IDs): 25\n"
+            "Filtered novel transcripts by min_TPM 5.0 in >= 2 samples: removed 3 novel transcripts, remaining total 142\n"
+            "\n=== Novel transcript models by type (after filtering) ===\n"
+            "Total novel transcripts (after filtering): 22\n"
+            "  - NIC: 15\n"
+            "  - NNC: 7\n",
+            encoding="utf-8",
+        )
+        (job_dir / "reconciled_novelty_by_sample.csv").write_text(
+            "sample,KNOWN,NIC,NNC\nS1,1000,120,30\nS2,900,110,25\n",
+            encoding="utf-8",
+        )
+        (job_dir / "reconciled_abundance.tsv").write_text(
+            "gene_ID\ttranscript_ID\tgene_novelty\ttranscript_novelty\n"
+            "G1\tTX1\tKnown\tKNOWN\n"
+            "G1\tTX2\tKnown\tNIC\n"
+            "G2\tTX3\tNovel\tNNC\n",
+            encoding="utf-8",
+        )
 
         job = MagicMock(
             run_uuid="run-reconcile",
@@ -556,6 +581,57 @@ class TestGenerateAnalysisSummary:
         assert summary.workflow_summary["metadata"]["input_bam_count"] == 2
         assert summary.workflow_summary["metadata"]["reference"] == "GRCh38"
         assert summary.workflow_summary["artifacts"]["annotation_gtf"]["present"] is True
+        assert summary.workflow_summary["metadata"]["transcript_category_counts"]["KNOWN"] == 120
+        assert summary.workflow_summary["metadata"]["gene_count"] == 2
+        assert summary.workflow_summary["metadata"]["isoform_count"] == 3
+        assert summary.workflow_summary["metadata"]["novel_gene_count"] == 14
+        assert summary.workflow_summary["metadata"]["novel_transcript_count"] == 25
+        assert summary.workflow_summary["metadata"]["novel_model_counts_after_filtering"]["NIC"] == 15
+        assert summary.workflow_summary["metadata"]["novelty_category_totals"]["KNOWN"] == 1900
+        assert summary.parsed_reports["reconciled_summary"].startswith("reconcileBams.py version test")
+        assert summary.parsed_reports["reconciled_novelty"]["total_rows"] == 2
+        assert summary.parsed_reports["reconcile_abundance"]["total_rows"] == 3
+
+    def test_generate_summary_infers_reconcile_bams_from_canonical_outputs_without_input_output_dirs(self, tmp_path):
+        job_dir = tmp_path / "workflow9"
+        job_dir.mkdir()
+        (job_dir / "exc.GRCh38.annotated.reconciled.bam").write_bytes(b"\x00" * 32)
+        (job_dir / "gko.GRCh38.annotated.reconciled.bam").write_bytes(b"\x00" * 32)
+        (job_dir / "exc.GRCh38.annotated.mapping.tsv").write_text("metric\tvalue\nreads\t100\n", encoding="utf-8")
+        (job_dir / "gko.GRCh38.annotated.mapping.tsv").write_text("metric\tvalue\nreads\t90\n", encoding="utf-8")
+        (job_dir / "reconciled.gtf").write_text("chr1\ttest\tgene\t1\t10\t.\t+\t.\tgene_id \"g1\";\n", encoding="utf-8")
+        (job_dir / "reconciled_summary.txt").write_text(
+            "reconcileBams.py version test\n"
+            "=== Summary of Findings ===\n"
+            "  - Known transcripts:                            120\n",
+            encoding="utf-8",
+        )
+        (job_dir / "reconciled_novelty_by_sample.csv").write_text(
+            "sample,KNOWN,NIC\nexc,100,5\ngko,90,4\n",
+            encoding="utf-8",
+        )
+        (job_dir / "reconciled_abundance.tsv").write_text(
+            "gene_ID\ttranscript_ID\tgene_novelty\ttranscript_novelty\n"
+            "G1\tTX1\tKnown\tKNOWN\n",
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-reconcile-top-level",
+            sample_name="reconciled",
+            workflow_key="dogme",
+            mode="RNA",
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_key == "reconcile_bams"
+        assert summary.key_results["Summary Report"] == "Available"
+        assert summary.key_results["Novelty by Sample"] == "Available"
 
     def test_generate_summary_infers_haplotype_with_vcf_from_layout(self, tmp_path):
         job_dir = tmp_path / "workflow12"

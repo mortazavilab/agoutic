@@ -574,6 +574,7 @@ async def get_analysis_summary_tool(
         # Basic info table
         output += "Field | Value\n--- | ---\n"
         output += f"Sample Name | {summary.sample_name}\n"
+        output += f"Workflow Key | {summary.workflow_key}\n"
         output += f"Mode | {summary.mode}\n"
         output += f"Status | {summary.status}\n"
         output += f"Work Directory | {summary.work_dir}\n\n"
@@ -624,12 +625,19 @@ async def get_analysis_summary_tool(
             "success": True,
             "summary": output,
             # Structured data for programmatic access
+            "run_uuid": summary.run_uuid,
             "mode": summary.mode,
+            "workflow_key": summary.workflow_key,
             "status": summary.status,
             "sample_name": summary.sample_name,
             "work_dir": summary.work_dir,
             "all_file_counts": summary.all_file_counts,
             "key_results": summary.key_results,
+            "parsed_reports": summary.parsed_reports,
+            "summary_contract": summary.summary_contract,
+            "result_sync_spec": summary.result_sync_spec,
+            "workflow_summary": summary.workflow_summary,
+            "warnings": summary.warnings,
             "file_summary": {
                 "csv_files": [f.dict() for f in summary.file_summary.csv_files],
                 "bed_files": [f.dict() for f in summary.file_summary.bed_files],

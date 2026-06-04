@@ -73,7 +73,7 @@ _NL_PROJECT_FILES_RE = re.compile(
     re.IGNORECASE,
 )
 _NL_FILES_RE = re.compile(
-    r"^(?:please\s+)?(?:list|show|what)\s+(?:the\s+)?files?\b(?:\s+(?:in|under|at|of)\s+(.+?))?\s*$",
+    r"^(?:please\s+)?(?:list|show|what)\s+(?:the\s+)?files?\b(?:\s+(?:in|under|at|of)\s+(.+?)|\s+(.+?))?\s*$",
     re.IGNORECASE,
 )
 
@@ -188,7 +188,7 @@ def detect_list_intent(message: str) -> ListCommand | None:
 
     match = _NL_FILES_RE.match(msg)
     if match:
-        target_ref = _clean_target_ref(match.group(1) or "")
+        target_ref = _clean_target_ref(match.group(1) or match.group(2) or "")
         return ListCommand(action="files", target_ref=target_ref)
 
     return None
