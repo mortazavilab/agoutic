@@ -721,6 +721,7 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
 
     extracted_params = {
         "plan_type": "reconcile_bams",
+        "workflow_key": "reconcile_bams",
         "workflow_block_id": workflow_block.id,
         "run_type": "script",
         "script_id": params.get("script_id"),
@@ -900,6 +901,7 @@ def _build_haplotype_with_vcf_plan_approval_context(workflow_block: ProjectBlock
 
     extracted_params = {
         "plan_type": "haplotype_with_vcf",
+        "workflow_key": "haplotype_with_vcf",
         "workflow_block_id": workflow_block.id,
         "run_type": "script",
         "script_id": params.get("script_id") or "haplotype_with_vcf/haplotype_with_vcf",

@@ -37,6 +37,99 @@ def _artifact_matches(artifact_data: dict) -> str:
     return f" ({', '.join(str(path) for path in matches)})"
 
 
+def _effective_workflow_family(summary_data: dict, wf_pore_c_enabled: bool | None = None) -> str:
+    workflow_key = _normalized_workflow_key(summary_data)
+    if workflow_key == "wf_pore_c":
+        if wf_pore_c_enabled is None:
+            wf_pore_c_enabled = bool(cortex_config.WF_PORE_C_ENABLED)
+        return "wf_pore_c" if wf_pore_c_enabled else "dogme"
+    return workflow_key
+
+
+def _build_reconcile_bams_context(summary_data: dict) -> str:
+    workflow_summary = summary_data.get("workflow_summary") or {}
+    metadata = workflow_summary.get("metadata") or {}
+    artifacts = workflow_summary.get("artifacts") or {}
+    warnings = summary_data.get("warnings") or []
+
+    parts = [
+        "## Workflow Summary\n"
+        f"Workflow key: reconcile_bams\n"
+        f"Input BAM count: {metadata.get('input_bam_count') or 0}\n"
+        f"Reference: {metadata.get('reference') or 'mixed or unknown'}"
+    ]
+
+    references = metadata.get("references") or []
+    if references:
+        parts.append("\n## References\n" + "\n".join(f"- {reference}" for reference in references))
+
+    samples = metadata.get("samples") or []
+    if samples:
+        parts.append("\n## Samples\n" + "\n".join(f"- {sample}" for sample in samples))
+
+    if artifacts:
+        parts.append("\n## Artifact Presence")
+        for label, title in (
+            ("inputs_manifest", "Inputs manifest"),
+            ("reconciled_bam", "Reconciled BAM outputs"),
+            ("bam_index", "BAM indexes"),
+            ("annotation_gtf", "Annotation GTF"),
+            ("tsv_outputs", "TSV outputs"),
+            ("txt_reports", "Text reports"),
+        ):
+            artifact_data = artifacts.get(label) or {}
+            parts.append(
+                f"- {title}: {_format_presence_label(bool(artifact_data.get('present')))}"
+                f"{_artifact_matches(artifact_data)}"
+            )
+
+    if warnings:
+        parts.append("\n## Warnings")
+        for warning in warnings:
+            parts.append(f"- {warning}")
+
+    return "\n".join(parts)
+
+
+def _build_haplotype_with_vcf_context(summary_data: dict) -> str:
+    workflow_summary = summary_data.get("workflow_summary") or {}
+    metadata = workflow_summary.get("metadata") or {}
+    artifacts = workflow_summary.get("artifacts") or {}
+    warnings = summary_data.get("warnings") or []
+
+    assignment_labels = metadata.get("assignment_labels") or []
+    parts = [
+        "## Workflow Summary\n"
+        f"Workflow key: haplotype_with_vcf\n"
+        f"Haplotyped BAM count: {metadata.get('haplotyped_bam_count') or 0}\n"
+        f"Assignment labels: {', '.join(str(label) for label in assignment_labels) or 'unknown'}"
+    ]
+
+    if artifacts:
+        parts.append("\n## Artifact Presence")
+        for label, title in (
+            ("haplotyped_bam", "Haplotyped BAM outputs"),
+            ("ambiguous_bam", "Ambiguous BAM outputs"),
+            ("bam_index", "BAM indexes"),
+            ("genome_summary", "Genome summary TSV"),
+            ("chromosome_summary", "Chromosome summary TSV"),
+            ("gene_counts", "Gene counts TSV"),
+            ("transcript_counts", "Transcript counts TSV"),
+        ):
+            artifact_data = artifacts.get(label) or {}
+            parts.append(
+                f"- {title}: {_format_presence_label(bool(artifact_data.get('present')))}"
+                f"{_artifact_matches(artifact_data)}"
+            )
+
+    if warnings:
+        parts.append("\n## Warnings")
+        for warning in warnings:
+            parts.append(f"- {warning}")
+
+    return "\n".join(parts)
+
+
 def _build_wf_pore_c_context(summary_data: dict) -> str:
     parts: list[str] = []
     workflow_summary = summary_data.get("workflow_summary") or {}
@@ -153,6 +246,96 @@ def _build_wf_pore_c_static_summary(sample_name: str, summary_data: dict, work_d
     return md
 
 
+def _build_reconcile_bams_static_summary(sample_name: str, summary_data: dict, work_directory: str = "") -> str:
+    workflow_summary = summary_data.get("workflow_summary") or {}
+    metadata = workflow_summary.get("metadata") or {}
+    artifacts = workflow_summary.get("artifacts") or {}
+    warnings = summary_data.get("warnings") or []
+    workflow_name = work_directory.rstrip("/").rsplit("/", 1)[-1] if work_directory else ""
+
+    md = (
+        f"### Reconcile Summary: {sample_name}\n\n"
+        f"**Workflow:** {workflow_name} &nbsp;|&nbsp; "
+        f"**Workflow key:** reconcile_bams &nbsp;|&nbsp; "
+        f"**Status:** {summary_data.get('status', 'COMPLETED')}\n\n"
+        f"- **Input BAM count:** {metadata.get('input_bam_count') or 0}\n"
+        f"- **Reference:** {metadata.get('reference') or 'mixed or unknown'}\n"
+    )
+
+    if artifacts:
+        md += "\n**Artifacts**\n"
+        for label, title in (
+            ("inputs_manifest", "Inputs manifest"),
+            ("reconciled_bam", "Reconciled BAM outputs"),
+            ("bam_index", "BAM indexes"),
+            ("annotation_gtf", "Annotation GTF"),
+            ("tsv_outputs", "TSV outputs"),
+            ("txt_reports", "Text reports"),
+        ):
+            artifact_data = artifacts.get(label) or {}
+            md += f"- {title}: {_format_presence_label(bool(artifact_data.get('present')))}\n"
+
+    if warnings:
+        md += "\n**Warnings**\n"
+        for warning in warnings:
+            md += f"- {warning}\n"
+
+    md += (
+        "\n"
+        "You can ask me to dive deeper, for example:\n"
+        "- \"Show me the reconcile manifest\"\n"
+        "- \"Which BAM outputs were produced?\"\n"
+        "- \"Summarize the reconcile report\"\n"
+    )
+    return md
+
+
+def _build_haplotype_with_vcf_static_summary(sample_name: str, summary_data: dict, work_directory: str = "") -> str:
+    workflow_summary = summary_data.get("workflow_summary") or {}
+    metadata = workflow_summary.get("metadata") or {}
+    artifacts = workflow_summary.get("artifacts") or {}
+    warnings = summary_data.get("warnings") or []
+    workflow_name = work_directory.rstrip("/").rsplit("/", 1)[-1] if work_directory else ""
+    assignment_labels = metadata.get("assignment_labels") or []
+
+    md = (
+        f"### Haplotype Summary: {sample_name}\n\n"
+        f"**Workflow:** {workflow_name} &nbsp;|&nbsp; "
+        f"**Workflow key:** haplotype_with_vcf &nbsp;|&nbsp; "
+        f"**Status:** {summary_data.get('status', 'COMPLETED')}\n\n"
+        f"- **Haplotyped BAM count:** {metadata.get('haplotyped_bam_count') or 0}\n"
+        f"- **Assignment labels:** {', '.join(str(label) for label in assignment_labels) or 'unknown'}\n"
+    )
+
+    if artifacts:
+        md += "\n**Artifacts**\n"
+        for label, title in (
+            ("haplotyped_bam", "Haplotyped BAM outputs"),
+            ("ambiguous_bam", "Ambiguous BAM outputs"),
+            ("bam_index", "BAM indexes"),
+            ("genome_summary", "Genome summary TSV"),
+            ("chromosome_summary", "Chromosome summary TSV"),
+            ("gene_counts", "Gene counts TSV"),
+            ("transcript_counts", "Transcript counts TSV"),
+        ):
+            artifact_data = artifacts.get(label) or {}
+            md += f"- {title}: {_format_presence_label(bool(artifact_data.get('present')))}\n"
+
+    if warnings:
+        md += "\n**Warnings**\n"
+        for warning in warnings:
+            md += f"- {warning}\n"
+
+    md += (
+        "\n"
+        "You can ask me to dive deeper, for example:\n"
+        "- \"Show me the haplotype summary TSV\"\n"
+        "- \"Summarize per-chromosome haplotype counts\"\n"
+        "- \"Which BAMs were assigned ambiguously?\"\n"
+    )
+    return md
+
+
 def _build_auto_analysis_context(
     sample_name: str, mode: str, run_uuid: str,
     summary_data: dict, parsed_csvs: dict,
@@ -162,8 +345,13 @@ def _build_auto_analysis_context(
     Build a structured text context from the Analyzer summary and parsed CSVs
     for the LLM to interpret.
     """
-    if _is_wf_pore_c_summary(summary_data, wf_pore_c_enabled=wf_pore_c_enabled):
+    workflow_family = _effective_workflow_family(summary_data, wf_pore_c_enabled=wf_pore_c_enabled)
+    if workflow_family == "wf_pore_c":
         return _build_wf_pore_c_context(summary_data)
+    if workflow_family == "reconcile_bams":
+        return _build_reconcile_bams_context(summary_data)
+    if workflow_family == "haplotype_with_vcf":
+        return _build_haplotype_with_vcf_context(summary_data)
 
     parts = []
 
@@ -224,8 +412,13 @@ def _build_static_analysis_summary(
     Build a static markdown summary (fallback when the LLM call fails).
     This is the original template that was used before the LLM pass was added.
     """
-    if _is_wf_pore_c_summary(summary_data, wf_pore_c_enabled=wf_pore_c_enabled):
+    workflow_family = _effective_workflow_family(summary_data, wf_pore_c_enabled=wf_pore_c_enabled)
+    if workflow_family == "wf_pore_c":
         return _build_wf_pore_c_static_summary(sample_name, summary_data, work_directory=work_directory)
+    if workflow_family == "reconcile_bams":
+        return _build_reconcile_bams_static_summary(sample_name, summary_data, work_directory=work_directory)
+    if workflow_family == "haplotype_with_vcf":
+        return _build_haplotype_with_vcf_static_summary(sample_name, summary_data, work_directory=work_directory)
 
     if summary_data:
         all_counts = summary_data.get("all_file_counts", {})

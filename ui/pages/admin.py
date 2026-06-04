@@ -654,7 +654,7 @@ try:
                             "Turn ON",
                             key="_admin_activity_maintenance_on",
                             disabled=bool(maintenance_state.get("mode")),
-                            use_container_width=True,
+                            width="stretch",
                         ):
                             resp = _enable_maintenance_mode(
                                 API_URL,
@@ -671,7 +671,7 @@ try:
                             "Turn OFF",
                             key="_admin_activity_maintenance_off",
                             disabled=not bool(maintenance_state.get("mode")),
-                            use_container_width=True,
+                            width="stretch",
                         ):
                             resp = _disable_maintenance_mode(API_URL)
                             if resp.status_code == 200:

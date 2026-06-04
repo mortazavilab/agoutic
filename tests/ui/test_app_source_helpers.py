@@ -2171,7 +2171,7 @@ class TestRenderWorkflowPlotPayload:
         fake_st.image.assert_called_once_with(
             str(image_path),
             caption="Volcano plot · AD vs control",
-            use_container_width=True,
+            width="stretch",
         )
         fake_st.caption.assert_not_called()
 
@@ -2241,7 +2241,7 @@ class TestRenderPlotBlock:
         fake_st.image.assert_called_once_with(
             b"fake-png",
             caption="Volcano plot · AD vs control",
-            use_container_width=True,
+            width="stretch",
         )
         fake_st.caption.assert_not_called()
 

@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+### Features
+
+- **Completed-workflow analysis is now workflow-family aware across Analyzer and Cortex: differential-expression outputs, reconcile outputs, haplotype outputs, wf-pore-c contact-map outputs, and Dogme outputs now generate different first-pass summaries instead of all falling through the Dogme-oriented auto-analysis path.**
+
+### Bug Fixes
+
+- **Automatic post-run analysis now routes `reconcile_bams` and `haplotype_with_vcf` workflows by `workflow_key` instead of incorrectly forcing them through Dogme DNA/RNA/cDNA skill selection; Analyzer also infers those workflow families from their on-disk layouts when older rows still report `dogme`, and `get_analysis_summary(work_dir=...)` now supports planner-owned differential-expression workflow folders that have no Launchpad job row.**
+
+### Documentation
+
+- **Updated the analyze-job-results skill and help surfaces to describe workflow-family-aware result analysis, including differential-expression workflow folders, rather than treating completed-workflow analysis as Dogme-only.**
+
+### Tests
+
+- **Added focused Analyzer and Cortex regression coverage for reconcile, haplotype, and planner-owned differential-expression workflow-family inference plus summary generation.**
+
 ## [3.7.1] - 2026-06-01
 
 ### Features

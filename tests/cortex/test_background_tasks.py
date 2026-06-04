@@ -2789,6 +2789,7 @@ async def test_ensure_workflow_plan_approval_gate_builds_reconcile_specific_payl
     assert gate_payload["gate_action"] == "reconcile_bams"
     assert gate_payload["skill"] == "reconcile_bams"
     assert gate_payload["extracted_params"]["run_type"] == "script"
+    assert gate_payload["extracted_params"]["workflow_key"] == "reconcile_bams"
     assert gate_payload["extracted_params"]["script_id"] == "reconcile_bams/reconcile_bams"
     assert gate_payload["extracted_params"]["reference"] == "mm39"
     assert gate_payload["extracted_params"]["annotation_gtf"] == "/refs/mm39.gtf"
@@ -2927,6 +2928,7 @@ async def test_ensure_workflow_plan_approval_gate_builds_haplotype_specific_payl
     assert gate_payload["gate_action"] == "haplotype_with_vcf"
     assert gate_payload["skill"] == "haplotype_with_vcf"
     assert gate_payload["extracted_params"]["run_type"] == "script"
+    assert gate_payload["extracted_params"]["workflow_key"] == "haplotype_with_vcf"
     assert gate_payload["extracted_params"]["script_id"] == "haplotype_with_vcf/haplotype_with_vcf"
     assert gate_payload["extracted_params"]["mode"] == "RNA"
     assert gate_payload["extracted_params"]["assignment_mode"] == "two_sample"
@@ -5196,6 +5198,104 @@ class TestAutoTriggerAnalysis:
         sess.close()
 
     @pytest.mark.asyncio
+    async def test_reconcile_routes_auto_analysis_by_workflow_key(self, session_factory, seed_data):
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "workflow_key": "reconcile_bams",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {"input_bam_count": 2, "reference": "GRCh38", "samples": ["S1", "S2"]},
+                "artifacts": {
+                    "inputs_manifest": {"present": True, "matches": ["output/reconciled.inputs.tsv"]},
+                    "reconciled_bam": {"present": True, "matches": ["reconciled.bam"]},
+                    "annotation_gtf": {"present": True, "matches": ["annotation.gtf"]},
+                },
+            },
+            "warnings": [],
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(return_value=(
+            "The reconcile outputs look complete.",
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        ))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-reconcile",
+                {"sample_name": "reconciled", "mode": None, "workflow_key": "reconcile_bams", "model": "default", "work_directory": "/work/workflow11"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        latest = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()[-1]
+        payload = get_block_payload(latest)
+        assert payload.get("skill") == "analyze_job_results"
+        assert "Reconcile Analysis: reconciled" in payload.get("markdown", "")
+        prompt = mock_engine.think.call_args.args[0]
+        assert "reconcile_bams workflow" in prompt
+        assert "Input Manifest Summary" in prompt
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_haplotype_routes_auto_analysis_by_workflow_key(self, session_factory, seed_data):
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "workflow_key": "haplotype_with_vcf",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {"haplotyped_bam_count": 4, "assignment_labels": ["h1", "h2"]},
+                "artifacts": {
+                    "haplotyped_bam": {"present": True, "matches": ["sample.haplotyped.bam"]},
+                    "ambiguous_bam": {"present": True, "matches": ["sample.ambiguous.haplotyped.bam"]},
+                    "genome_summary": {"present": True, "matches": ["sample.summary.tsv"]},
+                },
+            },
+            "warnings": [],
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(return_value=(
+            "The haplotype outputs look usable.",
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        ))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-haplotype",
+                {"sample_name": "sample", "mode": None, "workflow_key": "haplotype_with_vcf", "model": "default", "work_directory": "/work/workflow12"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        latest = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()[-1]
+        payload = get_block_payload(latest)
+        assert payload.get("skill") == "analyze_job_results"
+        assert "Haplotype Analysis: sample" in payload.get("markdown", "")
+        prompt = mock_engine.think.call_args.args[0]
+        assert "haplotype_with_vcf workflow" in prompt
+        assert "Haplotype Assignment Summaries" in prompt
+        sess.close()
+
+    @pytest.mark.asyncio
     async def test_wf_pore_c_static_summary_respects_feature_flag(self, session_factory, seed_data, monkeypatch):
         monkeypatch.setattr("cortex.job_polling.WF_PORE_C_ENABLED", False)
 
@@ -5330,6 +5430,32 @@ class TestBuildAutoAnalysisContext:
         result = _build_auto_analysis_context("s1", "DNA", "uuid", summary, {})
         assert "more" in result  # "…and X more"
 
+    def test_reconcile_context_uses_workflow_summary(self):
+        summary = {
+            "workflow_key": "reconcile_bams",
+            "workflow_summary": {
+                "metadata": {"input_bam_count": 2, "reference": "GRCh38", "samples": ["S1", "S2"]},
+                "artifacts": {"reconciled_bam": {"present": True, "matches": ["reconciled.bam"]}},
+            },
+        }
+        result = _build_auto_analysis_context("s1", "DNA", "uuid", summary, {})
+        assert "reconcile_bams" in result
+        assert "Input BAM count: 2" in result
+        assert "reconciled.bam" in result
+
+    def test_haplotype_context_uses_workflow_summary(self):
+        summary = {
+            "workflow_key": "haplotype_with_vcf",
+            "workflow_summary": {
+                "metadata": {"haplotyped_bam_count": 4, "assignment_labels": ["h1", "h2"]},
+                "artifacts": {"genome_summary": {"present": True, "matches": ["sample.summary.tsv"]}},
+            },
+        }
+        result = _build_auto_analysis_context("s1", "DNA", "uuid", summary, {})
+        assert "haplotype_with_vcf" in result
+        assert "Assignment labels: h1, h2" in result
+        assert "sample.summary.tsv" in result
+
 
 # ---------------------------------------------------------------------------
 # _build_static_analysis_summary
@@ -5367,6 +5493,32 @@ class TestBuildStaticAnalysisSummary:
         }
         result = _build_static_analysis_summary("s", "DNA", "uuid", summary)
         assert "more" in result
+
+    def test_reconcile_static_summary(self):
+        summary = {
+            "workflow_key": "reconcile_bams",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {"input_bam_count": 2, "reference": "GRCh38"},
+                "artifacts": {"inputs_manifest": {"present": True}},
+            },
+        }
+        result = _build_static_analysis_summary("sample1", "DNA", "uuid", summary, work_directory="/work/workflow11")
+        assert "Reconcile Summary: sample1" in result
+        assert "GRCh38" in result
+
+    def test_haplotype_static_summary(self):
+        summary = {
+            "workflow_key": "haplotype_with_vcf",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {"haplotyped_bam_count": 4, "assignment_labels": ["h1", "h2"]},
+                "artifacts": {"genome_summary": {"present": True}},
+            },
+        }
+        result = _build_static_analysis_summary("sample2", "RNA", "uuid", summary, work_directory="/work/workflow12")
+        assert "Haplotype Summary: sample2" in result
+        assert "h1, h2" in result
 
 
 # ---------------------------------------------------------------------------

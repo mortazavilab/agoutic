@@ -314,6 +314,39 @@ async def test_get_job_clean_status_returns_mode_specific_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_job_clean_status_recovers_completed_remote_status_from_job(monkeypatch):
+    fake_session = _FakeSession()
+    launchpad_app._workflow_clean_status.clear()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-cleaned-remote"
+        return SimpleNamespace(
+            run_uuid="run-cleaned-remote",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.FAILED,
+            progress_percent=0,
+            error_message="old failure text should not leak",
+            run_stage="CLEANED_REMOTE",
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+        )
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+
+    payload = await launchpad_app.get_job_clean_status("run-cleaned-remote", remote=True)
+
+    assert payload["run_uuid"] == "run-cleaned-remote"
+    assert payload["remote"] is True
+    assert payload["status"] == "COMPLETED"
+    assert payload["run_stage"] == "CLEANED_REMOTE"
+    assert payload["message"] == "Remote workflow cleanup completed."
+
+
+@pytest.mark.asyncio
 async def test_get_job_status_repolls_terminal_failed_slurm_job_for_task_summary(monkeypatch):
     fake_session = _FakeSession()
     synced_at = datetime(2026, 5, 25, 5, 12, 12, tzinfo=timezone.utc)

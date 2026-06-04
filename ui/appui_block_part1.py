@@ -730,25 +730,44 @@ def render_block_part1(
                         or _clean_run_uuid
                         or f"workflow {_clean_idx}"
                     ).strip()
-                    _clean_message = str(_clean_run.get("message") or "").strip()
-                    _clean_stage = ""
                     _clean_scope = "remote" if _clean_run.get("remote") else "local"
+                    _clean_stage_key = f"_clean_stage_{_clean_run_uuid}_{_clean_scope}"
+                    _clean_message_key = f"_clean_message_{_clean_run_uuid}_{_clean_scope}"
+                    _clean_stage = str(
+                        st.session_state.get(_clean_stage_key)
+                        or _clean_run.get("run_stage")
+                        or ""
+                    ).strip().upper()
+                    _clean_message = str(
+                        st.session_state.get(_clean_message_key)
+                        or _clean_run.get("message")
+                        or ""
+                    ).strip()
+                    _clean_terminal = _clean_stage in {"CLEANED_LOCAL", "CLEANED_REMOTE", "CLEAN_FAILED"}
                     if _clean_run_uuid:
-                        try:
-                            _clean_resp = make_authenticated_request(
-                                "GET",
-                                f"{API_URL}/jobs/{_clean_run_uuid}/clean-status?remote={'true' if _clean_run.get('remote') else 'false'}",
-                                timeout=5,
-                            )
-                            if getattr(_clean_resp, "status_code", None) == 200:
-                                _clean_status = _clean_resp.json()
-                                if isinstance(_clean_status, dict):
-                                    _clean_stage = str(_clean_status.get("run_stage") or "").strip().upper()
-                                    if _clean_stage:
-                                        st.session_state[f"_clean_stage_{_clean_run_uuid}_{_clean_scope}"] = _clean_stage
-                                    _clean_message = str(_clean_status.get("message") or _clean_message).strip()
-                        except Exception:
-                            pass
+                        if _clean_stage:
+                            st.session_state[_clean_stage_key] = _clean_stage
+                        if _clean_message:
+                            st.session_state[_clean_message_key] = _clean_message
+                        if not _clean_terminal:
+                            try:
+                                _clean_resp = make_authenticated_request(
+                                    "GET",
+                                    f"{API_URL}/jobs/{_clean_run_uuid}/clean-status?remote={'true' if _clean_run.get('remote') else 'false'}",
+                                    timeout=5,
+                                )
+                                if getattr(_clean_resp, "status_code", None) == 200:
+                                    _clean_status = _clean_resp.json()
+                                    if isinstance(_clean_status, dict):
+                                        _clean_stage = str(_clean_status.get("run_stage") or _clean_stage).strip().upper()
+                                        _clean_message = str(_clean_status.get("message") or _clean_message).strip()
+                                        if _clean_stage:
+                                            st.session_state[_clean_stage_key] = _clean_stage
+                                        if _clean_message:
+                                            st.session_state[_clean_message_key] = _clean_message
+                                        _clean_terminal = _clean_stage in {"CLEANED_LOCAL", "CLEANED_REMOTE", "CLEAN_FAILED"}
+                            except Exception:
+                                pass
                     if _clean_stage in {"CLEANED_LOCAL", "CLEANED_REMOTE"}:
                         st.success(f"✅ `{_clean_label}` — {_clean_message or _clean_stage.replace('_', ' ').title()}")
                     elif _clean_stage == "CLEAN_FAILED":
@@ -783,7 +802,7 @@ def render_block_part1(
                     _label = _img.get("label", "Plot")
                     if _b64:
                         _img_bytes = base64.b64decode(_b64)
-                        st.image(_img_bytes, caption=_label, use_container_width=True)
+                        st.image(_img_bytes, caption=_label, width="stretch")
 
             # ── Per-message token count ──
             _msg_tokens = content.get("tokens")

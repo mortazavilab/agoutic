@@ -2135,13 +2135,13 @@ def _render_workflow_plot_payload(payload: dict, block_id: str, step_suffix: str
                 import base64
 
                 image_bytes = base64.b64decode(image_b64)
-                st.image(image_bytes, caption=caption, use_container_width=True)
+                st.image(image_bytes, caption=caption, width="stretch")
                 continue
             if not Path(image_path).exists():
                 st.caption(f"{caption}: {image_path}")
                 continue
             _safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"wf_img_{block_id}_{step_suffix}_{image_idx}")
-            st.image(image_path, caption=caption, use_container_width=True)
+            st.image(image_path, caption=caption, width="stretch")
 
     charts = payload.get("charts", [])
     dfs = payload.get("_dataframes", {})

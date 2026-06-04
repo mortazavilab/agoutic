@@ -523,3 +523,117 @@ class TestGenerateAnalysisSummary:
         assert any("Missing requested output: .pairs.gz" == warning for warning in summary.warnings)
         assert any("Missing requested output: cooler/{alias}.mcool" == warning for warning in summary.warnings)
         assert any("pairs.stats.txt missing summary metrics" in warning for warning in summary.warnings)
+
+    def test_generate_summary_infers_reconcile_bams_from_layout(self, tmp_path):
+        job_dir = tmp_path / "workflow11"
+        (job_dir / "input").mkdir(parents=True)
+        (job_dir / "output").mkdir()
+        (job_dir / "output" / "reconciled.inputs.tsv").write_text(
+            "sample\tbam\treference\nS1\t/a.bam\tGRCh38\nS2\t/b.bam\tGRCh38\n",
+            encoding="utf-8",
+        )
+        (job_dir / "reconciled.bam").write_bytes(b"\x00" * 32)
+        (job_dir / "reconciled.bam.bai").write_bytes(b"\x00" * 8)
+        (job_dir / "annotation.gtf").write_text("chr1\ttest\tgene\t1\t10\t.\t+\t.\tgene_id \"g1\";\n", encoding="utf-8")
+        (job_dir / "reconcile_report.txt").write_text("done\n", encoding="utf-8")
+
+        job = MagicMock(
+            run_uuid="run-reconcile",
+            sample_name="reconciled",
+            workflow_key="dogme",
+            mode=None,
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_key == "reconcile_bams"
+        assert summary.key_results["Inputs Manifest"] == "Available"
+        assert summary.key_results["Reconciled BAM"] == "Available"
+        assert summary.workflow_summary["metadata"]["input_bam_count"] == 2
+        assert summary.workflow_summary["metadata"]["reference"] == "GRCh38"
+        assert summary.workflow_summary["artifacts"]["annotation_gtf"]["present"] is True
+
+    def test_generate_summary_infers_haplotype_with_vcf_from_layout(self, tmp_path):
+        job_dir = tmp_path / "workflow12"
+        job_dir.mkdir()
+        (job_dir / "sample.haplotyped.bam").write_bytes(b"\x00" * 32)
+        (job_dir / "sample.h1.haplotyped.bam").write_bytes(b"\x00" * 16)
+        (job_dir / "sample.h2.haplotyped.bam").write_bytes(b"\x00" * 16)
+        (job_dir / "sample.ambiguous.haplotyped.bam").write_bytes(b"\x00" * 16)
+        (job_dir / "sample.haplotyped.bam.bai").write_bytes(b"\x00" * 8)
+        (job_dir / "sample.summary.tsv").write_text(
+            "bam_name\ttotal_reads\th1\th2\tambiguous\nsample.haplotyped.bam\t100\t45\t40\t15\n",
+            encoding="utf-8",
+        )
+        (job_dir / "sample.chromosomes.tsv").write_text(
+            "chromosome\th1\th2\nchr1\t10\t11\n",
+            encoding="utf-8",
+        )
+        (job_dir / "sample.genes.tsv").write_text(
+            "gene\th1\th2\nGENE1\t4\t5\n",
+            encoding="utf-8",
+        )
+        (job_dir / "sample.transcripts.tsv").write_text(
+            "transcript\th1\th2\nTX1\t2\t3\n",
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-haplotype",
+            sample_name="sample",
+            workflow_key="dogme",
+            mode=None,
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_key == "haplotype_with_vcf"
+        assert summary.key_results["Genome Summary"] == "Available"
+        assert summary.key_results["Chromosome Summary"] == "Available"
+        assert summary.workflow_summary["artifacts"]["haplotyped_bam"]["count"] == 4
+        assert summary.workflow_summary["artifacts"]["ambiguous_bam"]["count"] == 1
+        assert summary.workflow_summary["metadata"]["assignment_labels"] == ["h1", "h2"]
+        assert summary.parsed_reports["haplotype_summary"]["data"][0]["total_reads"] == "100"
+
+    def test_generate_summary_supports_work_dir_only_differential_expression_workflow(self, tmp_path):
+        job_dir = tmp_path / "workflow16"
+        (job_dir / "de_inputs").mkdir(parents=True)
+        (job_dir / "de_results").mkdir()
+        (job_dir / "de_inputs" / "ad_vs_control_gene_counts.tsv").write_text(
+            "gene\tS1\tS2\tS3\tS4\nGeneA\t10\t12\t30\t28\n",
+            encoding="utf-8",
+        )
+        (job_dir / "de_inputs" / "ad_vs_control_gene_sample_info.csv").write_text(
+            "sample,group\nS1,control\nS2,control\nS3,ad\nS4,ad\n",
+            encoding="utf-8",
+        )
+        (job_dir / "de_results" / "de_results.tsv").write_text(
+            "gene\tlogFC\tFDR\nGeneA\t1.5\t0.01\nGeneB\t-2.1\t0.02\nGeneC\t0.2\t0.5\n",
+            encoding="utf-8",
+        )
+        (job_dir / "de_results" / "volcano_ad_vs_control_gene.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (job_dir / "de_results" / "volcano_ad_vs_control_gene.svg").write_text("<svg></svg>", encoding="utf-8")
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=None):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_key == "differential_expression"
+        assert summary.sample_name == "workflow16"
+        assert summary.key_results["DE Results"] == "Available"
+        assert summary.key_results["Volcano Plot"] == "Available"
+        assert summary.key_results["Input Counts"] == "Available"
+        assert summary.key_results["Sample Count"] == 4
+        assert summary.key_results["Significant Features"] == 2
+        assert summary.workflow_summary["metadata"]["comparison_name"] == "ad_vs_control_gene"
+        assert summary.workflow_summary["metadata"]["up_count"] == 1
+        assert summary.workflow_summary["metadata"]["down_count"] == 1
+        assert summary.parsed_reports["de_results"]["data"][0]["gene"] == "GeneA"
+        assert summary.parsed_reports["de_sample_info"]["data"][0]["group"] == "control"

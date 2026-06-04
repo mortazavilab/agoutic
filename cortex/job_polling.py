@@ -388,7 +388,7 @@ async def _auto_trigger_analysis(
     force: bool = False,
 ):
     """
-    Automatically analyse a just-completed Dogme job.
+    Automatically analyse a just-completed workflow.
 
     1. Fetches the analysis summary (file listing) from Analyzer.
     2. Parses key CSV result files (final_stats, qc_summary) via Analyzer MCP.
@@ -493,14 +493,18 @@ async def _auto_trigger_analysis(
         except Exception as e:
             logger.warning("Failed to fetch analysis summary", run_uuid=run_uuid, error=str(e))
 
-        # 3. Route auto-analysis by workflow identity with wf-pore-c gated.
+        # 3. Route auto-analysis by workflow family, with wf-pore-c behind its feature flag.
         mode_skill_map = {
             "DNA": "run_dogme_dna",
             "RNA": "run_dogme_rna",
             "CDNA": "run_dogme_cdna",
         }
         wf_pore_c_enabled = WF_PORE_C_ENABLED and workflow_key == "wf_pore_c"
-        if wf_pore_c_enabled:
+        workflow_family = workflow_key
+        if workflow_family == "wf_pore_c" and not wf_pore_c_enabled:
+            workflow_family = "dogme"
+
+        if workflow_family in {"reconcile_bams", "haplotype_with_vcf", "wf_pore_c"}:
             analysis_skill = "analyze_job_results"
         else:
             analysis_skill = mode_skill_map.get(str(mode or "").upper(), "analyze_job_results")
@@ -517,7 +521,7 @@ async def _auto_trigger_analysis(
         engine = None
         try:
             engine = AgentEngine(model_key=model_key)
-            if wf_pore_c_enabled:
+            if workflow_family == "wf_pore_c":
                 user_prompt = (
                     f"A wf-pore-c job for sample \"{sample_name}\" just completed.\n"
                     f"Work directory: {work_directory}\n\n"
@@ -535,6 +539,42 @@ async def _auto_trigger_analysis(
                     f"6. Notable Output Files\n\n"
                     f"Be explicit about requested outputs that are present or missing, mention the revision, reference, cutter, and sample alias when available, "
                     f"and clearly state when metrics are sparse or incomplete."
+                )
+            elif workflow_family == "reconcile_bams":
+                user_prompt = (
+                    f"A reconcile_bams workflow for sample \"{sample_name}\" just completed.\n"
+                    f"Work directory: {work_directory}\n\n"
+                    f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                    f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                    f"Use only the supplied analysis data, and prefer concrete artifact presence, manifest details, references, warnings, and filenames over generalities.\n\n"
+                    f"Here is the analysis summary and key result data:\n\n"
+                    f"{data_context}\n\n"
+                    f"Write a structured markdown report with these sections when the data support them:\n"
+                    f"1. Overall Assessment\n"
+                    f"2. Reconcile Outputs\n"
+                    f"3. Input Manifest Summary\n"
+                    f"4. Warnings or Missing Outputs\n"
+                    f"5. Recommended Next Steps\n"
+                    f"6. Notable Output Files\n\n"
+                    f"Be explicit about how many BAMs were reconciled, whether annotation outputs are present, and whether the references or samples look mixed."
+                )
+            elif workflow_family == "haplotype_with_vcf":
+                user_prompt = (
+                    f"A haplotype_with_vcf workflow for sample \"{sample_name}\" just completed.\n"
+                    f"Work directory: {work_directory}\n\n"
+                    f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                    f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                    f"Use only the supplied analysis data, and prefer concrete artifact presence, assignment labels, warnings, and filenames over generalities.\n\n"
+                    f"Here is the analysis summary and key result data:\n\n"
+                    f"{data_context}\n\n"
+                    f"Write a structured markdown report with these sections when the data support them:\n"
+                    f"1. Overall Assessment\n"
+                    f"2. Haplotyped BAM Outputs\n"
+                    f"3. Haplotype Assignment Summaries\n"
+                    f"4. Warnings or Missing Outputs\n"
+                    f"5. Recommended Next Steps\n"
+                    f"6. Notable Output Files\n\n"
+                    f"Be explicit about assignment labels, ambiguous BAM outputs, and which summary TSVs are available for follow-up interpretation."
                 )
             else:
                 user_prompt = (
@@ -578,7 +618,7 @@ async def _auto_trigger_analysis(
         if llm_md:
             # LLM succeeded -- prepend a header and append exploration hints
             _wf_name = work_directory.rstrip("/").rsplit("/", 1)[-1] if work_directory else ""
-            if wf_pore_c_enabled:
+            if workflow_family == "wf_pore_c":
                 workflow_version = ((summary_data.get("workflow_summary") or {}).get("metadata") or {}).get("workflow_version") or "unknown"
                 final_md = (
                     f"### Contact Map Analysis: {sample_name}\n"
@@ -591,6 +631,30 @@ async def _auto_trigger_analysis(
                     f"- \"Show me the pairs stats\"\n"
                     f"- \"Summarize the contact map outputs\"\n"
                     f"- \"Which requested outputs are missing?\"\n"
+                )
+            elif workflow_family == "reconcile_bams":
+                final_md = (
+                    f"### Reconcile Analysis: {sample_name}\n"
+                    f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
+                    f"**Workflow key:** reconcile_bams &nbsp;|&nbsp; "
+                    f"**Status:** COMPLETED\n\n"
+                    f"{llm_md}\n\n"
+                    f"You can ask me to dive deeper, for example:\n"
+                    f"- \"Show me the reconcile manifest\"\n"
+                    f"- \"Which BAM outputs were produced?\"\n"
+                    f"- \"Summarize the reconcile report\"\n"
+                )
+            elif workflow_family == "haplotype_with_vcf":
+                final_md = (
+                    f"### Haplotype Analysis: {sample_name}\n"
+                    f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
+                    f"**Workflow key:** haplotype_with_vcf &nbsp;|&nbsp; "
+                    f"**Status:** COMPLETED\n\n"
+                    f"{llm_md}\n\n"
+                    f"You can ask me to dive deeper, for example:\n"
+                    f"- \"Show me the haplotype summary TSV\"\n"
+                    f"- \"Summarize per-chromosome haplotype counts\"\n"
+                    f"- \"Which BAMs were assigned ambiguously?\"\n"
                 )
             else:
                 final_md = (

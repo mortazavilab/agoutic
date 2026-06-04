@@ -131,6 +131,56 @@ def _set_clean_status(*, run_uuid: str, remote: bool, status: str, run_stage: st
     _workflow_clean_status[(run_uuid, remote)] = payload
     return payload
 
+
+def _clean_status_payload_from_job(job, *, remote: bool) -> dict[str, object] | None:
+    clean_run_stage = str(getattr(job, "run_stage", "") or "").strip().upper()
+    if clean_run_stage not in {"CLEANING_LOCAL", "CLEANING_REMOTE", "CLEANED_LOCAL", "CLEANED_REMOTE", "CLEAN_FAILED"}:
+        return None
+
+    stage_is_remote = clean_run_stage.endswith("_REMOTE")
+    if clean_run_stage != "CLEAN_FAILED" and stage_is_remote != bool(remote):
+        return None
+
+    clean_running = clean_run_stage.startswith("CLEANING_")
+    clean_failed = clean_run_stage == "CLEAN_FAILED"
+    clean_message = (
+        str(getattr(job, "error_message", "") or "").strip()
+        if clean_failed
+        else (
+            "Cleaning remote workflow artifacts in the background."
+            if clean_running and bool(remote)
+            else "Cleaning local workflow artifacts in the background."
+            if clean_running
+            else "Remote workflow cleanup completed."
+            if bool(remote)
+            else "Local workflow cleanup completed."
+        )
+    ) or "Workflow clean failed."
+
+    updated_at = None
+    for candidate in (
+        getattr(job, "completed_at", None),
+        getattr(job, "started_at", None),
+        getattr(job, "submitted_at", None),
+    ):
+        if candidate is None:
+            continue
+        if hasattr(candidate, "isoformat"):
+            updated_at = candidate.isoformat()
+        else:
+            updated_at = str(candidate)
+        if updated_at:
+            break
+
+    return {
+        "run_uuid": str(getattr(job, "run_uuid", "") or ""),
+        "remote": bool(remote),
+        "status": "FAILED" if clean_failed else ("RUNNING" if clean_running else "COMPLETED"),
+        "run_stage": clean_run_stage,
+        "message": clean_message,
+        "updated_at": updated_at or datetime.now(timezone.utc).isoformat(),
+    }
+
 # --- APP SETUP ---
 app = FastAPI(
     title="AGOUTIC Launchpad",
@@ -1997,7 +2047,7 @@ async def submit_job(req: SubmitJobRequest):
         # Generate unique run ID
         run_uuid = str(uuid.uuid4())
         run_type = (req.run_type or "dogme").strip().lower()
-        workflow_key = "dogme" if run_type == "script" else (req.workflow_key or "dogme")
+        workflow_key = req.workflow_key or "dogme"
         workflow_executor = None
 
         if run_type != "script":
@@ -2951,7 +3001,16 @@ async def get_job_clean_status(
 ):
     payload = _workflow_clean_status.get((run_uuid, bool(remote)))
     if payload is None:
-        raise HTTPException(status_code=404, detail="Clean status not found")
+        session = SessionLocal()
+        try:
+            job = await get_job(session, run_uuid)
+        finally:
+            await session.close()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        payload = _clean_status_payload_from_job(job, remote=bool(remote))
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Clean status not found")
     return payload
 
 

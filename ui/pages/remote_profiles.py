@@ -244,7 +244,7 @@ for p in profiles:
         "Created": _fmt_datetime(p.get("created_at", "")),
     })
 
-st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 # ── Per-profile actions ──────────────────────────────────────────────
 
@@ -354,7 +354,7 @@ for idx, profile in enumerate(profiles):
                 balance_error = test_result.get("slurm_balance_error")
                 if balance_rows:
                     st.caption("Current SLURM account balances")
-                    st.dataframe(pd.DataFrame(balance_rows), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(balance_rows), width="stretch", hide_index=True)
                 elif balance_raw:
                     st.caption("Current SLURM account balances")
                     st.code(balance_raw, language="text")

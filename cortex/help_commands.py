@@ -630,15 +630,17 @@ _SKILL_HELP_OVERRIDES: dict[str, HelpTopic] = {
     ),
     "analyze_job_results": HelpTopic(
         title="Analyze Job Results Skill",
-        summary="Use this skill to inspect completed workflow outputs, open reports, and summarize QC or downstream findings.",
+        summary="Use this skill to inspect completed workflow outputs, open reports, and summarize QC or downstream findings across Dogme, reconcile, haplotype, differential-expression, and wf-pore-c workflows.",
         what_to_provide=("A workflow or file to inspect.", "The kind of result you care about."),
         example_prompts=(
             "How do I use the analyze job results skill for workflow7?",
             "Use the analyze job results skill to summarize the QC report for workflow10.",
+            "Use the analyze job results skill to summarize haplotype outputs for workflow12.",
+            "Use the analyze job results skill to summarize DE outputs for workflow16.",
         ),
         slash_commands=("/read-file <path>", "/list files", "/reanalyze [workflow]"),
         related_skills=("analyze_job_results",),
-        internal_steps=("Resolve workflow context, browse files, and summarize outputs from Analyzer tools.",),
+        internal_steps=("Resolve workflow context, branch by workflow family, browse files, and summarize outputs from Analyzer tools.",),
     ),
     "differential_expression": HelpTopic(
         title="Differential Expression Skill",

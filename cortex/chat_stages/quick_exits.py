@@ -499,6 +499,7 @@ class WorkflowReanalyzeStage:
                 ctx.session,
                 cmd,
                 project_id=ctx.project_id,
+                project_dir=_resolve_workflow_command_project_dir(ctx),
                 owner_id=ctx.user.id,
                 model=ctx.model or "default",
             )

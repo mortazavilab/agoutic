@@ -94,7 +94,7 @@ def _render_inventory_table(
     frame = pd.DataFrame(table_rows)
     st.dataframe(
         frame,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=min(420, 40 + 35 * len(frame)),
     )
@@ -380,7 +380,7 @@ with tab_files:
             df = pd.DataFrame(table_data)
             st.dataframe(
                 df.drop(columns=["_id"]),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 height=min(400, 40 + 35 * len(df)),
             )

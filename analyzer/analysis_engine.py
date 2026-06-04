@@ -9,6 +9,7 @@ import html
 import json
 import re
 from collections import OrderedDict
+from types import SimpleNamespace
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -122,6 +123,15 @@ def _workflow_key_file_patterns(
                         patterns.append(suffix)
 
         return patterns
+
+    if workflow_key == "reconcile_bams":
+        return [".inputs.tsv", ".bam", ".bai", ".gtf", ".tsv", ".txt"]
+
+    if workflow_key == "haplotype_with_vcf":
+        return [".haplotyped.bam", ".bai", ".summary.tsv", ".chromosomes.tsv", ".genes.tsv", ".transcripts.tsv"]
+
+    if workflow_key == "differential_expression":
+        return ["de_inputs/", "de_results/", "de_results.tsv", "de_results.csv", "volcano_", "_sample_info", "_counts"]
 
     if mode == "CDNA":
         return [
@@ -379,6 +389,408 @@ def _build_wf_pore_c_summary(
         "sample_alias": sample_alias,
         "metadata": metadata,
     }, warnings
+
+
+def _file_info_matches_suffix(file_info: FileInfo, *suffixes: str) -> bool:
+    name_lower = file_info.name.lower()
+    return any(name_lower.endswith(suffix.lower()) for suffix in suffixes)
+
+
+def _artifact_summary(files: List[FileInfo]) -> Dict[str, Any]:
+    return {
+        "present": bool(files),
+        "count": len(files),
+        "matches": [file_info.path for file_info in files],
+    }
+
+
+def _infer_workflow_key_from_layout(
+    work_dir: Optional[Path],
+    all_file_summary: JobFileSummary,
+    current_workflow_key: str,
+    workflow_metadata: Dict[str, Any],
+) -> str:
+    metadata_key = _normalize_workflow_key(workflow_metadata.get("workflow_key"))
+    if metadata_key != "dogme":
+        return metadata_key
+    if current_workflow_key != "dogme":
+        return current_workflow_key
+
+    all_files = _summary_files(all_file_summary)
+    if any(_file_info_matches_suffix(file_info, ".haplotyped.bam") for file_info in all_files):
+        if any(
+            _file_info_matches_suffix(
+                file_info,
+                ".summary.tsv",
+                ".chromosomes.tsv",
+                ".genes.tsv",
+                ".transcripts.tsv",
+            )
+            for file_info in all_files
+        ):
+            return "haplotype_with_vcf"
+
+    if work_dir is not None and (work_dir / "input").is_dir() and (work_dir / "output").is_dir():
+        if any(_file_info_matches_suffix(file_info, ".inputs.tsv") for file_info in all_files):
+            return "reconcile_bams"
+
+    if work_dir is not None and (work_dir / "de_inputs").is_dir() and (work_dir / "de_results").is_dir():
+        has_de_results = any(
+            file_info.path.startswith("de_results/") and (
+                _file_info_matches_suffix(file_info, ".tsv", ".csv", ".png", ".svg")
+                or "volcano_" in file_info.name.lower()
+            )
+            for file_info in all_files
+        )
+        has_de_inputs = any(file_info.path.startswith("de_inputs/") for file_info in all_files)
+        if has_de_results and has_de_inputs:
+            return "differential_expression"
+
+    return current_workflow_key
+
+
+def _summarize_de_result_table(work_dir: Optional[Path], result_file: FileInfo) -> Dict[str, Any]:
+    if work_dir is None:
+        return {
+            "row_count": 0,
+            "significant_count": None,
+            "up_count": None,
+            "down_count": None,
+            "fdr_column": None,
+            "logfc_column": None,
+            "top_features": [],
+        }
+
+    result_path = work_dir / result_file.path
+    if not result_path.is_file():
+        return {
+            "row_count": 0,
+            "significant_count": None,
+            "up_count": None,
+            "down_count": None,
+            "fdr_column": None,
+            "logfc_column": None,
+            "top_features": [],
+        }
+
+    row_count = 0
+    significant_count = 0
+    up_count = 0
+    down_count = 0
+    fdr_column = None
+    logfc_column = None
+    feature_column = None
+    top_features: List[str] = []
+
+    try:
+        with result_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            preview = handle.read(4096)
+            handle.seek(0)
+            delimiter = "\t" if "\t" in preview and preview.count("\t") >= preview.count(",") else ","
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            fieldnames = [str(name) for name in (reader.fieldnames or [])]
+            for candidate in ("FDR", "adj.P.Val", "padj", "qvalue"):
+                if candidate in fieldnames:
+                    fdr_column = candidate
+                    break
+            for candidate in ("logFC", "log2FoldChange", "log2fc"):
+                if candidate in fieldnames:
+                    logfc_column = candidate
+                    break
+            for candidate in ("gene", "gene_id", "symbol", "feature", "transcript_id"):
+                if candidate in fieldnames:
+                    feature_column = candidate
+                    break
+
+            for row in reader:
+                row_count += 1
+                if feature_column:
+                    feature_value = str(row.get(feature_column) or "").strip()
+                    if feature_value and len(top_features) < 5:
+                        top_features.append(feature_value)
+                try:
+                    sig_value = float(row.get(fdr_column)) if fdr_column and row.get(fdr_column) not in (None, "") else None
+                except (TypeError, ValueError):
+                    sig_value = None
+                try:
+                    logfc_value = float(row.get(logfc_column)) if logfc_column and row.get(logfc_column) not in (None, "") else None
+                except (TypeError, ValueError):
+                    logfc_value = None
+
+                if sig_value is not None and sig_value < 0.05:
+                    significant_count += 1
+                    if logfc_value is not None:
+                        if logfc_value > 0:
+                            up_count += 1
+                        elif logfc_value < 0:
+                            down_count += 1
+    except Exception:
+        return {
+            "row_count": 0,
+            "significant_count": None,
+            "up_count": None,
+            "down_count": None,
+            "fdr_column": None,
+            "logfc_column": None,
+            "top_features": [],
+        }
+
+    return {
+        "row_count": row_count,
+        "significant_count": significant_count if fdr_column else None,
+        "up_count": up_count if fdr_column and logfc_column else None,
+        "down_count": down_count if fdr_column and logfc_column else None,
+        "fdr_column": fdr_column,
+        "logfc_column": logfc_column,
+        "top_features": top_features,
+    }
+
+
+def _build_differential_expression_summary(
+    *,
+    work_dir: Optional[Path],
+    all_file_summary: JobFileSummary,
+) -> tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    all_files = _summary_files(all_file_summary)
+    warnings: List[str] = []
+
+    input_count_files = [
+        file_info for file_info in all_files
+        if file_info.path.startswith("de_inputs/") and _file_info_matches_suffix(file_info, ".tsv") and "count" in file_info.name.lower()
+    ]
+    sample_info_files = [
+        file_info for file_info in all_files
+        if file_info.path.startswith("de_inputs/") and _file_info_matches_suffix(file_info, ".csv", ".tsv") and "sample_info" in file_info.name.lower()
+    ]
+    result_tables = [
+        file_info for file_info in all_files
+        if file_info.path.startswith("de_results/") and _file_info_matches_suffix(file_info, "de_results.tsv", "de_results.csv")
+    ]
+    volcano_pngs = [
+        file_info for file_info in all_files
+        if file_info.path.startswith("de_results/") and _file_info_matches_suffix(file_info, ".png") and "volcano" in file_info.name.lower()
+    ]
+    volcano_svgs = [
+        file_info for file_info in all_files
+        if file_info.path.startswith("de_results/") and _file_info_matches_suffix(file_info, ".svg") and "volcano" in file_info.name.lower()
+    ]
+
+    results_preview = _parse_delimited_preview(work_dir, result_tables[0], max_rows=50) if result_tables else {"columns": [], "data": [], "total_rows": 0}
+    sample_info_preview = _parse_delimited_preview(work_dir, sample_info_files[0], max_rows=50) if sample_info_files else {"columns": [], "data": [], "total_rows": 0}
+    results_metrics = _summarize_de_result_table(work_dir, result_tables[0]) if result_tables else {
+        "row_count": 0,
+        "significant_count": None,
+        "up_count": None,
+        "down_count": None,
+        "fdr_column": None,
+        "logfc_column": None,
+        "top_features": [],
+    }
+
+    parsed_reports: Dict[str, Any] = {}
+    if results_preview["data"]:
+        parsed_reports["de_results"] = results_preview
+    if sample_info_preview["data"]:
+        parsed_reports["de_sample_info"] = sample_info_preview
+
+    if not result_tables:
+        warnings.append("No differential expression results table found")
+    if not sample_info_files:
+        warnings.append("No differential expression sample-info file found")
+    if not volcano_pngs and not volcano_svgs:
+        warnings.append("No volcano plot outputs found")
+
+    comparison_name = None
+    if input_count_files:
+        comparison_name = input_count_files[0].name.rsplit("_counts", 1)[0]
+    elif sample_info_files:
+        comparison_name = sample_info_files[0].name.rsplit("_sample_info", 1)[0]
+
+    group_columns = [
+        column for column in sample_info_preview.get("columns", [])
+        if column.lower() in {"group", "condition", "cohort", "label", "sample", "sample_name"}
+    ]
+
+    return {
+        "artifacts": {
+            "input_counts": _artifact_summary(input_count_files),
+            "sample_info": _artifact_summary(sample_info_files),
+            "results_table": _artifact_summary(result_tables),
+            "volcano_png": _artifact_summary(volcano_pngs),
+            "volcano_svg": _artifact_summary(volcano_svgs),
+        },
+        "metadata": {
+            "comparison_name": comparison_name,
+            "sample_count": sample_info_preview.get("total_rows", 0),
+            "sample_info_columns": sample_info_preview.get("columns", []),
+            "group_columns": group_columns,
+            "result_row_count": results_metrics["row_count"],
+            "significant_count": results_metrics["significant_count"],
+            "up_count": results_metrics["up_count"],
+            "down_count": results_metrics["down_count"],
+            "top_features": results_metrics["top_features"],
+        },
+    }, parsed_reports, warnings
+
+
+def _parse_reconcile_manifest(work_dir: Optional[Path], manifest_file: FileInfo) -> Dict[str, Any]:
+    if work_dir is None:
+        return {"input_bam_count": 0, "reference": None, "references": [], "samples": []}
+
+    manifest_path = work_dir / manifest_file.path
+    if not manifest_path.is_file():
+        return {"input_bam_count": 0, "reference": None, "references": [], "samples": []}
+
+    rows: List[Dict[str, str]] = []
+    try:
+        with manifest_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            for row in reader:
+                if isinstance(row, dict):
+                    rows.append({str(key): str(value or "") for key, value in row.items()})
+    except Exception:
+        return {"input_bam_count": 0, "reference": None, "references": [], "samples": []}
+
+    references = sorted({row.get("reference", "").strip() for row in rows if row.get("reference", "").strip()})
+    samples = sorted({row.get("sample", "").strip() for row in rows if row.get("sample", "").strip()})
+    return {
+        "input_bam_count": len(rows),
+        "reference": references[0] if len(references) == 1 else None,
+        "references": references,
+        "samples": samples,
+    }
+
+
+def _parse_delimited_preview(work_dir: Optional[Path], file_info: FileInfo, max_rows: int = 50) -> Dict[str, Any]:
+    if work_dir is None:
+        return {"columns": [], "data": [], "total_rows": 0}
+
+    full_path = work_dir / file_info.path
+    if not full_path.is_file():
+        return {"columns": [], "data": [], "total_rows": 0}
+
+    rows: List[Dict[str, Any]] = []
+    columns: List[str] = []
+    total_rows = 0
+    try:
+        with full_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            preview = handle.read(4096)
+            handle.seek(0)
+            delimiter = "\t" if "\t" in preview and preview.count("\t") >= preview.count(",") else ","
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            columns = [str(name) for name in (reader.fieldnames or [])]
+            for index, row in enumerate(reader, start=1):
+                total_rows = index
+                if len(rows) < max_rows:
+                    rows.append({str(key): value for key, value in dict(row).items()})
+    except Exception:
+        return {"columns": [], "data": [], "total_rows": 0}
+
+    return {"columns": columns, "data": rows, "total_rows": total_rows}
+
+
+def _build_reconcile_bams_summary(
+    *,
+    work_dir: Optional[Path],
+    all_file_summary: JobFileSummary,
+) -> tuple[Dict[str, Any], List[str]]:
+    all_files = _summary_files(all_file_summary)
+    warnings: List[str] = []
+
+    manifest_files = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".inputs.tsv")]
+    reconcile_bams = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".bam")]
+    bam_indexes = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".bai")]
+    annotation_gtfs = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".gtf", ".gtf.gz")]
+    tsv_outputs = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".tsv") and file_info not in manifest_files]
+    txt_reports = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".txt")]
+
+    manifest_summary = _parse_reconcile_manifest(work_dir, manifest_files[0]) if manifest_files else {
+        "input_bam_count": 0,
+        "reference": None,
+        "references": [],
+        "samples": [],
+    }
+
+    if not manifest_files:
+        warnings.append("Reconcile inputs manifest missing")
+    if not reconcile_bams:
+        warnings.append("No reconciled BAM outputs found")
+
+    return {
+        "artifacts": {
+            "inputs_manifest": _artifact_summary(manifest_files),
+            "reconciled_bam": _artifact_summary(reconcile_bams),
+            "bam_index": _artifact_summary(bam_indexes),
+            "annotation_gtf": _artifact_summary(annotation_gtfs),
+            "tsv_outputs": _artifact_summary(tsv_outputs),
+            "txt_reports": _artifact_summary(txt_reports),
+        },
+        "metadata": {
+            "input_bam_count": manifest_summary["input_bam_count"],
+            "reference": manifest_summary["reference"],
+            "references": manifest_summary["references"],
+            "samples": manifest_summary["samples"],
+            "annotation_gtf": annotation_gtfs[0].path if annotation_gtfs else None,
+        },
+    }, warnings
+
+
+def _build_haplotype_with_vcf_summary(
+    *,
+    work_dir: Optional[Path],
+    all_file_summary: JobFileSummary,
+) -> tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    all_files = _summary_files(all_file_summary)
+    warnings: List[str] = []
+
+    haplotyped_bams = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".haplotyped.bam")]
+    bam_indexes = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".bam.bai", ".bai")]
+    chromosome_summaries = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".chromosomes.tsv")]
+    genome_summaries = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".summary.tsv")]
+    gene_counts = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".genes.tsv")]
+    transcript_counts = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".transcripts.tsv")]
+    ambiguous_bams = [file_info for file_info in haplotyped_bams if ".ambiguous.haplotyped.bam" in file_info.name.lower()]
+
+    parsed_reports: Dict[str, Any] = {}
+    summary_preview = _parse_delimited_preview(work_dir, genome_summaries[0]) if genome_summaries else {"columns": [], "data": [], "total_rows": 0}
+    chromosome_preview = _parse_delimited_preview(work_dir, chromosome_summaries[0]) if chromosome_summaries else {"columns": [], "data": [], "total_rows": 0}
+    gene_preview = _parse_delimited_preview(work_dir, gene_counts[0]) if gene_counts else {"columns": [], "data": [], "total_rows": 0}
+    transcript_preview = _parse_delimited_preview(work_dir, transcript_counts[0]) if transcript_counts else {"columns": [], "data": [], "total_rows": 0}
+
+    if summary_preview["data"]:
+        parsed_reports["haplotype_summary"] = summary_preview
+    if chromosome_preview["data"]:
+        parsed_reports["chromosome_summary"] = chromosome_preview
+    if gene_preview["data"]:
+        parsed_reports["gene_counts"] = gene_preview
+    if transcript_preview["data"]:
+        parsed_reports["transcript_counts"] = transcript_preview
+
+    assignment_labels = [
+        column for column in summary_preview.get("columns", [])
+        if column not in {"bam_name", "total_reads", "ambiguous"}
+    ]
+
+    if not haplotyped_bams:
+        warnings.append("No haplotyped BAM outputs found")
+    if not genome_summaries:
+        warnings.append("No haplotype genome summary TSV found")
+
+    return {
+        "artifacts": {
+            "haplotyped_bam": _artifact_summary(haplotyped_bams),
+            "bam_index": _artifact_summary(bam_indexes),
+            "chromosome_summary": _artifact_summary(chromosome_summaries),
+            "genome_summary": _artifact_summary(genome_summaries),
+            "gene_counts": _artifact_summary(gene_counts),
+            "transcript_counts": _artifact_summary(transcript_counts),
+            "ambiguous_bam": _artifact_summary(ambiguous_bams),
+        },
+        "metadata": {
+            "assignment_labels": assignment_labels,
+            "haplotyped_bam_count": len(haplotyped_bams),
+        },
+    }, parsed_reports, warnings
 
 
 def _render_html_text(raw_content: str) -> str:
@@ -1474,13 +1886,25 @@ def generate_analysis_summary(
     Returns:
         AnalysisSummary with all available information
     """
+    resolved_input_work_dir = resolve_work_dir(work_dir=work_dir_path, run_uuid=run_uuid)
     job = _get_job_by_run_uuid_or_work_dir(run_uuid=run_uuid, work_dir_path=work_dir_path)
     if not job:
-        if run_uuid:
+        if resolved_input_work_dir is not None:
+            job = SimpleNamespace(
+                run_uuid=str(run_uuid or ""),
+                sample_name=resolved_input_work_dir.name,
+                workflow_key="dogme",
+                mode=None,
+                status="COMPLETED",
+                nextflow_work_dir=str(resolved_input_work_dir),
+                output_directory=str(resolved_input_work_dir),
+            )
+        elif run_uuid:
             raise ValueError(f"Job not found: {run_uuid}")
-        if work_dir_path:
+        elif work_dir_path:
             raise ValueError(f"Job not found for work_dir: {work_dir_path}")
-        raise ValueError("Either run_uuid or work_dir_path is required for generate_analysis_summary")
+        else:
+            raise ValueError("Either run_uuid or work_dir_path is required for generate_analysis_summary")
 
     resolved_run_uuid = str(job.run_uuid or run_uuid or "")
     _wdp = work_dir_path or (job.nextflow_work_dir or job.output_directory or None)
@@ -1491,7 +1915,7 @@ def generate_analysis_summary(
     all_file_summary = categorize_files(resolved_run_uuid or None, work_dir_path=_wdp)
     work_dir = resolve_work_dir(work_dir=_wdp, run_uuid=resolved_run_uuid or None)
     workflow_metadata = _load_workflow_metadata(work_dir)
-    workflow_key = _normalize_workflow_key(workflow_metadata.get("workflow_key") or workflow_key)
+    workflow_key = _infer_workflow_key_from_layout(work_dir, all_file_summary, workflow_key, workflow_metadata)
     summary_contract = workflow_metadata.get("summary_contract") if isinstance(workflow_metadata.get("summary_contract"), dict) else {}
     result_sync_spec = workflow_metadata.get("result_sync_spec") if isinstance(workflow_metadata.get("result_sync_spec"), dict) else {}
         
@@ -1523,45 +1947,6 @@ def generate_analysis_summary(
 
     # Look for common report files
     if work_dir:
-        # Parse QC summary if exists
-        qc_files = [f for f in file_summary.csv_files if 'qc_summary' in f.name.lower() or 'qc' in f.name.lower()]
-        if qc_files:
-            try:
-                qc_data = parse_csv_file(resolved_run_uuid or None, qc_files[0].path, max_rows=100, work_dir_path=_wdp)
-                parsed_reports['qc_summary'] = qc_data.dict()
-            except Exception:
-                pass
-
-        # Parse stats files
-        stats_files = [f for f in file_summary.csv_files if 'stats' in f.name.lower() or 'flagstat' in f.name.lower()]
-        if stats_files:
-            try:
-                stats_data = parse_csv_file(resolved_run_uuid or None, stats_files[0].path, max_rows=100, work_dir_path=_wdp)
-                parsed_reports['stats'] = stats_data.dict()
-            except Exception:
-                pass
-
-        # Mode-specific parsing
-        if normalized_mode == 'CDNA':
-            # Parse gene counts
-            gene_files = [f for f in file_summary.csv_files if 'gene_counts' in f.name.lower() or 'counts' in f.name.lower() and 'gene' in f.name.lower()]
-            if gene_files:
-                try:
-                    gene_data = parse_csv_file(resolved_run_uuid or None, gene_files[0].path, max_rows=50, work_dir_path=_wdp)
-                    parsed_reports['gene_counts'] = gene_data.dict()
-                except Exception:
-                    pass
-
-            # Parse transcript counts
-            transcript_files = [f for f in file_summary.csv_files if 'transcript_counts' in f.name.lower() or 'isoform' in f.name.lower()]
-            if transcript_files:
-                try:
-                    transcript_data = parse_csv_file(resolved_run_uuid or None, transcript_files[0].path, max_rows=50, work_dir_path=_wdp)
-                    parsed_reports['transcript_counts'] = transcript_data.dict()
-                except Exception:
-                    pass
-
-        # Count key file types from all files
         key_results = {
             "total_files": all_file_summary.txt_files.__len__() +
                           all_file_summary.csv_files.__len__() +
@@ -1573,62 +1958,134 @@ def generate_analysis_summary(
             "other_count": len(all_file_summary.other_files)
         }
 
-        # Add availability of parsed reports
-        key_results["QC Summary"] = "Available" if 'qc_summary' in parsed_reports else "Not found"
-        key_results["Stats"] = "Available" if 'stats' in parsed_reports else "Not found"
-
-        if workflow_key == "wf_pore_c":
-            report_filename = str(
-                result_sync_spec.get("report_filename")
-                or summary_contract.get("report_filename")
-                or "wf-pore-c-report.html"
-            ).strip()
-            visible_files = (
-                file_summary.txt_files
-                + file_summary.csv_files
-                + file_summary.bed_files
-                + file_summary.other_files
-            )
-            key_results["Workflow Report"] = "Available" if any(f.name == report_filename for f in visible_files) else "Not found"
-            workflow_summary, summary_warnings = _build_wf_pore_c_summary(
+        if workflow_key == "reconcile_bams":
+            workflow_summary, summary_warnings = _build_reconcile_bams_summary(
                 work_dir=work_dir,
                 all_file_summary=all_file_summary,
-                workflow_metadata=workflow_metadata,
-                summary_contract=summary_contract,
-                result_sync_spec=result_sync_spec,
             )
-            if workflow_summary.get("pairs_stats"):
-                parsed_reports["pairs_stats"] = workflow_summary["pairs_stats"]
+            key_results["Inputs Manifest"] = "Available" if workflow_summary["artifacts"]["inputs_manifest"]["present"] else "Not found"
+            key_results["Reconciled BAM"] = "Available" if workflow_summary["artifacts"]["reconciled_bam"]["present"] else "Not found"
+            key_results["Annotation GTF"] = "Available" if workflow_summary["artifacts"]["annotation_gtf"]["present"] else "Not found"
+            key_results["Input BAM Count"] = workflow_summary["metadata"]["input_bam_count"]
+            if workflow_summary["metadata"].get("reference"):
+                key_results["Reference"] = workflow_summary["metadata"]["reference"]
+        elif workflow_key == "differential_expression":
+            workflow_summary, family_reports, summary_warnings = _build_differential_expression_summary(
+                work_dir=work_dir,
+                all_file_summary=all_file_summary,
+            )
+            parsed_reports.update(family_reports)
+            key_results["DE Results"] = "Available" if workflow_summary["artifacts"]["results_table"]["present"] else "Not found"
+            key_results["Volcano Plot"] = "Available" if workflow_summary["artifacts"]["volcano_png"]["present"] or workflow_summary["artifacts"]["volcano_svg"]["present"] else "Not found"
+            key_results["Input Counts"] = "Available" if workflow_summary["artifacts"]["input_counts"]["present"] else "Not found"
+            key_results["Sample Info"] = "Available" if workflow_summary["artifacts"]["sample_info"]["present"] else "Not found"
+            if workflow_summary["metadata"].get("comparison_name"):
+                key_results["Comparison"] = workflow_summary["metadata"]["comparison_name"]
+            if workflow_summary["metadata"].get("sample_count"):
+                key_results["Sample Count"] = workflow_summary["metadata"]["sample_count"]
+            if workflow_summary["metadata"].get("result_row_count") is not None:
+                key_results["Result Rows"] = workflow_summary["metadata"]["result_row_count"]
+            if workflow_summary["metadata"].get("significant_count") is not None:
+                key_results["Significant Features"] = workflow_summary["metadata"]["significant_count"]
+        elif workflow_key == "haplotype_with_vcf":
+            workflow_summary, family_reports, summary_warnings = _build_haplotype_with_vcf_summary(
+                work_dir=work_dir,
+                all_file_summary=all_file_summary,
+            )
+            parsed_reports.update(family_reports)
+            key_results["Haplotyped BAMs"] = workflow_summary["metadata"]["haplotyped_bam_count"]
+            key_results["Genome Summary"] = "Available" if workflow_summary["artifacts"]["genome_summary"]["present"] else "Not found"
+            key_results["Chromosome Summary"] = "Available" if workflow_summary["artifacts"]["chromosome_summary"]["present"] else "Not found"
+            key_results["Gene Counts"] = "Available" if workflow_summary["artifacts"]["gene_counts"]["present"] else "Not found"
+            key_results["Transcript Counts"] = "Available" if workflow_summary["artifacts"]["transcript_counts"]["present"] else "Not found"
+            if workflow_summary["metadata"].get("assignment_labels"):
+                key_results["Assignment Labels"] = ", ".join(workflow_summary["metadata"]["assignment_labels"])
+        else:
+            qc_files = [f for f in file_summary.csv_files if 'qc_summary' in f.name.lower() or 'qc' in f.name.lower()]
+            if qc_files:
+                try:
+                    qc_data = parse_csv_file(resolved_run_uuid or None, qc_files[0].path, max_rows=100, work_dir_path=_wdp)
+                    parsed_reports['qc_summary'] = qc_data.dict()
+                except Exception:
+                    pass
 
-        # Extract key metrics from parsed reports
-        if 'qc_summary' in parsed_reports and parsed_reports['qc_summary'].get('data'):
-            qc_data = parsed_reports['qc_summary']['data']
-            if qc_data:
-                # Extract common QC metrics
-                for row in qc_data:
-                    if 'metric' in row and 'value' in row:
-                        key_results[row['metric']] = row['value']
+            stats_files = [f for f in file_summary.csv_files if 'stats' in f.name.lower() or 'flagstat' in f.name.lower()]
+            if stats_files:
+                try:
+                    stats_data = parse_csv_file(resolved_run_uuid or None, stats_files[0].path, max_rows=100, work_dir_path=_wdp)
+                    parsed_reports['stats'] = stats_data.dict()
+                except Exception:
+                    pass
 
-        if 'stats' in parsed_reports and parsed_reports['stats'].get('data'):
-            stats_data = parsed_reports['stats']['data']
-            if stats_data:
-                for row in stats_data:
-                    for key, value in row.items():
-                        if key.lower() in ['mapped_reads', 'total_reads', 'mapping_rate', 'duplicates']:
-                            key_results[key] = value
+            if normalized_mode == 'CDNA':
+                gene_files = [f for f in file_summary.csv_files if 'gene_counts' in f.name.lower() or 'counts' in f.name.lower() and 'gene' in f.name.lower()]
+                if gene_files:
+                    try:
+                        gene_data = parse_csv_file(resolved_run_uuid or None, gene_files[0].path, max_rows=50, work_dir_path=_wdp)
+                        parsed_reports['gene_counts'] = gene_data.dict()
+                    except Exception:
+                        pass
 
-        # Mode-specific key results
-        if normalized_mode == 'CDNA':
-            key_results["Gene Counts"] = "Available" if 'gene_counts' in parsed_reports else "Not found"
-            key_results["Transcript Counts"] = "Available" if 'transcript_counts' in parsed_reports else "Not found"
+                transcript_files = [f for f in file_summary.csv_files if 'transcript_counts' in f.name.lower() or 'isoform' in f.name.lower()]
+                if transcript_files:
+                    try:
+                        transcript_data = parse_csv_file(resolved_run_uuid or None, transcript_files[0].path, max_rows=50, work_dir_path=_wdp)
+                        parsed_reports['transcript_counts'] = transcript_data.dict()
+                    except Exception:
+                        pass
 
-            if 'gene_counts' in parsed_reports and parsed_reports['gene_counts'].get('data'):
-                gene_data = parsed_reports['gene_counts']['data']
-                key_results['genes_detected'] = len(gene_data)
+            key_results["QC Summary"] = "Available" if 'qc_summary' in parsed_reports else "Not found"
+            key_results["Stats"] = "Available" if 'stats' in parsed_reports else "Not found"
 
-            if 'transcript_counts' in parsed_reports and parsed_reports['transcript_counts'].get('data'):
-                transcript_data = parsed_reports['transcript_counts']['data']
-                key_results['transcripts_detected'] = len(transcript_data)
+            if workflow_key == "wf_pore_c":
+                report_filename = str(
+                    result_sync_spec.get("report_filename")
+                    or summary_contract.get("report_filename")
+                    or "wf-pore-c-report.html"
+                ).strip()
+                visible_files = (
+                    file_summary.txt_files
+                    + file_summary.csv_files
+                    + file_summary.bed_files
+                    + file_summary.other_files
+                )
+                key_results["Workflow Report"] = "Available" if any(f.name == report_filename for f in visible_files) else "Not found"
+                workflow_summary, summary_warnings = _build_wf_pore_c_summary(
+                    work_dir=work_dir,
+                    all_file_summary=all_file_summary,
+                    workflow_metadata=workflow_metadata,
+                    summary_contract=summary_contract,
+                    result_sync_spec=result_sync_spec,
+                )
+                if workflow_summary.get("pairs_stats"):
+                    parsed_reports["pairs_stats"] = workflow_summary["pairs_stats"]
+
+            if 'qc_summary' in parsed_reports and parsed_reports['qc_summary'].get('data'):
+                qc_data = parsed_reports['qc_summary']['data']
+                if qc_data:
+                    for row in qc_data:
+                        if 'metric' in row and 'value' in row:
+                            key_results[row['metric']] = row['value']
+
+            if 'stats' in parsed_reports and parsed_reports['stats'].get('data'):
+                stats_data = parsed_reports['stats']['data']
+                if stats_data:
+                    for row in stats_data:
+                        for key, value in row.items():
+                            if key.lower() in ['mapped_reads', 'total_reads', 'mapping_rate', 'duplicates']:
+                                key_results[key] = value
+
+            if normalized_mode == 'CDNA':
+                key_results["Gene Counts"] = "Available" if 'gene_counts' in parsed_reports else "Not found"
+                key_results["Transcript Counts"] = "Available" if 'transcript_counts' in parsed_reports else "Not found"
+
+                if 'gene_counts' in parsed_reports and parsed_reports['gene_counts'].get('data'):
+                    gene_data = parsed_reports['gene_counts']['data']
+                    key_results['genes_detected'] = len(gene_data)
+
+                if 'transcript_counts' in parsed_reports and parsed_reports['transcript_counts'].get('data'):
+                    transcript_data = parsed_reports['transcript_counts']['data']
+                    key_results['transcripts_detected'] = len(transcript_data)
 
     return AnalysisSummary(
         run_uuid=resolved_run_uuid,

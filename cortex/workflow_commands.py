@@ -508,6 +508,28 @@ def _clean_untracked_workflow_dir(project_dir: str | None, workflow_ref: str) ->
     return _format_cleanup_message(candidate.name, gzipped_count=gzipped_count, removed_dirs=removed_dirs, remote=False, tracked=False)
 
 
+def _resolve_untracked_workflow_dir(project_dir: str | None, workflow_ref: str) -> str | None:
+    raw_project_dir = str(project_dir or "").strip()
+    ref = str(workflow_ref or "").strip().rstrip("/")
+    if not raw_project_dir or not ref or "/" in ref or ref in {".", ".."}:
+        return None
+    if not _WORKFLOW_FOLDER_RE.fullmatch(ref):
+        return None
+
+    project_root = Path(raw_project_dir).expanduser()
+    try:
+        resolved_root = project_root.resolve()
+    except OSError:
+        return None
+
+    candidate = (resolved_root / ref).resolve()
+    if candidate.parent != resolved_root:
+        return None
+    if not candidate.exists() or not candidate.is_dir() or candidate.is_symlink():
+        return None
+    return str(candidate)
+
+
 def _iter_project_workflow_dirs(project_dir: str | None) -> list[Path]:
     raw_project_dir = str(project_dir or "").strip()
     if not raw_project_dir:
@@ -932,6 +954,7 @@ async def execute_manual_workflow_analysis(
     command: WorkflowCommand,
     *,
     project_id: str,
+    project_dir: str | None = None,
     owner_id: str | None = None,
     model: str | None = None,
 ) -> tuple[object | None, str | None]:
@@ -941,7 +964,27 @@ async def execute_manual_workflow_analysis(
 
     job = resolve_workflow_reference(session, project_id, target_refs[0])
     if job is None:
-        return None, f"I couldn't find `{target_refs[0]}` in this project."
+        untracked_work_dir = _resolve_untracked_workflow_dir(project_dir, target_refs[0])
+        if untracked_work_dir is None:
+            return None, f"I couldn't find `{target_refs[0]}` in this project."
+
+        agent_block = await _auto_trigger_analysis(
+            project_id,
+            "",
+            {
+                "sample_name": Path(untracked_work_dir).name,
+                "mode": None,
+                "model": model or "default",
+                "work_directory": untracked_work_dir,
+                "workflow_key": "dogme",
+            },
+            owner_id,
+            persist_request_message=False,
+            force=True,
+        )
+        if agent_block is None:
+            return None, f"Manual automatic analysis failed for `{target_refs[0]}`."
+        return agent_block, None
 
     label = _workflow_label(job)
     if not _job_results_ready(job):
@@ -959,6 +1002,7 @@ async def execute_manual_workflow_analysis(
             "mode": str(getattr(job, "mode", "") or "DNA").strip() or "DNA",
             "model": model or "default",
             "work_directory": _job_work_directory(job),
+            "workflow_key": str(getattr(job, "workflow_key", "") or "dogme").strip() or "dogme",
         },
         owner_id,
         persist_request_message=False,

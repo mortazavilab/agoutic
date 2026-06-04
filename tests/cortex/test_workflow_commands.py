@@ -1168,6 +1168,7 @@ async def test_execute_manual_workflow_analysis_reuses_auto_trigger(monkeypatch)
             "mode": "DNA",
             "model": "gemma-test",
             "work_directory": "/data/proj/workflow12",
+            "workflow_key": "dogme",
         },
         "user-1",
         persist_request_message=False,
@@ -1208,6 +1209,45 @@ async def test_execute_manual_workflow_analysis_uses_active_workflow_when_target
 
     assert agent_block is sentinel_block
     assert error is None
+
+
+@pytest.mark.asyncio
+async def test_execute_manual_workflow_analysis_supports_untracked_workflow_dir(monkeypatch, tmp_path):
+    workflow_dir = tmp_path / "workflow16"
+    workflow_dir.mkdir()
+    (workflow_dir / "de_inputs").mkdir()
+    (workflow_dir / "de_results").mkdir()
+
+    sentinel_block = object()
+    mock_auto = AsyncMock(return_value=sentinel_block)
+
+    monkeypatch.setattr("cortex.workflow_commands._auto_trigger_analysis", mock_auto)
+
+    agent_block, error = await execute_manual_workflow_analysis(
+        _FakeSession([]),
+        WorkflowCommand(action="reanalyze", workflow_ref="workflow16"),
+        project_id="proj-1",
+        project_dir=str(tmp_path),
+        owner_id="user-1",
+        model="gemma-test",
+    )
+
+    assert agent_block is sentinel_block
+    assert error is None
+    mock_auto.assert_awaited_once_with(
+        "proj-1",
+        "",
+        {
+            "sample_name": "workflow16",
+            "mode": None,
+            "model": "gemma-test",
+            "work_directory": str(workflow_dir),
+            "workflow_key": "dogme",
+        },
+        "user-1",
+        persist_request_message=False,
+        force=True,
+    )
 
 
 @pytest.mark.asyncio
