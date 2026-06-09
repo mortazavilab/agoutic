@@ -2,7 +2,7 @@
 
 ### Performance
 
-- **Chat hot-path performance improvements across six phases: prompt templates and skill text are now cached at module level to eliminate repeated disk I/O on every chat turn; tool contract formatting is cached alongside schema fetches; history queries select only the columns actually used (`type`, `payload_json`, `seq`) and limit to 60 rows instead of fetching all blocks; the setup stage merges three separate database sessions into one, reducing connection acquisitions from three to one; blocking file I/O for image reads in chat_dataframes and plan_executor is moved to threadpool via `run_in_threadpool`; memory context and conversation state computations are cached per-request to avoid redundant DB queries and Python-level iteration on follow-up messages. All caches are either module-level (static data) or per-request (request-scoped), with no global mutable state added beyond what already existed.**
+- **Chat hot-path performance improvements across six phases: prompt templates and skill text cached at module level to eliminate repeated disk I/O; tool contract formatting cached alongside schema fetches; history queries select only needed columns (`type`, `payload_json`, `seq`) and limit to 60 rows; setup stage merges three database sessions into one; blocking file I/O for image reads moved to threadpool via `run_in_threadpool`; memory context and conversation state computations cached per-request.**
 
 ### Features
 
@@ -19,7 +19,6 @@
 ### Documentation
 
 - **Updated the analyze-job-results skill and help surfaces to describe workflow-family-aware result analysis, including differential-expression workflow folders, rather than treating completed-workflow analysis as Dogme-only.**
-- **Performance improvements documented in `docs/PERFORMANCE_IMPROVEMENTS.md` with detailed breakdown of all six phases, affected files, risk assessment, and verification steps.**
 
 ## [3.7.1] - 2026-06-01
 
