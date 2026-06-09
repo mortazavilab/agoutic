@@ -18,6 +18,8 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+from fastapi.concurrency import run_in_threadpool
+
 import pandas as pd
 
 from atlas.config import CONSORTIUM_REGISTRY
@@ -298,7 +300,7 @@ def _extract_search_results(
 # Image extraction
 # ---------------------------------------------------------------------------
 
-def extract_embedded_images(all_results: dict[str, list[dict]]) -> list[dict]:
+async def extract_embedded_images(all_results: dict[str, list[dict]]) -> list[dict]:
     """Collect generated plot images (base64 PNG) from edgepython results."""
     images: list[dict] = []
     for src_key, src_results in all_results.items():
@@ -317,7 +319,8 @@ def extract_embedded_images(all_results: dict[str, list[dict]]) -> list[dict]:
             if not img_path.exists():
                 continue
             try:
-                img_bytes = img_path.read_bytes()
+                # Use threadpool to avoid blocking the event loop on disk I/O.
+                img_bytes = await run_in_threadpool(img_path.read_bytes)
                 b64 = base64.b64encode(img_bytes).decode("ascii")
                 plot_type = r.get("params", {}).get("plot_type", "plot")
                 images.append({

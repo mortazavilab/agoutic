@@ -36,3 +36,5 @@ docs/architecture_diagrams.md
 data/launchpad_logs/run-reconcile.script.stderr.log
 data/launchpad_logs/run-reconcile.script.stdout.log
 .vscode/settings.json
+docs/PERFORMANCE_IMPROVEMENTS.md
+.vscode/settings.json

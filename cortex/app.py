@@ -1954,6 +1954,7 @@ from common.maintenance_mode import get_maintenance_state  # noqa: E402
 async def chat_with_agent(req: ChatRequest, request: Request):
     """Dispatch a user chat message through the registered pipeline stages."""
     user = request.state.user
+    session = SessionLocal()
     ctx = ChatContext(
         project_id=req.project_id,
         message=req.message,
@@ -1961,6 +1962,7 @@ async def chat_with_agent(req: ChatRequest, request: Request):
         model=req.model,
         request_id=req.request_id,
         user=user,
+        session=session,
     )
     try:
         return await run_chat_pipeline(ctx)

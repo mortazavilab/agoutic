@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fastapi.concurrency import run_in_threadpool
+
 import pandas as pd
 
 from analyzer import enrichment_engine as analyzer_enrichment_engine
@@ -1187,7 +1189,11 @@ def _build_inline_image_entry(path_value: str, caption: str) -> dict[str, Any]:
     try:
         image_path = Path(path_value)
         if image_path.exists() and image_path.is_file():
-            entry["data_b64"] = base64.b64encode(image_path.read_bytes()).decode("ascii")
+            # Use threadpool to avoid blocking the event loop on disk I/O.
+            data = asyncio.get_event_loop().run_until_complete(
+                run_in_threadpool(image_path.read_bytes)
+            )
+            entry["data_b64"] = base64.b64encode(data).decode("ascii")
     except Exception:
         pass
     return entry

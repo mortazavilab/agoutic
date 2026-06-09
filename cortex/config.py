@@ -57,11 +57,9 @@ LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "32768"))
 # Keys are the friendly aliases surfaced in the UI/API; values are the exact
 # Ollama tags used for inference.
 LLM_MODELS = {
-    "default": "gemma4:31b",              # Default model (31B parameters, 20 GB RAM)
-    "fast": "devstral-small-2:latest",    # Faster, lighter checks (15GB)
-    "smart": "devstral-2:latest",         # Main high-IQ brain (74GB)
-    "coder": "qwen3-coder:latest",        # Specialized for writing code
-    "heavy": "gpt-oss:120b",              # Heaviest alternative model
+    "default": "gemma4:31b-it-qat",              # Default model (31B parameters, 20 GB RAM)
+    "fast": "gemma4:12b-it-qat",    # Faster, lighter checks (12GB)
+    "coder": "qwen3.6:35b-a3b-mtp-q8_0",        # Specialized for writing code
 }
 
 # --- SERVER INTEGRATION CONFIGURATION ---

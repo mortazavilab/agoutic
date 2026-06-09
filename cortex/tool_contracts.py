@@ -67,9 +67,17 @@ async def fetch_all_tool_schemas(
 
 def invalidate_schema_cache():
     """Force re-fetch on next call (useful after server restarts)."""
-    global _SCHEMA_CACHE, _CACHE_LOADED
+    global _SCHEMA_CACHE, _CACHE_LOADED, _FORMATTED_CONTRACTS
     _SCHEMA_CACHE = {}
     _CACHE_LOADED = False
+    _FORMATTED_CONTRACTS.clear()
+
+
+# ---------------------------------------------------------------------------
+# Formatted-contract cache — keyed by (source_key, source_type).
+# Invalidated automatically when invalidate_schema_cache() is called.
+# ---------------------------------------------------------------------------
+_FORMATTED_CONTRACTS: dict[tuple[str, str], str] = {}
 
 
 def format_tool_contract(source_key: str, source_type: str) -> str:
@@ -83,8 +91,13 @@ def format_tool_contract(source_key: str, source_type: str) -> str:
           OPTIONAL: file_type (bam|bigwig|bed|fastq)
           NEVER: pass ENCFF file accessions here — use get_file_metadata
     """
+    cache_key = (source_key, source_type)
+    if cache_key in _FORMATTED_CONTRACTS:
+        return _FORMATTED_CONTRACTS[cache_key]
+
     schemas = get_local_tool_schemas(source_key) or _SCHEMA_CACHE.get(source_key, {})
     if not schemas:
+        _FORMATTED_CONTRACTS[cache_key] = ""
         return ""
 
     lines = []
@@ -143,7 +156,9 @@ def format_tool_contract(source_key: str, source_type: str) -> str:
             lines.append(f"  ⚠️ {w}")
         lines.append("")  # blank line between tools
 
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    _FORMATTED_CONTRACTS[cache_key] = result
+    return result
 
 
 def validate_against_schema(

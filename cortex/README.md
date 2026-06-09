@@ -1,6 +1,6 @@
 # AGOUTIC Cortex: Agent Engine
 
-**Docs Current For:** AGOUTIC 3.7.1
+**Docs Current For:** AGOUTIC 3.7.2
 **Service Version:** 1.0  
 **Status:** Active Development 
 

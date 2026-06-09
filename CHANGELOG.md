@@ -1,4 +1,8 @@
-## [Unreleased]
+## [3.7.2] - 2026-06-09
+
+### Performance
+
+- **Chat hot-path performance improvements across six phases: prompt templates and skill text are now cached at module level to eliminate repeated disk I/O on every chat turn; tool contract formatting is cached alongside schema fetches; history queries select only the columns actually used (`type`, `payload_json`, `seq`) and limit to 60 rows instead of fetching all blocks; the setup stage merges three separate database sessions into one, reducing connection acquisitions from three to one; blocking file I/O for image reads in chat_dataframes and plan_executor is moved to threadpool via `run_in_threadpool`; memory context and conversation state computations are cached per-request to avoid redundant DB queries and Python-level iteration on follow-up messages. All caches are either module-level (static data) or per-request (request-scoped), with no global mutable state added beyond what already existed.**
 
 ### Features
 
@@ -10,14 +14,12 @@
 - **Manual workflow analysis now allows terminal failed jobs to be analyzed if the local workflow directory contains result artifacts, preventing "only available after the workflow finishes" errors for jobs that failed but produced partial outputs.**
 - **Natural-language file listing now recognizes bare workflow targets (e.g., `list files workflow4`) as explicit targets, preventing them from drifting into the currently active workflow context.**
 - **Analyzer MCP tool now exposes the full structured `AnalysisSummary` contract (including `workflow_key`, `parsed_reports`, and `workflow_summary`) to Cortex, ensuring that auto-analysis routing correctly identifies non-Dogme workflows even when tracked metadata is stale.**
+- **Updated LLM models.**
 
 ### Documentation
 
 - **Updated the analyze-job-results skill and help surfaces to describe workflow-family-aware result analysis, including differential-expression workflow folders, rather than treating completed-workflow analysis as Dogme-only.**
-
-### Tests
-
-- **Added focused Analyzer and Cortex regression coverage for reconcile, haplotype, and planner-owned differential-expression workflow-family inference plus summary generation.**
+- **Performance improvements documented in `docs/PERFORMANCE_IMPROVEMENTS.md` with detailed breakdown of all six phases, affected files, risk assessment, and verification steps.**
 
 ## [3.7.1] - 2026-06-01
 

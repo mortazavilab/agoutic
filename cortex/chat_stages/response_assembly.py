@@ -267,7 +267,7 @@ class ResponseAssemblyStage:
     async def run(self, ctx: ChatContext) -> None:
         # ── Extract DFs & images ──────────────────────────────────────
         ctx.embedded_dataframes = extract_embedded_dataframes(ctx.all_results, ctx.message)
-        ctx.embedded_images = extract_embedded_images(ctx.all_results)
+        ctx.embedded_images = await extract_embedded_images(ctx.all_results)
 
         _emit_progress(ctx.request_id, "done", "Complete")
 

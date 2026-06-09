@@ -67,11 +67,11 @@ The Dogme RNA pipeline performs:
 - `*.mapping_stats.txt` — read length and mapping quality distributions
 
 ### Modification Files (RNA has modifications)
-- `*.m6A.filtered.bed` — m6A modification calls with per-site frequencies
-- `*.pseU.filtered.bed` — pseudouridine modification calls (if model supports)
-- `*.m5C.filtered.bed` — m6A modification calls with per-site frequencies
-- `*.inosine.filtered.bed` — inosine modification calls with per-site frequencies
-- `*.Nm.filtered.bed` — Nm modification calls with per-site frequencies
+- `*.m6A.filtered.bed` or `*.m6A.filtered.bed.gz` — m6A modification calls with per-site frequencies
+- `*.pseU.filtered.bed` or `*.pseU.filtered.bed.gz` — pseudouridine modification calls (if model supports)
+- `*.m5C.filtered.bed` or `*.m5C.filtered.bed.gz` — m6A modification calls with per-site frequencies
+- `*.inosine.filtered.bed` or `*.inosine.filtered.bed.gz` — inosine modification calls with per-site frequencies
+- `*.Nm.filtered.bed` or `*.Nm.filtered.bed.gz` — Nm modification calls with per-site frequencies
 
 ### Transcript/Gene Counts in `annot/` folder
 - `*_qc_summary.csv` — gene-level expression counts
@@ -139,7 +139,7 @@ When a workflow-specific RNA follow-up targets a failed/cancelled workflow, pref
 3. Only fall back to another workflow when the explicitly requested workflow truly has no relevant result files
 
 Preferred flow:
-1. List `.bed` files in `<work_dir>/bedMethyl`
+1. List `.bed` and `.bed.gz` files in `<work_dir>/bedMethyl`
 2. Use only `*.filtered.bed` or `*.filtered.bed.gz` files that include explicit modification names such as `m6A`, `inosine`, `m5C`, `pseU`, or `Nm`
 3. Sum plus/minus files with the allowlisted script `analyze_job_results/count_bed`
 4. Present totals by modification, noting that the underlying dataframe remains available for plotting or chromosome-level follow-up
@@ -179,7 +179,7 @@ When user says "analyze the results":
 
 **STEP 2:** Present filtered file summary
 - The summary now excludes work/intermediate files automatically
-- Shows only final result files: txt, csv, bed files
+- Shows only final result files: txt, csv, bed.gz files
 
 **STEP 3:** Follow the shared workflow for finding and parsing files
 - See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the complete step-by-step workflow
@@ -217,8 +217,8 @@ When user says "analyze the results":
 
 **STEP 6:** Parse modification BED files to get detailed m6A and other modification locations from STEP 3
 ```
-[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.genomeRef.plus.mod.filtered.bed]]
-[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.genomeRef.minus.mod.filtered.bed]]
+[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.genomeRef.plus.mod.filtered.bed.gz]]
+[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.genomeRef.minus.mod.filtered.bed.gz]]
 ```
 
 **STEP 7:** Present results with RNA-specific interpretation (modification sites, expression levels)

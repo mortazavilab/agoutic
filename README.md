@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Release:** 3.7.1
+**Release:** 3.7.2
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -359,7 +359,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   AGOUTIC System v3.7.1                     │
+│                   AGOUTIC System v3.7.2                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -1010,7 +1010,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.7.1 — workflow cleanup now supports local and remote `clean` commands, `clean workflows`, and per-file `bedMethyl/*.bed` gzip preservation, while deterministic `/list files` prefers tracked local workflow directories after remote runs and the shipped help surfaces document the new cleanup flow
+- **Release**: 3.7.2 — workflow cleanup now supports local and remote `clean` commands, `clean workflows`, and per-file `bedMethyl/*.bed` gzip preservation, while deterministic `/list files` prefers tracked local workflow directories after remote runs and the shipped help surfaces document the new cleanup flow
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
