@@ -106,6 +106,10 @@ class TestParseWorkflowCommand:
         cmd = parse_workflow_command("/reanalyze workflow7")
         assert cmd == WorkflowCommand(action="reanalyze", workflow_ref="workflow7", workflow_refs=["workflow7"], new_name="")
 
+    def test_parse_analyze_slash_command_alias(self):
+        cmd = parse_workflow_command("/analyze workflow7")
+        assert cmd == WorkflowCommand(action="reanalyze", workflow_ref="workflow7", workflow_refs=["workflow7"], new_name="")
+
     def test_parse_reanalyze_slash_command_multiple_targets(self):
         cmd = parse_workflow_command("/reanalyze workflow7, workflow8 workflow9")
         assert cmd == WorkflowCommand(

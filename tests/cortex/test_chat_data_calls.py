@@ -1994,9 +1994,112 @@ class TestDataCallExecution:
         data = resp.json()
         payload = (data.get("agent_block") or {}).get("payload", {})
         md = payload.get("markdown", "")
-        mock_mcp.call_tool.assert_awaited_once_with("get_analysis_summary", work_dir=str(workflow_dir))
+        calls = mock_mcp.call_tool.await_args_list
+        assert calls[0].args[0] == "get_analysis_summary"
+        assert calls[0].kwargs == {"work_dir": str(workflow_dir)}
+        assert [call.args[0] for call in calls] == [
+            "get_analysis_summary",
+            "find_file",
+            "find_file",
+        ]
         assert "analysis complete" in md.lower()
         assert "Raw Query Results" in md
+
+    def test_run_dogme_rna_analysis_summary_tag_triggers_key_csv_followups(self, SL, seed, tmp_path):
+        workflow_dir = tmp_path / "workflow6"
+        workflow_dir.mkdir(parents=True, exist_ok=True)
+
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="EXECUTION_JOB",
+            status="DONE",
+            payload_json=json.dumps({
+                "work_directory": str(workflow_dir),
+                "run_uuid": "run-194-04",
+                "sample_name": "igvfr_194-04",
+                "mode": "RNA",
+            }),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(side_effect=[
+            {
+                "summary": "Analysis Summary for: igvfr_194-04",
+                "mode": "RNA",
+                "status": "COMPLETED",
+                "sample_name": "igvfr_194-04",
+                "work_dir": str(workflow_dir),
+                "file_summary": {"csv_files": []},
+            },
+            {
+                "success": True,
+                "work_dir": str(workflow_dir),
+                "search_term": "final_stats",
+                "file_count": 1,
+                "paths": ["annot/igvfr_194-04.mm39_final_stats.csv"],
+                "primary_path": "annot/igvfr_194-04.mm39_final_stats.csv",
+            },
+            {
+                "success": True,
+                "file_path": "annot/igvfr_194-04.mm39_final_stats.csv",
+                "columns": ["metric", "value"],
+                "data": [{"metric": "mapped_reads", "value": 1000}],
+                "total_rows": 1,
+            },
+            {
+                "success": True,
+                "work_dir": str(workflow_dir),
+                "search_term": "qc_summary",
+                "file_count": 1,
+                "paths": ["annot/igvfr_194-04.mm39_qc_summary.csv"],
+                "primary_path": "annot/igvfr_194-04.mm39_qc_summary.csv",
+            },
+            {
+                "success": True,
+                "file_path": "annot/igvfr_194-04.mm39_qc_summary.csv",
+                "columns": ["gene", "count"],
+                "data": [{"gene": "Actb", "count": 42}],
+                "total_rows": 1,
+            },
+        ])
+
+        def think(msg, skill, history):
+            return (
+                "To analyze the results, I will first retrieve the job summary.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow_dir}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.app._resolve_project_dir", return_value=tmp_path),
+            patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(client, "Analyze the results", skill="run_dogme_rna")
+
+        assert resp.status_code == 200
+        calls = mock_mcp.call_tool.await_args_list
+        assert [call.args[0] for call in calls] == [
+            "get_analysis_summary",
+            "find_file",
+            "parse_csv_file",
+            "find_file",
+            "parse_csv_file",
+        ]
+        assert calls[1].kwargs == {"work_dir": str(workflow_dir), "file_name": "final_stats"}
+        assert calls[2].kwargs == {"file_path": "annot/igvfr_194-04.mm39_final_stats.csv", "work_dir": str(workflow_dir), "max_rows": 100}
+        assert calls[3].kwargs == {"work_dir": str(workflow_dir), "file_name": "qc_summary"}
+        assert calls[4].kwargs == {"file_path": "annot/igvfr_194-04.mm39_qc_summary.csv", "work_dir": str(workflow_dir), "max_rows": 100}
 
 
 # ===========================================================================

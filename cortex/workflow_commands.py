@@ -47,7 +47,7 @@ class WorkflowCommand:
 
 
 _SLASH_RERUN = re.compile(r"^/rerun(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
-_SLASH_REANALYZE = re.compile(r"^/(?:reanaly[sz]e|rerun-analysis|auto-analyze)(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+_SLASH_REANALYZE = re.compile(r"^/(?:reanaly[sz]e|analy[sz]e|rerun-analysis|auto-analyze)(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_DELETE = re.compile(r"^/delete(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_CLEAN = re.compile(r"^/clean(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_RENAME = re.compile(r"^/rename\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)

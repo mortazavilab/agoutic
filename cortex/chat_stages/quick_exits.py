@@ -117,7 +117,7 @@ class CapabilitiesStage:
             "- Help: `/help`, `/help remote slurm`, `/help /list files`, `/help remote_execution`\n"
             "- Inventory: `/list samples`, `/list staged [--profile NAME]`, `/list imported`, `/list dfs`, `/list workflows`, `/list files [target] [--project] [--depth N]`\n"
             "- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`\n"
-            "- Workflows: `/use <workflow>`, `/reanalyze [workflow[, workflow2, ...]]`, `/rerun [workflow[, workflow2, ...]]`, `/delete [workflow[, workflow2, ...]]`, `/sync-workflow [workflow[, workflow2, ...]]`\n"
+            "- Workflows: `/use <workflow>`, `/analyze [workflow[, workflow2, ...]]`, `/reanalyze [workflow[, workflow2, ...]]`, `/rerun [workflow[, workflow2, ...]]`, `/delete [workflow[, workflow2, ...]]`, `/sync-workflow [workflow[, workflow2, ...]]`\n"
             "- Files: `/read-file <path> [--lines N] [--mode auto|plain|markdown|html_text|html_raw]`\n"
             "- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`\n"
             "- Memory: `/remember <text>`, `/remember-global <text>`, `/remember-df DF5 as <name>`, `/memories`, `/pin #<id>`, `/unpin #<id>`, `/restore #<id>`, `/annotate <sample> key=value`, `/search-memories <query>`, `/upgrade-to-global #<id>`\n\n"

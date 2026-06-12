@@ -157,20 +157,21 @@ When user says "analyze the results":
 [[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
-**STEP 2:** Present filtered file summary
-- The summary now excludes work/intermediate files automatically
-- Shows only final result files: txt, csv, bed files
+**STEP 2:** Use the summary only as a launch point
+- Do not stop after reporting file counts or high-level file availability
+- Treat the summary as evidence for which cDNA result files should be parsed next
 
-**STEP 3:** Parse cDNA-specific key results
+**STEP 3:** Parse cDNA-specific key results immediately when available
 - Gene counts CSV: `parse_csv_file(...)` for expression overview
 - Transcript counts: `parse_csv_file(...)` for isoform composition
-- Alignment stats: `read_file_content(...)` for QC metrics
+- Alignment stats: `read_file_content(...)` or `parse_csv_file(...)` for QC metrics
 
-**STEP 4:** Present results with cDNA interpretation
-- Library quality (full-length coverage, duplicate rate)
-- Expression findings (gene/transcript counts)
-- Novel discoveries (new genes/isoforms)
-- Mapping statistics
+**STEP 4:** Present a detailed first-pass analysis
+- Include an **Overall Assessment** of run completeness and library quality
+- Include **Key Metrics** from parsed counts and alignment outputs
+- Include **Reference-Specific Findings** when genome build or annotation target is clear
+- Include **QC Concerns or Limitations** tied to the observed outputs
+- Include **Recommended Next Steps** grounded in expression, isoform, and annotation findings
 
 ---
 
@@ -180,11 +181,13 @@ When user says "analyze the results":
 - Use [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the complete file parsing workflow
 - Execute tool calls immediately — don't explain first
 - Present results with clear cDNA-specific interpretation
+- For generic "analyze results" requests, default to a detailed post-run analysis rather than a file inventory-only response
 - Offer suggestions for further analysis
 
 **DON'T:**
 - Explain your process before executing
 - Say "query did not return expected data" when parsing succeeds
+- Stop after reporting file counts and file availability for a generic analysis request
 - Ask permission for obvious next steps
 - Get stuck in explanation loops
 

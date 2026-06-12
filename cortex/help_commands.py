@@ -110,6 +110,7 @@ _COMMAND_CATALOG: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Workflows",
         (
             ("/use <workflow>", "switch the active workflow context"),
+            ("/analyze [workflow[, workflow2, ...]]", "alias for rerunning post-run analysis for one or more workflows"),
             ("/reanalyze [workflow[, workflow2, ...]]", "rerun post-run analysis for one or more workflows"),
             ("/rerun [workflow[, workflow2, ...]]", "rerun one or more workflows"),
             ("/delete [workflow[, workflow2, ...]]", "delete one or more workflows"),
@@ -366,7 +367,7 @@ _TOPIC_GUIDES: dict[str, HelpTopic] = {
             "Read reconciled_summary.txt from workflow10.",
             "What was the alignment rate for the current workflow?",
         ),
-        slash_commands=("/read-file <path>", "/reanalyze [workflow]", "/list files"),
+        slash_commands=("/read-file <path>", "/analyze [workflow]", "/reanalyze [workflow]", "/list files"),
         related_skills=("analyze_job_results",),
         internal_steps=(
             "Resolve the workflow context and browse or read relevant files through Analyzer tools.",
@@ -638,7 +639,7 @@ _SKILL_HELP_OVERRIDES: dict[str, HelpTopic] = {
             "Use the analyze job results skill to summarize haplotype outputs for workflow12.",
             "Use the analyze job results skill to summarize DE outputs for workflow16.",
         ),
-        slash_commands=("/read-file <path>", "/list files", "/reanalyze [workflow]"),
+        slash_commands=("/read-file <path>", "/list files", "/analyze [workflow]", "/reanalyze [workflow]"),
         related_skills=("analyze_job_results",),
         internal_steps=("Resolve workflow context, branch by workflow family, browse files, and summarize outputs from Analyzer tools.",),
     ),

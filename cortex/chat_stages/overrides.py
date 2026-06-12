@@ -155,6 +155,8 @@ class OverrideDetectionStage:
                 project_dir=ctx.project_dir,
                 project_id=ctx.project_id,
             )
+            if not _generated_calls:
+                _generated_calls = _promote_llm_workflow_summary_tags(ctx)
             if _should_override_generic_workflow_summary_tags(ctx, _generated_calls):
                 _suppress_all_tags(ctx)
                 ctx.auto_calls = _generated_calls
@@ -286,6 +288,63 @@ def _should_override_generic_workflow_summary_tags(ctx: ChatContext, auto_calls:
         return False
 
     return all(tool == "get_analysis_summary" for tool in llm_tools)
+
+
+def _promote_llm_workflow_summary_tags(ctx: ChatContext) -> list[dict]:
+    if ctx.active_skill not in _WORKFLOW_ANALYSIS_SKILLS:
+        return []
+    if not ctx.has_any_tags or ctx.legacy_encode_matches:
+        return []
+
+    llm_tools = [match.group(3) for match in ctx.data_call_matches]
+    llm_tools.extend(match.group(1) for match in ctx.legacy_analysis_matches)
+    if not llm_tools or not all(tool == "get_analysis_summary" for tool in llm_tools):
+        return []
+
+    for match in ctx.data_call_matches:
+        if match.group(3) != "get_analysis_summary":
+            continue
+
+        params = _parse_tag_params(match.group(4))
+        work_dir = str(params.get("work_dir") or "").strip()
+        run_uuid = str(params.get("run_uuid") or "").strip()
+        if not (work_dir or run_uuid):
+            continue
+
+        summary_params: dict = {}
+        file_lookup_params: dict = {}
+        if work_dir:
+            summary_params["work_dir"] = work_dir
+            file_lookup_params["work_dir"] = work_dir
+        if run_uuid:
+            summary_params["run_uuid"] = run_uuid
+            if not file_lookup_params:
+                file_lookup_params["run_uuid"] = run_uuid
+
+        return [
+            {
+                "source_type": "service",
+                "source_key": "analyzer",
+                "tool": "get_analysis_summary",
+                "params": summary_params,
+            },
+            {
+                "source_type": "service",
+                "source_key": "analyzer",
+                "tool": "find_file",
+                "params": {**file_lookup_params, "file_name": "final_stats"},
+                "_chain": "parse_csv_file",
+            },
+            {
+                "source_type": "service",
+                "source_key": "analyzer",
+                "tool": "find_file",
+                "params": {**file_lookup_params, "file_name": "qc_summary"},
+                "_chain": "parse_csv_file",
+            },
+        ]
+
+    return []
 
 
 def _validate_referential_accessions(ctx: ChatContext) -> None:

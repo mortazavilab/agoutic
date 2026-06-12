@@ -1,8 +1,37 @@
+## [Unreleased]
+
+### Features
+
+- **Workflow analysis auto-generation now includes key result-file parsing:** When the LLM emits only a `get_analysis_summary` call for workflow-analysis skills (Dogme DNA/RNA/cDNA, haplotype, DE, etc.), Cortex now also auto-generates `find_file` + `parse_csv_file` calls for `final_stats` and `qc_summary`, so users get parsed metrics instead of file-count summaries.
+- **Override detection stage promotes LLM-only summary tags:** When the LLM emits only `get_analysis_summary` without concrete file-parsing calls, `_promote_llm_workflow_summary_tags()` in `overrides.py` converts it into a full auto-generated call set including `find_file` + `parse_csv_file` for key result files.
+- **New `/analyze [workflow]` slash command:** Alias for `/reanalyze`, matching the natural-language "analyze workflowN" path that was already supported. Updated in help catalog, topic guides, and skill help overrides.
+
+### Bug Fixes
+
+- **Increased default memory for `doradoTask` from 9 GB to 32 GB in Nextflow configuration, preventing out-of-memory failures during dorado basecalling.**
+- **Fixed transient `DetachedInstanceError` flashes in the UI by disabling attribute expiration on commit for sync database sessions, ensuring ORM blocks remain readable after being committed and closed.**
+- **Dogme DNA/RNA/cDNA skills now instruct the LLM to produce detailed first-pass analysis rather than stopping at file-count summaries:** All three Dogme skill docs updated with anti-pattern guards ("DON'T stop after reporting file counts"), explicit section requirements (Overall Assessment, Key Metrics, QC Concerns, Recommended Next Steps), and evidence-based interpretation guidance.
+
+### Tests
+
+- **Added regression coverage for workflow-analysis auto-generation of `find_file` + `parse_csv_file` follow-ups in `tests/cortex/test_auto_generate_data.py`.**
+- **Added regression coverage for override-detection promotion of LLM-only summary tags, generic workflow analysis intent detection, and `/analyze` slash command parsing in `tests/cortex/test_chat_data_calls.py`, `tests/cortex/test_skill_manifest.py`, and `tests/cortex/test_workflow_commands.py`.**
+- **Added regression test for sync-session attribute retention after commit/close in `tests/test_common_database.py`.**
+
+### Documentation
+
+- **Updated UI agent-response section header from "Summary first, details on demand" to "Analysis summary and details".**
+
 ## [3.7.2] - 2026-06-09
 
 ### Performance
 
-- **Chat hot-path performance improvements across six phases: prompt templates and skill text cached at module level to eliminate repeated disk I/O; tool contract formatting cached alongside schema fetches; history queries select only needed columns (`type`, `payload_json`, `seq`) and limit to 60 rows; setup stage merges three database sessions into one; blocking file I/O for image reads moved to threadpool via `run_in_threadpool`; memory context and conversation state computations cached per-request.**
+- **Phase 1 — Prompt template caching:** Prompt templates and skill text are now cached at module level to eliminate repeated disk I/O on every chat turn. Templates are loaded once at import time rather than read from disk per-request.**
+- **Phase 2 — Tool contract caching:** Tool contract formatting is cached alongside schema fetches, avoiding redundant serialization of MCP tool schemas on each tool-call round.**
+- **Phase 3 — History query optimization:** Conversation history queries now select only the columns actually used (`type`, `payload_json`, `seq`) and limit to 60 rows (20 turns × 3 block types) instead of fetching all blocks for every chat turn.**
+- **Phase 4 — Session consolidation:** The setup stage merges three separate database sessions into one, reducing connection acquisitions from three to one per request.**
+- **Phase 5 — Blocking I/O offloading:** Blocking file I/O for image reads in `chat_dataframes` and `plan_executor` is moved to threadpool via `run_in_threadpool`, preventing UI polling stalls.**
+- **Phase 6 — Per-request caching:** Memory context and conversation state computations are cached per-request to avoid redundant DB queries and Python-level iteration on follow-up messages. All caches are either module-level (static data) or per-request (request-scoped), with no global mutable state added beyond what already existed.**
 
 ### Features
 

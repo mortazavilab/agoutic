@@ -192,6 +192,7 @@ class _LazySyncSessionLocal:
             self._factory = sessionmaker(
                 autocommit=False,
                 autoflush=False,
+                expire_on_commit=False,
                 bind=get_sync_engine(),
             )
         return self._factory(**kw)
@@ -199,7 +200,10 @@ class _LazySyncSessionLocal:
     def configure(self, engine: Engine) -> None:
         """Rebind to a specific engine (used by tests)."""
         self._factory = sessionmaker(
-            autocommit=False, autoflush=False, bind=engine
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
+            bind=engine,
         )
 
     def reset(self) -> None:

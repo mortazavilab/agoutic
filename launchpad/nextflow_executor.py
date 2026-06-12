@@ -746,7 +746,7 @@ class NextflowConfig:
         if is_slurm:
             config_lines.append(f"        clusterOptions = '--account={gpu_account} --gres=gpu:1'")
             config_lines.append(f"        queue = '{gpu_partition}'")
-        config_lines.append(f"        memory = '{9 if is_slurm else min(9, local_task_memory_cap)} GB'  // Increase if necessary")
+        config_lines.append(f"        memory = '{32 if is_slurm else min(32, local_task_memory_cap)} GB'  // Increase if necessary")
         config_lines.append(f"        cpus = {4 if is_slurm else min(4, local_task_cpu_cap)}         // dorado is more GPU intensive than CPU intensive")
         config_lines.append("        time = '12:00:00'")
         if max_gpu_tasks is not None:

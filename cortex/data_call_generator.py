@@ -136,6 +136,11 @@ _BAM_DETAILS_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_GENERIC_WORKFLOW_ANALYSIS_INTENT_RE = re.compile(
+    r'\b(?:analy[sz]e|analysis|summari[sz]e|summary|qc\s+report|report)\b',
+    re.IGNORECASE,
+)
+
 
 def _extract_modification_name(user_message: str) -> str | None:
     match = _MODIFICATION_COUNT_INTENT_RE.search(user_message)
@@ -160,6 +165,21 @@ def _is_modification_summary_intent(user_message: str) -> bool:
     return _looks_like_mod_summary_term(
         match.group("term1") or match.group("term2") or match.group("term3")
     )
+
+
+def _wants_generic_workflow_analysis(user_message: str) -> bool:
+    msg = user_message or ""
+    if not _GENERIC_WORKFLOW_ANALYSIS_INTENT_RE.search(msg):
+        return False
+    if re.search(r'\b(?:parse|read|open|display|view|get)\b\s+(?:the\s+)?(?:file\s+)?\S+\.(?:csv|tsv|bed|txt|log|html|htm|md|markdown)\b', msg, re.IGNORECASE):
+        return False
+    if _BAM_DETAILS_INTENT_RE.search(msg):
+        return False
+    if _BED_COUNT_INTENT_RE.search(msg):
+        return False
+    if _extract_modification_name(msg) or _is_modification_summary_intent(msg):
+        return False
+    return bool(re.search(r'\b(?:workflow\d+|results?|job|run|qc)\b', msg, re.IGNORECASE))
 
 
 # ---------------------------------------------------------------------------
@@ -848,10 +868,10 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                         "_chain": _pick_file_tool(_resolved_file),
                     })
 
-        # --- Catch-all for analyze_job_results: if the LLM narrated steps
-        # instead of emitting a DATA_CALL, auto-generate get_analysis_summary
-        # so the analysis actually executes. ---
-        if not calls and skill_key == "analyze_job_results" and (work_dir or run_uuid):
+        # --- Catch-all for workflow analysis skills: if the LLM narrated steps
+        # instead of emitting concrete DATA_CALLs, auto-generate summary plus
+        # high-value result-file parsing so the analysis actually executes. ---
+        if not calls and skill_key in workflow_analysis_skills and (work_dir or run_uuid):
             _bed_count_intent = bool(_BED_COUNT_INTENT_RE.search(msg_lower))
             _modification_name = _extract_modification_name(user_message)
             _bam_details_intent = bool(_BAM_DETAILS_INTENT_RE.search(user_message)) or \
@@ -993,8 +1013,36 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 "tool": "get_analysis_summary",
                 "params": _summary_params,
             })
-            logger.warning("Auto-generated get_analysis_summary for analyze_job_results skill",
-                          work_dir=work_dir, run_uuid=run_uuid)
+
+            if _wants_generic_workflow_analysis(user_message):
+                _file_lookup_params: dict = {}
+                if work_dir:
+                    _file_lookup_params["work_dir"] = work_dir
+                elif run_uuid:
+                    _file_lookup_params["run_uuid"] = run_uuid
+
+                for _file_hint in ("final_stats", "qc_summary"):
+                    calls.append({
+                        "source_type": "service", "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": {**_file_lookup_params, "file_name": _file_hint},
+                        "_chain": "parse_csv_file",
+                    })
+
+                logger.warning(
+                    "Auto-generated workflow analysis follow-up calls",
+                    skill_key=skill_key,
+                    work_dir=work_dir,
+                    run_uuid=run_uuid,
+                    followups=["final_stats", "qc_summary"],
+                )
+            else:
+                logger.warning(
+                    "Auto-generated get_analysis_summary for workflow analysis skill",
+                    skill_key=skill_key,
+                    work_dir=work_dir,
+                    run_uuid=run_uuid,
+                )
 
     return calls
 

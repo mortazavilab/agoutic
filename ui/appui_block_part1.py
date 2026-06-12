@@ -644,7 +644,7 @@ def render_block_part1(
     elif btype == "AGENT_PLAN":
         handled = True
         with st.chat_message("assistant", avatar="🤖"):
-            section_header("Agent Response", "Summary first, details on demand", icon="🤖")
+            section_header("Agent Response", "Analysis summary and details", icon="🤖")
             show_metadata()
             st.divider()
             if "markdown" in content:

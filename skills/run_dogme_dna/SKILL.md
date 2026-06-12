@@ -153,18 +153,21 @@ When user says "analyze the results":
 [[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
-**STEP 2:** Present filtered file summary
-- The summary now excludes work/intermediate files automatically
-- Shows only final result files: txt, csv, bed files
+**STEP 2:** Use the summary only as a launch point
+- Do not stop after reporting file counts or high-level file availability
+- Treat the summary as evidence for which final result files should be parsed next
 
-**STEP 3:** Follow the shared workflow for finding and parsing files
-- See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the complete step-by-step workflow
+**STEP 3:** Parse the most informative key outputs immediately when they are available
+- Parse alignment or stats CSV or TXT outputs when present
+- Parse methylation or accessibility BED files when present
+- Follow [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the concrete file-finding and parsing flow
 
-**STEP 4:** Present results with DNA-specific interpretation
-- Methylation levels and site frequencies
-- Coverage and alignment quality
-- Modification quality metrics
-- Comparison to expected patterns (promoters should be hypomethylated, etc.)
+**STEP 4:** Write a detailed first-pass analysis
+- Include an **Overall Assessment** of run completeness and expected DNA outputs
+- Include **Key Metrics** from parsed files whenever available
+- Include **Reference-Specific Findings** when genome build or assay context is clear
+- Include **QC Concerns or Limitations** tied to real outputs, missing artifacts, or parsed metrics
+- Include **Recommended Next Steps** grounded in the observed methylation or accessibility outputs
 
 ---
 
@@ -174,11 +177,13 @@ When user says "analyze the results":
 - Reference [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the standard workflow
 - Execute tool calls immediately — don't explain what you're about to do
 - Present results with clear explanations of what they mean
+- For generic "analyze results" requests, default to a detailed post-run analysis rather than a file inventory-only response
 - Offer suggestions for further analysis
 
 **DON'T:**
 - Explain your process step-by-step before executing
 - Say "the query did not return expected data" when parse succeeds
+- Stop after reporting file counts and file availability for a generic analysis request
 - Ask permission for obvious next steps
 - Forget the directory prefix in file_path parameter
 ````

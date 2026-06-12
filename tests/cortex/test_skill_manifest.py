@@ -237,3 +237,15 @@ class TestManifestFields:
         assert manifest.required_services == ("launchpad",)
         assert "/pore-c" in manifest.slash_commands
         assert OutputType.JOB in manifest.output_types
+
+
+class TestDogmeAnalysisSkillPrompts:
+    def test_dogme_analysis_skills_require_detailed_first_pass(self):
+        skills_root = Path(__file__).resolve().parents[2] / "skills"
+
+        for key in ("run_dogme_dna", "run_dogme_rna", "run_dogme_cdna"):
+            content = (skills_root / key / "SKILL.md").read_text()
+            assert "Overall Assessment" in content
+            assert "Key Metrics" in content
+            assert "Recommended Next Steps" in content
+            assert "Stop after reporting file counts and file availability" in content

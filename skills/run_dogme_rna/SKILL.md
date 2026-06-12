@@ -177,19 +177,27 @@ When user says "analyze the results":
 [[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
-**STEP 2:** Present filtered file summary
-- The summary now excludes work/intermediate files automatically
-- Shows only final result files: txt, csv, bed.gz files
+**STEP 2:** Use the summary only as the starting point, not the final answer
+- Do not stop after file counts or file-availability statements
+- Treat the summary as evidence for which result files should be parsed next
 
-**STEP 3:** Follow the shared workflow for finding and parsing files
+**STEP 3:** Parse the most informative key outputs immediately when they are available
+- Parse the main QC or quantification CSV when a `*_qc_summary.csv` or similar file is present
+- Parse the main stats CSV when a `*_final_stats.csv` or similar file is present
+- If RNA modification BED files are available, summarize them from `bedMethyl/` using the shared modification-summary flow
 - See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the complete step-by-step workflow
 
-**STEP 4:** Present results with RNA-specific interpretation
-- Modification site locations and frequencies
-- Expression levels and isoform composition
-- Poly(A) tail length patterns
-- Alignment quality and read characteristics
-- Enrichment of modifications at known regulatory motifs
+**STEP 4:** Write a detailed first-pass analysis
+- Include an **Overall Assessment** that explains what completed successfully and what the file set implies about the run
+- Include **Key Metrics** using parsed values whenever available; if a key metric is not yet parsed, say which file contains it
+- Include **Reference-Specific Findings** when the reference genome or annotation target is clear
+- Include **QC Concerns or Limitations** grounded in parsed stats, missing artifacts, or workflow-specific caveats
+- Include **Recommended Next Steps** tied to the observed outputs
+
+**STEP 5:** Prefer evidence over generic filler
+- Base conclusions on parsed CSV or BED content whenever possible
+- Avoid vague statements like "QC Summary: Available" unless followed by interpretation
+- Mention notable files after the analytic sections above, not instead of them
 
 ---
 
@@ -199,11 +207,13 @@ When user says "analyze the results":
 - Reference [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the standard workflow
 - Execute tool calls immediately — don't explain what you're about to do
 - Present results with clear explanations of what they mean
+- For generic "analyze results" requests, default to a detailed post-run analysis with sections such as Overall Assessment, Key Metrics, QC Concerns or Limitations, and Recommended Next Steps
 - Offer suggestions for further analysis
 
 **DON'T:**
 - Explain your process step-by-step before executing
 - Say "the query did not return expected data" when parse succeeds
+- Stop after reporting file counts and file availability for a generic analysis request
 - Ask permission for obvious next steps
 - Forget the directory prefix in file_path parameter
 - Ask permission for obvious next steps ("Would you like me to parse this file?")

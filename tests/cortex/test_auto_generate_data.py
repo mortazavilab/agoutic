@@ -628,6 +628,37 @@ class TestAnalyzeJobResultsCatchAll:
         assert len(summary_calls) == 1
         assert summary_calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1"
 
+    def test_rna_skill_generic_analysis_adds_summary_and_key_csv_followups(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow6",
+                "run_uuid": "aaaa-bbbb",
+                "sample_name": "igvfr_194-04",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "Analyze workflow6", "run_dogme_rna",
+            history_blocks=blocks,
+        )
+
+        assert [c["tool"] for c in calls] == [
+            "get_analysis_summary",
+            "find_file",
+            "find_file",
+        ]
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow6"
+        assert calls[1]["params"] == {
+            "work_dir": "/tmp/proj/workflow6",
+            "file_name": "final_stats",
+        }
+        assert calls[1]["_chain"] == "parse_csv_file"
+        assert calls[2]["params"] == {
+            "work_dir": "/tmp/proj/workflow6",
+            "file_name": "qc_summary",
+        }
+        assert calls[2]["_chain"] == "parse_csv_file"
+
     def test_auto_generates_summary_for_wf_pore_c_without_mode(self):
         blocks = _make_blocks([
             {"type": "EXECUTION_JOB", "payload": {
