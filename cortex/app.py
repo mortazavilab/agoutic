@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import httpx
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Body, FastAPI, HTTPException, Path as FastAPIPath, Query, Request
 from pathlib import Path
@@ -444,6 +444,207 @@ async def get_available_skills():
         "skills": list(SKILLS_REGISTRY.keys()),
         "count": len(SKILLS_REGISTRY)
     }
+
+
+class RemoteProfileCreateBody(BaseModel):
+    nickname: Optional[str] = None
+    ssh_host: str
+    ssh_port: int = 22
+    ssh_username: str
+    auth_method: Literal["key_file", "ssh_agent"] = "key_file"
+    key_file_path: Optional[str] = None
+    local_username: Optional[str] = None
+    default_slurm_account: Optional[str] = None
+    default_slurm_partition: Optional[str] = None
+    default_slurm_gpu_account: Optional[str] = None
+    default_slurm_gpu_partition: Optional[str] = None
+    remote_base_path: Optional[str] = None
+
+
+class RemoteProfileUpdateBody(BaseModel):
+    nickname: Optional[str] = None
+    ssh_host: Optional[str] = None
+    ssh_port: Optional[int] = None
+    ssh_username: Optional[str] = None
+    auth_method: Optional[Literal["key_file", "ssh_agent"]] = None
+    key_file_path: Optional[str] = None
+    local_username: Optional[str] = None
+    default_slurm_account: Optional[str] = None
+    default_slurm_partition: Optional[str] = None
+    default_slurm_gpu_account: Optional[str] = None
+    default_slurm_gpu_partition: Optional[str] = None
+    remote_base_path: Optional[str] = None
+    is_enabled: Optional[bool] = None
+
+
+class RemoteProfilePasswordBody(BaseModel):
+    local_password: str = ""
+
+
+def _proxy_error_detail(resp: httpx.Response) -> str:
+    try:
+        payload = resp.json()
+        if isinstance(payload, dict):
+            detail = payload.get("detail") or payload.get("message")
+            if isinstance(detail, str) and detail.strip():
+                return detail.strip()
+    except Exception:
+        pass
+    return str(resp.text or "Upstream request failed").strip() or "Upstream request failed"
+
+
+async def _proxy_remote_profile_request(
+    method: str,
+    path: str,
+    *,
+    user_id: str,
+    timeout: float,
+    json_body: dict | None = None,
+    include_user_id_param: bool = True,
+):
+    params = {"user_id": user_id} if include_user_id_param else None
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.request(
+                method,
+                f"{_launchpad_rest_base_url()}{path}",
+                params=params,
+                headers=_launchpad_internal_headers(),
+                json=json_body,
+            )
+    except Exception as exc:
+        logger.warning("Failed to proxy remote profile request",
+                       method=method, path=path, user_id=user_id, error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {exc}")
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=_proxy_error_detail(resp))
+
+    if not resp.content:
+        return JSONResponse(status_code=resp.status_code, content={})
+
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {"message": resp.text}
+    return JSONResponse(status_code=resp.status_code, content=payload)
+
+
+@app.get("/remote-profiles")
+async def list_remote_profiles(request: Request):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "GET",
+        "/ssh-profiles",
+        user_id=user.id,
+        timeout=10.0,
+    )
+
+
+@app.post("/remote-profiles")
+async def create_remote_profile(request: Request, body: RemoteProfileCreateBody):
+    user = request.state.user
+    payload = body.model_dump(exclude_none=True)
+    payload["user_id"] = user.id
+    return await _proxy_remote_profile_request(
+        "POST",
+        "/ssh-profiles",
+        user_id=user.id,
+        timeout=10.0,
+        json_body=payload,
+        include_user_id_param=False,
+    )
+
+
+@app.put("/remote-profiles/{profile_id}")
+async def update_remote_profile(
+    request: Request,
+    body: RemoteProfileUpdateBody,
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "PUT",
+        f"/ssh-profiles/{profile_id}",
+        user_id=user.id,
+        timeout=10.0,
+        json_body=body.model_dump(exclude_unset=True),
+    )
+
+
+@app.delete("/remote-profiles/{profile_id}")
+async def delete_remote_profile(
+    request: Request,
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "DELETE",
+        f"/ssh-profiles/{profile_id}",
+        user_id=user.id,
+        timeout=10.0,
+    )
+
+
+@app.post("/remote-profiles/{profile_id}/test")
+async def test_remote_profile(
+    request: Request,
+    body: RemoteProfilePasswordBody = Body(default_factory=RemoteProfilePasswordBody),
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "POST",
+        f"/ssh-profiles/{profile_id}/test",
+        user_id=user.id,
+        timeout=float(os.getenv("REMOTE_PROFILE_TEST_TIMEOUT_SECONDS", "630")),
+        json_body={"local_password": body.local_password},
+    )
+
+
+@app.get("/remote-profiles/{profile_id}/auth-session")
+async def get_remote_profile_auth_session(
+    request: Request,
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "GET",
+        f"/ssh-profiles/{profile_id}/auth-session",
+        user_id=user.id,
+        timeout=10.0,
+    )
+
+
+@app.post("/remote-profiles/{profile_id}/auth-session")
+async def create_remote_profile_auth_session(
+    request: Request,
+    body: RemoteProfilePasswordBody,
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "POST",
+        f"/ssh-profiles/{profile_id}/auth-session",
+        user_id=user.id,
+        timeout=30.0,
+        json_body={"local_password": body.local_password},
+    )
+
+
+@app.delete("/remote-profiles/{profile_id}/auth-session")
+async def delete_remote_profile_auth_session(
+    request: Request,
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "DELETE",
+        f"/ssh-profiles/{profile_id}/auth-session",
+        user_id=user.id,
+        timeout=10.0,
+    )
 
 @app.get("/jobs/{run_uuid}/status")
 async def get_job_status_proxy(run_uuid: str, request: Request):

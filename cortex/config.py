@@ -38,6 +38,11 @@ INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 
 # Frontend URL for OAuth redirects - use environment variable for remote access
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8501")
+LOCAL_UI_ALLOWED_ORIGINS = tuple(
+    origin.strip().rstrip("/")
+    for origin in os.getenv("LOCAL_UI_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+)
 
 # --- SKILLS & CODE CONFIG (derived from AGOUTIC_CODE) ---
 SKILLS_DIR = AGOUTIC_CODE / "skills"

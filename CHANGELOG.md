@@ -2,25 +2,41 @@
 
 ### Features
 
+- **Local-first Streamlit UI with remote Cortex support:** The UI can now run on a user's local machine and talk to a remote Cortex server. Login uses a browser-initiated OAuth flow that returns an auth code to the local Streamlit page, which exchanges it for a bearer session. Hosted Streamlit continues to use the existing cookie-based login flow.
+- **Cortex accepts bearer-token sessions alongside cookies:** `AuthMiddleware` in `cortex/middleware.py` now resolves authentication from either the existing `session` cookie or an `Authorization: Bearer ...` header, attaching both the user and transport type to `request.state`.
+- **Local-client auth exchange endpoint:** Cortex exposes `/auth/login?client_mode=local&return_to=...` for local Streamlit clients and `/auth/exchange` to convert a short-lived browser redirect code into a bearer session. Return targets are validated against loopback hosts or an allowlist (`LOCAL_UI_ALLOWED_ORIGINS`).
+- **Cortex proxies remote profile management:** New endpoints under `/remote-profiles/*` proxy SSH profile CRUD, connection testing, and local auth-session operations through to Launchpad. The UI no longer needs direct Launchpad REST access for these flows.
+- **Streamlit auth helpers are transport-neutral:** `ui/auth.py` now bootstraps bearer tokens from the auth-code callback, builds generic request kwargs (`build_auth_request_kwargs`), and merges them into all authenticated requests including chat, file upload, and share operations.
 - **Workflow analysis auto-generation now includes key result-file parsing:** When the LLM emits only a `get_analysis_summary` call for workflow-analysis skills (Dogme DNA/RNA/cDNA, haplotype, DE, etc.), Cortex now also auto-generates `find_file` + `parse_csv_file` calls for `final_stats` and `qc_summary`, so users get parsed metrics instead of file-count summaries.
 - **Override detection stage promotes LLM-only summary tags:** When the LLM emits only `get_analysis_summary` without concrete file-parsing calls, `_promote_llm_workflow_summary_tags()` in `overrides.py` converts it into a full auto-generated call set including `find_file` + `parse_csv_file` for key result files.
 - **New `/analyze [workflow]` slash command:** Alias for `/reanalyze`, matching the natural-language "analyze workflowN" path that was already supported. Updated in help catalog, topic guides, and skill help overrides.
 
 ### Bug Fixes
 
+- **Removed direct Launchpad REST dependency from the Streamlit UI:** The remote profiles page (`ui/pages/remote_profiles.py`) and shared SSH-profile loader (`ui/appui_services.py`, `ui/appUI.py`) now route through Cortex instead of calling `LAUNCHPAD_REST_URL` directly. End-user environments no longer need `LAUNCHPAD_REST_URL` or `INTERNAL_API_SECRET`.
+- **Chat/upload/share runtime uses generic auth kwargs:** Direct request calls in `ui/appui_chat_runtime.py` that previously built `cookies={"session": ...}` manually now consume the transport-neutral auth helper, preventing broken requests when running local Streamlit against remote Cortex.
 - **Increased default memory for `doradoTask` from 9 GB to 32 GB in Nextflow configuration, preventing out-of-memory failures during dorado basecalling.**
 - **Fixed transient `DetachedInstanceError` flashes in the UI by disabling attribute expiration on commit for sync database sessions, ensuring ORM blocks remain readable after being committed and closed.**
 - **Dogme DNA/RNA/cDNA skills now instruct the LLM to produce detailed first-pass analysis rather than stopping at file-count summaries:** All three Dogme skill docs updated with anti-pattern guards ("DON'T stop after reporting file counts"), explicit section requirements (Overall Assessment, Key Metrics, QC Concerns, Recommended Next Steps), and evidence-based interpretation guidance.
 
 ### Tests
 
+- **Added bearer-token and exchange flow coverage in `tests/cortex/test_auth.py`:** New tests for `/auth/me` with bearer headers, logout via bearer token, heartbeat via bearer token, login return-target validation, flow-cookie presence, auth-code exchange, and single-use enforcement.
+- **Added focused remote-profile proxy tests in `tests/cortex/test_remote_profile_proxy.py`:** Tests verify that Cortex proxies list, create, and auth-session endpoints to Launchpad with the authenticated user's identity injected server-side.
+- **Extended UI auth helper tests in `tests/ui/test_auth_helpers.py`:** New coverage for bearer-token usage in `get_current_user_state`, local-browser login link generation, auth-code bootstrap storing a bearer token, and `make_authenticated_request` attaching bearer headers.
 - **Added regression coverage for workflow-analysis auto-generation of `find_file` + `parse_csv_file` follow-ups in `tests/cortex/test_auto_generate_data.py`.**
 - **Added regression coverage for override-detection promotion of LLM-only summary tags, generic workflow analysis intent detection, and `/analyze` slash command parsing in `tests/cortex/test_chat_data_calls.py`, `tests/cortex/test_skill_manifest.py`, and `tests/cortex/test_workflow_commands.py`.**
 - **Added regression test for sync-session attribute retention after commit/close in `tests/test_common_database.py`.**
 
 ### Documentation
 
+- **Updated README.md to document hosted versus local Streamlit topologies:** Added setup instructions for running the UI against a remote Cortex server, described the local-client auth flow, and noted that remote profile management is proxied through Cortex.
+- **Updated CONFIGURATION.md with UI/auth topology variables:** Documented `AGOUTIC_API_URL`, `FRONTEND_URL`, `GOOGLE_REDIRECT_URI`, `LOCAL_UI_ALLOWED_ORIGINS`, and clarified which variables are server-side only (`LAUNCHPAD_REST_URL`, `INTERNAL_API_SECRET`).
 - **Updated UI agent-response section header from "Summary first, details on demand" to "Analysis summary and details".**
+
+### Infrastructure
+
+- **UI now has its own standalone `VERSION` file (`ui/VERSION`):** The Streamlit UI reads version from its own file instead of the repo root, enabling independent UI-only releases that can diverge from the main Agoutic version.
 
 ## [3.7.2] - 2026-06-09
 

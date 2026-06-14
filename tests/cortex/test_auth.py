@@ -23,6 +23,7 @@ from sqlalchemy.pool import StaticPool
 from common.database import Base
 from cortex.models import User, Session as SessionModel
 from cortex.app import app
+from cortex.auth import _issue_local_exchange_code
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +149,67 @@ class TestGetMe:
             resp = c.get("/auth/me")
             assert resp.status_code in (401, 403)
 
+    def test_bearer_token_returns_user_info(self, test_session_factory, seed_user, tmp_path):
+        with patch("cortex.db.SessionLocal", test_session_factory), \
+             patch("cortex.app.SessionLocal", test_session_factory), \
+             patch("cortex.auth.SessionLocal", test_session_factory), \
+             patch("cortex.dependencies.SessionLocal", test_session_factory), \
+             patch("cortex.middleware.SessionLocal", test_session_factory), \
+             patch("cortex.config.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.auth.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.user_jail.AGOUTIC_DATA", tmp_path):
+            c = TestClient(app, raise_server_exceptions=False)
+            resp = c.get("/auth/me", headers={"Authorization": "Bearer auth-session-token"})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["email"] == "auth@example.com"
+            assert data["username"] == "authuser"
+
+
+class TestLoginRouting:
+    def test_login_rejects_non_loopback_local_return_to(self, test_session_factory, seed_user, tmp_path):
+        with patch("cortex.db.SessionLocal", test_session_factory), \
+             patch("cortex.app.SessionLocal", test_session_factory), \
+             patch("cortex.auth.SessionLocal", test_session_factory), \
+             patch("cortex.middleware.SessionLocal", test_session_factory), \
+             patch("cortex.config.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.user_jail.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.auth.GOOGLE_CLIENT_ID", "client"), \
+             patch("cortex.auth.GOOGLE_CLIENT_SECRET", "secret"):
+            c = TestClient(app, raise_server_exceptions=False)
+            resp = c.get(
+                "/auth/login",
+                params={
+                    "client_mode": "local",
+                    "return_to": "https://example.com/callback",
+                },
+                follow_redirects=False,
+            )
+            assert resp.status_code == 400
+
+    def test_login_sets_flow_cookie_for_loopback_local_client(self, test_session_factory, seed_user, tmp_path):
+        with patch("cortex.db.SessionLocal", test_session_factory), \
+             patch("cortex.app.SessionLocal", test_session_factory), \
+             patch("cortex.auth.SessionLocal", test_session_factory), \
+             patch("cortex.middleware.SessionLocal", test_session_factory), \
+             patch("cortex.config.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.user_jail.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.auth.GOOGLE_CLIENT_ID", "client"), \
+             patch("cortex.auth.GOOGLE_CLIENT_SECRET", "secret"), \
+             patch("cortex.auth.AsyncOAuth2Client.create_authorization_url", return_value=("https://accounts.google.test/o/oauth2/auth", "state")):
+            c = TestClient(app, raise_server_exceptions=False)
+            resp = c.get(
+                "/auth/login",
+                params={
+                    "client_mode": "local",
+                    "return_to": "http://localhost:8501",
+                },
+                follow_redirects=False,
+            )
+            assert resp.status_code in (302, 307)
+            assert resp.headers["location"] == "https://accounts.google.test/o/oauth2/auth"
+            assert "agoutic_auth_flow=" in resp.headers.get("set-cookie", "")
+
 
 # ---------------------------------------------------------------------------
 # POST /auth/logout
@@ -180,6 +242,74 @@ class TestLogout:
             resp = c.post("/auth/logout")
             # Should succeed even without a session (graceful)
             assert resp.status_code == 200
+
+    def test_logout_with_bearer_invalidates_session(self, test_session_factory, seed_user, tmp_path):
+        with patch("cortex.db.SessionLocal", test_session_factory), \
+             patch("cortex.app.SessionLocal", test_session_factory), \
+             patch("cortex.auth.SessionLocal", test_session_factory), \
+             patch("cortex.middleware.SessionLocal", test_session_factory), \
+             patch("cortex.config.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.user_jail.AGOUTIC_DATA", tmp_path):
+            c = TestClient(app, raise_server_exceptions=False)
+            resp = c.post("/auth/logout", headers={"Authorization": "Bearer auth-session-token"})
+            assert resp.status_code == 200
+
+            sess = test_session_factory()
+            result = sess.execute(
+                select(SessionModel).where(SessionModel.id == "auth-session-token")
+            )
+            session_obj = result.scalar_one_or_none()
+            assert session_obj is not None
+            assert session_obj.is_valid is False
+            sess.close()
+
+
+class TestHeartbeat:
+    def test_heartbeat_accepts_bearer_token(self, test_session_factory, seed_user, tmp_path):
+        with patch("cortex.db.SessionLocal", test_session_factory), \
+             patch("cortex.app.SessionLocal", test_session_factory), \
+             patch("cortex.auth.SessionLocal", test_session_factory), \
+             patch("cortex.middleware.SessionLocal", test_session_factory), \
+             patch("cortex.config.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.user_jail.AGOUTIC_DATA", tmp_path):
+            c = TestClient(app, raise_server_exceptions=False)
+            resp = c.post("/auth/heartbeat", headers={"Authorization": "Bearer auth-session-token"})
+            assert resp.status_code == 200
+            payload = resp.json()
+            assert payload["status"] == "extended"
+            assert payload["expires_at"]
+
+
+class TestAuthExchange:
+    def test_exchange_returns_bearer_session(self, test_session_factory, seed_user, tmp_path):
+        with patch("cortex.db.SessionLocal", test_session_factory), \
+             patch("cortex.app.SessionLocal", test_session_factory), \
+             patch("cortex.auth.SessionLocal", test_session_factory), \
+             patch("cortex.middleware.SessionLocal", test_session_factory), \
+             patch("cortex.config.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.user_jail.AGOUTIC_DATA", tmp_path):
+            c = TestClient(app, raise_server_exceptions=False)
+            code = _issue_local_exchange_code("auth-session-token")
+            resp = c.post("/auth/exchange", json={"code": code})
+            assert resp.status_code == 200
+            payload = resp.json()
+            assert payload["access_token"] == "auth-session-token"
+            assert payload["token_type"] == "bearer"
+            assert payload["user"]["email"] == "auth@example.com"
+
+    def test_exchange_code_is_single_use(self, test_session_factory, seed_user, tmp_path):
+        with patch("cortex.db.SessionLocal", test_session_factory), \
+             patch("cortex.app.SessionLocal", test_session_factory), \
+             patch("cortex.auth.SessionLocal", test_session_factory), \
+             patch("cortex.middleware.SessionLocal", test_session_factory), \
+             patch("cortex.config.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.user_jail.AGOUTIC_DATA", tmp_path):
+            c = TestClient(app, raise_server_exceptions=False)
+            code = _issue_local_exchange_code("auth-session-token")
+            first = c.post("/auth/exchange", json={"code": code})
+            second = c.post("/auth/exchange", json={"code": code})
+            assert first.status_code == 200
+            assert second.status_code == 400
 
 
 # ---------------------------------------------------------------------------

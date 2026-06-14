@@ -814,7 +814,7 @@ class TestProjectAccessUiHelpers:
         fn(
             api_url="http://api.test",
             active_id="proj-1",
-            get_session_cookie_fn=lambda: None,
+            build_auth_request_kwargs_fn=lambda: {},
             disabled=True,
             disabled_reason="Viewer access is read-only in this shared project.",
         )

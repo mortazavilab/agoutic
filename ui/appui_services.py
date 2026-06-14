@@ -178,29 +178,18 @@ def load_available_reference_genomes(
     genomes = catalog.get("genomes") if isinstance(catalog, dict) else None
     return list(genomes) if isinstance(genomes, list) else []
 
-
-def launchpad_headers(internal_api_secret: str | None) -> dict:
-    headers = {"Content-Type": "application/json"}
-    if internal_api_secret:
-        headers["X-Internal-Secret"] = internal_api_secret
-    return headers
-
-
 def load_user_ssh_profiles(
     user_id: str,
     *,
-    launchpad_url: str,
+    api_url: str,
     request_fn,
-    internal_api_secret: str | None,
 ) -> list[dict]:
     if not user_id:
         return []
     try:
         resp = request_fn(
             "GET",
-            f"{launchpad_url}/ssh-profiles",
-            params={"user_id": user_id},
-            headers=launchpad_headers(internal_api_secret),
+            f"{api_url}/remote-profiles",
             timeout=8,
         )
         if resp.status_code != 200:

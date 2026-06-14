@@ -10,7 +10,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import plotly.express as px
 import plotly.graph_objects as go
-from auth import require_auth, logout_button, make_authenticated_request, get_session_cookie
+from auth import require_auth, logout_button, make_authenticated_request, build_auth_request_kwargs
 from theme import inject_global_css, get_plotly_template
 from components.cards import section_header, status_chip, metadata_row, stat_tile, info_callout
 from components.progress import stepper, segmented_progress, timeline, progress_stats
@@ -56,15 +56,14 @@ from appui_services import (
     get_cached_job_status as _get_cached_job_status_impl,
     get_job_debug_info as _get_job_debug_info_impl,
     load_user_ssh_profiles as _load_user_ssh_profiles_impl,
-    launchpad_headers as _launchpad_headers_impl,
 )
 from appui_sidebar import render_sidebar
 from appui_chat_runtime import handle_active_chat, launch_chat_request, render_file_upload, render_project_collaborator_list, render_project_share_form
 from appui_block_part1 import render_block_part1
 from appui_block_part2 import render_block_part2
 
-# --- VERSION (single source of truth: VERSION file at repo root) ---
-_VERSION_FILE = _Path(__file__).resolve().parent.parent / "VERSION"
+# --- VERSION (standalone for UI-only releases) ---
+_VERSION_FILE = _Path(__file__).resolve() / "VERSION"
 _version_raw = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
 AGOUTIC_VERSION = _version_raw[1:] if _version_raw.lower().startswith("v") else _version_raw
 
@@ -93,8 +92,6 @@ def _browser_page_title(project_name: str | None = None) -> str:
 # --- CONFIG ---
 # Use environment variable or default to localhost
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
-LAUNCHPAD_URL = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
-INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 LIVE_JOB_STATUS_TIMEOUT_SECONDS = float(os.getenv("LIVE_JOB_STATUS_TIMEOUT_SECONDS", "60"))
 
 st.set_page_config(page_title=_browser_page_title(), layout="wide")
@@ -320,16 +317,11 @@ def _create_project_server_side(name: str = None) -> dict:
     return _create_project_server_side_impl(name, API_URL, make_authenticated_request)
 
 
-def _launchpad_headers() -> dict:
-    return _launchpad_headers_impl(INTERNAL_API_SECRET)
-
-
 def _load_user_ssh_profiles(user_id: str) -> list[dict]:
     return _load_user_ssh_profiles_impl(
         user_id,
-        launchpad_url=LAUNCHPAD_URL,
+        api_url=API_URL,
         request_fn=make_authenticated_request,
-        internal_api_secret=INTERNAL_API_SECRET,
     )
 
 
@@ -1210,7 +1202,7 @@ st.write("---")
 render_file_upload(
     api_url=API_URL,
     active_id=active_id,
-    get_session_cookie_fn=get_session_cookie,
+    build_auth_request_kwargs_fn=build_auth_request_kwargs,
     disabled=not _can_mutate_active_project,
     disabled_reason="Viewer access is read-only in this shared project.",
 )
@@ -1221,7 +1213,7 @@ render_project_share_form(
     api_url=API_URL,
     active_project=_active_project,
     user=user,
-    get_session_cookie_fn=get_session_cookie,
+    build_auth_request_kwargs_fn=build_auth_request_kwargs,
 )
 
 # 3. Chat Input
@@ -1297,5 +1289,5 @@ if prompt:
         active_id=active_id,
         prompt=prompt,
         model_choice=model_choice,
-        get_session_cookie_fn=get_session_cookie,
+        build_auth_request_kwargs_fn=build_auth_request_kwargs,
     )

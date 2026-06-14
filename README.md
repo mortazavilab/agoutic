@@ -293,6 +293,13 @@ The environment now includes `htslib` (`bgzip`, `tabix`) and `bcftools` so AGOUT
 
 ### Run the System
 
+AGOUTIC now supports two UI topologies:
+
+- Hosted Streamlit: Streamlit and Cortex run on the same server or network boundary and the browser uses the existing cookie-based login flow.
+- Local Streamlit against remote Cortex: Streamlit runs on the user's machine, `AGOUTIC_API_URL` points at the remote Cortex server, and login returns to the local Streamlit page so it can exchange a bearer session.
+
+In both modes, the UI talks only to Cortex. End-user UI environments do not need `LAUNCHPAD_REST_URL` or `INTERNAL_API_SECRET`.
+
 ```bash
 # Recommended: start the full backend stack
 ./agoutic_servers.sh --start
@@ -317,8 +324,17 @@ uvicorn cortex.app:app --host 0.0.0.0 --port 8000 --reload
 cd ui && streamlit run appUI.py
 ```
 
+For a local UI talking to a remote Cortex server:
+
+```bash
+export AGOUTIC_API_URL=http://remote-cortex-host:8000
+streamlit run ui/appUI.py --server.port 8501
+```
+
+When the UI is running on `localhost` or `127.0.0.1`, the login button automatically requests the local-client auth flow. Cortex redirects back to the local Streamlit URL with a short-lived auth code, and the UI exchanges that code for a bearer session.
+
 Note: running `python ui/appUI.py` directly will not work correctly because the UI
-auth flow depends on Streamlit request context and browser cookies.
+auth flow depends on Streamlit request context plus either browser cookies (hosted mode) or the local auth-code exchange (local mode).
 
 ### Verify Installation
 
@@ -773,6 +789,10 @@ When servers are started or restarted via `agoutic_servers.sh`, existing log fil
 | Variable | Default | Description |
 |---|---|---|
 | `AGOUTIC_LOG_FORMAT` | `json` | Set to `dev` for coloured human-readable console output |
+| `AGOUTIC_API_URL` | `http://127.0.0.1:8000` | Cortex base URL used by Streamlit. Set this when running the UI against a remote Cortex server. |
+| `FRONTEND_URL` | `http://localhost:8501` | Hosted Streamlit origin used by Cortex for the browser-cookie login flow. |
+| `GOOGLE_REDIRECT_URI` | `http://localhost:8000/auth/callback` | OAuth callback URL exposed by Cortex. Must match the value registered in Google Cloud. |
+| `LOCAL_UI_ALLOWED_ORIGINS` | unset | Optional comma-separated extra local UI origins allowed for auth-code return targets. Loopback origins (`localhost`, `127.0.0.1`) work without this. |
 
 ## �🚀 Running the System
 
@@ -785,6 +805,15 @@ When servers are started or restarted via `agoutic_servers.sh`, existing log fil
 # Start the UI separately
 streamlit run ui/appUI.py --server.port 8501
 ```
+
+For a local Streamlit client against a remote Cortex deployment:
+
+```bash
+export AGOUTIC_API_URL=http://remote-cortex-host:8000
+streamlit run ui/appUI.py --server.port 8501
+```
+
+The Streamlit UI now proxies remote profile management through Cortex, so the local UI environment does not need direct Launchpad REST credentials.
 
 If you need manual development startup:
 

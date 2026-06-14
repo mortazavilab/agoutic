@@ -43,13 +43,13 @@ def _matching_collaborator_user_id(collaborators: list[dict] | None, email: str)
     return None
 
 
-def _submit_share_request(*, api_url: str, project_id: str, email: str, role: str, cookies: dict, timeout: int = 10) -> tuple[requests.Response, str]:
+def _submit_share_request(*, api_url: str, project_id: str, email: str, role: str, request_kwargs: dict, timeout: int = 10) -> tuple[requests.Response, str]:
     create_resp = _buffer_and_close_response(
         requests.post(
             f"{api_url}/projects/{project_id}/collaborators",
             json={"email": email, "role": role},
-            cookies=cookies,
             timeout=timeout,
+            **request_kwargs,
         )
     )
     error_detail = _response_error_detail(create_resp).lower()
@@ -59,8 +59,8 @@ def _submit_share_request(*, api_url: str, project_id: str, email: str, role: st
     collaborators_resp = _buffer_and_close_response(
         requests.get(
             f"{api_url}/projects/{project_id}/collaborators",
-            cookies=cookies,
             timeout=timeout,
+            **request_kwargs,
         )
     )
     if collaborators_resp.status_code != 200:
@@ -78,8 +78,8 @@ def _submit_share_request(*, api_url: str, project_id: str, email: str, role: st
         requests.patch(
             f"{api_url}/projects/{project_id}/collaborators/{collaborator_user_id}",
             json={"role": role},
-            cookies=cookies,
             timeout=timeout,
+            **request_kwargs,
         )
     )
     return update_resp, "updated"
@@ -130,7 +130,7 @@ def render_project_collaborator_list(*, prompt: str, active_project: dict, colla
             st.markdown(line)
 
 
-def render_file_upload(*, api_url: str, active_id: str, get_session_cookie_fn, disabled: bool = False, disabled_reason: str | None = None):
+def render_file_upload(*, api_url: str, active_id: str, build_auth_request_kwargs_fn, disabled: bool = False, disabled_reason: str | None = None):
     """Render file upload UI and perform uploads for the active project."""
     with st.expander("📎 Upload files", expanded=False):
         if disabled:
@@ -143,8 +143,7 @@ def render_file_upload(*, api_url: str, active_id: str, get_session_cookie_fn, d
             key="file_upload_widget",
         )
         if uploaded_files and st.button("Upload", key="upload_btn"):
-            session_token = get_session_cookie_fn()
-            cookies = {"session": session_token} if session_token else {}
+            request_kwargs = build_auth_request_kwargs_fn()
             files_payload = [
                 ("files", (uf.name, uf.getvalue(), uf.type or "application/octet-stream"))
                 for uf in uploaded_files
@@ -153,7 +152,7 @@ def render_file_upload(*, api_url: str, active_id: str, get_session_cookie_fn, d
                 resp = _buffer_and_close_response(requests.post(
                     f"{api_url}/projects/{active_id}/upload",
                     files=files_payload,
-                    cookies=cookies,
+                    **request_kwargs,
                 ))
                 if resp.status_code == 200:
                     result = resp.json()
@@ -171,7 +170,7 @@ def render_project_share_form(
     api_url: str,
     active_project: dict,
     user: dict,
-    get_session_cookie_fn,
+    build_auth_request_kwargs_fn,
 ):
     feedback = st.session_state.get("_share_form_feedback")
     if feedback and feedback.get("project_id") == active_project.get("id"):
@@ -212,15 +211,14 @@ def render_project_share_form(
         if not submitted:
             return
 
-        session_token = get_session_cookie_fn()
-        cookies = {"session": session_token} if session_token else {}
+        request_kwargs = build_auth_request_kwargs_fn()
         try:
             resp, action = _submit_share_request(
                 api_url=api_url,
                 project_id=active_project["id"],
                 email=email,
                 role=role,
-                cookies=cookies,
+                request_kwargs=request_kwargs,
                 timeout=10,
             )
         except Exception as exc:
@@ -270,7 +268,7 @@ def handle_active_chat(*, api_url: str, active_project_id: str | None = None):
     ac_request_id = active_chat["request_id"]
     ac_result = active_chat["result_holder"]
     ac_start = active_chat["start_time"]
-    ac_session_token = active_chat["session_token"]
+    ac_request_kwargs = dict(active_chat.get("auth_request_kwargs") or {})
     stage_icons = {
         "waiting": "⏳",
         "thinking": "🧠",
@@ -287,11 +285,10 @@ def handle_active_chat(*, api_url: str, active_project_id: str | None = None):
             status_box = st.status("🧠 Processing...", expanded=True)
             elapsed = time.time() - ac_start
             try:
-                cookies = {"session": ac_session_token} if ac_session_token else {}
                 sr = _buffer_and_close_response(requests.get(
                     f"{api_url}/chat/status/{ac_request_id}",
-                    cookies=cookies,
                     timeout=3,
+                    **ac_request_kwargs,
                 ))
                 if sr.status_code == 200:
                     info = sr.json()
@@ -306,11 +303,10 @@ def handle_active_chat(*, api_url: str, active_project_id: str | None = None):
 
             if st.button("⏹️ Stop", key="_stop_chat_btn"):
                 try:
-                    cookies = {"session": ac_session_token} if ac_session_token else {}
                     _buffer_and_close_response(requests.post(
                         f"{api_url}/chat/cancel/{ac_request_id}",
-                        cookies=cookies,
                         timeout=5,
+                        **ac_request_kwargs,
                     ))
                 except Exception:
                     pass
@@ -364,15 +360,14 @@ def handle_active_chat(*, api_url: str, active_project_id: str | None = None):
         st.rerun()
 
 
-def launch_chat_request(*, api_url: str, active_id: str, prompt: str, model_choice: str, get_session_cookie_fn):
+def launch_chat_request(*, api_url: str, active_id: str, prompt: str, model_choice: str, build_auth_request_kwargs_fn):
     """Start a threaded chat request and persist request state in session."""
     request_id = str(uuid.uuid4())
-    session_token = get_session_cookie_fn()
+    auth_request_kwargs = build_auth_request_kwargs_fn()
     result_holder = {"response": None, "error": None}
 
     def _send_chat_request():
         try:
-            cookies = {"session": session_token} if session_token else {}
             result_holder["response"] = _buffer_and_close_response(requests.post(
                 f"{api_url}/chat",
                 json={
@@ -382,8 +377,8 @@ def launch_chat_request(*, api_url: str, active_id: str, prompt: str, model_choi
                     "model": model_choice,
                     "request_id": request_id,
                 },
-                cookies=cookies,
                 timeout=900,
+                **auth_request_kwargs,
             ))
         except Exception as exc:
             result_holder["error"] = exc
@@ -399,7 +394,7 @@ def launch_chat_request(*, api_url: str, active_id: str, prompt: str, model_choi
         "request_id": request_id,
         "result_holder": result_holder,
         "start_time": time.time(),
-        "session_token": session_token,
+        "auth_request_kwargs": auth_request_kwargs,
         "project_id": active_id,
     }
     time.sleep(0.5)

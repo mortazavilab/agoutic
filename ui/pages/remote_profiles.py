@@ -1,7 +1,7 @@
 """
 Remote Connection Profiles Page
 Manage SSH connection profiles used for HPC/SLURM remote execution.
-All requests go through the Launchpad REST API.
+All requests go through Cortex — the UI never contacts Launchpad directly.
 """
 
 import streamlit as st
@@ -19,12 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from auth import require_auth, make_authenticated_request
 from components.cards import section_header, empty_state, status_chip
 
-# Launchpad REST URL for SSH profile management
-LAUNCHPAD_URL = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
-# Cortex API URL for authentication
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
-# Internal API secret for service-to-service auth with Launchpad
-INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+REMOTE_PROFILES_URL = f"{API_URL}/remote-profiles"
 REMOTE_PROFILE_TEST_TIMEOUT_SECONDS = int(os.getenv("REMOTE_PROFILE_TEST_TIMEOUT_SECONDS", "630"))
 REMOTE_PROFILE_TEST_MAX_WAIT_SECONDS = int(os.getenv("REMOTE_PROFILE_TEST_MAX_WAIT_SECONDS", "600"))
 
@@ -32,21 +28,12 @@ st.set_page_config(page_title="Remote Profiles", page_icon="🔌", layout="wide"
 
 # Require authentication
 user = require_auth(API_URL)
-user_id = user.get("id") or user.get("user_id", "")
 
 section_header("Remote Connection Profiles", "Manage SSH profiles for remote HPC/SLURM execution", icon="🔌")
 st.caption("Remote base path may use placeholders like {ssh_username}, {project_slug}, {sample_name}, and {workflow_slug}.")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
-
-def _launchpad_headers() -> dict:
-    """Return headers required for Launchpad service-to-service auth."""
-    h = {"Content-Type": "application/json"}
-    if INTERNAL_API_SECRET:
-        h["X-Internal-Secret"] = INTERNAL_API_SECRET
-    return h
-
 
 def _fmt_datetime(val: str) -> str:
     """Format an ISO datetime string for display."""
@@ -59,13 +46,11 @@ def _fmt_datetime(val: str) -> str:
 
 
 def _load_profiles() -> list[dict]:
-    """Fetch SSH profiles for the current user from Launchpad."""
+    """Fetch SSH profiles for the current user from Cortex."""
     try:
         resp = make_authenticated_request(
             "GET",
-            f"{LAUNCHPAD_URL}/ssh-profiles",
-            params={"user_id": user_id},
-            headers=_launchpad_headers(),
+            REMOTE_PROFILES_URL,
             timeout=10,
         )
         if resp.status_code == 200:
@@ -77,7 +62,7 @@ def _load_profiles() -> list[dict]:
             st.error(f"Failed to load profiles: {resp.status_code}")
             return []
     except Exception as e:
-        st.error(f"Cannot connect to Launchpad API: {e}")
+        st.error(f"Cannot connect to Cortex remote profile API: {e}")
         return []
 
 
@@ -86,9 +71,7 @@ def _load_auth_session(profile_id: str) -> dict:
     try:
         resp = make_authenticated_request(
             "GET",
-            f"{LAUNCHPAD_URL}/ssh-profiles/{profile_id}/auth-session",
-            params={"user_id": user_id},
-            headers=_launchpad_headers(),
+            f"{REMOTE_PROFILES_URL}/{profile_id}/auth-session",
             timeout=10,
         )
         if resp.status_code == 200:
@@ -183,7 +166,6 @@ with st.expander("➕ Create Profile", expanded=False):
                     st.error(err)
             else:
                 payload = {
-                    "user_id": user_id,
                     "nickname": nickname.strip(),
                     "ssh_host": ssh_host.strip(),
                     "ssh_port": ssh_port,
@@ -208,9 +190,8 @@ with st.expander("➕ Create Profile", expanded=False):
                 try:
                     resp = make_authenticated_request(
                         "POST",
-                        f"{LAUNCHPAD_URL}/ssh-profiles",
+                        REMOTE_PROFILES_URL,
                         json=payload,
-                        headers=_launchpad_headers(),
                         timeout=10,
                     )
                     if resp.status_code in (200, 201):
@@ -286,10 +267,8 @@ for idx, profile in enumerate(profiles):
                                 try:
                                     resp = make_authenticated_request(
                                         "POST",
-                                        f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/auth-session",
-                                        params={"user_id": user_id},
+                                        f"{REMOTE_PROFILES_URL}/{pid}/auth-session",
                                         json={"local_password": local_auth_pwd},
-                                        headers=_launchpad_headers(),
                                         timeout=30,
                                     )
                                     if resp.status_code == 200:
@@ -305,9 +284,7 @@ for idx, profile in enumerate(profiles):
                         try:
                             resp = make_authenticated_request(
                                 "DELETE",
-                                f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/auth-session",
-                                params={"user_id": user_id},
-                                headers=_launchpad_headers(),
+                                f"{REMOTE_PROFILES_URL}/{pid}/auth-session",
                                 timeout=10,
                             )
                             if resp.status_code == 200:
@@ -325,11 +302,9 @@ for idx, profile in enumerate(profiles):
                     try:
                         resp = _run_request_with_elapsed(
                             "POST",
-                            f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/test",
+                            f"{REMOTE_PROFILES_URL}/{pid}/test",
                             status_label="Testing connection…",
-                            params={"user_id": user_id},
                             json={"local_password": local_auth_pwd},
-                            headers=_launchpad_headers(),
                             timeout=REMOTE_PROFILE_TEST_TIMEOUT_SECONDS,
                         )
                         if resp.status_code == 200:
@@ -374,9 +349,7 @@ for idx, profile in enumerate(profiles):
                         try:
                             resp = make_authenticated_request(
                                 "DELETE",
-                                f"{LAUNCHPAD_URL}/ssh-profiles/{pid}",
-                                params={"user_id": user_id},
-                                headers=_launchpad_headers(),
+                                f"{REMOTE_PROFILES_URL}/{pid}",
                                 timeout=10,
                             )
                             if resp.status_code in (200, 204):
@@ -509,10 +482,8 @@ for idx, profile in enumerate(profiles):
                         try:
                             resp = make_authenticated_request(
                                 "PUT",
-                                f"{LAUNCHPAD_URL}/ssh-profiles/{pid}",
-                                params={"user_id": user_id},
+                                f"{REMOTE_PROFILES_URL}/{pid}",
                                 json=update_payload,
-                                headers=_launchpad_headers(),
                                 timeout=10,
                             )
                             if resp.status_code == 200:
@@ -526,4 +497,4 @@ for idx, profile in enumerate(profiles):
 
 # Footer
 st.divider()
-st.caption(f"Connected to Launchpad API: {LAUNCHPAD_URL}")
+st.caption(f"Connected to Cortex API: {API_URL}")
