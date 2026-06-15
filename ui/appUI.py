@@ -63,10 +63,46 @@ from appui_block_part1 import render_block_part1
 from appui_block_part2 import render_block_part2
 
 # --- VERSION (standalone for UI-only releases) ---
-_VERSION_FILE = _Path(__file__).resolve() / "VERSION"
+_VERSION_FILE = _Path(__file__).resolve().parent / "VERSION"
 _version_raw = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
 AGOUTIC_VERSION = _version_raw[1:] if _version_raw.lower().startswith("v") else _version_raw
 
+# --- Startup diagnostics (Streamlit runs the script twice on startup, so this prints twice — harmless) ---
+_api_url = os.getenv("AGOUTIC_API_URL", "(not set)")
+_frontend_url = os.getenv("FRONTEND_URL", "(not set)")
+_local_origins = os.getenv("LOCAL_UI_ALLOWED_ORIGINS", "(not set)")
+_oauth_redirect = os.getenv("GOOGLE_REDIRECT_URI", "(not set)")
+
+from urllib.parse import urlparse
+import socket
+
+_parsed = urlparse(_api_url)
+_is_loopback = _parsed.hostname in {"127.0.0.1", "localhost", "0.0.0.0"}
+
+# Also check if the hostname resolves to a local IP (hosted mode on same machine)
+_is_local_host = False
+if not _is_loopback and _parsed.hostname:
+    try:
+        addrinfo = socket.getaddrinfo(_parsed.hostname, None)
+        for family, _, _, _, sockaddr in addrinfo:
+            ip = sockaddr[0]
+            if ip.startswith("127.") or ip == "::1":
+                _is_local_host = True
+                break
+    except (socket.gaierror, OSError):
+        pass
+
+_mode = "local" if _is_loopback or _is_local_host else "server"
+
+if "startup_diagnostics_printed" not in st.session_state:
+    print(f"\n{'='*60}", flush=True)
+    print(f"[AGOUTIC] v{AGOUTIC_VERSION}  mode={_mode}", flush=True)
+    print(f"[AGOUTIC] AGOUTIC_API_URL={_api_url}", flush=True)
+    print(f"[AGOUTIC] FRONTEND_URL={_frontend_url}", flush=True)
+    print(f"[AGOUTIC] LOCAL_UI_ALLOWED_ORIGINS={_local_origins}", flush=True)
+    print(f"[AGOUTIC] GOOGLE_REDIRECT_URI={_oauth_redirect}", flush=True)
+    print(f"{'='*60}\n", flush=True)
+    st.session_state["startup_diagnostics_printed"] = True
 
 def _resolved_page_project_name() -> str:
     cached_name = str(st.session_state.get("_page_project_name") or "").strip()

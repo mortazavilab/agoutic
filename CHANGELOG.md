@@ -1,4 +1,4 @@
-## [Unreleased]
+## [3.7.3] - 2026-06-14
 
 ### Features
 
@@ -13,6 +13,7 @@
 
 ### Bug Fixes
 
+- **Prevented startup diagnostics from printing multiple times in the UI by tracking state in `st.session_state`.**
 - **Removed direct Launchpad REST dependency from the Streamlit UI:** The remote profiles page (`ui/pages/remote_profiles.py`) and shared SSH-profile loader (`ui/appui_services.py`, `ui/appUI.py`) now route through Cortex instead of calling `LAUNCHPAD_REST_URL` directly. End-user environments no longer need `LAUNCHPAD_REST_URL` or `INTERNAL_API_SECRET`.
 - **Chat/upload/share runtime uses generic auth kwargs:** Direct request calls in `ui/appui_chat_runtime.py` that previously built `cookies={"session": ...}` manually now consume the transport-neutral auth helper, preventing broken requests when running local Streamlit against remote Cortex.
 - **Increased default memory for `doradoTask` from 9 GB to 32 GB in Nextflow configuration, preventing out-of-memory failures during dorado basecalling.**
@@ -37,6 +38,8 @@
 ### Infrastructure
 
 - **UI now has its own standalone `VERSION` file (`ui/VERSION`):** The Streamlit UI reads version from its own file instead of the repo root, enabling independent UI-only releases that can diverge from the main Agoutic version.
+
+## [3.7.2] - 2026-06-09
 
 ## [3.7.2] - 2026-06-09
 
