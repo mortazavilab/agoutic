@@ -15,7 +15,63 @@ def _make_block(payload: dict):
 class TestToolDispatchPathResolution:
     def test_consortium_alias_preserved_over_base_alias(self):
         tool_aliases, _ = _get_aliases()
-        assert tool_aliases["get_file"] == "get_file_metadata"
+        # IGVF overrides the base get_file -> read_file_content alias.
+        assert tool_aliases["igvf"]["get_file"] == "get_file_metadata"
+
+    def test_encode_accession_keeps_encode_tool_routing(self):
+        tag_pattern = re.compile(r'\[\[DATA_CALL: (consortium|service)=([^,]+), tool=([^,]+),?\s*(.*?)\]\]')
+        match = tag_pattern.match(
+            "[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR589FUJ]]"
+        )
+        assert match is not None
+
+        calls_by_source = build_calls_by_source(
+            data_call_matches=[match],
+            legacy_encode_matches=[],
+            legacy_analysis_matches=[],
+            auto_calls=[],
+            has_any_tags=True,
+            user_id="u-1",
+            project_id="proj-1",
+            user_message="tell me about ENCSR589FUJ",
+            conversation_history=[],
+            history_blocks=[],
+            project_dir="",
+            active_skill="ENCODE_Search",
+        )
+
+        encode_calls = calls_by_source["encode"]
+        assert len(encode_calls) == 1
+        assert encode_calls[0]["tool"] == "get_experiment"
+        assert encode_calls[0]["params"]["accession"] == "ENCSR589FUJ"
+
+    def test_encode_accession_overrides_mismatched_igvf_source(self):
+        tag_pattern = re.compile(r'\[\[DATA_CALL: (consortium|service)=([^,]+), tool=([^,]+),?\s*(.*?)\]\]')
+        match = tag_pattern.match(
+            "[[DATA_CALL: consortium=igvf, tool=get_experiment, accession=ENCSR589FUJ]]"
+        )
+        assert match is not None
+
+        calls_by_source = build_calls_by_source(
+            data_call_matches=[match],
+            legacy_encode_matches=[],
+            legacy_analysis_matches=[],
+            auto_calls=[],
+            has_any_tags=True,
+            user_id="u-1",
+            project_id="proj-1",
+            user_message="tell me about ENCSR589FUJ",
+            conversation_history=[],
+            history_blocks=[],
+            project_dir="",
+            active_skill="welcome",
+        )
+
+        assert "igvf" not in calls_by_source or not calls_by_source["igvf"]
+        encode_calls = calls_by_source["encode"]
+        assert len(encode_calls) == 1
+        assert encode_calls[0]["tool"] == "get_experiment"
+        assert encode_calls[0]["params"]["accession"] == "ENCSR589FUJ"
 
     def test_igvf_file_metadata_does_not_hit_encode_rerouter(self):
         tag_pattern = re.compile(r'\[\[DATA_CALL: (consortium|service)=([^,]+), tool=([^,]+),?\s*(.*?)\]\]')

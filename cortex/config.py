@@ -19,8 +19,10 @@ from common.database import DATABASE_URL  # noqa: E402
 # Google OAuth
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-# Allow override via environment variable for remote access
-GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/callback")
+
+# Derived from AGOUTIC_API_URL — no need for a separate env var.
+_api_url = os.getenv("AGOUTIC_API_URL", "http://localhost:8000")
+GOOGLE_REDIRECT_URI = f"{_api_url.rstrip('/')}/auth/callback"
 
 # Super admin email (auto-approved on first login)
 SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "")

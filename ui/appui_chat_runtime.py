@@ -326,6 +326,8 @@ def handle_active_chat(*, api_url: str, active_project_id: str | None = None):
     if chat_failed:
         st.session_state["_last_prompt_failed"] = True
 
+    should_rerun = False
+
     with st.chat_message("assistant"):
         if ac_result["error"]:
             st.error(f"Failed to send message: {ac_result['error']}")
@@ -354,10 +356,12 @@ def handle_active_chat(*, api_url: str, active_project_id: str | None = None):
             else:
                 st.empty()
                 st.session_state.pop("_last_prompt_failed", None)
+                should_rerun = True
 
         st.caption(f"⏱️ {elapsed:.0f}s elapsed")
-        time.sleep(0.3)
-        st.rerun()
+        if should_rerun:
+            time.sleep(0.3)
+            st.rerun()
 
 
 def launch_chat_request(*, api_url: str, active_id: str, prompt: str, model_choice: str, build_auth_request_kwargs_fn):

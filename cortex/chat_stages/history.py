@@ -20,21 +20,22 @@ PRIORITY = 300
 class _HistoryRow:
     """Lightweight stand-in for a ProjectBlock row used only in the history loop.
 
-    Stores just ``type``, ``payload_json`` (as a dict), and ``seq`` so the
-    downstream loop never touches ORM-loaded columns it doesn't need.
+    Stores only the attributes consumed by downstream helpers/state rebuild:
+    ``id``, ``type``, ``status``, ``payload_json`` (original JSON string), and
+    ``seq``.
     """
 
-    __slots__ = ("type", "payload_json", "seq", "_raw_payload")
+    __slots__ = ("id", "type", "status", "payload_json", "seq")
 
-    def __init__(self, type_: str, payload_json: str | None, seq: int):
+    def __init__(self, id_: str, type_: str, status: str, payload_json: str | None, seq: int):
+        self.id = id_
         self.type = type_
+        self.status = status
         self.seq = seq
-        # Lazy-parse the JSON payload only when get_block_payload asks for it.
-        self._raw_payload = payload_json
-        self.payload_json: dict = {}
+        self.payload_json = payload_json or ""
 
     def __repr__(self) -> str:  # pragma: no cover — debug helper
-        return f"_HistoryRow(type={self.type!r}, seq={self.seq})"
+        return f"_HistoryRow(id={self.id!r}, type={self.type!r}, status={self.status!r}, seq={self.seq})"
 
 
 _DETAILS_RE = re.compile(
@@ -55,21 +56,32 @@ class HistoryStage:
         return True
 
     async def run(self, ctx: ChatContext) -> None:
-        # Fetch only the columns actually used in the loop (type + payload_json).
-        # seq is needed for ordering.  This avoids transferring created_at,
-        # status, owner_id, etc. for every block on every chat turn.
+        # Fetch only columns used by conversation history rendering and
+        # conversation_state reconstruction.
         history_result = ctx.session.execute(
-            select(ProjectBlock.type, ProjectBlock.payload_json, ProjectBlock.seq)
+            select(
+                ProjectBlock.id,
+                ProjectBlock.type,
+                ProjectBlock.status,
+                ProjectBlock.payload_json,
+                ProjectBlock.seq,
+            )
             .where(ProjectBlock.project_id == ctx.project_id)
-            .where(ProjectBlock.type.in_(["USER_MESSAGE", "AGENT_PLAN", "EXECUTION_JOB"]))
-            .order_by(ProjectBlock.seq.asc())
+            .where(ProjectBlock.type.in_([
+                "USER_MESSAGE",
+                "AGENT_PLAN",
+                "EXECUTION_JOB",
+                "WORKFLOW_PLAN",
+                "PENDING_ACTION",
+            ]))
+            .order_by(ProjectBlock.seq.desc())
             .limit(_MAX_HISTORY_ROWS)
         )
-        rows = history_result.all()
+        rows = list(reversed(history_result.all()))
 
         # Reconstruct lightweight block-like objects with only the needed attrs.
         ctx.history_blocks = [
-            _HistoryRow(t, p, s) for t, p, s in rows
+            _HistoryRow(i, t, st, p, s) for i, t, st, p, s in rows
         ]
 
         conversation_history: list[dict] = []

@@ -67,9 +67,6 @@ export AGOUTIC_API_URL=http://remote-cortex-host:8000
 # Cortex: hosted Streamlit/browser origin for cookie-based login
 export FRONTEND_URL=http://localhost:8501
 
-# Cortex: OAuth callback exposed by Cortex itself
-export GOOGLE_REDIRECT_URI=http://localhost:8000/auth/callback
-
 # Cortex: optional comma-separated allowlist for non-loopback local UI origins
 # Loopback origins (localhost / 127.0.0.1) are already allowed.
 export LOCAL_UI_ALLOWED_ORIGINS=http://my-dev-box:8501
@@ -81,7 +78,7 @@ export INTERNAL_API_SECRET=replace-me
 
 Notes:
 - `FRONTEND_URL` is for hosted Streamlit, not the local Streamlit client case.
-- `GOOGLE_REDIRECT_URI` must exactly match the Google Cloud OAuth app configuration.
+- `GOOGLE_REDIRECT_URI` is derived automatically from `AGOUTIC_API_URL` (`{AGOUTIC_API_URL}/auth/callback`) and no longer needs a separate env var. Ensure the Google Cloud OAuth app is configured with this callback URL.
 - `LAUNCHPAD_REST_URL` and `INTERNAL_API_SECRET` should stay on the server side. Remote profile management and other UI flows now go through Cortex.
 
 ## Derived Paths

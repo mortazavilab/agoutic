@@ -20,7 +20,6 @@ import pandas as pd
 
 from atlas.config import (
     CONSORTIUM_REGISTRY,
-    get_all_tool_aliases,
     get_all_param_aliases,
 )
 from common import MCPHttpClient
@@ -85,6 +84,9 @@ _BED_FILENAME_METADATA_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ENCODE_ACCESSION_RE = re.compile(r"\bENC[A-Z0-9]{5,}\b", re.IGNORECASE)
+_IGVF_ACCESSION_RE = re.compile(r"\bIGVF[A-Z0-9]{4,}\b", re.IGNORECASE)
+
 
 def _extract_modification_name(user_message: str) -> str | None:
     match = _MODIFICATION_COUNT_INTENT_RE.search(user_message)
@@ -116,6 +118,39 @@ def _parse_bed_filename_metadata(file_path: str) -> dict[str, str] | None:
     if not match:
         return None
     return {key: value for key, value in match.groupdict().items()}
+
+
+def _infer_consortium_from_accession(
+    source_type: str,
+    source_key: str,
+    params: dict[str, object] | None,
+    user_message: str,
+) -> str:
+    """Trust explicit accession prefixes over a mismatched consortium tag.
+
+    Only applies to consortium calls already targeting ENCODE or IGVF. If the
+    params or user message contain an unambiguous ENCODE (ENC...) or IGVF
+    (IGVF...) accession, use that source instead of the declared one.
+    """
+    if source_type != "consortium" or source_key not in {"encode", "igvf"}:
+        return source_key
+
+    candidates: list[str] = []
+    for value in (params or {}).values():
+        if isinstance(value, str):
+            candidates.append(value)
+        elif isinstance(value, list):
+            candidates.extend(item for item in value if isinstance(item, str))
+    candidates.append(user_message)
+
+    has_encode = any(_ENCODE_ACCESSION_RE.search(value) for value in candidates)
+    has_igvf = any(_IGVF_ACCESSION_RE.search(value) for value in candidates)
+
+    if has_encode and not has_igvf:
+        return "encode"
+    if has_igvf and not has_encode:
+        return "igvf"
+    return source_key
 
 
 def _build_modification_totals_rows(dataframe: dict | None) -> list[dict]:
@@ -431,26 +466,44 @@ class ToolExecutionResult:
 # Build calls_by_source
 # ---------------------------------------------------------------------------
 
-def _get_aliases() -> tuple[dict[str, str], dict[str, dict[str, str]]]:
-    """Merge atlas registry aliases with our base aliases.
+def _get_aliases() -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+    """Build per-source tool aliases and global param aliases.
 
-    Consortium-registered canonical tool names are protected: if a base alias
-    would remap a name that is itself a real consortium tool (i.e. appears as
-    an alias target or has param_aliases defined), the base alias is skipped
-    so the consortium tool remains reachable.
+    Tool aliases are scoped by source_key so that one consortium's aliases
+    (e.g. IGVF's ``"get_experiment": "get_dataset"``) do not pollute another
+    consortium's tool calls (e.g. ENCODE where ``get_experiment`` is valid).
+
+    Returns ``(source_tool_aliases, param_aliases)`` where
+    ``source_tool_aliases[source_key]`` is a dict of wrong_name -> correct_name.
     """
-    tool_aliases = get_all_tool_aliases()
+    from atlas.config import CONSORTIUM_REGISTRY
+
+    # Build per-source tool alias dicts
+    source_tool_aliases: dict[str, dict[str, str]] = {}
+    all_alias_values: set[str] = set()  # for canonical protection below
+    for _sk, _entry in CONSORTIUM_REGISTRY.items():
+        sa = _entry.get("tool_aliases", {})
+        if sa:
+            source_tool_aliases[_sk] = dict(sa)
+            all_alias_values.update(sa.values())
+
     # Canonical consortium tool names = alias targets + param_alias keys
-    _consortium_canonical: set[str] = set(tool_aliases.values())
+    _consortium_canonical: set[str] = set(all_alias_values)
     param_aliases = get_all_param_aliases()
     _consortium_canonical.update(param_aliases.keys())
-    # Add base aliases only when the alias key is not itself a consortium tool
+
+    # Add base aliases scoped to each source that doesn't already have the tool
     for _alias, _target in _BASE_TOOL_ALIASES.items():
-        if _alias not in _consortium_canonical and _alias not in tool_aliases:
-            tool_aliases[_alias] = _target
+        if _alias not in _consortium_canonical:
+            for _sk in source_tool_aliases:
+                if _alias not in source_tool_aliases[_sk]:
+                    source_tool_aliases.setdefault(_sk, {})[_alias] = _target
+
+    # Merge base param aliases into the global param_aliases dict
     for tool_name, pa in _BASE_PARAM_ALIASES.items():
         param_aliases.setdefault(tool_name, {}).update(pa)
-    return tool_aliases, param_aliases
+
+    return source_tool_aliases, param_aliases
 
 
 def build_calls_by_source(
@@ -510,7 +563,29 @@ def build_calls_by_source(
         tool_name = match.group(3)
         params_str = match.group(4)
 
-        corrected_tool = tool_aliases.get(tool_name, tool_name)
+        params = _hydrate_request_placeholders(
+            _parse_tag_params(params_str),
+            user_id=user_id,
+            project_id=project_id,
+        )
+
+        inferred_source_key = _infer_consortium_from_accession(
+            source_type,
+            source_key,
+            params,
+            user_message,
+        )
+        if inferred_source_key != source_key:
+            logger.warning(
+                "Corrected consortium from accession prefix",
+                original_source=f"{source_type}/{source_key}",
+                corrected_source=f"{source_type}/{inferred_source_key}",
+            )
+            source_key = inferred_source_key
+
+        # Look up aliases scoped to this source so IGVF aliases don't pollute ENCODE calls
+        _source_aliases = tool_aliases.get(source_key, {})
+        corrected_tool = _source_aliases.get(tool_name, tool_name)
         if corrected_tool != tool_name:
             logger.warning("Corrected hallucinated tool name",
                            original=tool_name, corrected=corrected_tool)
@@ -528,12 +603,6 @@ def build_calls_by_source(
                            original_source=f"{source_type}/{source_key}")
             source_type = "service"
             source_key = "analyzer"
-
-        params = _hydrate_request_placeholders(
-            _parse_tag_params(params_str),
-            user_id=user_id,
-            project_id=project_id,
-        )
 
         # Fix hallucinated parameter names
         p_aliases = param_aliases.get(corrected_tool, {})
@@ -575,7 +644,8 @@ def build_calls_by_source(
             user_id=user_id,
             project_id=project_id,
         )
-        corrected_tool = tool_aliases.get(tool_name, tool_name)
+        encode_aliases = tool_aliases.get("encode", {})
+        corrected_tool = encode_aliases.get(tool_name, tool_name)
         if corrected_tool != tool_name:
             logger.warning("Corrected hallucinated tool name (legacy)",
                            original=tool_name, corrected=corrected_tool)

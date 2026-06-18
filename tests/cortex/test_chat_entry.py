@@ -244,6 +244,20 @@ class TestCapabilitiesResponse:
         assert "help: prompting agoutic" in markdown
         assert "/commands" in markdown
 
+    def test_commands_trigger(self, client):
+        resp = client.post("/chat", json={
+            "project_id": "proj-chat",
+            "message": "/commands",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        markdown = data["agent_block"]["payload"]["markdown"]
+        assert "### Slash Commands" in markdown
+        assert "/help <topic>" in markdown
+        assert "/sync-workflow" in markdown
+        assert data["gate_block"] is None
+
     def test_show_capabilities(self, client):
         resp = client.post("/chat", json={
             "project_id": "proj-chat",

@@ -781,6 +781,44 @@ class TestActiveChatIsolation:
         fake_st.chat_message.assert_not_called()
         fake_st.rerun.assert_not_called()
 
+    def test_handle_active_chat_keeps_failure_visible_without_immediate_rerun(self):
+        fake_response = SimpleNamespace(status_code=500, text="boom", json=lambda: {"detail": "boom"})
+        fake_thread = SimpleNamespace(is_alive=lambda: False, join=MagicMock())
+        fake_st = SimpleNamespace(
+            session_state={
+                "_active_chat": {
+                    "project_id": "project-a",
+                    "thread": fake_thread,
+                    "request_id": "req-1",
+                    "result_holder": {"response": fake_response, "error": None},
+                    "start_time": 100.0,
+                    "auth_request_kwargs": {},
+                }
+            },
+            chat_message=lambda *_args, **_kwargs: contextlib.nullcontext(),
+            error=MagicMock(),
+            warning=MagicMock(),
+            info=MagicMock(),
+            empty=MagicMock(),
+            caption=MagicMock(),
+            rerun=MagicMock(),
+        )
+        fn = _load_function(
+            "handle_active_chat",
+            {
+                "st": fake_st,
+                "time": SimpleNamespace(time=lambda: 101.0, sleep=lambda *_args, **_kwargs: None),
+            },
+        )
+
+        fn(api_url="http://api.test", active_project_id="project-a")
+
+        fake_thread.join.assert_called_once()
+        assert "_active_chat" not in fake_st.session_state
+        assert fake_st.session_state["_last_prompt_failed"] is True
+        fake_st.error.assert_called_once_with("Chat request failed: 500 - boom")
+        fake_st.rerun.assert_not_called()
+
 
 class TestProjectAccessUiHelpers:
     def test_current_project_record_prefers_cached_project(self):

@@ -71,7 +71,6 @@ AGOUTIC_VERSION = _version_raw[1:] if _version_raw.lower().startswith("v") else 
 _api_url = os.getenv("AGOUTIC_API_URL", "(not set)")
 _frontend_url = os.getenv("FRONTEND_URL", "(not set)")
 _local_origins = os.getenv("LOCAL_UI_ALLOWED_ORIGINS", "(not set)")
-_oauth_redirect = os.getenv("GOOGLE_REDIRECT_URI", "(not set)")
 
 from urllib.parse import urlparse
 import socket
@@ -98,9 +97,10 @@ if "startup_diagnostics_printed" not in st.session_state:
     print(f"\n{'='*60}", flush=True)
     print(f"[AGOUTIC] v{AGOUTIC_VERSION}  mode={_mode}", flush=True)
     print(f"[AGOUTIC] AGOUTIC_API_URL={_api_url}", flush=True)
-    print(f"[AGOUTIC] FRONTEND_URL={_frontend_url}", flush=True)
-    print(f"[AGOUTIC] LOCAL_UI_ALLOWED_ORIGINS={_local_origins}", flush=True)
-    print(f"[AGOUTIC] GOOGLE_REDIRECT_URI={_oauth_redirect}", flush=True)
+    if _frontend_url != "(not set)":
+        print(f"[AGOUTIC] FRONTEND_URL={_frontend_url}", flush=True)
+    if _local_origins != "(not set)":
+        print(f"[AGOUTIC] LOCAL_UI_ALLOWED_ORIGINS={_local_origins}", flush=True)
     print(f"{'='*60}\n", flush=True)
     st.session_state["startup_diagnostics_printed"] = True
 

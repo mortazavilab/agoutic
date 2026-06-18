@@ -1,3 +1,21 @@
+## [Unreleased]
+
+### Bug Fixes
+
+- **Fixed ENCODE dataframe follow-up crash caused by empty payloads in history rows:** `_HistoryRow` in `cortex/chat_stages/history.py` now includes `id`, `status`, and original `payload_json` (JSON string) fields required by `conversation_state.py`. Previously, missing `id`/`status` fields caused `AttributeError` and `payload_json` was set to `{}` instead of the original JSON string, making ENCODE dataframe follow-up questions return hallucinated cell types (e.g., C2C12 instead of HepG2).
+- **Fixed history query ordering to keep newest rows instead of oldest:** History query now fetches rows with `seq.desc()` and reverses the list for chronological order. Previously `seq.asc()` kept the oldest 60 rows, losing recent conversation context.
+- **Added missing block types to history filter:** `WORKFLOW_PLAN` and `PENDING_ACTION` block types are now included in the history query filter alongside `DATAFRAME`, ensuring workflow plans and pending actions appear in chat history.
+- **Fixed UI error messages disappearing immediately after chat failures:** `handle_active_chat()` in `ui/appui_chat_runtime.py` now uses a `should_rerun` guard that only triggers `st.rerun()` on successful responses, not on failures. 500 errors and other chat failures now remain visible for the user to read.
+
+### Tests
+
+- **Added regression tests for history stage optimization in `tests/cortex/test_history_stage.py`:** Tests verify that `payload_json` is preserved as original JSON string for dataframe blocks, the 60-row window keeps newest rows (not oldest), and `_HistoryRow` includes `id`/`status` fields required by `conversation_state.py`.
+- **Added regression test for UI error visibility in `tests/ui/test_app_source_helpers.py`:** Verifies that `handle_active_chat()` does not trigger immediate rerun on chat failure, keeping error messages visible.
+
+### Performance
+
+- **History query optimization (continued from 3.7.2):** History rows now select only required columns (`id`, `type`, `status`, `payload_json`, `seq`) instead of all block columns, reducing database I/O and memory usage per chat turn.
+
 ## [3.7.3] - 2026-06-14
 
 ### Features
