@@ -105,16 +105,17 @@ async def download_after_approval(project_id: str, gate_block_id: str):
         _username = getattr(owner_user, "username", None) if owner_user else None
         _slug = project_obj.slug if project_obj else None
 
+        if _username and _slug:
+            project_dir = Path(AGOUTIC_DATA) / "users" / _username / _slug
+        else:
+            project_dir = Path(AGOUTIC_DATA) / "users" / owner_id / project_id
+
         if _username:
             from cortex.user_jail import get_user_data_dir
             target_dir = get_user_data_dir(_username)
         elif _target_dir_str:
             target_dir = Path(_target_dir_str)
         else:
-            if _username and _slug:
-                project_dir = Path(AGOUTIC_DATA) / "users" / _username / _slug
-            else:
-                project_dir = Path(AGOUTIC_DATA) / "users" / owner_id / project_id
             target_dir = project_dir / "data"
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -127,6 +128,7 @@ async def download_after_approval(project_id: str, gate_block_id: str):
                 "source": "conversation",
                 "files": [{"filename": u["filename"], "url": u["url"]} for u in urls],
                 "target_dir": str(target_dir),
+                "project_data_dir": str(project_dir / "data"),
                 "downloaded": 0,
                 "total_files": len(urls),
                 "bytes_downloaded": 0,
@@ -150,8 +152,7 @@ async def download_after_approval(project_id: str, gate_block_id: str):
                 owner_id=owner_id,
                 files=urls,
                 target_dir=target_dir,
-                username=_username,
-                project_slug=_slug,
+                project_dir=project_dir,
                 source="conversation",
             )
         )

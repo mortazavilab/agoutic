@@ -6,6 +6,8 @@
 - **Fixed history query ordering to keep newest rows instead of oldest:** History query now fetches rows with `seq.desc()` and reverses the list for chronological order. Previously `seq.asc()` kept the oldest 60 rows, losing recent conversation context.
 - **Added missing block types to history filter:** `WORKFLOW_PLAN` and `PENDING_ACTION` block types are now included in the history query filter alongside `DATAFRAME`, ensuring workflow plans and pending actions appear in chat history.
 - **Fixed UI error messages disappearing immediately after chat failures:** `handle_active_chat()` in `ui/appui_chat_runtime.py` now uses a `should_rerun` guard that only triggers `st.rerun()` on successful responses, not on failures. 500 errors and other chat failures now remain visible for the user to read.
+- **Fixed compressed filename loss during ENCODE downloads:** `tool_dispatch.py` now prefers actual filenames from download URLs/hrefs over synthesized ones, preserving `.fastq.gz` extensions in approval gates and on disk.
+- **Fixed truncation of .fastq.gz paths in Dogme approval gates:** Updated relative path extraction regex in `job_parameters.py` to recognize `.fastq.gz` and `.fq.gz`, preventing them from being stripped to `.fastq`.
 
 ### Tests
 

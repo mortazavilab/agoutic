@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+from urllib.parse import unquote, urlsplit
 
 import pandas as pd
 
@@ -1354,6 +1355,14 @@ def _handle_download_chain(
 ) -> None:
     """After get_file_metadata / get_file_download_url, extract the download
     URL and accumulate files for an approval-gated download."""
+    def _filename_from_url(url: str | None) -> str | None:
+        if not isinstance(url, str) or not url:
+            return None
+        candidate = Path(unquote(urlsplit(url).path)).name
+        if not candidate or "." not in candidate:
+            return None
+        return candidate
+
     _download_tools = {"get_file_metadata", "get_file_download_url"}
     if tool_name not in _download_tools or not isinstance(result_data, dict):
         return
@@ -1375,27 +1384,43 @@ def _handle_download_chain(
     file_size = result_data.get("file_size")
     file_fmt = result_data.get("file_format", "")
     file_name = f"{file_acc}.{file_fmt}" if file_acc and file_fmt else file_acc
+    href = result_data.get("href")
+    cloud = result_data.get("cloud_metadata")
 
     # IGVF: get_file_download_url returns a direct "download_url" field
     if result_data.get("download_url"):
         dl_url = result_data["download_url"]
     # IGVF: get_file_metadata returns "href" (relative to api.data.igvf.org)
-    elif source_key == "igvf" and result_data.get("href"):
-        href = result_data["href"]
+    elif source_key == "igvf" and href:
         if href.startswith("http"):
             dl_url = href
         else:
             dl_url = f"https://api.data.igvf.org{href}"
     # ENCODE: cloud_metadata or href
     else:
-        cloud = result_data.get("cloud_metadata")
         if isinstance(cloud, dict) and cloud.get("url"):
             dl_url = cloud["url"]
-        elif result_data.get("href"):
-            dl_url = f"https://www.encodeproject.org{result_data['href']}"
+        elif href:
+            dl_url = f"https://www.encodeproject.org{href}"
 
     if not dl_url:
         return
+
+    filename_candidates = [
+        _filename_from_url(href),
+        _filename_from_url(result_data.get("download_url")),
+        _filename_from_url(cloud.get("url") if isinstance(cloud, dict) else None),
+        _filename_from_url(dl_url),
+    ]
+    for candidate in filename_candidates:
+        if candidate and file_acc and candidate.upper().startswith(file_acc.upper()):
+            file_name = candidate
+            break
+    else:
+        for candidate in filename_candidates:
+            if candidate and candidate.count(".") > file_name.count("."):
+                file_name = candidate
+                break
 
     dl_file_info = {
         "url": dl_url,

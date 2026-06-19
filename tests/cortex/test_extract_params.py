@@ -414,6 +414,30 @@ class TestInputType:
         ]
 
     @pytest.mark.asyncio
+    async def test_relative_fastq_gz_input_path_preserved(self):
+        data_dir = self.tmp / "users" / "tuser" / "test" / "data"
+        data_dir.mkdir(parents=True)
+        gz_path = data_dir / "ENCFF694INI.fastq.gz"
+        gz_path.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {
+                "text": "Analyze the human fastqCDNA sample K562r2 using the file data/ENCFF694INI.fastq.gz on hpc3"
+            },
+        )
+
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["input_type"] == "fastq"
+        assert result["entry_point"] == "fastqCDNA"
+        assert result["input_directory"] == str(gz_path)
+
+    @pytest.mark.asyncio
     async def test_bam_remap(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "I have unmapped bam files"})
         sess = self.sf()

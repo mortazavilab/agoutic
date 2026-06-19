@@ -3717,6 +3717,10 @@ class TestDownloadWorkflow:
         if gate:
             payload = gate.get("payload", {})
             assert "download" in json.dumps(payload).lower() or "approval" in json.dumps(payload).lower()
+            extracted = payload.get("extracted_params", {})
+            files = extracted.get("files", [])
+            assert files
+            assert files[0]["filename"] == "ENCFF123ABC.fastq.gz"
 
 
 # ===========================================================================
