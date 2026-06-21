@@ -11,6 +11,8 @@
 
 ### Tests
 
+- **Added unit tests for edgePythonMCP module:** Coverage for MCP tool schemas, parameter extraction, and server initialization in `tests/edgepython_mcp/`.
+- **Added 328 regression tests across 11 cortex modules:** Pure-function coverage (`test_plot_routing`, `test_remote_stage_status`, `test_path_helpers`, `test_edgepython_plot_params`, `test_chat_context`, `test_plan_templates`) and regex/string-parsing coverage (`test_dataframe_transforms`, `test_analysis_helpers`, `test_plan_classifier`, `test_plan_params`, `test_tag_parser`), bringing cortex test coverage to 5% overall.
 - **Added regression tests for history stage optimization in `tests/cortex/test_history_stage.py`:** Tests verify that `payload_json` is preserved as original JSON string for dataframe blocks, the 60-row window keeps newest rows (not oldest), and `_HistoryRow` includes `id`/`status` fields required by `conversation_state.py`.
 - **Added regression test for UI error visibility in `tests/ui/test_app_source_helpers.py`:** Verifies that `handle_active_chat()` does not trigger immediate rerun on chat failure, keeping error messages visible.
 
