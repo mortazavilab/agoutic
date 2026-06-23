@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Features
+
+- **Analysis reports are now saved to the workflow folder:** After a Dogme job completes or `/reanalyze` is run, the LLM-generated markdown analysis report is written as `<workflowN>_<YYYYMMDD_HHMMSS>_analysis.md` in the workflow directory. Each reanalyze creates a new timestamped file so historical reports accumulate. Implemented via `_save_analysis_report()` in `cortex/job_polling.py`, called from both the auto-trigger path and `execute_manual_workflow_analysis()`. Atomic writes use `tempfile.mkstemp` + `os.replace`; failures are logged but never break the analysis flow.
+
 ### Bug Fixes
 
 - **Fixed ENCODE dataframe follow-up crash caused by empty payloads in history rows:** `_HistoryRow` in `cortex/chat_stages/history.py` now includes `id`, `status`, and original `payload_json` (JSON string) fields required by `conversation_state.py`. Previously, missing `id`/`status` fields caused `AttributeError` and `payload_json` was set to `{}` instead of the original JSON string, making ENCODE dataframe follow-up questions return hallucinated cell types (e.g., C2C12 instead of HepG2).

@@ -2,7 +2,9 @@ import asyncio
 import copy
 import datetime
 import json
+import os
 import re
+import tempfile
 import time
 
 from fastapi.concurrency import run_in_threadpool
@@ -26,6 +28,46 @@ _JOB_STATUS_CACHE_MAX_AGE_SECONDS = 30.0
 _ACTIVE_RESULT_SYNC_STATES = {"pending_import", "downloading_outputs"}
 _TERMINAL_RESULT_SYNC_STATES = {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
 _latest_job_status_by_run_uuid: dict[str, dict] = {}
+
+
+def _save_analysis_report(work_directory: str, workflow_ref: str, final_md: str) -> None:
+    """Save the LLM-generated analysis report to the workflow folder.
+
+    Best-effort — never raises. Each call gets a unique timestamped filename
+    so repeated /reanalyze runs accumulate as separate files.
+    """
+    if not work_directory or not final_md:
+        return
+
+    try:
+        wf_dir = os.path.realpath(work_directory)
+        if not os.path.isdir(wf_dir):
+            logger.debug("Work directory not found, skipping analysis report save",
+                         work_directory=work_directory)
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{workflow_ref}_{timestamp}_analysis.md"
+        filepath = os.path.join(wf_dir, filename)
+
+        # Atomic write: temp file + rename
+        fd, tmp_path = tempfile.mkstemp(dir=wf_dir, suffix=".tmp", prefix="analysis_")
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(final_md)
+            os.replace(tmp_path, filepath)
+            logger.info("Analysis report saved to workflow folder",
+                        work_directory=work_directory, filename=filename)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except Exception as exc:
+        logger.warning("Failed to save analysis report to workflow folder",
+                       work_directory=work_directory, error=str(exc))
 
 
 def _normalized_workflow_key(value: str | None) -> str:
@@ -714,6 +756,10 @@ async def _auto_trigger_analysis(
             )
             _model_name = "system"
             llm_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        # Save analysis report to workflow folder (best-effort)
+        _workflow_ref = work_directory.rstrip("/").rsplit("/", 1)[-1] if work_directory else run_uuid or "analysis"
+        _save_analysis_report(work_directory, _workflow_ref, final_md)
 
         # 7. Create AGENT_PLAN block with the analysis
         _token_payload = {
