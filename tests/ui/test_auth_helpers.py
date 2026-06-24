@@ -209,3 +209,27 @@ class TestMakeAuthenticatedRequest:
             timeout=5,
             headers={"Authorization": "Bearer bearer-xyz"},
         )
+
+    def test_make_authenticated_request_uses_supplied_auth_kwargs(self):
+        from ui.auth import make_authenticated_request
+
+        response = MagicMock()
+        with patch("ui.auth.build_auth_request_kwargs", return_value={"headers": {"Authorization": "Bearer wrong-token"}}), \
+             patch("ui.auth.requests.request", return_value=response) as request_fn, \
+             patch("ui.auth._buffer_and_close_response", side_effect=lambda r: r):
+            result = make_authenticated_request(
+                "POST",
+                "http://api.test/remote-profiles/p1/test",
+                timeout=30,
+                auth_kwargs={"headers": {"Authorization": "Bearer captured-token"}},
+                json={"local_password": "secret"},
+            )
+
+        assert result is response
+        request_fn.assert_called_once_with(
+            "POST",
+            "http://api.test/remote-profiles/p1/test",
+            timeout=30,
+            headers={"Authorization": "Bearer captured-token"},
+            json={"local_password": "secret"},
+        )

@@ -16,7 +16,7 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from auth import require_auth, make_authenticated_request
+from auth import require_auth, make_authenticated_request, build_auth_request_kwargs
 from components.cards import section_header, empty_state, status_chip
 
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
@@ -101,8 +101,16 @@ def _response_error_text(resp) -> str:
 def _run_request_with_elapsed(method: str, url: str, *, status_label: str, timeout: int, **kwargs):
     status_box = st.empty()
     started = time.time()
+    auth_kwargs = build_auth_request_kwargs()
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(make_authenticated_request, method, url, timeout=timeout, **kwargs)
+        future = executor.submit(
+            make_authenticated_request,
+            method,
+            url,
+            timeout=timeout,
+            auth_kwargs=auth_kwargs,
+            **kwargs,
+        )
         while not future.done():
             elapsed = int(time.time() - started)
             status_box.info(f"{status_label} Elapsed: {elapsed}s / {REMOTE_PROFILE_TEST_MAX_WAIT_SECONDS}s")

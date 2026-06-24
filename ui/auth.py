@@ -371,7 +371,7 @@ def logout_button(api_url: str):
         st.stop()
 
 
-def make_authenticated_request(method: str, url: str, **kwargs) -> requests.Response:
+def make_authenticated_request(method: str, url: str, auth_kwargs: Optional[Dict] = None, **kwargs) -> requests.Response:
     """
     Make an authenticated HTTP request using the current auth transport.
     
@@ -387,7 +387,8 @@ def make_authenticated_request(method: str, url: str, **kwargs) -> requests.Resp
         >>> resp = make_authenticated_request("GET", f"{API_URL}/blocks?project_id=abc")
         >>> data = resp.json()
     """
-    request_kwargs = _merge_auth_request_kwargs(kwargs, build_auth_request_kwargs())
+    resolved_auth_kwargs = auth_kwargs if auth_kwargs is not None else build_auth_request_kwargs()
+    request_kwargs = _merge_auth_request_kwargs(kwargs, resolved_auth_kwargs)
     response = requests.request(method, url, **request_kwargs)
     # Eagerly buffer the body so we can close the underlying socket before
     # handing the response object back to rerun-heavy Streamlit callers.
