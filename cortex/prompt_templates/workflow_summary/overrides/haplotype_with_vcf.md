@@ -1,0 +1,1 @@
+For haplotype_with_vcf reports, prioritize assignment labels, haplotyped BAM counts, ambiguous outputs, and which summary TSVs are available for interpretation.

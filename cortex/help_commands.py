@@ -112,6 +112,7 @@ _COMMAND_CATALOG: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("/use <workflow>", "switch the active workflow context"),
             ("/analyze [workflow[, workflow2, ...]]", "alias for rerunning post-run analysis for one or more workflows"),
             ("/reanalyze [workflow[, workflow2, ...]]", "rerun post-run analysis for one or more workflows"),
+            ("/summarize [workflow[, workflow2, ...]] [-- focus text]", "compare saved workflow analysis markdown for one or more workflows, or all reported workflows in the active project by default"),
             ("/rerun [workflow[, workflow2, ...]]", "rerun one or more workflows"),
             ("/delete [workflow[, workflow2, ...]]", "delete one or more workflows"),
             ("/clean [remote] [workflow[, workflow2, ...]]", "gzip loose bedMethyl BEDs individually and remove work/dor* folders for one or more workflows"),

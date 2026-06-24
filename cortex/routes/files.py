@@ -13,6 +13,7 @@ MD5 hash) are detected and reused instead of re-downloaded.
 import asyncio
 import hashlib
 import json
+import os
 import re
 import uuid
 from datetime import date
@@ -21,6 +22,7 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -67,6 +69,33 @@ def _resolve_user_and_project(session, user, project_id: str):
     project_dir = _dbh._resolve_project_dir(session, user, project_id)
 
     return username, slug, project_dir
+
+
+def _resolve_project_download_path(project_dir: Path, requested_path: str) -> Path:
+    """Resolve a requested project file path without allowing traversal outside the project tree."""
+    raw_value = str(requested_path or "").strip()
+    if not raw_value:
+        raise HTTPException(status_code=422, detail="Provide a file path to download.")
+
+    project_root = Path(project_dir).resolve()
+    normalized_root = os.path.normpath(str(project_root))
+    if os.path.isabs(raw_value):
+        normalized_candidate = Path(os.path.normpath(raw_value))
+    else:
+        normalized_candidate = Path(os.path.normpath(os.path.join(normalized_root, raw_value)))
+
+    try:
+        normalized_candidate.relative_to(project_root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only download files inside the active project.",
+        ) from exc
+
+    if not normalized_candidate.exists() or not normalized_candidate.is_file():
+        raise HTTPException(status_code=404, detail="Requested file was not found.")
+
+    return normalized_candidate
 
 
 def _create_project_data_symlink(project_dir: Path, filename: str, central_path: Path) -> Path:
@@ -595,6 +624,22 @@ async def _post_download_suggestions(
         status="DONE",
         owner_id=owner_id,
     )
+
+
+@router.get("/projects/{project_id}/files/download")
+async def download_project_file(project_id: str, path: str, request: Request):
+    """Download a file located inside the active project tree."""
+    user = request.state.user
+    require_project_access(project_id, user, min_role="viewer")
+
+    session = _db.SessionLocal()
+    try:
+        _username, _slug, project_dir = _resolve_user_and_project(session, user, project_id)
+    finally:
+        session.close()
+
+    resolved_path = _resolve_project_download_path(project_dir, path)
+    return FileResponse(path=resolved_path, filename=resolved_path.name)
 
 
 # --- File Upload ---

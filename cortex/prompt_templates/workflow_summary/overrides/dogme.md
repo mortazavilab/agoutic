@@ -1,0 +1,1 @@
+For Dogme-family reports, prioritize sample-level sequencing and mapping metrics when they are present, such as read count, mapped read count, mapped percentage, reference-specific findings, and major QC observations.

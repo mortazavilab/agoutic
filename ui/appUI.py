@@ -716,7 +716,14 @@ def get_cached_job_status(run_uuid: str):
 
 
 def _render_md_with_dataframes(md: str, block_id: str, section: str):
-    return _render_md_with_dataframes_impl(md, block_id, section)
+    return _render_md_with_dataframes_impl(
+        md,
+        block_id,
+        section,
+        api_url=API_URL,
+        project_id=str(st.session_state.get("active_project_id") or "").strip(),
+        request_fn=make_authenticated_request,
+    )
 
 
 def _render_embedded_dataframes(dfs: dict, block_id: str, *, only_visible: bool = True):
@@ -923,6 +930,7 @@ def render_block(block, expected_project_id: str = ""):
         _format_duration=_format_duration,
         _block_timestamp=_block_timestamp,
         _render_workflow_plot_payload=_render_workflow_plot_payload,
+        _render_md_with_dataframes=_render_md_with_dataframes,
         _render_embedded_dataframes=_render_embedded_dataframes,
         _render_step_payload=_render_step_payload,
         _job_status_updated_at=_job_status_updated_at,

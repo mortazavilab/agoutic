@@ -190,6 +190,7 @@ Prompt-coach coverage currently includes slash commands, skills, workflow import
 | Command | Syntax | Description |
 |---|---|---|
 | `/use` | `/use workflow7` | Switch the active workflow context for follow-up browsing and analysis |
+| `/summarize` | `/summarize workflow7 workflow8 -- mapping and QC` | Compare saved `*_analysis.md` workflow reports in chat and save a combined markdown summary under the project `summaries/` folder |
 | `/rerun` | `/rerun workflow7` | Rerun the matching workflow/job in the current project |
 | `/rename` | `/rename workflow7 treated-r1` | Rename the matching workflow/job |
 | `/delete` | `/delete workflow7` | Delete the matching workflow/job |
@@ -199,6 +200,8 @@ Prompt-coach coverage currently includes slash commands, skills, workflow import
 | `/sync-workflow` | `/sync-workflow workflow12` | Retry or continue syncing outputs for a remote or imported workflow |
 
 Workflow references can match a workflow folder, workflow alias, workflow display name, or sample name.
+
+`/summarize` reads existing saved workflow analysis markdown rather than rerunning analysis. With no workflow targets it scans the active project for immediate-child `workflow*` folders that already contain saved `*_analysis.md` files. The slash form accepts optional focus text after ` -- `, for example `/summarize workflow7 workflow8 -- mapping and QC`. Natural language can use phrasing such as `summarize workflow7 workflow8 focusing on mapping and QC`.
 
 `/clean workflowN` and `/clean workflow7 workflow8` accept the same comma- or space-separated workflow references as the other workflow commands. Use `/clean workflows` to target all tracked Launchpad workflows plus any untracked immediate-child `workflow*` folders in the active project. Use `/clean remote workflowN` when you want the same cleanup performed against the remote workflow directory instead of the local copy.
 

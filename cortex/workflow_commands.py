@@ -21,6 +21,12 @@ from cortex.job_polling import _auto_trigger_analysis, poll_job_status
 from cortex.llm_validators import get_block_payload
 from cortex.models import Project, ProjectBlock, User
 from cortex.remote_orchestration import _launchpad_internal_headers, _launchpad_rest_base_url, _update_project_block_payload
+from cortex.workflow_summary import (
+    WorkflowSummaryTarget,
+    find_latest_analysis_report,
+    save_workflow_summary_markdown,
+    summarize_workflow_reports,
+)
 
 
 _WORKFLOW_FOLDER_RE = re.compile(r"^workflow\d+$", re.IGNORECASE)
@@ -30,7 +36,7 @@ _WORKFLOW_CLEAN_TIMEOUT_SECONDS = float(os.getenv("LAUNCHPAD_CLEAN_TIMEOUT", "36
 
 @dataclass
 class WorkflowCommand:
-    action: Literal["rerun", "reanalyze", "delete", "rename", "use", "import", "sync", "cancel_sync", "list_tracked", "clean"]
+    action: Literal["rerun", "reanalyze", "delete", "rename", "use", "import", "sync", "cancel_sync", "list_tracked", "clean", "summarize"]
     workflow_ref: str = ""
     workflow_refs: list[str] = field(default_factory=list)
     new_name: str = ""
@@ -44,10 +50,12 @@ class WorkflowCommand:
     reference_genome: list[str] = field(default_factory=list)
     modifications: str | None = None
     remote: bool = False
+    focus_text: str = ""
 
 
 _SLASH_RERUN = re.compile(r"^/rerun(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_REANALYZE = re.compile(r"^/(?:reanaly[sz]e|analy[sz]e|rerun-analysis|auto-analyze)(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+_SLASH_SUMMARIZE = re.compile(r"^/summari[sz]e(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_DELETE = re.compile(r"^/delete(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_CLEAN = re.compile(r"^/clean(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _SLASH_RENAME = re.compile(r"^/rename\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
@@ -67,6 +75,7 @@ _NL_ANALYZE_WORKFLOW = re.compile(
     r"^(?:please\s+)?analy[sz]e(?:\s+(?:results?\s+(?:for|of)\s+)?)?(workflow\S*(?:[\s,]+(?:and\s+)?workflow\S*)*)$",
     re.IGNORECASE | re.DOTALL,
 )
+_NL_SUMMARIZE = re.compile(r"^(?:please\s+)?summari[sz]e(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
 _NL_DELETE = re.compile(r"^(?:please\s+)?delete(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
 _NL_CLEAN = re.compile(r"^(?:please\s+)?clean(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
 _NL_RENAME = re.compile(r"^(?:please\s+)?rename\s+(\S+)\s+(?:to\s+)?(.+)$", re.IGNORECASE | re.DOTALL)
@@ -88,6 +97,8 @@ _NL_CANCEL_SYNC = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _IMPORT_PROFILE_SUFFIX = re.compile(r"^(?P<path>.+?)\s+(?:on|using|via)\s+(?P<profile>[A-Za-z0-9_.-]+)\s*$", re.IGNORECASE | re.DOTALL)
+_SUMMARY_SLASH_FOCUS_SPLIT = re.compile(r"^(?P<refs>.*?)(?:\s+--\s+)(?P<focus>.+)$", re.DOTALL)
+_SUMMARY_NL_FOCUS_SPLIT = re.compile(r"^(?P<refs>.*?)(?:\s+(?:with\s+)?focus(?:ing)?\s+on\s+)(?P<focus>.+)$", re.IGNORECASE | re.DOTALL)
 
 
 def _workflow_reference_candidates(job) -> list[str]:
@@ -302,6 +313,33 @@ def _clean_command_with_refs(raw_refs: str | None) -> WorkflowCommand:
     )
 
 
+def _normalize_summary_target_text(raw_refs: str | None) -> str:
+    text = str(raw_refs or "").strip()
+    normalized = text.lower()
+    if normalized in {"workflow", "workflows", "the workflow", "the workflows", "all workflows", "all the workflows"}:
+        return "workflows"
+    return text
+
+
+def _summarize_command_with_refs(raw_refs: str | None, *, natural_language: bool = False) -> WorkflowCommand:
+    text = str(raw_refs or "").strip()
+    focus_text = ""
+
+    if text:
+        focus_match = (_SUMMARY_NL_FOCUS_SPLIT if natural_language else _SUMMARY_SLASH_FOCUS_SPLIT).match(text)
+        if focus_match:
+            text = str(focus_match.group("refs") or "").strip()
+            focus_text = str(focus_match.group("focus") or "").strip()
+
+    refs = _parse_workflow_ref_list(_normalize_summary_target_text(text))
+    return WorkflowCommand(
+        action="summarize",
+        workflow_ref=refs[0] if refs else "",
+        workflow_refs=refs,
+        focus_text=focus_text,
+    )
+
+
 def _build_workflow_command_history(session: Session, project_id: str) -> tuple[list, list[dict]]:
     history_blocks = list(
         session.execute(
@@ -357,6 +395,106 @@ def _resolve_command_refs(session: Session, project_id: str, command: WorkflowCo
     return [active_ref] if active_ref else []
 
 
+def _job_workflow_family(job) -> str:
+    return str(getattr(job, "workflow_key", "") or "").strip().lower()
+
+
+def _resolve_local_workflow_dir_for_job(job, project_dir: str | None) -> str:
+    job_work_dir = str(_job_work_directory(job) or "").strip()
+    if job_work_dir:
+        try:
+            resolved = Path(job_work_dir).expanduser().resolve()
+        except OSError:
+            resolved = None
+        if resolved is not None and resolved.is_dir():
+            return str(resolved)
+
+    for candidate in _workflow_reference_candidates(job):
+        resolved_dir = _resolve_untracked_workflow_dir(project_dir, str(candidate or ""))
+        if resolved_dir:
+            return resolved_dir
+    return ""
+
+
+def _resolve_summarize_targets(
+    session: Session,
+    project_id: str,
+    project_dir: str | None,
+    command: WorkflowCommand,
+) -> tuple[list[WorkflowSummaryTarget], list[str]]:
+    warnings: list[str] = []
+    targets: list[WorkflowSummaryTarget] = []
+    seen_work_dirs: set[str] = set()
+    raw_refs = [_normalize_workflow_ref(ref) for ref in (command.workflow_refs or []) if _normalize_workflow_ref(ref)]
+
+    def _append_target(workflow_ref: str, work_dir: str, workflow_family: str = "", workflow_label: str = "") -> None:
+        normalized_dir = str(work_dir or "").strip()
+        if not normalized_dir or normalized_dir in seen_work_dirs:
+            return
+        seen_work_dirs.add(normalized_dir)
+        targets.append(
+            WorkflowSummaryTarget(
+                workflow_ref=workflow_ref,
+                work_dir=normalized_dir,
+                workflow_family=workflow_family,
+                workflow_label=workflow_label or workflow_ref,
+            )
+        )
+
+    if not raw_refs or any(ref.lower() == "workflows" for ref in raw_refs):
+        tracked_jobs = {
+            str(candidate).strip().lower(): job
+            for job in _list_project_jobs(session, project_id)
+            if str(getattr(job, "status", "") or "").upper() != "DELETED"
+            for candidate in _workflow_reference_candidates(job)
+            if candidate
+        }
+        for workflow_dir in _iter_project_workflow_dirs(project_dir):
+            if find_latest_analysis_report(workflow_dir) is None:
+                continue
+            job = tracked_jobs.get(workflow_dir.name.lower())
+            _append_target(
+                workflow_dir.name,
+                str(workflow_dir),
+                workflow_family=_job_workflow_family(job) if job is not None else "",
+                workflow_label=_workflow_label(job) if job is not None else workflow_dir.name,
+            )
+        if targets:
+            return targets, warnings
+        if not project_dir:
+            warnings.append("I couldn't determine the active project directory to search for workflow analysis markdown files.")
+        else:
+            warnings.append("No workflow folders with saved analysis markdown files were found in this project.")
+        if not raw_refs:
+            return [], warnings
+
+    for workflow_ref in raw_refs:
+        if workflow_ref.lower() == "workflows":
+            continue
+        job = resolve_workflow_reference(session, project_id, workflow_ref)
+        if job is not None:
+            work_dir = _resolve_local_workflow_dir_for_job(job, project_dir)
+            if not work_dir:
+                warnings.append(f"I couldn't find a local workflow folder for `{workflow_ref}`.")
+                continue
+            _append_target(
+                workflow_ref,
+                work_dir,
+                workflow_family=_job_workflow_family(job),
+                workflow_label=_workflow_label(job),
+            )
+            continue
+
+        work_dir = _resolve_untracked_workflow_dir(project_dir, workflow_ref)
+        if work_dir:
+            _append_target(workflow_ref, work_dir, workflow_label=workflow_ref)
+            continue
+
+        warnings.append(f"I couldn't find `{workflow_ref}` in this project.")
+
+    return targets, warnings
+
+
 def _missing_workflow_target_message(action: str) -> str:
     examples = {
         "reanalyze": "Try `reanalyze`, `reanalyze workflow5`, or `reanalyze workflow5, workflow6`.",
@@ -365,6 +503,7 @@ def _missing_workflow_target_message(action: str) -> str:
         "clean": "Try `clean workflow5`, `clean remote workflow5`, or `clean workflows`.",
         "sync": "Try `sync workflow`, `sync workflow5`, or `sync workflow5, workflow6`.",
         "cancel_sync": "Try `cancel sync workflow5`.",
+        "summarize": "Try `summarize`, `summarize workflow5 workflow6`, or `/summarize workflow5, workflow6 -- mapping and QC`.",
     }
     return (
         "I couldn't determine which workflow to use. "
@@ -649,6 +788,10 @@ def parse_workflow_command(message: str) -> WorkflowCommand | None:
     if match:
         return _command_with_refs("reanalyze", match.group(1))
 
+    match = _SLASH_SUMMARIZE.match(msg)
+    if match:
+        return _summarize_command_with_refs(match.group(1), natural_language=False)
+
     match = _SLASH_DELETE.match(msg)
     if match:
         return _command_with_refs("delete", match.group(1))
@@ -688,6 +831,10 @@ def detect_workflow_intent(message: str) -> WorkflowCommand | None:
     match = _NL_ANALYZE_WORKFLOW.match(msg)
     if match:
         return _command_with_refs("reanalyze", match.group(1))
+
+    match = _NL_SUMMARIZE.match(msg)
+    if match:
+        return _summarize_command_with_refs(match.group(1), natural_language=True)
 
     match = _NL_RERUN.match(msg)
     if match:
@@ -789,6 +936,31 @@ async def execute_workflow_command(
 ) -> str:
     if command.action == "list_tracked":
         return _format_tracked_workflows(session, project_id)
+
+    if command.action == "summarize":
+        targets, warnings = _resolve_summarize_targets(session, project_id, project_dir, command)
+        if not targets:
+            if warnings:
+                return "\n".join(warnings)
+            return _missing_workflow_target_message("summarize")
+
+        summary_result = await summarize_workflow_reports(
+            targets,
+            model=model or "default",
+            focus_text=command.focus_text,
+        )
+        final_markdown = summary_result.markdown
+        if warnings:
+            final_markdown = final_markdown.rstrip() + "\n\nTarget resolution warnings:\n" + "\n".join(
+                f"- {warning}" for warning in warnings
+            )
+
+        saved_path, save_warning = save_workflow_summary_markdown(project_dir, final_markdown)
+        if saved_path:
+            final_markdown = final_markdown.rstrip() + f"\n\nSaved summary: `{saved_path}`"
+        if save_warning:
+            final_markdown = final_markdown.rstrip() + f"\n\nSave warning: {save_warning}"
+        return final_markdown
 
     target_refs = _resolve_command_refs(session, project_id, command)
     if command.action == "clean":

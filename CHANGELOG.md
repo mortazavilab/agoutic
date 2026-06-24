@@ -1,8 +1,12 @@
 ## [Unreleased]
 
+## [3.7.4] - 2026-06-24
+
 ### Features
 
 - **Analysis reports are now saved to the workflow folder:** After a Dogme job completes or `/reanalyze` is run, the LLM-generated markdown analysis report is written as `<workflowN>_<YYYYMMDD_HHMMSS>_analysis.md` in the workflow directory. Each reanalyze creates a new timestamped file so historical reports accumulate. Implemented via `_save_analysis_report()` in `cortex/job_polling.py`, called from both the auto-trigger path and `execute_manual_workflow_analysis()`. Atomic writes use `tempfile.mkstemp` + `os.replace`; failures are logged but never break the analysis flow.
+- **Added LLM-driven `/summarize` workflow report comparisons:** AGOUTIC can now compare existing saved workflow analysis markdown reports across one or more workflows, or across all workflow folders in the active project that already contain saved `*_analysis.md` files. The summarize path resolves workflow targets deterministically, loads the latest saved report per workflow, applies repo-managed summary prompts with optional workflow-family overrides, accepts optional focus text such as `/summarize workflow7 workflow8 -- mapping and QC`, returns a combined markdown comparison in chat, and saves the same output under a project-level `summaries/` directory.
+- **Added chat-driven project file downloads for saved summaries and workflow files:** Assistant responses that mention downloadable project paths now render a UI download control, Cortex exposes a project-scoped authenticated file download endpoint for files inside the active project tree, and natural-language requests such as `download workflow10/report.html` or `download workflow-summary-20260624_163203.md` now resolve existing local project files without going through the broader external-download planning flow.
 
 ### Bug Fixes
 

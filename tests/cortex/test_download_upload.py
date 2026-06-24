@@ -298,6 +298,33 @@ class TestGetDownloadStatus:
         assert data["total_files"] == 1
 
 
+class TestProjectFileDownload:
+    def test_downloads_project_file_by_relative_path(self, client, tmp_path):
+        target = tmp_path / "proj" / "summaries" / "workflow-summary.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("summary")
+
+        resp = client.get(
+            "/projects/proj-dl/files/download",
+            params={"path": "summaries/workflow-summary.md"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.text == "summary"
+        assert 'filename="workflow-summary.md"' in resp.headers.get("content-disposition", "")
+
+    def test_rejects_project_file_traversal(self, client, tmp_path):
+        outside = tmp_path / "secret.txt"
+        outside.write_text("nope")
+
+        resp = client.get(
+            "/projects/proj-dl/files/download",
+            params={"path": "../secret.txt"},
+        )
+
+        assert resp.status_code == 403
+
+
 # ---------------------------------------------------------------------------
 # DELETE /projects/{id}/downloads/{dl_id}
 # ---------------------------------------------------------------------------

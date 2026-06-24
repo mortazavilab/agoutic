@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cortex.file_commands import FileCommand, execute_file_command, parse_file_command
+from cortex.file_commands import FileCommand, detect_file_intent, execute_file_command, parse_file_command
 
 
 class _FakeMCPClient:
@@ -55,6 +55,15 @@ class TestParseFileCommand:
         cmd = parse_file_command("/read-file report.html --mode rich_text")
         assert cmd is not None
         assert "Unsupported render mode" in cmd.error
+
+
+class TestDetectFileIntent:
+    def test_detect_local_download_intent_for_file(self):
+        cmd = detect_file_intent("download workflow10/reconciled_summary.txt")
+        assert cmd == FileCommand(action="download", file_ref="workflow10/reconciled_summary.txt")
+
+    def test_ignore_external_download_request(self):
+        assert detect_file_intent("download https://example.com/file.bam") is None
 
 
 @pytest.mark.asyncio
@@ -145,4 +154,63 @@ async def test_execute_file_command_falls_back_to_find_then_read(monkeypatch):
                 "render_mode": "html_text",
             },
         ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_file_command_downloads_direct_workflow_relative_path(monkeypatch, tmp_path):
+    workflow_dir = tmp_path / "proj" / "workflow10"
+    workflow_dir.mkdir(parents=True)
+    target_file = workflow_dir / "reconciled_summary.txt"
+    target_file.write_text("Analysis complete.\n")
+
+    fake_client = _FakeMCPClient([])
+    monkeypatch.setattr("cortex.file_commands.get_service_url", lambda _key: "http://analyzer")
+    monkeypatch.setattr("cortex.file_commands.MCPHttpClient", lambda name, base_url: fake_client)
+
+    markdown = await execute_file_command(
+        FileCommand(action="download", file_ref="workflow10/reconciled_summary.txt"),
+        history_blocks=_history_blocks(work_dir=str(workflow_dir)),
+        project_dir=str(tmp_path / "proj"),
+    )
+
+    assert "Ready to download" in markdown
+    assert str(target_file) in markdown
+    assert fake_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_file_command_download_falls_back_to_find(monkeypatch, tmp_path):
+    workflow_dir = tmp_path / "proj" / "workflow10"
+    reports_dir = workflow_dir / "reports"
+    reports_dir.mkdir(parents=True)
+    target_file = reports_dir / "report.html"
+    target_file.write_text("<h1>QC</h1>")
+
+    fake_client = _FakeMCPClient(
+        [
+            {
+                "success": True,
+                "work_dir": str(workflow_dir),
+                "primary_path": "reports/report.html",
+                "matches": ["reports/report.html"],
+            }
+        ]
+    )
+
+    monkeypatch.setattr("cortex.file_commands.get_service_url", lambda _key: "http://analyzer")
+    monkeypatch.setattr("cortex.file_commands.MCPHttpClient", lambda name, base_url: fake_client)
+
+    markdown = await execute_file_command(
+        FileCommand(action="download", file_ref="report.html"),
+        history_blocks=_history_blocks(work_dir=str(workflow_dir)),
+        project_dir=str(tmp_path / "proj"),
+    )
+
+    assert str(target_file) in markdown
+    assert fake_client.calls == [
+        (
+            "find_file",
+            {"file_name": "report.html", "work_dir": str(workflow_dir)},
+        )
     ]

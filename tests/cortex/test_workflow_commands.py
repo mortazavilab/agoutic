@@ -118,6 +118,19 @@ class TestParseWorkflowCommand:
             workflow_refs=["workflow7", "workflow8", "workflow9"],
         )
 
+    def test_parse_summarize_slash_command_multiple_targets_with_focus(self):
+        cmd = parse_workflow_command("/summarize workflow7, workflow8 -- mapping and QC")
+        assert cmd == WorkflowCommand(
+            action="summarize",
+            workflow_ref="workflow7",
+            workflow_refs=["workflow7", "workflow8"],
+            focus_text="mapping and QC",
+        )
+
+    def test_parse_summarize_slash_command_without_targets(self):
+        cmd = parse_workflow_command("/summarize")
+        assert cmd == WorkflowCommand(action="summarize")
+
     def test_parse_rename_slash_command(self):
         cmd = parse_workflow_command("/rename workflow7 tumor-retry")
         assert cmd == WorkflowCommand(action="rename", workflow_ref="workflow7", new_name="tumor-retry")
@@ -202,6 +215,19 @@ class TestDetectWorkflowIntent:
     def test_detect_natural_language_analyze_workflow_routes_to_reanalyze(self):
         cmd = detect_workflow_intent("analyze workflow3")
         assert cmd == WorkflowCommand(action="reanalyze", workflow_ref="workflow3", workflow_refs=["workflow3"], new_name="")
+
+    def test_detect_natural_language_summarize_with_focus(self):
+        cmd = detect_workflow_intent("summarize workflow3, workflow4 focusing on mapping and QC")
+        assert cmd == WorkflowCommand(
+            action="summarize",
+            workflow_ref="workflow3",
+            workflow_refs=["workflow3", "workflow4"],
+            focus_text="mapping and QC",
+        )
+
+    def test_detect_natural_language_summarize_without_targets(self):
+        cmd = detect_workflow_intent("summarize")
+        assert cmd == WorkflowCommand(action="summarize")
 
     def test_detect_natural_language_generic_analyze_does_not_become_workflow_command(self):
         assert detect_workflow_intent("analyze the results") is None

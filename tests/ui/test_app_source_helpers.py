@@ -178,6 +178,20 @@ def _load_function(name: str, extra_globals: dict | None = None):
     return namespace[name]
 
 
+def _load_renderers_symbols(symbol_names: set[str], extra_globals: dict | None = None):
+    namespace: dict = {
+        "pd": pd,
+        "px": px,
+        "go": go,
+        "re": _re_module,
+        "Path": Path,
+    }
+    if extra_globals:
+        namespace.update(extra_globals)
+    _ast_load_symbols_from_file(symbol_names, _EXTRACTED_MODULES["appui_renderers"], namespace)
+    return namespace
+
+
 def _load_block_part2_function(name: str, extra_globals: dict | None = None):
     namespace: dict = {"datetime": dt, "os": os}
     if extra_globals:
@@ -2532,6 +2546,81 @@ class TestPublicationPlotHelpers:
         assert error is None
         assert file_name == "publication_plot.html"
         assert b"plotly" in payload.lower()
+
+
+class TestProjectMarkdownDownloads:
+    def test_extract_downloadable_project_paths_prefers_project_paths(self):
+        symbols = _load_renderers_symbols(
+            {"_looks_like_downloadable_project_path", "_extract_downloadable_project_paths"}
+        )
+
+        extract_paths = symbols["_extract_downloadable_project_paths"]
+        markdown = (
+            "Saved summary: `/tmp/proj/summaries/workflow-summary.md`\n\n"
+            "Also see workflow10/report.html and `data/qc/final_stats.tsv`."
+        )
+
+        assert extract_paths(markdown) == [
+            "/tmp/proj/summaries/workflow-summary.md",
+            "data/qc/final_stats.tsv",
+            "workflow10/report.html",
+        ]
+
+    def test_render_md_with_dataframes_adds_project_download_button(self):
+        fake_st = SimpleNamespace(
+            session_state={},
+            markdown=MagicMock(),
+            dataframe=MagicMock(),
+            download_button=MagicMock(),
+            caption=MagicMock(),
+        )
+        fake_response = SimpleNamespace(
+            status_code=200,
+            content=b"summary-bytes",
+            headers={
+                "content-type": "text/markdown",
+                "content-disposition": 'attachment; filename="workflow-summary.md"',
+            },
+        )
+        symbols = _load_renderers_symbols(
+            {
+                "_looks_like_downloadable_project_path",
+                "_extract_downloadable_project_paths",
+                "_download_filename_from_headers",
+                "_render_project_file_download_controls",
+                "_render_md_with_dataframes",
+            },
+            {
+                "st": fake_st,
+            },
+        )
+
+        render_markdown = symbols["_render_md_with_dataframes"]
+        request_fn = MagicMock(return_value=fake_response)
+
+        render_markdown(
+            "Saved summary: `/tmp/proj/summaries/workflow-summary.md`",
+            "block-1",
+            "main",
+            api_url="http://api.test",
+            project_id="proj-1",
+            request_fn=request_fn,
+        )
+
+        fake_st.markdown.assert_called_once_with("Saved summary: `/tmp/proj/summaries/workflow-summary.md`")
+        request_fn.assert_called_once_with(
+            "GET",
+            "http://api.test/projects/proj-1/files/download",
+            params={"path": "/tmp/proj/summaries/workflow-summary.md"},
+            timeout=60,
+        )
+        fake_st.download_button.assert_called_once_with(
+            label="⬇️ Download workflow-summary.md",
+            data=b"summary-bytes",
+            file_name="workflow-summary.md",
+            mime="text/markdown",
+            key="_project_download_block-1_main_0",
+        )
 
 
 class TestBlockRequiresFullRefresh:

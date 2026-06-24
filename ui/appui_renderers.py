@@ -8,7 +8,105 @@ import plotly.graph_objects as go
 import streamlit as st
 
 
-def _render_md_with_dataframes(md: str, block_id: str, section: str):
+def _looks_like_downloadable_project_path(path_value: str) -> bool:
+    cleaned = str(path_value or "").strip().strip('"\'`')
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if lowered.startswith(("http://", "https://")):
+        return False
+    if cleaned.startswith("/"):
+        return True
+    return bool(re.match(r"^(workflow\d+|summaries|data)(?:/|$)", cleaned, re.IGNORECASE))
+
+
+def _extract_downloadable_project_paths(md: str) -> list[str]:
+    text = str(md or "")
+    candidates: list[str] = []
+
+    for inline_code in re.findall(r"`([^`\n]+)`", text):
+        if _looks_like_downloadable_project_path(inline_code):
+            candidates.append(inline_code.strip())
+
+    for raw_path in re.findall(r"(?<![\w])(?:/[^\s`<>()\[\]{}\"']+|(?:workflow\d+|summaries|data)/[^\s`<>()\[\]{}\"']+)", text, flags=re.IGNORECASE):
+        if _looks_like_downloadable_project_path(raw_path):
+            candidates.append(raw_path.strip())
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
+def _download_filename_from_headers(headers: dict | None, fallback_path: str) -> str:
+    content_disposition = str((headers or {}).get("content-disposition") or "")
+    match = re.search(r'filename="?([^";]+)"?', content_disposition, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return Path(str(fallback_path or "")).name or "download"
+
+
+def _render_project_file_download_controls(
+    md: str,
+    *,
+    block_id: str,
+    section: str,
+    api_url: str | None = None,
+    project_id: str | None = None,
+    request_fn=None,
+):
+    if not api_url or not project_id or request_fn is None:
+        return
+
+    for index, path_value in enumerate(_extract_downloadable_project_paths(md)):
+        cache_key = f"_project_download_cache_{project_id}_{path_value}"
+        cached = st.session_state.get(cache_key)
+        if cached is None:
+            try:
+                response = request_fn(
+                    "GET",
+                    f"{api_url}/projects/{project_id}/files/download",
+                    params={"path": path_value},
+                    timeout=60,
+                )
+                if response.status_code != 200:
+                    detail = getattr(response, "text", "")[:200] or f"HTTP {response.status_code}"
+                    cached = {"error": detail}
+                else:
+                    cached = {
+                        "data": response.content,
+                        "mime": response.headers.get("content-type") or "application/octet-stream",
+                        "file_name": _download_filename_from_headers(response.headers, path_value),
+                    }
+            except Exception as exc:
+                cached = {"error": str(exc)}
+            st.session_state[cache_key] = cached
+
+        if cached.get("error"):
+            st.caption(f"Download unavailable for `{Path(path_value).name}`: {cached['error']}")
+            continue
+
+        st.download_button(
+            label=f"⬇️ Download {cached['file_name']}",
+            data=cached["data"],
+            file_name=cached["file_name"],
+            mime=cached["mime"],
+            key=f"_project_download_{block_id}_{section}_{index}",
+        )
+
+
+def _render_md_with_dataframes(
+    md: str,
+    block_id: str,
+    section: str,
+    *,
+    api_url: str | None = None,
+    project_id: str | None = None,
+    request_fn=None,
+):
     """Render markdown while converting pipe tables to interactive dataframes."""
     lines = md.splitlines(keepends=True)
     buf_text: list[str] = []
@@ -19,6 +117,14 @@ def _render_md_with_dataframes(md: str, block_id: str, section: str):
         chunk = "".join(buf_text).strip()
         if chunk:
             st.markdown(chunk)
+            _render_project_file_download_controls(
+                chunk,
+                block_id=block_id,
+                section=section,
+                api_url=api_url,
+                project_id=project_id,
+                request_fn=request_fn,
+            )
         buf_text.clear()
 
     def flush_table():

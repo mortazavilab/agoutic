@@ -18,7 +18,7 @@ from cortex.chat_sync_handler import (
 )
 from cortex.db import row_to_dict
 from cortex.db_helpers import _create_block_internal, _resolve_project_dir, save_conversation_message
-from cortex.file_commands import execute_file_command, parse_file_command
+from cortex.file_commands import detect_file_intent, execute_file_command, parse_file_command
 from cortex.help_commands import detect_help_intent, execute_help_command, parse_help_command, render_slash_commands_markdown
 from cortex.list_commands import detect_list_intent, execute_list_command, parse_list_command
 from cortex.memory_commands import (
@@ -117,7 +117,7 @@ class CapabilitiesStage:
             "- Help: `/help`, `/help remote slurm`, `/help /list files`, `/help remote_execution`\n"
             "- Inventory: `/list samples`, `/list staged [--profile NAME]`, `/list imported`, `/list dfs`, `/list workflows`, `/list files [target] [--project] [--depth N]`\n"
             "- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`\n"
-            "- Workflows: `/use <workflow>`, `/analyze [workflow[, workflow2, ...]]`, `/reanalyze [workflow[, workflow2, ...]]`, `/rerun [workflow[, workflow2, ...]]`, `/delete [workflow[, workflow2, ...]]`, `/sync-workflow [workflow[, workflow2, ...]]`\n"
+            "- Workflows: `/use <workflow>`, `/analyze [workflow[, workflow2, ...]]`, `/reanalyze [workflow[, workflow2, ...]]`, `/summarize [workflow[, workflow2, ...]] [-- focus text]`, `/rerun [workflow[, workflow2, ...]]`, `/delete [workflow[, workflow2, ...]]`, `/sync-workflow [workflow[, workflow2, ...]]`\n"
             "- Files: `/read-file <path> [--lines N] [--mode auto|plain|markdown|html_text|html_raw]`\n"
             "- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`\n"
             "- Memory: `/remember <text>`, `/remember-global <text>`, `/remember-df DF5 as <name>`, `/memories`, `/pin #<id>`, `/unpin #<id>`, `/restore #<id>`, `/annotate <sample> key=value`, `/search-memories <query>`, `/upgrade-to-global #<id>`\n\n"
@@ -437,13 +437,13 @@ class FileCommandStage:
     priority = 233
 
     async def should_run(self, ctx: ChatContext) -> bool:
-        return parse_file_command(ctx.message) is not None
+        return parse_file_command(ctx.message) is not None or detect_file_intent(ctx.message) is not None
 
     async def run(self, ctx: ChatContext) -> None:
         from sqlalchemy import select
         from cortex.models import ProjectBlock
 
-        file_cmd = parse_file_command(ctx.message)
+        file_cmd = parse_file_command(ctx.message) or detect_file_intent(ctx.message)
 
         if not ctx.history_blocks:
             history_result = ctx.session.execute(
@@ -467,7 +467,7 @@ class FileCommandStage:
             ctx.active_skill,
             ctx.model or "default",
             markdown,
-            prompt_type="file_command",
+            prompt_type="file_command" if ctx.message.strip().startswith("/") else "file_intent",
         )
         ctx.short_circuit(resp)
 

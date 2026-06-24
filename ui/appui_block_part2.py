@@ -450,6 +450,7 @@ def render_block_part2(
     _format_plan_timestamp,
     _format_duration,
     _block_timestamp,
+    _render_md_with_dataframes,
     _render_workflow_plot_payload,
     _render_embedded_dataframes,
     _render_step_payload,
@@ -574,13 +575,13 @@ def render_block_part2(
                                     _render_workflow_plot_payload(result, block_id, f"step_{idx}")
                                     result_markdown = result.get("markdown")
                                     if isinstance(result_markdown, str) and result_markdown.strip():
-                                        st.markdown(result_markdown)
+                                        _render_md_with_dataframes(result_markdown, f"{block_id}_step_{idx}", "result")
                                     result_dfs = result.get("_dataframes")
                                     if isinstance(result_dfs, dict) and result_dfs:
                                         _render_embedded_dataframes(result_dfs, f"{block_id}_step_{idx}")
                                     post_dataframe_markdown = result.get("post_dataframe_markdown")
                                     if isinstance(post_dataframe_markdown, str) and post_dataframe_markdown.strip():
-                                        st.markdown(post_dataframe_markdown)
+                                        _render_md_with_dataframes(post_dataframe_markdown, f"{block_id}_step_{idx}", "post_dataframe")
                                     rendered_result = {
                                         key: value for key, value in result.items()
                                         if key not in {"markdown", "_dataframes", "post_dataframe_markdown"}
@@ -592,7 +593,7 @@ def render_block_part2(
 
             markdown = content.get("markdown")
             if markdown:
-                st.markdown(markdown)
+                _render_md_with_dataframes(markdown, block_id, "plan")
 
             if isinstance(steps, list) and steps:
                 with st.expander("Plan Payload", expanded=False):

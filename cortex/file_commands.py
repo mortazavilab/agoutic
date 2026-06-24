@@ -20,11 +20,12 @@ _USAGE = (
     "[--mode auto|plain|markdown|html_text|html_raw]"
 )
 _VALID_RENDER_MODES = {"auto", "plain", "markdown", "html_text", "html_raw"}
+_NL_DOWNLOAD_RE = re.compile(r"^(?:please\s+)?download\s+(.+?)\s*$", re.IGNORECASE | re.DOTALL)
 
 
 @dataclass
 class FileCommand:
-    action: Literal["read"]
+    action: Literal["read", "download"]
     file_ref: str = ""
     preview_lines: int | None = None
     render_mode: str | None = None
@@ -119,6 +120,49 @@ def _file_usage_message(detail: str = "") -> str:
     return _USAGE
 
 
+def _clean_file_ref(file_ref: str) -> str:
+    cleaned = str(file_ref or "").strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {'"', "'", "`"}:
+        cleaned = cleaned[1:-1].strip()
+    return cleaned.rstrip("?.!,;:")
+
+
+def _looks_like_local_download_ref(file_ref: str) -> bool:
+    cleaned = _clean_file_ref(file_ref)
+    if not cleaned:
+        return False
+
+    lowered = cleaned.lower()
+    if lowered.startswith(("http://", "https://")):
+        return False
+    if " from " in lowered:
+        return False
+    if os.path.isabs(cleaned):
+        return True
+    if re.match(r"^(workflow\d+|summaries|data)(?:/|$)", cleaned, re.IGNORECASE):
+        return True
+    if "/" in cleaned:
+        return True
+
+    return bool(re.search(r"\.[A-Za-z0-9]{1,8}(?:\.gz)?$", Path(cleaned).name))
+
+
+def detect_file_intent(message: str) -> FileCommand | None:
+    msg = str(message or "").strip()
+    if not msg or msg.startswith("/"):
+        return None
+
+    match = _NL_DOWNLOAD_RE.match(msg)
+    if not match:
+        return None
+
+    file_ref = _clean_file_ref(match.group(1))
+    if not _looks_like_local_download_ref(file_ref):
+        return None
+
+    return FileCommand(action="download", file_ref=file_ref)
+
+
 def _resolve_direct_target(
     file_ref: str,
     *,
@@ -192,6 +236,14 @@ def _format_file_read_response(result: dict, *, requested_path: str) -> str:
     return f"{header}\n\n{body}".strip()
 
 
+def _format_file_download_response(*, requested_path: str, resolved_path: str) -> str:
+    return (
+        f"**Ready to download:** `{Path(resolved_path).name}`\n\n"
+        f"Path: `{resolved_path}`\n\n"
+        "Use the download control below this message to save the file."
+    )
+
+
 async def execute_file_command(
     command: FileCommand,
     *,
@@ -201,6 +253,8 @@ async def execute_file_command(
     if command.error:
         return _file_usage_message(command.error)
     if not command.file_ref:
+        if command.action == "download":
+            return "Provide a file path to download."
         return _file_usage_message("Provide a file path to read.")
 
     context = _extract_job_context_from_history(None, history_blocks=history_blocks)
@@ -208,6 +262,12 @@ async def execute_file_command(
     default_work_dir = str(context.get("work_dir") or "") or project_dir
 
     if not default_work_dir and not project_dir:
+        if command.action == "download":
+            return (
+                "I could not resolve an active workflow or project directory for download. "
+                "Use /use <workflow> first or provide a workflow-prefixed path such as "
+                "workflow10/reconciled_summary.txt."
+            )
         return (
             "I could not resolve an active workflow or project directory for /read-file. "
             "Use /use <workflow> first or provide a workflow-prefixed path such as "
@@ -222,11 +282,18 @@ async def execute_file_command(
     )
 
     if direct_requested and not direct_work_dir:
+        if command.action == "download":
+            return (
+                "I can only download files inside the active project or workflow context. "
+                "Use a workflow-relative path such as workflow10/report.html."
+            )
         return (
             "I can only read files inside the active project or workflow context. "
             "Use a workflow-relative path such as workflow10/report.html."
         )
     if direct_requested and not direct_path:
+        if command.action == "download":
+            return "Provide a file path to download, not just a workflow directory."
         return _file_usage_message("Provide a file path, not just a workflow directory.")
 
     read_preview_lines = command.preview_lines or 120
@@ -236,6 +303,14 @@ async def execute_file_command(
     client = MCPHttpClient(name="analyzer", base_url=analyzer_url)
     await client.connect()
     try:
+        if command.action == "download" and direct_requested:
+            candidate_path = Path(direct_work_dir) / direct_path
+            if candidate_path.exists() and candidate_path.is_file():
+                return _format_file_download_response(
+                    requested_path=command.file_ref,
+                    resolved_path=str(candidate_path),
+                )
+
         if direct_requested:
             direct_result = await client.call_tool(
                 "read_file_content",
@@ -272,6 +347,15 @@ async def execute_file_command(
         resolved_work_dir = str(find_result.get("work_dir") or search_work_dir)
         if not primary_path:
             return f"I could not resolve a concrete path for {command.file_ref}."
+
+        if command.action == "download":
+            candidate_path = Path(resolved_work_dir) / primary_path
+            if not candidate_path.exists() or not candidate_path.is_file():
+                return f"I found {primary_path} but the file is no longer available on disk."
+            return _format_file_download_response(
+                requested_path=command.file_ref,
+                resolved_path=str(candidate_path),
+            )
 
         read_result = await client.call_tool(
             "read_file_content",

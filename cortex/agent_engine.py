@@ -99,6 +99,10 @@ class AgentEngine:
     def _render_template(self, template_name: str, **context) -> str:
         return self._read_template(template_name).format(**context)
 
+    def read_prompt_template(self, template_name: str) -> str:
+        """Return a cached prompt template by relative path under prompt_templates/."""
+        return self._read_template(template_name)
+
     def _load_skill_text(self, skill_key: str) -> str:
         """
         Reads the Markdown content of a specific skill from the skills/ folder.
@@ -395,6 +399,34 @@ EXAMPLES:
             return response.choices[0].message.content, _usage_to_dict(response.usage)
 
         except Exception as e:
+            return f"❌ Brain Freeze (Connection Error): {str(e)}", _usage_to_dict(None)
+
+    def run_custom_prompt(
+        self,
+        system_prompt: str,
+        user_message: str,
+        conversation_history: list = None,
+        *,
+        temperature: float = 0.1,
+    ):
+        """Run an ad hoc prompt without skill loading, using the standard budget manager."""
+        budget = ContextBudgetManager()
+        messages = budget.fit_messages(
+            system_prompt=system_prompt,
+            conversation_history=conversation_history,
+            user_message=user_message,
+        )
+
+        try:
+            response = client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=temperature,
+                extra_body={"options": {"num_ctx": LLM_NUM_CTX}},
+            )
+            return response.choices[0].message.content, _usage_to_dict(response.usage)
+        except Exception as e:
+            logger.error("Custom prompt execution failed", error=str(e), model=self.display_name)
             return f"❌ Brain Freeze (Connection Error): {str(e)}", _usage_to_dict(None)
 
     def analyze_results(self, user_message: str, first_pass_text: str,
