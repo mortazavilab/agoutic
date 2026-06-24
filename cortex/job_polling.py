@@ -758,8 +758,13 @@ async def _auto_trigger_analysis(
             llm_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         # Save analysis report to workflow folder (best-effort)
+        # Strip interactive "dive deeper" suggestions before saving to disk
+        saved_md = final_md
+        dive_idx = final_md.rfind("💡 *You can ask me to dive deeper")
+        if dive_idx != -1:
+            saved_md = final_md[:dive_idx].rstrip() + "\n"
         _workflow_ref = work_directory.rstrip("/").rsplit("/", 1)[-1] if work_directory else run_uuid or "analysis"
-        _save_analysis_report(work_directory, _workflow_ref, final_md)
+        _save_analysis_report(work_directory, _workflow_ref, saved_md)
 
         # 7. Create AGENT_PLAN block with the analysis
         _token_payload = {

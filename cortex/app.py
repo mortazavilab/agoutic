@@ -646,6 +646,114 @@ async def delete_remote_profile_auth_session(
         timeout=10.0,
     )
 
+
+def _repair_terminal_job_and_workflow_state_from_status(
+    run_uuid: str,
+    status_payload: dict | None,
+) -> list[tuple[str, str, dict, str | None]]:
+    if not run_uuid or not isinstance(status_payload, dict):
+        return []
+
+    job_status = str(status_payload.get("status") or "").upper()
+    completed_ready = job_polling._completed_job_results_ready(status_payload)
+    completed_sync_terminal = job_polling._completed_job_result_sync_is_terminal(status_payload)
+    if job_status not in {"COMPLETED", "FAILED", "CANCELLED", "STALE"}:
+        return []
+    if job_status == "COMPLETED" and not (completed_ready or completed_sync_terminal):
+        return []
+
+    scheduled_analysis: list[tuple[str, str, dict, str | None]] = []
+    session = SessionLocal()
+    try:
+        blocks = session.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
+        for block in blocks:
+            payload = get_block_payload(block)
+            if payload.get("run_uuid") != run_uuid:
+                continue
+
+            resolved_work_directory = job_polling._resolved_job_work_directory(
+                payload.get("work_directory"),
+                status_payload,
+            )
+            merged_status = dict(status_payload)
+            if resolved_work_directory:
+                merged_status["work_directory"] = resolved_work_directory
+                payload["work_directory"] = resolved_work_directory
+            payload["job_status"] = merged_status
+            payload["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
+
+            if job_status == "COMPLETED":
+                block.status = "DONE"
+            elif job_status == "FAILED":
+                block.status = "FAILED"
+            elif job_status == "CANCELLED":
+                block.status = "CANCELLED"
+            else:
+                block.status = "FAILED"
+
+            block.payload_json = json.dumps(payload)
+            session.commit()
+            session.refresh(block)
+            sync_project_tasks(session, block.project_id)
+
+            workflow_block_id = payload.get("workflow_plan_block_id")
+            workflow_block = _find_workflow_plan(
+                session,
+                block.project_id,
+                workflow_block_id=workflow_block_id if isinstance(workflow_block_id, str) else None,
+                run_uuid=run_uuid,
+            )
+            if workflow_block is None:
+                continue
+
+            workflow_payload = get_block_payload(workflow_block)
+            if workflow_payload.get("run_uuid") != run_uuid:
+                workflow_payload["run_uuid"] = run_uuid
+                _persist_workflow_plan(session, workflow_block, workflow_payload)
+                workflow_payload = get_block_payload(workflow_block)
+
+            run_step_id = _resolve_workflow_step_id(
+                workflow_payload,
+                "run_dogme",
+                kinds=("RUN_SCRIPT", "run"),
+            )
+            if run_step_id:
+                workflow_payload = _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    run_step_id,
+                    "COMPLETED" if job_status == "COMPLETED" else ("CANCELLED" if job_status == "CANCELLED" else "FAILED"),
+                    extra={
+                        "run_uuid": run_uuid,
+                        "block_id": block.id,
+                        **({"work_directory": resolved_work_directory} if resolved_work_directory else {}),
+                    },
+                )
+
+            if job_status != "COMPLETED" or not completed_ready or payload.get("run_type") == "script":
+                continue
+
+            analysis_idx = _workflow_step_index(workflow_payload, "analyze_results")
+            if analysis_idx is None:
+                continue
+            analysis_step = workflow_payload["steps"][analysis_idx]
+            if analysis_step.get("status") != "PENDING":
+                continue
+
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                "analyze_results",
+                "RUNNING",
+                extra={"run_uuid": run_uuid},
+            )
+            scheduled_analysis.append((block.project_id, run_uuid, dict(payload), block.owner_id))
+    finally:
+        session.close()
+
+    return scheduled_analysis
+
+
 @app.get("/jobs/{run_uuid}/status")
 async def get_job_status_proxy(run_uuid: str, request: Request):
     """
@@ -673,6 +781,19 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
         headers["X-Internal-Secret"] = INTERNAL_API_SECRET
     cached_status = job_polling.get_cached_job_status(run_uuid)
     if _cache_hit_is_authoritative(cached_status):
+        for project_id, scheduled_run_uuid, payload, owner_id in _repair_terminal_job_and_workflow_state_from_status(
+            run_uuid,
+            cached_status,
+        ):
+            asyncio.create_task(
+                job_polling._auto_trigger_analysis(
+                    project_id,
+                    scheduled_run_uuid,
+                    payload,
+                    owner_id,
+                    force=True,
+                )
+            )
         return cached_status
 
     status_proxy_timeout = float(os.getenv("CORTEX_JOB_STATUS_PROXY_TIMEOUT_SECONDS", "150"))
@@ -688,6 +809,20 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
             if isinstance(payload, dict):
                 job_polling.cache_job_status(run_uuid, payload)
                 cached_payload = job_polling.get_cached_job_status(run_uuid, max_age_seconds=0)
+                repair_source = cached_payload if cached_payload is not None else payload
+                for project_id, scheduled_run_uuid, scheduled_payload, owner_id in _repair_terminal_job_and_workflow_state_from_status(
+                    run_uuid,
+                    repair_source,
+                ):
+                    asyncio.create_task(
+                        job_polling._auto_trigger_analysis(
+                            project_id,
+                            scheduled_run_uuid,
+                            scheduled_payload,
+                            owner_id,
+                            force=True,
+                        )
+                    )
                 if cached_payload is not None:
                     return cached_payload
             return payload

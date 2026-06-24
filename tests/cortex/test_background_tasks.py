@@ -3968,6 +3968,88 @@ class TestJobStatusProxyCache:
         async_client.assert_not_called()
 
     @pytest.mark.anyio
+    async def test_cached_terminal_status_repairs_workflow_plan_and_reserves_analysis(self, session_factory, seed_data, monkeypatch):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "workflow_type": "local_sample_intake",
+                "title": "Process local sample ad015_23778",
+                "sample_name": "ad015_23778",
+                "run_uuid": "proxy-copyback-cached",
+                "status": "RUNNING",
+                "next_step": "run_dogme",
+                "steps": [
+                    {"id": "run_dogme", "kind": "run", "title": "Run Dogme", "status": "RUNNING", "order_index": 0},
+                    {"id": "analyze_results", "kind": "analysis", "title": "Analyze results", "status": "PENDING", "order_index": 1},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "proxy-copyback-cached",
+                "workflow_plan_block_id": workflow_block.id,
+                "work_directory": "/local/workflow7",
+                "sample_name": "ad015_23778",
+                "mode": "RNA",
+                "model": "default",
+                "run_type": "dogme",
+                "job_status": {"status": "RUNNING", "progress_percent": 99},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        cached = {
+            "run_uuid": "proxy-copyback-cached",
+            "status": "COMPLETED",
+            "progress_percent": 100,
+            "message": "Results synchronized to the local workflow directory.",
+            "result_destination": "local",
+            "transfer_state": "outputs_downloaded",
+            "work_directory": "/local/workflow7",
+        }
+        job_polling_module.cache_job_status("proxy-copyback-cached", cached)
+
+        request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u-bg")))
+        monkeypatch.setattr("cortex.app.require_run_uuid_access", lambda run_uuid, user: None)
+        async_client = MagicMock()
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", async_client)
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling._auto_trigger_analysis", new_callable=AsyncMock) as mock_auto, \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            mock_create_task.side_effect = lambda coro: (_close_scheduled_coroutine(coro), MagicMock())[1]
+            result = await get_job_status_proxy("proxy-copyback-cached", request)
+
+        assert result == cached
+        async_client.assert_not_called()
+        assert mock_auto.call_count == 1
+        assert mock_create_task.call_count == 1
+
+        sess = session_factory()
+        refreshed_job = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).one()
+        refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        job_payload = get_block_payload(refreshed_job)
+        workflow_payload = get_block_payload(refreshed_workflow)
+        assert refreshed_job.status == "DONE"
+        assert job_payload["job_status"]["transfer_state"] == "outputs_downloaded"
+        assert workflow_payload["steps"][0]["status"] == "COMPLETED"
+        assert workflow_payload["steps"][1]["status"] == "RUNNING"
+        sess.close()
+
+    @pytest.mark.anyio
     async def test_returns_cached_status_when_live_proxy_times_out(self, monkeypatch):
         cached = {
             "run_uuid": "proxy-fallback-test",
@@ -4068,6 +4150,101 @@ class TestJobStatusProxyCache:
         assert refreshed["tasks"]["completed_count"] == 61
         assert "last_poll_error" not in refreshed
         async_client.assert_called_once()
+
+    @pytest.mark.anyio
+    async def test_live_terminal_status_repairs_workflow_plan_and_reserves_analysis(self, session_factory, seed_data, monkeypatch):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "workflow_type": "local_sample_intake",
+                "title": "Process local sample ad015_23778",
+                "sample_name": "ad015_23778",
+                "run_uuid": "proxy-copyback-live",
+                "status": "RUNNING",
+                "next_step": "run_dogme",
+                "steps": [
+                    {"id": "run_dogme", "kind": "run", "title": "Run Dogme", "status": "RUNNING", "order_index": 0},
+                    {"id": "analyze_results", "kind": "analysis", "title": "Analyze results", "status": "PENDING", "order_index": 1},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "proxy-copyback-live",
+                "workflow_plan_block_id": workflow_block.id,
+                "work_directory": "/local/workflow8",
+                "sample_name": "ad015_23778",
+                "mode": "RNA",
+                "model": "default",
+                "run_type": "dogme",
+                "job_status": {"status": "RUNNING", "progress_percent": 99},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u-bg")))
+        monkeypatch.setattr("cortex.app.require_run_uuid_access", lambda run_uuid, user: None)
+
+        live_payload = {
+            "run_uuid": "proxy-copyback-live",
+            "status": "COMPLETED",
+            "progress_percent": 100,
+            "message": "Results synchronized to the local workflow directory.",
+            "result_destination": "local",
+            "transfer_state": "outputs_downloaded",
+            "work_directory": "/local/workflow8",
+        }
+
+        class _LiveAsyncClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, *args, **kwargs):
+                response = MagicMock()
+                response.raise_for_status.return_value = None
+                response.json.return_value = live_payload
+                return response
+
+        async_client = MagicMock(return_value=_LiveAsyncClient())
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", async_client)
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling._auto_trigger_analysis", new_callable=AsyncMock) as mock_auto, \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            mock_create_task.side_effect = lambda coro: (_close_scheduled_coroutine(coro), MagicMock())[1]
+            result = await get_job_status_proxy("proxy-copyback-live", request)
+
+        assert result == live_payload
+        assert mock_auto.call_count == 1
+        assert mock_create_task.call_count == 1
+        async_client.assert_called_once()
+
+        sess = session_factory()
+        refreshed_job = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).one()
+        refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        job_payload = get_block_payload(refreshed_job)
+        workflow_payload = get_block_payload(refreshed_workflow)
+        assert refreshed_job.status == "DONE"
+        assert job_payload["job_status"]["transfer_state"] == "outputs_downloaded"
+        assert workflow_payload["steps"][0]["status"] == "COMPLETED"
+        assert workflow_payload["steps"][1]["status"] == "RUNNING"
+        sess.close()
 
     @pytest.mark.anyio
     async def test_live_transient_failure_still_returns_preserved_cached_status(self, monkeypatch):
