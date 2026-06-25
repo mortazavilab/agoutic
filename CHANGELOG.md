@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Features
+
+### Bug Fixes
+
+- **Replaced deprecated `st.components.v1.html` with `st.html`:** Resolves Streamlit 1.51+ deprecation warning (`st.components.v1.html will be removed after 2026-06-01`). Now using Streamlit 1.58.0 going forward.
+
 ## [3.7.4] - 2026-06-24
 
 ### Features

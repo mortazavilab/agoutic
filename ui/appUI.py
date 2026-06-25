@@ -7,7 +7,6 @@ from datetime import timedelta
 from pathlib import Path as _Path
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 import plotly.express as px
 import plotly.graph_objects as go
 from auth import require_auth, logout_button, make_authenticated_request, build_auth_request_kwargs
@@ -1128,9 +1127,8 @@ def _render_chat():
                 )
 
 with st.container(key=_project_scope_mount_key("project_panel", active_id)):
-    components.html(
-        f"<script>window.parent.document.title = {json.dumps(_browser_page_title(_known_project_name))};</script>",
-        height=0,
+    st.html(
+        f"<script>window.parent.document.title = {json.dumps(_browser_page_title(_known_project_name))};</script>"
     )
     _active_project_collaborators = []
     try:
