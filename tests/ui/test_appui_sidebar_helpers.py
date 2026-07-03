@@ -1,4 +1,4 @@
-from ui.appui_sidebar import _fetch_model_options
+from ui.appui_sidebar import _fetch_model_options, _resolve_requested_project_id
 
 
 class _Response:
@@ -35,3 +35,25 @@ def test_fetch_model_options_falls_back_to_default_on_error():
 
     _fetch_model_options.clear()
     assert _fetch_model_options("http://api.test", request_fn) == ["default"]
+
+
+def test_resolve_requested_project_id_accepts_existing_project():
+    resolved, is_valid = _resolve_requested_project_id(
+        "proj-2",
+        "proj-1",
+        [{"id": "proj-1"}, {"id": "proj-2"}],
+    )
+
+    assert resolved == "proj-2"
+    assert is_valid is True
+
+
+def test_resolve_requested_project_id_rejects_unknown_project():
+    resolved, is_valid = _resolve_requested_project_id(
+        "test703",
+        "proj-1",
+        [{"id": "proj-1"}, {"id": "proj-2"}],
+    )
+
+    assert resolved == "proj-1"
+    assert is_valid is False

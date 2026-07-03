@@ -211,6 +211,7 @@ def _load_block_part2_function(name: str, extra_globals: dict | None = None):
                 "_execution_run_metadata",
                 "_looks_like_workflow_path",
                 "_execution_job_workflow_path",
+                "_render_execution_job_actions",
             },
             _BLOCK_PART2_PATH,
             namespace,
@@ -263,20 +264,16 @@ class TestCreateProjectServerSide:
             timeout=10,
         )
 
-    def test_falls_back_to_uuid_when_request_fails(self):
+    def test_returns_error_when_request_fails(self):
         request = MagicMock(side_effect=RuntimeError("network down"))
         fn = _load_function("_create_project_server_side", {"make_authenticated_request": request})
 
-        import uuid
-        original_uuid4 = uuid.uuid4
-        uuid.uuid4 = lambda: "uuid-fallback"
-        try:
-            result = fn("named-project")
-        finally:
-            uuid.uuid4 = original_uuid4
+        result = fn("named-project")
 
         assert isinstance(result, dict)
-        assert result["id"] == "uuid-fallback"
+        assert result["id"] == ""
+        assert result["name"] == "named-project"
+        assert result["error"] == "network down"
 
 
 class TestAdminActivityHelpers:
@@ -667,6 +664,62 @@ class TestProjectSwitchHelpers:
 
         assert value == dt.timedelta(seconds=5)
 
+    def test_project_refresh_interval_caps_full_refresh_jobs_to_five_seconds(self):
+        fn = _load_function("_project_refresh_interval", {"timedelta": dt.timedelta})
+
+        value = fn(
+            auto_refresh=True,
+            poll_seconds=30,
+            auto_refresh_suppressed=False,
+            project_switch_loading=False,
+            has_running_job=True,
+            has_full_refresh_job=True,
+        )
+
+        assert value == dt.timedelta(seconds=5)
+
+    def test_project_discovery_interval_uses_idle_cadence(self):
+        fn = _load_function(
+            "_project_discovery_interval",
+            {
+                "timedelta": dt.timedelta,
+                "IDLE_DISCOVERY_POLL_SECONDS": 120,
+            },
+        )
+
+        value = fn(
+            auto_refresh=True,
+            auto_refresh_suppressed=False,
+            project_switch_loading=False,
+        )
+
+        assert value == dt.timedelta(seconds=120)
+
+    def test_project_discovery_interval_disables_when_live_stream_off(self):
+        fn = _load_function(
+            "_project_discovery_interval",
+            {
+                "timedelta": dt.timedelta,
+                "IDLE_DISCOVERY_POLL_SECONDS": 120,
+            },
+        )
+
+        value = fn(
+            auto_refresh=False,
+            auto_refresh_suppressed=False,
+            project_switch_loading=False,
+        )
+
+        assert value is None
+
+    def test_task_sections_have_active_items_for_running_or_pending_roots(self):
+        fn = _load_function("_task_sections_have_active_items")
+
+        assert fn({"running": [{"id": "task-1"}]}) is True
+        assert fn({"pending": [{"id": "task-2"}]}) is True
+        assert fn({"running": [{"id": "child-1", "parent_task_id": "task-1"}]}) is False
+        assert fn({"completed": [{"id": "task-3"}]}) is False
+
     def test_bootstrap_suppressed_monitoring_only_when_timer_is_missing(self):
         fn = _load_function("_should_bootstrap_suppressed_monitoring")
 
@@ -682,6 +735,61 @@ class TestProjectSwitchHelpers:
             refresh_interval=dt.timedelta(seconds=2),
             has_running_job=True,
         ) is False
+
+    def test_incremental_block_fetch_disabled_for_full_refresh_jobs(self):
+        fn = _load_function("_should_use_incremental_block_fetch")
+
+        assert fn(
+            has_existing_blocks=True,
+            project_switch_loading_for=None,
+            active_project_id="proj-1",
+            has_full_refresh_job=True,
+        ) is False
+
+    def test_incremental_block_fetch_enabled_for_stable_project_history(self):
+        fn = _load_function("_should_use_incremental_block_fetch")
+
+        assert fn(
+            has_existing_blocks=True,
+            project_switch_loading_for=None,
+            active_project_id="proj-1",
+            has_full_refresh_job=False,
+        ) is True
+
+    def test_refresh_live_download_block_polls_download_endpoint(self):
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "status": "RUNNING",
+                "bytes_downloaded": 550 * 1024 * 1024,
+                "current_file": "ENCFF313VYZ.fastq.gz",
+                "current_file_bytes": 550 * 1024 * 1024,
+                "current_file_expected": 1522 * 1024 * 1024,
+            },
+        )
+        request = MagicMock(return_value=response)
+        fn = _load_function("_refresh_live_download_block", {"make_authenticated_request": request})
+
+        result = fn(
+            {
+                "id": "block-1",
+                "type": "DOWNLOAD_TASK",
+                "status": "RUNNING",
+                "payload": {
+                    "download_id": "dl-1",
+                    "bytes_downloaded": 100,
+                },
+            },
+            "proj-1",
+        )
+
+        assert result["payload"]["bytes_downloaded"] == 550 * 1024 * 1024
+        assert result["payload"]["current_file"] == "ENCFF313VYZ.fastq.gz"
+        request.assert_called_once_with(
+            "GET",
+            "http://api.test/projects/proj-1/downloads/dl-1",
+            timeout=10,
+        )
 
     def test_finish_project_switch_loading_clears_flag_and_reruns(self):
         fake_st = SimpleNamespace(
@@ -2566,12 +2674,25 @@ class TestProjectMarkdownDownloads:
             "workflow10/report.html",
         ]
 
+    def test_extract_downloadable_project_paths_skips_remote_directory_paths(self):
+        symbols = _load_renderers_symbols(
+            {"_looks_like_downloadable_project_path", "_extract_downloadable_project_paths"}
+        )
+
+        extract_paths = symbols["_extract_downloadable_project_paths"]
+        markdown = (
+            "Sample F121-9r1 is staged on hpc3 at "
+            "`/share/crsp/lab/seyedam/share/agoutic/seyedam/data/2960436ba625d300`."
+        )
+
+        assert extract_paths(markdown) == []
+
     def test_render_md_with_dataframes_adds_project_download_button(self):
         fake_st = SimpleNamespace(
             session_state={},
             markdown=MagicMock(),
             dataframe=MagicMock(),
-            download_button=MagicMock(),
+            link_button=MagicMock(),
             caption=MagicMock(),
         )
         fake_response = SimpleNamespace(
@@ -2587,6 +2708,8 @@ class TestProjectMarkdownDownloads:
                 "_looks_like_downloadable_project_path",
                 "_extract_downloadable_project_paths",
                 "_download_filename_from_headers",
+                "_should_render_inline_download_control",
+                "_project_file_download_url",
                 "_render_project_file_download_controls",
                 "_render_md_with_dataframes",
             },
@@ -2608,19 +2731,47 @@ class TestProjectMarkdownDownloads:
         )
 
         fake_st.markdown.assert_called_once_with("Saved summary: `/tmp/proj/summaries/workflow-summary.md`")
-        request_fn.assert_called_once_with(
-            "GET",
-            "http://api.test/projects/proj-1/files/download",
-            params={"path": "/tmp/proj/summaries/workflow-summary.md"},
-            timeout=60,
-        )
-        fake_st.download_button.assert_called_once_with(
+        request_fn.assert_not_called()
+        fake_st.link_button.assert_called_once_with(
             label="⬇️ Download workflow-summary.md",
-            data=b"summary-bytes",
-            file_name="workflow-summary.md",
-            mime="text/markdown",
+            url="http://api.test/projects/proj-1/files/download?path=%2Ftmp%2Fproj%2Fsummaries%2Fworkflow-summary.md",
             key="_project_download_block-1_main_0",
         )
+
+    def test_skips_inline_download_control_for_fastq_inputs(self):
+        fake_st = SimpleNamespace(
+            markdown=MagicMock(),
+            link_button=MagicMock(),
+        )
+        symbols = _load_renderers_symbols(
+            {
+                "_looks_like_downloadable_project_path",
+                "_extract_downloadable_project_paths",
+                "_should_render_inline_download_control",
+                "_project_file_download_url",
+                "_render_project_file_download_controls",
+                "_render_md_with_dataframes",
+            },
+            {
+                "st": fake_st,
+            },
+        )
+
+        render_markdown = symbols["_render_md_with_dataframes"]
+        request_fn = MagicMock()
+
+        render_markdown(
+            "Use input file `data/ENCFF874VSI.fastq.gz` on hpc3.",
+            "block-1",
+            "main",
+            api_url="http://api.test",
+            project_id="proj-1",
+            request_fn=request_fn,
+        )
+
+        fake_st.markdown.assert_called_once_with("Use input file `data/ENCFF874VSI.fastq.gz` on hpc3.")
+        request_fn.assert_not_called()
+        fake_st.link_button.assert_not_called()
 
 
 class TestBlockRequiresFullRefresh:
@@ -2667,6 +2818,43 @@ class TestBlockRequiresFullRefresh:
                 "job_status": {"status": "COMPLETED", "transfer_state": "stale"},
             },
         }) is False
+
+
+class TestBlockShouldRenderInLiveFragment:
+    def test_running_execution_job_uses_live_fragment(self):
+        fn = _load_function("_block_should_render_in_live_fragment")
+
+        assert fn({"type": "EXECUTION_JOB", "status": "RUNNING"}) is True
+
+    def test_pending_transfer_execution_job_uses_live_fragment(self):
+        fn = _load_function("_block_should_render_in_live_fragment")
+
+        assert fn(
+            {
+                "type": "EXECUTION_JOB",
+                "status": "DONE",
+                "payload": {"job_status": {"status": "COMPLETED", "transfer_state": "pending_import"}},
+            }
+        ) is True
+
+    def test_running_staging_and_download_tasks_use_live_fragment(self):
+        fn = _load_function("_block_should_render_in_live_fragment")
+
+        assert fn({"type": "STAGING_TASK", "status": "RUNNING"}) is True
+        assert fn({"type": "DOWNLOAD_TASK", "status": "RUNNING"}) is True
+
+    def test_terminal_blocks_stay_in_cold_history(self):
+        fn = _load_function("_block_should_render_in_live_fragment")
+
+        assert fn({"type": "WORKFLOW_PLAN", "status": "RUNNING"}) is False
+        assert fn({"type": "STAGING_TASK", "status": "DONE"}) is False
+        assert fn(
+            {
+                "type": "EXECUTION_JOB",
+                "status": "DONE",
+                "payload": {"job_status": {"status": "COMPLETED", "transfer_state": "outputs_downloaded"}},
+            }
+        ) is False
 
 
 class TestCachedJobStatus:

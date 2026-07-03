@@ -6,6 +6,18 @@
 
 - **Replaced deprecated `st.components.v1.html` with `st.html`:** Resolves Streamlit 1.51+ deprecation warning (`st.components.v1.html will be removed after 2026-06-01`). Now using Streamlit 1.58.0 going forward.
 
+### Performance
+
+- **Streamlit chat now separates active live cards from cold project history:** Added a per-project active-state index in `ui/appui_active_state.py`, switched project block refresh to incremental `since_seq` fetches in `ui/appui_tasks.py`, and updated `ui/appUI.py` so idle projects stay on a slow discovery cadence while active execution, staging, and download cards render through dedicated live fragment paths instead of keeping the whole visible chat window hot.
+- **Task dock now follows the same discovery-versus-live model as chat:** `ui/appUI.py` now uses project-scoped task-dock caches plus a split between idle discovery and active task rendering, reducing repeated `/projects/{project_id}/tasks` work on old projects while still letting active work update automatically.
+- **Completed, failed, cancelled, stale, and synced workflow history now stays cold unless reactivated:** The UI now tracks active run UUIDs and transfer states explicitly, follows the newest rerun attempt rather than stale history, and stops polling terminal jobs/downloads/staging tasks until a rerun, resume, or sync transition makes that specific workflow active again.
+- **Reduced UI RAM and rerender cost for large project histories:** Added TTL-based Session State eviction for non-figure download/export payloads in `ui/appui_cache_ttl.py`, switched plot/dataframe lookup onto a per-project dataframe index in `ui/appui_renderers.py`, and made terminal logs plus embedded dataframe sections lazier in `ui/appui_block_part1.py` and `ui/appui_block_part2.py` so old histories cost less CPU and memory.
+- **Execution status cards are now structured for full active-card fragmentization:** `ui/appui_block_part2.py` now separates the live execution-status body from the mutation/action controls, keeping the fragment boundary cleaner for per-card live updates and future `parallel=True` adoption on read-only active fragments.
+
+### Tests
+
+- **Added focused UI regression coverage for the new refresh model:** `tests/ui/test_app_source_helpers.py` now covers the idle discovery interval, live-card classification for execution/staging/download blocks, and the helper wiring needed by the fragmentized execution-card path. Focused validation continues to use `tests/cortex/test_block_endpoints.py` alongside the UI suite to keep the incremental block-stream contract covered.
+
 ## [3.7.4] - 2026-06-24
 
 ### Features

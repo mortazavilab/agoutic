@@ -128,6 +128,7 @@ def _browser_page_title(project_name: str | None = None) -> str:
 # Use environment variable or default to localhost
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
 LIVE_JOB_STATUS_TIMEOUT_SECONDS = float(os.getenv("LIVE_JOB_STATUS_TIMEOUT_SECONDS", "60"))
+IDLE_DISCOVERY_POLL_SECONDS = max(int(os.getenv("IDLE_DISCOVERY_POLL_SECONDS", "120") or 120), 5)
 
 st.set_page_config(page_title=_browser_page_title(), layout="wide")
 inject_global_css()
@@ -415,6 +416,40 @@ def _project_scope_mount_key(scope_name: str, project_id: str) -> str:
     return f"{scope_token}_project_scope_{project_token}"
 
 
+def _task_dock_cache_keys(project_id: str) -> tuple[str, str]:
+    project_token = (project_id or "none").strip() or "none"
+    return (
+        f"_cached_task_sections_{project_token}",
+        f"_last_task_check_{project_token}",
+    )
+
+
+def _task_sections_have_active_items(sections: dict) -> bool:
+    if not isinstance(sections, dict):
+        return False
+
+    for section_name in ("running", "pending"):
+        tasks = sections.get(section_name, [])
+        if any(isinstance(task, dict) and not task.get("parent_task_id") for task in tasks):
+            return True
+    return False
+
+
+def _render_task_dock_sections(project_id: str, sections: dict) -> None:
+    sections, hidden_stale = prepare_project_task_sections_for_dock(sections)
+    total_tasks = _count_project_tasks(sections)
+    st.session_state["_show_task_dock"] = total_tasks > 0
+    if total_tasks == 0:
+        return
+
+    with st.container(border=True, height=TASK_DOCK_HEIGHT_PX, key="task_dock"):
+        if hidden_stale:
+            st.caption(
+                f"Hidden {hidden_stale} stale task(s) older than 48h from this project view."
+            )
+        render_project_tasks(project_id, sections=sections, docked=True)
+
+
 def _current_project_record(project_id: str) -> dict:
     for project in st.session_state.get("_cached_projects", []):
         if project.get("id") == project_id:
@@ -439,17 +474,72 @@ def _project_refresh_interval(
     auto_refresh_suppressed: bool,
     project_switch_loading: bool,
     has_running_job: bool,
+    has_full_refresh_job: bool = False,
 ):
     if project_switch_loading:
         return timedelta(milliseconds=100)
 
     refresh_seconds = max(int(poll_seconds or 30), 1)
+    if has_full_refresh_job:
+        refresh_seconds = min(refresh_seconds, 5)
     if has_running_job and auto_refresh_suppressed:
         return timedelta(seconds=refresh_seconds)
     if not (auto_refresh or has_running_job) or auto_refresh_suppressed:
         return None
 
     return timedelta(seconds=refresh_seconds)
+
+
+def _project_discovery_interval(
+    *,
+    auto_refresh: bool,
+    auto_refresh_suppressed: bool,
+    project_switch_loading: bool,
+):
+    if project_switch_loading:
+        return timedelta(milliseconds=100)
+
+    if auto_refresh_suppressed or not auto_refresh:
+        return None
+
+    return timedelta(seconds=IDLE_DISCOVERY_POLL_SECONDS)
+
+
+def _block_should_render_in_live_fragment(block: dict) -> bool:
+    btype = block.get("type")
+    bstatus = str(block.get("status") or "").upper()
+    content = block.get("payload", {}) if isinstance(block.get("payload"), dict) else {}
+
+    if btype in {"DOWNLOAD_TASK", "STAGING_TASK"}:
+        return bstatus == "RUNNING"
+
+    if btype != "EXECUTION_JOB":
+        return False
+
+    job_status = content.get("job_status", {}) if isinstance(content.get("job_status"), dict) else {}
+    status = str(job_status.get("status") or "").upper()
+    transfer_state = str(
+        job_status.get("transfer_state")
+        or content.get("transfer_state")
+        or ""
+    ).strip().lower()
+    imported_source_kind = str(
+        job_status.get("imported_source_kind")
+        or content.get("imported_source_kind")
+        or ""
+    ).strip().lower()
+
+    if bstatus == "RUNNING" or status in {"RUNNING", "PENDING"}:
+        return True
+    if transfer_state in {"pending_import", "downloading_outputs"}:
+        return True
+    if (
+        imported_source_kind == "slurm"
+        and bstatus in {"RUNNING", "DONE"}
+        and transfer_state not in {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
+    ):
+        return True
+    return False
 
 
 def _project_shared_status_banner_payload(
@@ -615,6 +705,53 @@ def _should_bootstrap_suppressed_monitoring(
         and has_running_job
     )
 
+
+def _should_use_incremental_block_fetch(
+    *,
+    has_existing_blocks: bool,
+    project_switch_loading_for: str | None,
+    active_project_id: str,
+    has_full_refresh_job: bool,
+) -> bool:
+    if not has_existing_blocks:
+        return False
+    if project_switch_loading_for == active_project_id:
+        return False
+    if has_full_refresh_job:
+        return False
+    return True
+
+
+def _refresh_live_download_block(block: dict, project_id: str) -> dict:
+    refreshed_block = dict(block or {})
+    content = refreshed_block.get("payload", {}) if isinstance(refreshed_block.get("payload"), dict) else {}
+    download_id = str(content.get("download_id") or "").strip()
+    if not download_id or not project_id:
+        return refreshed_block
+
+    try:
+        response = make_authenticated_request(
+            "GET",
+            f"{API_URL}/projects/{project_id}/downloads/{download_id}",
+            timeout=10,
+        )
+    except Exception:
+        return refreshed_block
+
+    if getattr(response, "status_code", 0) != 200:
+        return refreshed_block
+
+    live_payload = response.json() if callable(getattr(response, "json", None)) else None
+    if not isinstance(live_payload, dict):
+        return refreshed_block
+
+    merged_payload = dict(content)
+    merged_payload.update(live_payload)
+    refreshed_block["payload"] = merged_payload
+    if live_payload.get("status") is not None:
+        refreshed_block["status"] = str(live_payload.get("status") or refreshed_block.get("status") or "")
+    return refreshed_block
+
 # Check if we're creating a new project (flag set by New Project button)
 if st.session_state.get("_create_new_project", False):
     # Create project via server-side endpoint (server generates UUID)
@@ -624,26 +761,31 @@ if st.session_state.get("_create_new_project", False):
     new_id = _new_proj["id"] if isinstance(_new_proj, dict) else _new_proj
     _new_slug = _new_proj.get("slug", "") if isinstance(_new_proj, dict) else ""
     _new_name = _new_proj.get("name", "") if isinstance(_new_proj, dict) else ""
-    st.session_state.active_project_id = new_id
-    st.session_state["_page_project_name"] = _new_name or (_pending_name or "")
-    st.session_state.blocks = []
-    # Clear project-related data
-    for key in ['loaded_conversation', 'selected_job', 'chat_history', 
-                'skill_content', 'selected_skill', 'job_status', 'messages',
-                '_max_visible_blocks', '_welcome_sent_for']:
-        if key in st.session_state:
-            del st.session_state[key]
-    # Clear any widget keys left over from old block rendering
-    # (form keys, checkbox keys, rejection state, etc.)
-    stale_prefixes = ('params_form_', 'logs_', 'rejecting_', 'rejection_reason_',
-                      'submit_reject_', 'cancel_reject_')
-    for key in list(st.session_state.keys()):
-        if any(key.startswith(p) for p in stale_prefixes):
-            del st.session_state[key]
-    # Reset the project ID text input widget so it doesn't hold the old value
-    st.session_state["_project_id_input"] = new_id
-    if _new_slug and _new_slug != _slugify_project_name(_pending_name or ""):
-        st.toast(f"Created project — folder: {_new_slug}")
+    _creation_error = _new_proj.get("error", "") if isinstance(_new_proj, dict) else ""
+    if new_id:
+        st.session_state.pop("_project_creation_error", None)
+        st.session_state.active_project_id = new_id
+        st.session_state["_page_project_name"] = _new_name or (_pending_name or "")
+        st.session_state.blocks = []
+        # Clear project-related data
+        for key in ['loaded_conversation', 'selected_job', 'chat_history', 
+                    'skill_content', 'selected_skill', 'job_status', 'messages',
+                    '_max_visible_blocks', '_welcome_sent_for']:
+            if key in st.session_state:
+                del st.session_state[key]
+        # Clear any widget keys left over from old block rendering
+        # (form keys, checkbox keys, rejection state, etc.)
+        stale_prefixes = ('params_form_', 'logs_', 'rejecting_', 'rejection_reason_',
+                          'submit_reject_', 'cancel_reject_')
+        for key in list(st.session_state.keys()):
+            if any(key.startswith(p) for p in stale_prefixes):
+                del st.session_state[key]
+        # Reset the project ID text input widget so it doesn't hold the old value
+        st.session_state["_project_id_input"] = new_id
+        if _new_slug and _new_slug != _slugify_project_name(_pending_name or ""):
+            st.toast(f"Created project — folder: {_new_slug}")
+    elif _creation_error:
+        st.session_state["_project_creation_error"] = f"Could not create project: {_creation_error}"
     # Clear the flag
     del st.session_state["_create_new_project"]
 
@@ -676,6 +818,16 @@ if st.session_state.get("_last_rendered_project") != st.session_state.active_pro
     st.session_state.blocks = []
     st.session_state._last_rendered_project = st.session_state.active_project_id
     st.session_state.pop("_welcome_sent_for", None)
+    # Clear project-scoped caches (active-state index, dataframe index, rehydrated DFs)
+    try:
+        from appui_active_state import clear_active_state, clear_df_index, clear_rehydrated_df_cache
+        old_project = st.session_state.get("_last_rendered_project")
+        if old_project:
+            clear_active_state(old_project)
+            clear_df_index(old_project)
+            clear_rehydrated_df_cache(old_project)
+    except (ImportError, ModuleNotFoundError):
+        pass
     # Suppress auto-refresh for a few cycles after switching to avoid
     # Streamlit DOM-reuse artefacts (old messages blinking).
     _pause_auto_refresh(3)
@@ -761,7 +913,7 @@ def _render_workflow_plot_payload(payload: dict, block_id: str, step_suffix: str
     return _render_workflow_plot_payload_impl(payload, block_id, step_suffix, PLOTLY_TEMPLATE)
 
 
-def render_block(block, expected_project_id: str = ""):
+def render_block(block, expected_project_id: str = "", live_job_status_map: dict | None = None):
     """Render a single block.
 
     If expected_project_id is provided, silently skip blocks that belong
@@ -939,6 +1091,7 @@ def render_block(block, expected_project_id: str = ""):
         _pause_auto_refresh=_pause_auto_refresh,
         get_job_debug_info=get_job_debug_info,
         _render_plot_block=_render_plot_block,
+        live_job_status_map=live_job_status_map,
     )
 
     if not handled_part1 and not handled_part2:
@@ -970,13 +1123,65 @@ _refresh_interval = _project_refresh_interval(
     auto_refresh_suppressed=_auto_refresh_suppressed,
     project_switch_loading=_project_switch_loading,
     has_running_job=bool(st.session_state.get("_has_running_job", False)),
+    has_full_refresh_job=bool(st.session_state.get("_has_full_refresh_job", False)),
+)
+_discovery_refresh_interval = _project_discovery_interval(
+    auto_refresh=auto_refresh,
+    auto_refresh_suppressed=_auto_refresh_suppressed,
+    project_switch_loading=_project_switch_loading,
 )
 project_loading_slot = None
 
 
 @st.fragment(run_every=_refresh_interval)
+def _render_live_block_fragment(block: dict, expected_project_id: str = ""):
+    project_id = expected_project_id or st.session_state.active_project_id
+    live_block = block
+    block_id = str(block.get("id") or "")
+    btype = block.get("type")
+    content = block.get("payload", {}) if isinstance(block.get("payload"), dict) else {}
+    live_job_status_map = None
+
+    if btype == "EXECUTION_JOB":
+        run_uuid = str(content.get("run_uuid") or "").strip()
+        if run_uuid:
+            live_job_status, _ = get_cached_job_status(run_uuid)
+            if isinstance(live_job_status, dict) and live_job_status:
+                live_job_status_map = {run_uuid: live_job_status}
+                try:
+                    from appui_active_state import update_run_status
+
+                    update_run_status(st.session_state.active_project_id, run_uuid, live_job_status)
+                except (ImportError, ModuleNotFoundError):
+                    pass
+    elif btype == "DOWNLOAD_TASK":
+        live_block = _refresh_live_download_block(block, project_id)
+        live_content = live_block.get("payload", {}) if isinstance(live_block.get("payload"), dict) else {}
+        try:
+            from appui_active_state import update_download_status
+
+            update_download_status(project_id, block_id, live_content)
+        except (ImportError, ModuleNotFoundError):
+            pass
+
+    container_key = _project_scope_mount_key(f"live_block_{block_id}", project_id)
+    with st.container(key=container_key):
+        render_block(
+            live_block,
+            expected_project_id=expected_project_id,
+            live_job_status_map=live_job_status_map,
+        )
+
+
+@st.fragment(run_every=_discovery_refresh_interval)
 def _render_chat():
-    """Render all chat blocks for the active project."""
+    """Render all chat blocks for the active project.
+
+    Uses incremental block streaming and active-state tracking to avoid
+    refetching and rescanning large project histories on every refresh cycle.
+    Only active jobs/downloads/staging tasks are polled; completed/failed/synced
+    tasks render from cached data until reactivated.
+    """
     _active_id = st.session_state.active_project_id
     with st.container(key=_project_scope_mount_key("chat", _active_id)):
         if st.session_state.get("_project_switch_loading_for") == _active_id:
@@ -988,14 +1193,53 @@ def _render_chat():
         if project_loading_slot is not None:
             project_loading_slot.empty()
 
-        # 1. Fetch & Sanitize
-        fetched_blocks, _fetch_ok = get_sanitized_blocks(_active_id)
+        # Import active-state helpers
+        from appui_active_state import (
+            get_active_runs_to_poll,
+            get_active_downloads_to_poll,
+            has_any_active_items,
+            merge_blocks_incremental,
+            should_block_require_poll,
+            update_run_status,
+            update_download_status,
+            register_active_run,
+            register_active_download,
+            is_job_active,
+            is_download_active,
+        )
+        from appui_cache_ttl import periodic_cache_maintenance
+
+        # Run periodic cache maintenance to evict expired download/export caches
+        periodic_cache_maintenance()
+
+        # 1. Fetch & Sanitize (incremental streaming)
+        # Use incremental fetch on subsequent refreshes to avoid refetching large histories.
+        # On initial load or project switch, fall back to full fetch for correctness.
+        _use_incremental_fetch = _should_use_incremental_block_fetch(
+            has_existing_blocks=bool(st.session_state.get("blocks")),
+            project_switch_loading_for=st.session_state.get("_project_switch_loading_for"),
+            active_project_id=_active_id,
+            has_full_refresh_job=bool(st.session_state.get("_has_full_refresh_job", False)),
+        )
+
+        if not _use_incremental_fetch:
+            # Full fetch on initial load to establish baseline
+            fetched_blocks, _fetch_ok = get_sanitized_blocks(_active_id)
+        else:
+            # Incremental fetch for subsequent refreshes (only new blocks since last poll)
+            from appui_tasks import get_sanitized_blocks_incremental
+            fetched_blocks, _fetch_ok = get_sanitized_blocks_incremental(_active_id, API_URL, make_authenticated_request)
+        
         fetched_blocks = [b for b in fetched_blocks if b.get("project_id") == _active_id]
 
         # Only update session-state blocks when the fetch actually succeeded.
         # A transient server error / timeout should NOT wipe the displayed chat.
         if _fetch_ok:
-            blocks = fetched_blocks
+            existing_blocks = st.session_state.get("blocks", [])
+            blocks, _has_new_blocks = merge_blocks_incremental(
+                _active_id, existing_blocks, fetched_blocks,
+                max_visible=st.session_state.get("_max_visible_blocks", 30),
+            )
             st.session_state.blocks = blocks
         else:
             # Keep whatever was previously in session state so the chat stays visible.
@@ -1037,51 +1281,72 @@ def _render_chat():
             st.session_state.pop("_hidden_block_count", None)
             visible_blocks = blocks
 
-        # 3. Scan ALL blocks for running jobs
+        # 3. Scan visible blocks for active state updates (lightweight pass)
         _has_running_job = False
         _has_full_refresh_job = False
         _has_pending_submission = False
         _has_finished_job = False
-        _active_result_sync_states = {"pending_import", "downloading_outputs"}
-        _terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
-        for blk in blocks:
+
+        for blk in visible_blocks:
             btype = blk.get("type")
-            bstatus = blk.get("status")
+            bstatus = str(blk.get("status") or "").upper()
+            block_id = blk.get("id", "")
+            content = blk.get("payload", {}) if isinstance(blk.get("payload"), dict) else {}
+
+            # Check for full refresh requirements (only for active blocks)
             if _block_requires_full_refresh(blk):
                 _has_full_refresh_job = True
-            if btype == "EXECUTION_JOB" and bstatus == "RUNNING":
-                _has_running_job = True
-            if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
-                _has_finished_job = True
-            # Keep auto-refresh alive while a result transfer is in progress
-            # (manual sync on an already-completed job).
-            if btype == "EXECUTION_JOB" and bstatus == "DONE":
-                _blk_payload = blk.get("payload", {}) if isinstance(blk.get("payload"), dict) else {}
-                _blk_js = _blk_payload.get("job_status", {}) if isinstance(_blk_payload.get("job_status"), dict) else {}
-                _blk_run_uuid = _blk_payload.get("run_uuid", "")
-                _blk_imported_source_kind = str(_blk_payload.get("imported_source_kind") or _blk_js.get("imported_source_kind") or "").strip().lower()
-                _blk_ts = (_blk_js.get("transfer_state") or "").strip().lower()
-                _cached_ts = (st.session_state.get(f"_transfer_state_{_blk_run_uuid}") or "").strip().lower() if _blk_run_uuid else ""
-                if _blk_ts in _active_result_sync_states or _cached_ts in _active_result_sync_states:
+
+            # EXECUTION_JOB handling with rerun-aware tracking
+            if btype == "EXECUTION_JOB":
+                run_uuid = content.get("run_uuid", "")
+                job_status = content.get("job_status", {})
+
+                # Prefer the latest fragment-populated status cache so the parent
+                # discovery loop doesn't re-activate cards from stale block payloads.
+                if run_uuid:
+                    cached_status = st.session_state.get(f"_job_status_cache_{run_uuid}")
+                    if isinstance(cached_status, dict) and isinstance(cached_status.get("job_status"), dict):
+                        job_status = cached_status["job_status"]
+
+                # Update active-state index for this run
+                if run_uuid:
+                    is_active = update_run_status(_active_id, run_uuid, job_status)
+                    if is_active:
+                        _has_running_job = True
+                elif bstatus == "RUNNING":
                     _has_running_job = True
-                elif (
-                    _blk_imported_source_kind == "slurm"
-                    and _blk_ts not in _terminal_result_sync_states
-                    and _cached_ts not in _terminal_result_sync_states
-                ):
+
+                if bstatus in ("DONE", "FAILED"):
+                    _has_finished_job = True
+
+            # DOWNLOAD_TASK handling
+            elif btype == "DOWNLOAD_TASK":
+                if is_download_active(content):
+                    update_download_status(_active_id, block_id, content)
                     _has_running_job = True
-            if btype == "STAGING_TASK" and bstatus == "RUNNING":
-                _has_running_job = True
-            if btype == "STAGING_TASK" and bstatus in ("DONE", "FAILED"):
-                _has_finished_job = True
-            if btype == "APPROVAL_GATE" and bstatus == "APPROVED":
+
+            # STAGING_TASK handling
+            elif btype == "STAGING_TASK":
+                if bstatus == "RUNNING":
+                    _has_running_job = True
+                elif bstatus in ("DONE", "FAILED"):
+                    _has_finished_job = True
+
+            # APPROVAL_GATE handling
+            elif btype == "APPROVAL_GATE" and bstatus == "APPROVED":
                 _has_pending_submission = True
-            if btype == "DOWNLOAD_TASK" and bstatus == "RUNNING":
-                _has_running_job = True
+
+        # Also check for any active items not currently visible (e.g., in hidden history)
+        if has_any_active_items(_active_id):
+            _has_running_job = True
 
         # 4. Render visible blocks
         for blk in visible_blocks:
-            render_block(blk, expected_project_id=_active_id)
+            if _block_should_render_in_live_fragment(blk):
+                _render_live_block_fragment(blk, expected_project_id=_active_id)
+            else:
+                render_block(blk, expected_project_id=_active_id)
 
         # 5. Determine if auto-refresh should stay active
         if _has_pending_submission and not _has_running_job and not _has_finished_job:
@@ -1176,27 +1441,47 @@ with st.container(key=_project_scope_mount_key("project_panel", active_id)):
 
 
 @st.fragment(run_every=_refresh_interval)
+def _render_live_task_dock(project_id: str):
+    if st.session_state.get("_project_switch_loading_for") == project_id:
+        st.session_state["_show_task_dock"] = False
+        return
+
+    cache_key, checked_key = _task_dock_cache_keys(project_id)
+    sections = get_project_tasks(project_id)
+    st.session_state[cache_key] = sections
+    st.session_state[checked_key] = time.time()
+    _render_task_dock_sections(project_id, sections)
+
+
+@st.fragment(run_every=_discovery_refresh_interval)
 def _render_task_dock():
-    """Render an inline task pane only when the project has tasks."""
+    """Render an inline task pane only when the project has tasks.
+
+    Optimized to reduce polling frequency when there are no active tasks,
+    avoiding unnecessary API calls on idle projects.
+    """
     _active_id = st.session_state.active_project_id
     with st.container(key=_project_scope_mount_key("task_dock_scope", _active_id)):
         if st.session_state.get("_project_switch_loading_for") == _active_id:
             st.session_state["_show_task_dock"] = False
             return
 
-        sections = get_project_tasks(_active_id)
-        sections, hidden_stale = prepare_project_task_sections_for_dock(sections)
-        total_tasks = _count_project_tasks(sections)
-        st.session_state["_show_task_dock"] = total_tasks > 0
-        if total_tasks == 0:
+        from appui_active_state import has_any_active_items
+        _has_active = has_any_active_items(_active_id)
+
+        cache_key, checked_key = _task_dock_cache_keys(_active_id)
+        sections = st.session_state.get(cache_key, {})
+        _last_task_check = float(st.session_state.get(checked_key, 0) or 0)
+        if not isinstance(sections, dict) or not sections or (time.time() - _last_task_check) >= IDLE_DISCOVERY_POLL_SECONDS or _has_active:
+            sections = get_project_tasks(_active_id)
+            st.session_state[cache_key] = sections
+            st.session_state[checked_key] = time.time()
+
+        if _has_active or _task_sections_have_active_items(sections):
+            _render_live_task_dock(_active_id)
             return
 
-        with st.container(border=True, height=TASK_DOCK_HEIGHT_PX, key="task_dock"):
-            if hidden_stale:
-                st.caption(
-                    f"Hidden {hidden_stale} stale task(s) older than 48h from this project view."
-                )
-            render_project_tasks(_active_id, sections=sections, docked=True)
+        _render_task_dock_sections(_active_id, sections)
 
 
     # Pagination button — rendered outside the fragment to avoid duplicate-key

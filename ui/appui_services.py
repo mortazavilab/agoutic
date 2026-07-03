@@ -6,7 +6,7 @@ import streamlit as st
 
 def create_project_server_side(name: str | None, api_url: str, request_fn) -> dict:
     """Create a project via POST /projects and return {id, slug, name}."""
-    project_name = name or f"project-{datetime.datetime.now().strftime('%Y-%m-%d')}"
+    project_name = str(name or "").strip() or f"Project {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
     try:
         resp = request_fn(
             "POST",
@@ -20,13 +20,12 @@ def create_project_server_side(name: str | None, api_url: str, request_fn) -> di
                 "id": data["id"],
                 "slug": data.get("slug", ""),
                 "name": data.get("name", project_name),
+                "error": "",
             }
-    except Exception:
-        pass
-
-    import uuid as _uuid
-
-    return {"id": str(_uuid.uuid4()), "slug": "", "name": project_name}
+        detail = getattr(resp, "text", "")[:200] or f"HTTP {resp.status_code}"
+        return {"id": "", "slug": "", "name": project_name, "error": detail}
+    except Exception as exc:
+        return {"id": "", "slug": "", "name": project_name, "error": str(exc)}
 
 
 def load_reference_genome_catalog(

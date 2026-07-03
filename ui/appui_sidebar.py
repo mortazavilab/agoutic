@@ -47,6 +47,28 @@ def _project_can_manage_collaborators(project: dict | None, user: dict | None = 
     return role == "owner"
 
 
+def _resolve_requested_project_id(
+    requested_id: str | None,
+    active_project_id: str | None,
+    cached_projects: list[dict] | None,
+) -> tuple[str, bool]:
+    requested = str(requested_id or "").strip()
+    active = str(active_project_id or "").strip()
+    if not requested:
+        return active, False
+    if requested == active:
+        return active, True
+
+    available_ids = {
+        str(project.get("id") or "").strip()
+        for project in (cached_projects or [])
+        if str(project.get("id") or "").strip()
+    }
+    if requested in available_ids:
+        return requested, True
+    return active, False
+
+
 def render_sidebar(
     *,
     user: dict,
@@ -180,33 +202,58 @@ def render_sidebar(
 
         st.divider()
         with st.expander("✨ New Project", expanded=False):
-            _default_slug = f"project-{datetime.datetime.now().strftime('%Y-%m-%d')}"
+            _default_name = f"Project {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
             _new_name = st.text_input(
                 "Project name",
-                value=_default_slug,
+                value=_default_name,
                 key="_new_project_name_input",
                 max_chars=40,
-                help="Lowercase letters, numbers, hyphens. Will be auto-slugified.",
+                help="Display name for the project. A filesystem-safe slug is generated automatically.",
             )
+            if st.session_state.get("_project_creation_error"):
+                st.warning(st.session_state.get("_project_creation_error"))
             if st.button("Create", key="_create_project_btn", width="stretch"):
-                _slug = slugify_project_name(_new_name or _default_slug)
-                st.session_state["_create_new_project"] = _slug
+                _clean_name = str(_new_name or "").strip() or _default_name
+                st.session_state.pop("_project_creation_error", None)
+                st.session_state["_create_new_project"] = _clean_name
                 st.rerun()
 
         if "_project_id_input" not in st.session_state:
             st.session_state["_project_id_input"] = st.session_state.active_project_id
 
         def _on_project_id_change():
-            new_val = st.session_state.get("_project_id_input", "")
-            if new_val and new_val != st.session_state.get("active_project_id"):
-                st.session_state["_project_switch_loading_for"] = new_val
-                st.session_state.active_project_id = new_val
+            requested_id = st.session_state.get("_project_id_input", "")
+            resolved_id, is_valid = _resolve_requested_project_id(
+                requested_id,
+                st.session_state.get("active_project_id"),
+                st.session_state.get("_cached_projects", []),
+            )
+            if not is_valid:
+                st.session_state["_project_id_input"] = resolved_id
+                if str(requested_id or "").strip():
+                    st.session_state["_project_id_input_error"] = (
+                        "Project IDs must already exist in your accessible project list. "
+                        "Use New Project above to create one."
+                    )
+                return
+
+            st.session_state.pop("_project_id_input_error", None)
+            if resolved_id != st.session_state.get("active_project_id"):
+                st.session_state["_project_switch_loading_for"] = resolved_id
+                st.session_state.active_project_id = resolved_id
                 st.session_state.pop("_page_project_name", None)
                 st.session_state.blocks = []
-                st.session_state._last_rendered_project = new_val
+                st.session_state._last_rendered_project = resolved_id
                 st.session_state.pop("_welcome_sent_for", None)
 
-        st.text_input("Project ID", key="_project_id_input", on_change=_on_project_id_change)
+        st.text_input(
+            "Open Project ID",
+            key="_project_id_input",
+            on_change=_on_project_id_change,
+            help="Switch to an existing accessible project. Use New Project above to create a new one.",
+        )
+        if st.session_state.get("_project_id_input_error"):
+            st.caption(st.session_state.get("_project_id_input_error"))
 
         st.divider()
 

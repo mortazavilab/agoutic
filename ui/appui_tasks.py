@@ -11,18 +11,30 @@ _PROJECT_TASK_HIDE_STALE_HOURS = float(os.getenv("PROJECT_TASK_HIDE_STALE_HOURS"
 _STAGE_TASK_ACTION_TIMEOUT_SECONDS = float(os.getenv("STAGE_TASK_ACTION_TIMEOUT_SECONDS", "15"))
 
 
-def get_sanitized_blocks(target_project_id: str, api_url: str, request_fn):
+def get_sanitized_blocks(target_project_id: str, api_url: str, request_fn, *, since_seq: int = 0, limit: int = 500):
     """
     Fetch blocks from server, but scrub any block that doesn't match the target ID.
 
-    Returns (blocks_list, fetch_ok) so callers can distinguish an empty project
-    from a transient server failure and avoid wiping session-state blocks.
+    Supports incremental streaming via since_seq parameter. When since_seq > 0,
+    only new blocks since that sequence number are fetched, reducing bandwidth
+    and CPU for large project histories.
+
+    Args:
+        target_project_id: The project ID to fetch blocks for.
+        api_url: The API base URL.
+        request_fn: The authenticated request function.
+        since_seq: Only fetch blocks with seq > since_seq (default 0 = fetch all).
+        limit: Maximum number of blocks to fetch (default 500).
+
+    Returns:
+        Tuple of (blocks_list, fetch_ok) so callers can distinguish an empty project
+        from a transient server failure and avoid wiping session-state blocks.
     """
     try:
         resp = request_fn(
             "GET",
             f"{api_url}/blocks",
-            params={"project_id": target_project_id, "since_seq": 0, "limit": 500},
+            params={"project_id": target_project_id, "since_seq": since_seq, "limit": limit},
             timeout=10,
         )
         if resp.status_code == 200:
@@ -47,6 +59,42 @@ def get_sanitized_blocks(target_project_id: str, api_url: str, request_fn):
             "Block fetch failed for project %s: %s", target_project_id, exc
         )
         return [], False
+
+
+def get_sanitized_blocks_incremental(target_project_id: str, api_url: str, request_fn):
+    """
+    Fetch blocks incrementally using the latest_seq stored in Session State.
+
+    This is the optimized path for fragment refreshes: it only fetches new blocks
+    since the last successful fetch, avoiding refetching large histories.
+
+    Args:
+        target_project_id: The project ID to fetch blocks for.
+        api_url: The API base URL.
+        request_fn: The authenticated request function.
+
+    Returns:
+        Tuple of (blocks_list, fetch_ok) so callers can distinguish an empty project
+        from a transient server failure and avoid wiping session-state blocks.
+    """
+    import streamlit as st
+    
+    # Get the latest sequence number we've seen for this project
+    seq_key = f"_latest_seq_{target_project_id}"
+    since_seq = int(st.session_state.get(seq_key, 0))
+    
+    # Fetch only new blocks
+    new_blocks, fetch_ok = get_sanitized_blocks(
+        target_project_id, api_url, request_fn,
+        since_seq=since_seq, limit=100  # Smaller limit for incremental fetches
+    )
+    
+    if fetch_ok and new_blocks:
+        # Update the latest sequence number
+        latest_seq = max((b.get("seq", 0) for b in new_blocks), default=0)
+        st.session_state[seq_key] = latest_seq
+    
+    return new_blocks, fetch_ok
 
 
 def get_project_tasks(project_id: str, api_url: str, request_fn):

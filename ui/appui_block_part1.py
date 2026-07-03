@@ -668,7 +668,13 @@ def render_block_part1(
                         # ── Render visible DataFrames (with DF IDs) between answer and raw details ──
                         _dfs = content.get("_dataframes")
                         if _dfs and isinstance(_dfs, dict):
-                            _render_embedded_dataframes(_dfs, block_id, only_visible=True)
+                            # For completed/failed blocks, wrap in expander to avoid expensive re-renders
+                            is_terminal = status in ("COMPLETED", "DONE", "FAILED", "CANCELLED")
+                            if is_terminal:
+                                with st.expander("📊 DataFrames", expanded=False):
+                                    _render_embedded_dataframes(_dfs, block_id, only_visible=True)
+                            else:
+                                _render_embedded_dataframes(_dfs, block_id, only_visible=True)
                         with st.expander(summary_text, expanded=False):
                             # Non-visible (supplementary) DFs go inside raw details
                             if _dfs and isinstance(_dfs, dict):
@@ -678,13 +684,25 @@ def render_block_part1(
                         _render_md_with_dataframes(md, block_id, "main")
                         _dfs = content.get("_dataframes")
                         if _dfs and isinstance(_dfs, dict):
-                            _render_embedded_dataframes(_dfs, block_id)
+                            # For completed/failed blocks, wrap in expander to avoid expensive re-renders
+                            is_terminal = status in ("COMPLETED", "DONE", "FAILED", "CANCELLED")
+                            if is_terminal:
+                                with st.expander("📊 DataFrames", expanded=False):
+                                    _render_embedded_dataframes(_dfs, block_id)
+                            else:
+                                _render_embedded_dataframes(_dfs, block_id)
                 else:
                     _render_md_with_dataframes(md, block_id, "main")
                     # ── Render embedded DataFrames after plain markdown ──
                     _dfs = content.get("_dataframes")
                     if _dfs and isinstance(_dfs, dict):
-                        _render_embedded_dataframes(_dfs, block_id)
+                        # For completed/failed blocks, wrap in expander to avoid expensive re-renders
+                        is_terminal = status in ("COMPLETED", "DONE", "FAILED", "CANCELLED")
+                        if is_terminal:
+                            with st.expander("📊 DataFrames", expanded=False):
+                                _render_embedded_dataframes(_dfs, block_id)
+                        else:
+                            _render_embedded_dataframes(_dfs, block_id)
 
             # ── Inline sync progress (visible right in the agent response) ──
             _sync_run_uuid = content.get("_sync_run_uuid", "")
