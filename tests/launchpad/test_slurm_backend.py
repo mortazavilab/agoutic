@@ -1627,6 +1627,73 @@ async def test_sync_results_to_local_does_not_restart_while_sync_is_active(monke
 
 
 @pytest.mark.asyncio
+async def test_check_status_preserves_active_copyback_on_scheduler_poll_failure(monkeypatch):
+    backend = SlurmBackend()
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    job = SimpleNamespace(
+        slurm_job_id="50052940",
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+        status="RUNNING",
+        progress_percent=0,
+        run_stage="completed",
+        slurm_state="COMPLETED",
+        transfer_state="downloading_outputs",
+        result_destination="local",
+        remote_work_dir="/remote/project/workflow2",
+        nextflow_work_dir="/local/project/workflow2",
+        workflow_usage_json={"cpu_queue_seconds": 120.0},
+        workflow_usage_synced_at=None,
+    )
+
+    async def fake_get_job(_run_uuid):
+        return job
+
+    async def fake_load_profile(_profile_id, _user_id):
+        return profile
+
+    async def fake_connect(_profile):
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr(backend, "_load_profile", fake_load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", fake_connect)
+    backend._transfer_progress["run-2"] = {
+        "current_folder": "bams",
+        "folders_done": 1,
+        "folders_total": 4,
+        "current_file": "sample1.bam",
+        "files_done": 2,
+        "files_total": 5,
+    }
+
+    try:
+        result = await backend.check_status("run-2")
+    finally:
+        backend._transfer_progress.pop("run-2", None)
+
+    assert result.status == "RUNNING"
+    assert result.transfer_state == "downloading_outputs"
+    assert result.message == "bams/ (2/4 folders) — sample1.bam"
+    assert result.transfer_detail == "bams/ (2/4 folders) — sample1.bam"
+    assert result.progress_percent == 95
+    assert result.workflow_usage == {"cpu_queue_seconds": 120.0}
+    assert result.work_directory == "/local/project/workflow2"
+
+
+@pytest.mark.asyncio
 async def test_cancel_result_sync_marks_run_cancelled(monkeypatch):
     backend = SlurmBackend()
     job = SimpleNamespace(

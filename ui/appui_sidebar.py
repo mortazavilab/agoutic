@@ -69,6 +69,25 @@ def _resolve_requested_project_id(
     return active, False
 
 
+def _render_token_usage_chart(daily: list[dict] | None) -> None:
+    if not isinstance(daily, list) or len(daily) <= 1:
+        return
+
+    try:
+        import pandas as _pd
+
+        _df_tok = _pd.DataFrame(daily)
+        if "date" not in _df_tok or "total_tokens" not in _df_tok:
+            return
+        _df_tok["date"] = _pd.to_datetime(_df_tok["date"], errors="coerce")
+        _df_tok = _df_tok.dropna(subset=["date"]).set_index("date")
+        if _df_tok.empty:
+            return
+        st.line_chart(_df_tok["total_tokens"], width="stretch")
+    except (ImportError, OSError, ValueError, TypeError):
+        st.caption("Token history chart unavailable in this environment.")
+
+
 def render_sidebar(
     *,
     user: dict,
@@ -495,14 +514,7 @@ def render_sidebar(
                     tcol1, tcol2 = st.columns(2)
                     tcol1.metric("Total", f"{_tok_total:,}")
                     tcol2.metric("Completion", f"{_lt.get('completion_tokens', 0):,}")
-                _daily = _tok_data.get("daily", [])
-                if len(_daily) > 1:
-                    import pandas as _pd
-
-                    _df_tok = _pd.DataFrame(_daily)
-                    _df_tok["date"] = _pd.to_datetime(_df_tok["date"])
-                    _df_tok = _df_tok.set_index("date")
-                    st.line_chart(_df_tok["total_tokens"], width="stretch")
+                _render_token_usage_chart(_tok_data.get("daily", []))
                 _since = _tok_data.get("tracking_since")
                 if _since:
                     st.caption(f"Tracking since {_since[:10]}")

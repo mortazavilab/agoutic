@@ -248,7 +248,6 @@ def get_cached_job_status(
     timeout = float(timeout_seconds or 0) if timeout_seconds else 0.0
     if timeout <= 0:
         timeout = 5.0
-    timeout = min(timeout, 5.0)
 
     try:
         resp = request_fn(

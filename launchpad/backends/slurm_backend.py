@@ -732,6 +732,34 @@ class SlurmBackend:
 
         except Exception as e:
             logger.warning(f"Failed to poll SLURM status for {run_uuid}: {e}")
+            transfer_state = (getattr(job, "transfer_state", "") or "").strip().lower()
+            if transfer_state in self._ACTIVE_RESULT_SYNC_STATES and self._needs_local_result_copy(job):
+                transfer_detail = self.get_transfer_detail(run_uuid)
+                synced_at = getattr(job, "workflow_usage_synced_at", None)
+                workflow_usage_synced_at = synced_at.isoformat() if isinstance(synced_at, datetime) else None
+                if transfer_state == "downloading_outputs":
+                    message = transfer_detail or "Copying results back to the local workflow..."
+                    progress_percent = max(int(getattr(job, "progress_percent", 0) or 0), 95)
+                else:
+                    message = transfer_detail or "Preparing to copy results back to the local workflow..."
+                    progress_percent = max(int(getattr(job, "progress_percent", 0) or 0), 90)
+                return BackendJobStatus(
+                    run_uuid=run_uuid,
+                    status="RUNNING",
+                    progress_percent=progress_percent,
+                    execution_mode="slurm",
+                    run_stage=job.run_stage,
+                    slurm_job_id=job.slurm_job_id,
+                    slurm_state=job.slurm_state,
+                    transfer_state=getattr(job, "transfer_state", None),
+                    transfer_detail=transfer_detail,
+                    result_destination=job.result_destination,
+                    ssh_profile_nickname=profile.nickname,
+                    message=message,
+                    work_directory=self._effective_work_directory(job),
+                    workflow_usage=getattr(job, "workflow_usage_json", None),
+                    workflow_usage_synced_at=workflow_usage_synced_at,
+                )
             return BackendJobStatus(
                 run_uuid=run_uuid,
                 status=job.status,

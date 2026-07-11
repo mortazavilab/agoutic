@@ -96,12 +96,18 @@ def _render_project_file_download_controls(
     if not api_url or not project_id or request_fn is None:
         return
 
+    def _render_link_button(*, label: str, url: str, key: str) -> None:
+        try:
+            st.link_button(label=label, url=url, key=key)
+        except TypeError:
+            st.link_button(label=label, url=url)
+
     for index, path_value in enumerate(_extract_downloadable_project_paths(md)):
         if not _should_render_inline_download_control(path_value):
             continue
 
         file_name = Path(path_value).name or "download"
-        st.link_button(
+        _render_link_button(
             label=f"⬇️ Download {file_name}",
             url=_project_file_download_url(api_url, project_id, path_value),
             key=f"_project_download_{block_id}_{section}_{index}",

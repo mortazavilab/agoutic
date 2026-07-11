@@ -10,7 +10,7 @@ import re as _re_module
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pandas as pd
 import plotly.express as px
@@ -2738,6 +2738,52 @@ class TestProjectMarkdownDownloads:
             key="_project_download_block-1_main_0",
         )
 
+    def test_render_md_with_dataframes_retries_link_button_without_key_for_older_streamlit(self):
+        fake_st = SimpleNamespace(
+            session_state={},
+            markdown=MagicMock(),
+            dataframe=MagicMock(),
+            caption=MagicMock(),
+        )
+        fake_st.link_button = MagicMock(side_effect=[TypeError("unexpected keyword argument 'key'"), None])
+        symbols = _load_renderers_symbols(
+            {
+                "_looks_like_downloadable_project_path",
+                "_extract_downloadable_project_paths",
+                "_download_filename_from_headers",
+                "_should_render_inline_download_control",
+                "_project_file_download_url",
+                "_render_project_file_download_controls",
+                "_render_md_with_dataframes",
+            },
+            {
+                "st": fake_st,
+            },
+        )
+
+        render_markdown = symbols["_render_md_with_dataframes"]
+
+        render_markdown(
+            "Saved summary: `/tmp/proj/summaries/workflow-summary.md`",
+            "block-1",
+            "main",
+            api_url="http://api.test",
+            project_id="proj-1",
+            request_fn=MagicMock(),
+        )
+
+        assert fake_st.link_button.call_args_list == [
+            call(
+                label="⬇️ Download workflow-summary.md",
+                url="http://api.test/projects/proj-1/files/download?path=%2Ftmp%2Fproj%2Fsummaries%2Fworkflow-summary.md",
+                key="_project_download_block-1_main_0",
+            ),
+            call(
+                label="⬇️ Download workflow-summary.md",
+                url="http://api.test/projects/proj-1/files/download?path=%2Ftmp%2Fproj%2Fsummaries%2Fworkflow-summary.md",
+            ),
+        ]
+
     def test_skips_inline_download_control_for_fastq_inputs(self):
         fake_st = SimpleNamespace(
             markdown=MagicMock(),
@@ -2857,6 +2903,34 @@ class TestBlockShouldRenderInLiveFragment:
         ) is False
 
 
+class TestRenderLiveBlockFragment:
+    def test_renders_live_block_without_explicit_container_key(self):
+        container_calls = []
+
+        @contextlib.contextmanager
+        def _container(**kwargs):
+            container_calls.append(kwargs)
+            yield
+
+        fake_st = SimpleNamespace(
+            container=_container,
+            session_state=SimpleNamespace(active_project_id="proj-1"),
+        )
+        render_block = MagicMock()
+        fn = _load_function(
+            "_render_live_block_fragment",
+            {
+                "st": fake_st,
+                "render_block": render_block,
+            },
+        )
+
+        fn({"id": "blk-1", "type": "WORKFLOW_PLAN", "payload": {}}, expected_project_id="proj-1")
+
+        assert container_calls == [{}]
+        render_block.assert_called_once()
+
+
 class TestCachedJobStatus:
     def test_fetches_status_and_updates_session_cache(self):
         fake_st = SimpleNamespace(session_state={})
@@ -2888,7 +2962,7 @@ class TestCachedJobStatus:
         request.assert_called_once_with(
             "GET",
             "http://api.test/jobs/run-123/status",
-            timeout=5.0,
+            timeout=60.0,
         )
 
     def test_reuses_recent_cached_status_without_refetch(self):

@@ -1,4 +1,11 @@
-from ui.appui_sidebar import _fetch_model_options, _resolve_requested_project_id
+from types import SimpleNamespace
+
+import ui.appui_sidebar as appui_sidebar
+from ui.appui_sidebar import (
+    _fetch_model_options,
+    _render_token_usage_chart,
+    _resolve_requested_project_id,
+)
 
 
 class _Response:
@@ -57,3 +64,27 @@ def test_resolve_requested_project_id_rejects_unknown_project():
 
     assert resolved == "proj-1"
     assert is_valid is False
+
+
+def test_render_token_usage_chart_falls_back_when_streamlit_chart_backend_errors(monkeypatch):
+    fake_st = SimpleNamespace(
+        line_chart=lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("pyarrow/brotli import failed")
+        ),
+        caption_calls=[],
+    )
+
+    def _capture_caption(message):
+        fake_st.caption_calls.append(message)
+
+    fake_st.caption = _capture_caption
+    monkeypatch.setattr(appui_sidebar, "st", fake_st)
+
+    _render_token_usage_chart(
+        [
+            {"date": "2026-07-05", "total_tokens": 100},
+            {"date": "2026-07-06", "total_tokens": 200},
+        ]
+    )
+
+    assert fake_st.caption_calls == ["Token history chart unavailable in this environment."]

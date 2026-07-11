@@ -5,6 +5,11 @@
 ### Bug Fixes
 
 - **Replaced deprecated `st.components.v1.html` with `st.html`:** Resolves Streamlit 1.51+ deprecation warning (`st.components.v1.html will be removed after 2026-06-01`). Now using Streamlit 1.58.0 going forward.
+- **Fixed duplicate Streamlit element key crashes in task dock and live block fragments:** Removed the fixed inner `key="task_dock"` container from `_render_task_dock_sections()` and the explicit `key=` argument from `_render_live_block_fragment()`, both of which collided when fragment timers overlapped with full-page reruns. Retasked CSS styling to the outer project-scoped mount containers instead.
+- **Fixed remote jobs appearing stuck in PENDING after login:** The UI live-status helper (`ui/appui_services.py`) was hard-capping every `/jobs/{run_uuid}/status` request at 5 seconds, causing Streamlit to silently fall back to stale block payloads when Cortex → Launchpad → SSH polls took longer. The cap is now removed so the configured `LIVE_JOB_STATUS_TIMEOUT_SECONDS` (default 60 s) is honored.
+- **Fixed SLURM scheduler poll failures masking active result copy-back:** When `SlurmBackend.check_status()` raised an exception during SSH/sacct polling, it returned a generic "Failed to poll scheduler" message even when the job was already in `downloading_outputs`. The fallback now preserves transfer state, progress detail, and workflow usage for active sync jobs.
+- **Fixed sidebar token chart crashing on broken pyarrow/brotli environments:** Wrapped `st.line_chart` rendering in `_render_token_usage_chart()` with a best-effort try/except so import or ABI failures do not crash the entire UI.
+- **Fixed inline project file download buttons failing on older Streamlit versions:** `st.link_button(label=..., url=..., key=...)` now retries without `key=` when the Streamlit version does not accept it, preventing `TypeError` in markdown renderers.
 
 ### Performance
 

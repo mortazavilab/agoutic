@@ -145,25 +145,25 @@ TASK_DOCK_HEIGHT_PX = 320
 st.markdown(
     """
     <style>
-    .st-key-task_dock [data-testid="stVerticalBlockBorderWrapper"] {
+    [class*="st-key-task_dock_scope_project_scope_"] [data-testid="stVerticalBlockBorderWrapper"] {
         background: color-mix(in srgb, var(--background-color) 90%, var(--secondary-background-color) 10%);
         border-radius: 0.9rem;
         box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
         overflow: hidden;
     }
 
-    .st-key-task_dock [data-testid="stMetric"] {
+    [class*="st-key-task_dock_scope_project_scope_"] [data-testid="stMetric"] {
         background: color-mix(in srgb, var(--secondary-background-color) 82%, transparent);
         border-radius: 0.65rem;
         padding: 0.35rem 0.5rem;
     }
 
-    .st-key-task_dock [data-testid="stExpander"] {
+    [class*="st-key-task_dock_scope_project_scope_"] [data-testid="stExpander"] {
         border-radius: 0.65rem;
         overflow: hidden;
     }
 
-    .st-key-task_dock [data-testid="stVerticalBlock"] > div {
+    [class*="st-key-task_dock_scope_project_scope_"] [data-testid="stVerticalBlock"] > div {
         gap: 0.6rem;
     }
 
@@ -442,7 +442,7 @@ def _render_task_dock_sections(project_id: str, sections: dict) -> None:
     if total_tasks == 0:
         return
 
-    with st.container(border=True, height=TASK_DOCK_HEIGHT_PX, key="task_dock"):
+    with st.container(border=True, height=TASK_DOCK_HEIGHT_PX):
         if hidden_stale:
             st.caption(
                 f"Hidden {hidden_stale} stale task(s) older than 48h from this project view."
@@ -1164,8 +1164,7 @@ def _render_live_block_fragment(block: dict, expected_project_id: str = ""):
         except (ImportError, ModuleNotFoundError):
             pass
 
-    container_key = _project_scope_mount_key(f"live_block_{block_id}", project_id)
-    with st.container(key=container_key):
+    with st.container():
         render_block(
             live_block,
             expected_project_id=expected_project_id,
