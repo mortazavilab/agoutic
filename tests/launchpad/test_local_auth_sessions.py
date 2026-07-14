@@ -109,6 +109,8 @@ def test_local_broker_transport_uses_fail_fast_publickey_options():
     assert "IdentitiesOnly=yes" in transport
     assert "ConnectTimeout=600" in transport
     assert "ConnectionAttempts=1" in transport
+    assert "ServerAliveInterval=30" in transport
+    assert "ServerAliveCountMax=3" in transport
 
 
 @pytest.mark.asyncio
@@ -240,6 +242,52 @@ async def test_local_broker_rsync_retries_without_skip_compress_on_incompatible_
     assert "--partial" not in commands[1]
     assert any(str(part).startswith("--skip-compress=") for part in commands[0])
     assert not any(str(part).startswith("--skip-compress=") for part in commands[1])
+
+
+@pytest.mark.asyncio
+async def test_local_broker_rsync_resumes_after_transient_ssh_disconnect(monkeypatch, tmp_path):
+    local_file = tmp_path / "PAW22048_227a452e_51a78d56_57.pod5"
+    local_file.write_text("POD5")
+    commands = []
+
+    async def fake_run_subprocess(cmd, timeout_seconds=None, request_id=None, idle_timeout_seconds=None, stall_message=None, timeout_message=None):
+        commands.append(cmd)
+        if len(commands) == 1:
+            return {
+                "ok": False,
+                "stdout": "",
+                "stderr": "Connection to hpc3.rcic.uci.edu closed by remote host.\nrsync: [sender] write error: Broken pipe (32)",
+                "exit_status": 255,
+            }
+        return {"ok": True, "stdout": "total size is 84\n", "stderr": "", "exit_status": 0}
+
+    monkeypatch.setattr("launchpad.backends.local_user_broker._run_subprocess", fake_run_subprocess)
+
+    result = await _handle_request(
+        {
+            "auth_token": "token-123",
+            "op": "rsync_transfer",
+            "profile": {
+                "ssh_host": "hpc3.rcic.uci.edu",
+                "ssh_port": 22,
+                "ssh_username": "seyedam",
+                "auth_method": "key_file",
+                "key_file_path": "~/.ssh/id_ed25519",
+            },
+            "source": str(local_file),
+            "dest": "seyedam@hpc3.rcic.uci.edu:/scratch/seyedam/agoutic/data/sample",
+            "copy_links": True,
+            "timeout_seconds": 30,
+        },
+        shutdown_event=asyncio.Event(),
+        auth_token="token-123",
+    )
+
+    assert result["ok"] is True
+    assert result["bytes_transferred"] == 84
+    assert len(commands) == 2
+    assert "--partial-dir=.rsync-partial" in commands[0]
+    assert "--partial-dir=.rsync-partial" in commands[1]
 
 
 @pytest.mark.asyncio

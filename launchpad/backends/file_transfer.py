@@ -19,7 +19,10 @@ from launchpad.config import (
     SSH_CONNECT_TIMEOUT_SECONDS,
     SSH_CONNECTION_ATTEMPTS,
     SSH_KNOWN_HOSTS,
+    SSH_SERVER_ALIVE_COUNT_MAX,
+    SSH_SERVER_ALIVE_INTERVAL_SECONDS,
     SSH_STRICT_HOST_KEY_CHECKING,
+    RSYNC_TRANSPORT_RETRY_ATTEMPTS,
 )
 from launchpad.backends.ssh_manager import SSHConnection, SSHProfileData, resolve_key_file_path
 
@@ -96,6 +99,28 @@ def should_retry_without_skip_compress(*, exit_code: int | None, stderr_text: st
         "protocol incompatibility",
     )
     return any(marker in lowered for marker in retry_markers)
+
+
+def should_retry_rsync_transport(*, exit_code: int | None, stderr_text: str) -> bool:
+    """Return whether rsync can safely resume after a transient SSH disconnect."""
+    if exit_code != 255:
+        return False
+    lowered = stderr_text.lower()
+    non_retryable_markers = (
+        "permission denied",
+        "authentication failed",
+        "host key verification failed",
+    )
+    if any(marker in lowered for marker in non_retryable_markers):
+        return False
+    retryable_markers = (
+        "closed by remote host",
+        "connection reset by peer",
+        "connection unexpectedly closed",
+        "broken pipe",
+        "connection timed out",
+    )
+    return any(marker in lowered for marker in retryable_markers)
 
 
 def _normalize_local_rsync_source(source: str) -> str:
@@ -625,6 +650,27 @@ class FileTransferManager:
                 timeout_seconds=_remaining_timeout_seconds(deadline),
                 on_progress=on_progress,
             )
+            retry_count = 0
+            while (
+                retry_count < max(0, RSYNC_TRANSPORT_RETRY_ATTEMPTS)
+                and should_retry_rsync_transport(exit_code=returncode, stderr_text=stderr_text)
+            ):
+                retry_count += 1
+                logger.warning(
+                    "Retrying rsync after transient SSH transport disconnect",
+                    direction=direction,
+                    source=source,
+                    dest=dest,
+                    retry_attempt=retry_count,
+                    retry_limit=RSYNC_TRANSPORT_RETRY_ATTEMPTS,
+                    stderr=stderr_text.strip(),
+                )
+                returncode, stdout_text, stderr_text = await self._run_rsync_subprocess(
+                    cmd=cmd,
+                    direction=direction,
+                    timeout_seconds=_remaining_timeout_seconds(deadline),
+                    on_progress=on_progress,
+                )
             if should_retry_without_skip_compress(exit_code=returncode, stderr_text=stderr_text):
                 logger.warning(
                     "Retrying rsync without --skip-compress after incompatibility",
@@ -734,6 +780,8 @@ class FileTransferManager:
         parts.extend(["-o", "GSSAPIAuthentication=no"])
         parts.extend(["-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}"])
         parts.extend(["-o", f"ConnectionAttempts={SSH_CONNECTION_ATTEMPTS}"])
+        parts.extend(["-o", f"ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL_SECONDS}"])
+        parts.extend(["-o", f"ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}"])
         parts.extend(["-o", f"StrictHostKeyChecking={'yes' if SSH_STRICT_HOST_KEY_CHECKING else 'no'}"])
         if SSH_KNOWN_HOSTS:
             parts.extend(["-o", f"UserKnownHostsFile={str(Path(SSH_KNOWN_HOSTS).expanduser())}"])

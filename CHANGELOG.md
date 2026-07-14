@@ -4,6 +4,8 @@
 
 ### Bug Fixes
 
+- **Made long remote staging uploads resilient to transient SSH disconnects:** Direct and local-auth-broker `rsync` transfers now send SSH keepalives and automatically resume up to two recognized transport failures (including remote-host closures, resets, and broken pipes) from the existing `.rsync-partial` data while preserving the overall transfer deadline.
+- **Extended local SSH broker logins to 72 hours by default:** The local-auth session lifetime now defaults to 259200 seconds, preventing long remote staging operations from losing their authenticated broker session; deployments can still override `LOCAL_AUTH_SESSION_TTL_SECONDS`.
 - **Replaced deprecated `st.components.v1.html` with `st.html`:** Resolves Streamlit 1.51+ deprecation warning (`st.components.v1.html will be removed after 2026-06-01`). Now using Streamlit 1.58.0 going forward.
 - **Fixed duplicate Streamlit element key crashes in task dock and live block fragments:** Removed the fixed inner `key="task_dock"` container from `_render_task_dock_sections()` and the explicit `key=` argument from `_render_live_block_fragment()`, both of which collided when fragment timers overlapped with full-page reruns. Retasked CSS styling to the outer project-scoped mount containers instead.
 - **Fixed remote jobs appearing stuck in PENDING after login:** The UI live-status helper (`ui/appui_services.py`) was hard-capping every `/jobs/{run_uuid}/status` request at 5 seconds, causing Streamlit to silently fall back to stale block payloads when Cortex → Launchpad → SSH polls took longer. The cap is now removed so the configured `LIVE_JOB_STATUS_TIMEOUT_SECONDS` (default 60 s) is honored.
@@ -21,6 +23,7 @@
 
 ### Tests
 
+- **Added remote transfer recovery regression coverage:** Focused Launchpad tests now reproduce a remote-host closure/broken-pipe failure and verify both direct and local-auth-broker `rsync` paths resume with their preserved partial directory and SSH keepalive options.
 - **Added focused UI regression coverage for the new refresh model:** `tests/ui/test_app_source_helpers.py` now covers the idle discovery interval, live-card classification for execution/staging/download blocks, and the helper wiring needed by the fragmentized execution-card path. Focused validation continues to use `tests/cortex/test_block_endpoints.py` alongside the UI suite to keep the incremental block-stream contract covered.
 
 ## [3.7.4] - 2026-06-24
