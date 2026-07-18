@@ -295,7 +295,7 @@ async def test_submit_uses_fallback_when_cache_resolution_fails(monkeypatch, pro
 
 
 @pytest.mark.anyio
-async def test_submit_writes_remote_config_and_references_it(monkeypatch, profile):
+async def test_submit_derives_missing_requested_staged_reference_path(monkeypatch, profile):
     backend = SlurmBackend()
     conn = _FakeConn(existing_paths={"/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_candle"})
 
@@ -306,7 +306,7 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
         sample_name="sample",
         mode="DNA",
         input_directory="/tmp/input",
-        reference_genome=["mm39"],
+        reference_genome=["GRCh38"],
         ssh_profile_id="profile-1",
         slurm_account="cpu-request",
         slurm_partition="cpu-part-request",
@@ -341,7 +341,7 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
 
     async def _ensure_assets(*args, **kwargs):
         return ({
-            "mm39": {
+            "GRCh38": {
                 "requires_kallisto": False,
                 "missing_required_assets": [],
                 "all_required_present": True,
@@ -395,10 +395,12 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
     assert "gpuAccount = 'gpu-default'" in config_write[0]
     assert "gpuPartition = 'gpu-part-default'" in config_write[0]
 
-    # Remote staged reference cache should be used in genome_annot_refs.
-    mm39_cfg = REFERENCE_GENOMES["mm39"]
-    assert f"/remote/eli/agoutic/ref/mm39/{Path(mm39_cfg['fasta']).name}" in config_write[0]
-    assert f"/remote/eli/agoutic/ref/mm39/{Path(mm39_cfg['gtf']).name}" in config_write[0]
+    # A staged sample can retain another reference's cache metadata. The
+    # requested reference must still use its derived remote cache path.
+    grch38_cfg = REFERENCE_GENOMES["GRCh38"]
+    assert f"/remote/eli/agoutic/ref/grch38/{Path(grch38_cfg['fasta']).name}" in config_write[0]
+    assert f"/remote/eli/agoutic/ref/grch38/{Path(grch38_cfg['gtf']).name}" in config_write[0]
+    assert str(grch38_cfg["fasta"]) not in config_write[0]
 
     # Staged input cache should be symlinked to workflow-local pod5 directory.
     symlink_cmds = [c for c in conn.commands if "ln -sfn" in c and "/workflow4/pod5" in c]

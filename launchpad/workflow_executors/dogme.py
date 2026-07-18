@@ -312,10 +312,12 @@ class DogmeWorkflowExecutor(WorkflowExecutor):
             first_ref = _normalize_reference_id((params.reference_genome or ["default"])[0])
             remote_reference_paths[first_ref] = params.reference_cache_path
 
-        if not remote_reference_paths and params.reference_genome:
+        if params.reference_genome:
             derived_ref_root = _derive_remote_roots(params, profile)["ref_root"]
-            for genome_name in params.reference_genome or []:
+            for genome_name in params.reference_genome:
                 ref_id = _normalize_reference_id(genome_name)
+                if ref_id in remote_reference_paths:
+                    continue
                 remote_reference_paths[ref_id] = str(PurePosixPath(derived_ref_root) / ref_id)
 
         lower_map = {key.lower(): key for key in REFERENCE_GENOMES.keys()}
