@@ -6,6 +6,7 @@
 
 ### Bug Fixes
 
+- **Fixed remote BAM remap path detection:** Explicit remote file phrasing such as `remote unmapped.bam file <path> ... on hpc3` now preserves the source file as a direct remote input, preventing fallback staging from substituting the local project data directory or an empty cache path.
 - **Preserved completed remote workflow status when result sync fails:** A failed local copy-back now remains a retryable `transfer_failed` state with its rsync error detail, rather than marking an otherwise completed SLURM workflow as failed in status cards and notifications.
 - **Fixed remote reference paths for reused staged samples:** Dogme SLURM configuration now derives the remote cache path for every requested reference genome missing from reused staged-sample metadata, preventing Nextflow from falling back to a local FASTA/GTF path when a run selects a different reference such as GRCh38.
 - **Made long remote staging uploads resilient to transient SSH disconnects:** Direct and local-auth-broker `rsync` transfers now send SSH keepalives and automatically resume up to two recognized transport failures (including remote-host closures, resets, and broken pipes) from the existing `.rsync-partial` data while preserving the overall transfer deadline.
