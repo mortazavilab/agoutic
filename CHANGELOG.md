@@ -4,6 +4,8 @@
 
 ### Bug Fixes
 
+- **Preserved completed remote workflow status when result sync fails:** A failed local copy-back now remains a retryable `transfer_failed` state with its rsync error detail, rather than marking an otherwise completed SLURM workflow as failed in status cards and notifications.
+- **Fixed remote reference paths for reused staged samples:** Dogme SLURM configuration now derives the remote cache path for every requested reference genome missing from reused staged-sample metadata, preventing Nextflow from falling back to a local FASTA/GTF path when a run selects a different reference such as GRCh38.
 - **Made long remote staging uploads resilient to transient SSH disconnects:** Direct and local-auth-broker `rsync` transfers now send SSH keepalives and automatically resume up to two recognized transport failures (including remote-host closures, resets, and broken pipes) from the existing `.rsync-partial` data while preserving the overall transfer deadline.
 - **Extended local SSH broker logins to 72 hours by default:** The local-auth session lifetime now defaults to 259200 seconds, preventing long remote staging operations from losing their authenticated broker session; deployments can still override `LOCAL_AUTH_SESSION_TTL_SECONDS`.
 - **Replaced deprecated `st.components.v1.html` with `st.html`:** Resolves Streamlit 1.51+ deprecation warning (`st.components.v1.html will be removed after 2026-06-01`). Now using Streamlit 1.58.0 going forward.

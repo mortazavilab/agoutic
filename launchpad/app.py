@@ -2467,10 +2467,14 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             transfer_message = transfer_detail or job.error_message
             return {
                 "run_uuid": run_uuid,
-                "status": "FAILED" if transfer_failed else "RUNNING",
-                "progress_percent": 0 if transfer_failed else 99,
-                "message": transfer_message or (
-                    "Remote job completed, but copying results back to the local workflow failed."
+                # A copy-back failure must not overwrite a successful remote
+                # workflow result. transfer_state carries the retryable failure.
+                "status": "COMPLETED" if transfer_failed else "RUNNING",
+                "progress_percent": 100 if transfer_failed else 99,
+                "message": (
+                    f"Remote job completed; result synchronization failed: {transfer_message}"
+                    if transfer_failed and transfer_message
+                    else "Remote job completed, but copying results back to the local workflow failed."
                     if transfer_failed
                     else "Copying results back to the local workflow..."
                 ),
