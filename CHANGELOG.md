@@ -2,6 +2,8 @@
 
 ### Features
 
+- **Automatically discover complete reference folders:** At service startup, AGOUTIC now registers new `$AGOUTIC_DATA/references/<name>/` directories containing exactly one FASTA-family file and one GTF-family file. Discovered references appear in the UI catalog and use the normal remote staging flow; explicit catalog entries remain authoritative, while incomplete or ambiguous folders are skipped.
+
 ### Bug Fixes
 
 - **Preserved completed remote workflow status when result sync fails:** A failed local copy-back now remains a retryable `transfer_failed` state with its rsync error detail, rather than marking an otherwise completed SLURM workflow as failed in status cards and notifications.
