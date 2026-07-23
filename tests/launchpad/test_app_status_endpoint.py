@@ -173,6 +173,50 @@ async def test_get_job_status_reports_sync_completion_message(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_job_status_preserves_completed_execution_when_result_sync_fails(monkeypatch):
+    fake_session = _FakeSession()
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: fake_session)
+
+    async def fake_get_job(session, run_uuid):
+        assert session is fake_session
+        assert run_uuid == "run-sync-failed"
+        return SimpleNamespace(
+            run_uuid="run-sync-failed",
+            execution_mode="slurm",
+            status=launchpad_app.JobStatus.COMPLETED,
+            progress_percent=100,
+            error_message="Rsync transfer stalled - no output for 1800s.",
+            run_stage="completed",
+            slurm_job_id="50052942",
+            slurm_state="COMPLETED",
+            transfer_state="transfer_failed",
+            result_destination="local",
+            nextflow_work_dir="/local/project/workflow11",
+            remote_work_dir="/remote/project/workflow11",
+            workflow_usage_json=None,
+            workflow_usage_synced_at=None,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+            imported_source_complete=None,
+        )
+
+    monkeypatch.setattr(launchpad_app, "get_job", fake_get_job)
+    monkeypatch.setattr(launchpad_app, "get_backend", lambda _: SimpleNamespace(get_transfer_detail=lambda _: None))
+
+    payload = await launchpad_app.get_job_status("run-sync-failed")
+
+    assert payload["status"] == "COMPLETED"
+    assert payload["progress_percent"] == 100
+    assert payload["transfer_state"] == "transfer_failed"
+    assert payload["transfer_detail"] == "Rsync transfer stalled - no output for 1800s."
+    assert payload["message"] == (
+        "Remote job completed; result synchronization failed: Rsync transfer stalled - no output for 1800s."
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_job_status_reports_stale_transfer_message_without_repoll(monkeypatch):
     fake_session = _FakeSession()
 
@@ -995,10 +1039,14 @@ async def test_get_job_status_reports_transfer_failure_detail_for_completed_slur
 
     payload = await launchpad_app.get_job_status("run-fail")
 
-    assert payload["status"] == "FAILED"
+    assert payload["status"] == "COMPLETED"
+    assert payload["progress_percent"] == 100
     assert payload["transfer_state"] == "transfer_failed"
     assert payload["transfer_detail"] == "No result artifacts found on remote at /remote/workflow5/output."
-    assert "No result artifacts found" in payload["message"]
+    assert payload["message"] == (
+        "Remote job completed; result synchronization failed: "
+        "No result artifacts found on remote at /remote/workflow5/output."
+    )
 
 
 @pytest.mark.asyncio

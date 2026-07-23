@@ -1755,6 +1755,54 @@ class TestSubmitJobAfterApproval:
         assert submitted["staged_remote_input_path"] == "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/778fbb3a707d09a5"
 
     @pytest.mark.asyncio
+    async def test_remote_unmapped_bam_remap_skips_staging(self, session_factory, seed_data):
+        remote_bam = "/share/crsp/lab/seyedam/share/agoutic/elnaz/fshd15/workflow7/bams/fshd15.unmapped.bam"
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "edited_params": {
+                "sample_name": "fshd15_chm13_remap",
+                "mode": "DNA",
+                "input_type": "bam",
+                "entry_point": "remap",
+                "input_directory": f"remote:{remote_bam}",
+                "remote_input_path": remote_bam,
+                "staged_remote_input_path": remote_bam,
+                "reference_genome": ["chm13"],
+                "execution_mode": "slurm",
+                "ssh_profile_nickname": "hpc3",
+                "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/elnaz",
+                "cache_preflight": {
+                    "status": "ready",
+                    "data_action": {"action": "use_remote_path", "cache_path": remote_bam},
+                },
+            },
+        })
+
+        async def _passthrough_prepare(session, project_id, owner_id, params):
+            return dict(params)
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "remote-remap-uuid", "work_directory": "/work/remote-remap",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission._prepare_remote_execution_params", new=_passthrough_prepare), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock(side_effect=_close_scheduled_coroutine)
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.call_args.args[0] == "submit_dogme_job"
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["remote_input_path"] == remote_bam
+        assert submitted["staged_remote_input_path"] == remote_bam
+        assert submitted["input_directory"] == f"remote:{remote_bam}"
+        assert submitted["entry_point"] == "remap"
+        assert submitted["reference_genome"] == ["chm13"]
+
+    @pytest.mark.asyncio
     async def test_stage_only_remote_request_calls_stage_remote_sample(self, session_factory, seed_data):
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
             "gate_action": "remote_stage",

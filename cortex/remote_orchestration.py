@@ -157,7 +157,8 @@ async def _resolve_ssh_profile_reference(
         for profile in profiles:
             if profile.get("id") == ssh_profile_id:
                 return ssh_profile_id, profile.get("nickname")
-        return ssh_profile_id, ssh_profile_nickname
+        if not ssh_profile_nickname:
+            return ssh_profile_id, None
 
     nickname = (ssh_profile_nickname or "").strip().lower()
     if not nickname:

@@ -2,8 +2,15 @@
 
 ### Features
 
+- **Automatically discover complete reference folders:** At service startup, AGOUTIC now registers new `$AGOUTIC_DATA/references/<name>/` directories containing exactly one FASTA-family file and one GTF-family file. Discovered references appear in the UI catalog and use the normal remote staging flow; explicit catalog entries remain authoritative, while incomplete or ambiguous folders are skipped.
+
 ### Bug Fixes
 
+- **Recognized explicit existing remote input directories:** Requests such as `existing remote POD5 directory: /path` now preserve the remote path and use it directly, avoiding unnecessary staging or copying.
+- **Recovered stale saved SSH profile IDs by nickname:** Remote execution now resolves a configured profile nickname when its stored profile ID no longer exists, allowing renamed or recreated profiles to be selected correctly.
+- **Fixed remote BAM remap path detection:** Explicit remote file phrasing such as `remote unmapped.bam file <path> ... on hpc3` now preserves the source file as a direct remote input, preventing fallback staging from substituting the local project data directory or an empty cache path.
+- **Preserved completed remote workflow status when result sync fails:** A failed local copy-back now remains a retryable `transfer_failed` state with its rsync error detail, rather than marking an otherwise completed SLURM workflow as failed in status cards and notifications.
+- **Fixed remote reference paths for reused staged samples:** Dogme SLURM configuration now derives the remote cache path for every requested reference genome missing from reused staged-sample metadata, preventing Nextflow from falling back to a local FASTA/GTF path when a run selects a different reference such as GRCh38.
 - **Restored older-message loading for large projects with pending workflows:** Chat history pagination now renders independently of the live task dock, so pending workflow tasks no longer hide the control; older block pages are fetched on demand beyond the initial history window.
 - **Made long remote staging uploads resilient to transient SSH disconnects:** Direct and local-auth-broker `rsync` transfers now send SSH keepalives and automatically resume up to two recognized transport failures (including remote-host closures, resets, and broken pipes) from the existing `.rsync-partial` data while preserving the overall transfer deadline.
 - **Extended local SSH broker logins to 72 hours by default:** The local-auth session lifetime now defaults to 259200 seconds, preventing long remote staging operations from losing their authenticated broker session; deployments can still override `LOCAL_AUTH_SESSION_TTL_SECONDS`.

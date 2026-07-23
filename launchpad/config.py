@@ -126,6 +126,39 @@ class JobStatus(str, Enum):
     DELETED = "DELETED"
 
 # --- REFERENCE GENOMES ---
+_REFERENCE_FASTA_SUFFIXES = (".fa", ".fasta", ".fna", ".fa.gz", ".fasta.gz", ".fna.gz")
+_REFERENCE_GTF_SUFFIXES = (".gtf", ".gtf.gz")
+
+
+def discover_reference_genomes(reference_root: Path | None = None) -> dict[str, dict[str, Path]]:
+    """Discover reference directories with one FASTA and one GTF asset."""
+    root = reference_root or AGOUTIC_DATA / "references"
+    if not root.is_dir():
+        return {}
+
+    discovered: dict[str, dict[str, Path]] = {}
+    for reference_dir in sorted(root.iterdir()):
+        if not reference_dir.is_dir():
+            continue
+
+        files = [path for path in reference_dir.iterdir() if path.is_file()]
+        fasta_files = sorted(
+            path for path in files if path.name.lower().endswith(_REFERENCE_FASTA_SUFFIXES)
+        )
+        gtf_files = sorted(
+            path for path in files if path.name.lower().endswith(_REFERENCE_GTF_SUFFIXES)
+        )
+        if len(fasta_files) != 1 or len(gtf_files) != 1:
+            continue
+
+        discovered[reference_dir.name] = {
+            "fasta": fasta_files[0],
+            "gtf": gtf_files[0],
+        }
+
+    return discovered
+
+
 REFERENCE_GENOMES = {
     "GRCh38": {
         "fasta": AGOUTIC_DATA / "references" / "GRCh38" / "GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta",
@@ -139,12 +172,21 @@ REFERENCE_GENOMES = {
         "kallisto_index": AGOUTIC_DATA / "references" / "mm39" / "mm39GencM36_k63.idx",
         "kallisto_t2g": AGOUTIC_DATA / "references" / "mm39" / "mm39GencM36_k63.t2g",
     },
+    "chm13": {
+        "fasta": AGOUTIC_DATA / "references" / "chm13" / "chm13v2.0.fa",
+        "gtf": AGOUTIC_DATA / "references" / "chm13" / "Homo_sapiens-GCA_009914755.4-2022_07-genes_fixed.gtf",
+    },
     "mad1": {
         "fasta": AGOUTIC_DATA / "references" / "mad1" / "MAD1.fa",
         "gtf": AGOUTIC_DATA / "references" / "mad1" / "MAD1.gtf",
     },
     "default": "GRCh38",
 }
+
+# Explicit catalog entries take precedence; complete new reference folders are
+# automatically available to the UI and remote staging after service restart.
+for _reference_id, _reference_assets in discover_reference_genomes().items():
+    REFERENCE_GENOMES.setdefault(_reference_id, _reference_assets)
 
 # --- MODIFICATION MOTIFS ---
 DEFAULT_DNA_MODS = "5mCG_5hmCG,6mA"

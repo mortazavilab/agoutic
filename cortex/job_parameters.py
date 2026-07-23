@@ -19,6 +19,14 @@ _GENOME_STOP_WORDS = {
 
 _REMOTE_INPUT_PATTERNS = [
     re.compile(
+        r"\b(?:existing|already\s+(?:present|available)|remote)\s+(?:remote\s+)?(?:[\w.-]+\s+)?(?:data|folder|path|input(?:\s+folder)?|directory)\s*(?:at|in|:)?\s*(/[\w./-]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bremote\s+(?:[\w.-]+\s+)?file\s+(?:at|in)?\s*(/[\w./-]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"\b(?:use|using|with|from|at)\s+(?:the\s+)?remote\s+(?:data|folder|path|input(?:\s+folder)?|directory)\s+(?:at|in)?\s*(/[\w./-]+)",
         re.IGNORECASE,
     ),

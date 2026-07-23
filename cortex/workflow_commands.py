@@ -234,9 +234,9 @@ def _apply_result_sync_status_update(
             job_status["progress_percent"] = 99
             block_status = "RUNNING"
         elif transfer_state == "transfer_failed":
-            job_status["status"] = "FAILED"
-            job_status["progress_percent"] = 0
-            block_status = "FAILED"
+            job_status["status"] = "COMPLETED"
+            job_status["progress_percent"] = 100
+            block_status = "DONE"
         elif transfer_state == "outputs_downloaded":
             job_status["status"] = "COMPLETED"
             job_status["progress_percent"] = 100
