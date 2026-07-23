@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 from common.database import Base
 from cortex.models import User, Project, ProjectAccess, ProjectBlock
 from cortex.job_parameters import extract_job_parameters_from_conversation
-from cortex.remote_orchestration import _prepare_remote_execution_params
+from cortex.remote_orchestration import _prepare_remote_execution_params, _resolve_ssh_profile_reference
 from launchpad.models import RemoteStagedSample
 
 
@@ -732,6 +732,46 @@ class TestRemoteExecutionDetection:
         assert result["input_directory"] == "remote:/crsp/lab/seyedam/share/pod5/Jamshid"
         assert result["cache_preflight"]["data_action"]["action"] == "use_remote_path"
         assert result["result_destination"] == "both"
+
+    @pytest.mark.asyncio
+    async def test_detects_existing_remote_pod5_directory_without_staging(self):
+        remote_pod5 = "/dfs9/seyedam-lab/share/fshd/fshd020d/pod5"
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {"text": (
+                "Run DNA on HPC3 using the existing remote POD5 directory:"
+                f"{remote_pod5}. This path exists on HPC3; do not stage or copy it."
+            )},
+        )
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+                 "id": "profile-123",
+                 "nickname": "hpc3",
+                 "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/elnaz",
+             }])):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["remote_input_path"] == remote_pod5
+        assert result["staged_remote_input_path"] == remote_pod5
+        assert result["input_directory"] == f"remote:{remote_pod5}"
+        assert result["cache_preflight"]["data_action"]["action"] == "use_remote_path"
+
+    @pytest.mark.asyncio
+    async def test_ssh_profile_nickname_replaces_stale_saved_id(self):
+        with patch(
+            "cortex.remote_orchestration._list_user_ssh_profiles",
+            new=AsyncMock(return_value=[{"id": "current-profile", "nickname": "hpc3"}]),
+        ):
+            profile_id, nickname = await _resolve_ssh_profile_reference(
+                "u1", "stale-profile", "hpc3"
+            )
+
+        assert profile_id == "current-profile"
+        assert nickname == "hpc3"
 
     @pytest.mark.asyncio
     async def test_detects_explicit_remote_unmapped_bam_file_for_remap(self):

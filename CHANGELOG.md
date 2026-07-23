@@ -6,6 +6,8 @@
 
 ### Bug Fixes
 
+- **Recognized explicit existing remote input directories:** Requests such as `existing remote POD5 directory: /path` now preserve the remote path and use it directly, avoiding unnecessary staging or copying.
+- **Recovered stale saved SSH profile IDs by nickname:** Remote execution now resolves a configured profile nickname when its stored profile ID no longer exists, allowing renamed or recreated profiles to be selected correctly.
 - **Fixed remote BAM remap path detection:** Explicit remote file phrasing such as `remote unmapped.bam file <path> ... on hpc3` now preserves the source file as a direct remote input, preventing fallback staging from substituting the local project data directory or an empty cache path.
 - **Preserved completed remote workflow status when result sync fails:** A failed local copy-back now remains a retryable `transfer_failed` state with its rsync error detail, rather than marking an otherwise completed SLURM workflow as failed in status cards and notifications.
 - **Fixed remote reference paths for reused staged samples:** Dogme SLURM configuration now derives the remote cache path for every requested reference genome missing from reused staged-sample metadata, preventing Nextflow from falling back to a local FASTA/GTF path when a run selects a different reference such as GRCh38.
