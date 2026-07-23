@@ -2060,22 +2060,38 @@ async def create_block(block_in: BlockCreate, request: Request):
         session.close()
 
 @app.get("/blocks", response_model=BlockStreamOut)
-async def get_blocks(project_id: str, request: Request, since_seq: int = 0, limit: int = 500):
+async def get_blocks(
+    project_id: str,
+    request: Request,
+    since_seq: int = 0,
+    before_seq: int = 0,
+    limit: int = 500,
+):
     user = request.state.user
     require_project_access(project_id, user, min_role="viewer")
     session = SessionLocal()
     try:
-        # Count total blocks for this project above since_seq
+        if before_seq and since_seq:
+            raise HTTPException(
+                status_code=400,
+                detail="Use either since_seq or before_seq, not both",
+            )
+
+        # Count blocks in the requested direction. A before_seq request is
+        # used by the UI to page backwards through project history.
         total_query = select(func.count(ProjectBlock.id))\
-            .where(ProjectBlock.project_id == project_id)\
-            .where(ProjectBlock.seq > since_seq)
+            .where(ProjectBlock.project_id == project_id)
+        if before_seq:
+            total_query = total_query.where(ProjectBlock.seq < before_seq)
+        else:
+            total_query = total_query.where(ProjectBlock.seq > since_seq)
         total_count = session.execute(total_query).scalar() or 0
 
         if total_count <= limit:
             # Everything fits — simple ascending query
             query = select(ProjectBlock)\
                 .where(ProjectBlock.project_id == project_id)\
-                .where(ProjectBlock.seq > since_seq)\
+                .where(ProjectBlock.seq < before_seq if before_seq else ProjectBlock.seq > since_seq)\
                 .order_by(ProjectBlock.seq.asc())\
                 .limit(limit)
         else:
@@ -2084,7 +2100,7 @@ async def get_blocks(project_id: str, request: Request, since_seq: int = 0, limi
             # chronological order.
             subq = select(ProjectBlock)\
                 .where(ProjectBlock.project_id == project_id)\
-                .where(ProjectBlock.seq > since_seq)\
+                .where(ProjectBlock.seq < before_seq if before_seq else ProjectBlock.seq > since_seq)\
                 .order_by(ProjectBlock.seq.desc())\
                 .limit(limit)\
                 .subquery()
@@ -2096,12 +2112,25 @@ async def get_blocks(project_id: str, request: Request, since_seq: int = 0, limi
         blocks = result.scalars().all()
         
         new_latest = since_seq
+        oldest_seq = before_seq
         if blocks:
             new_latest = blocks[-1].seq
+            oldest_seq = blocks[0].seq
+
+        has_older = bool(
+            oldest_seq
+            and session.execute(
+                select(func.count(ProjectBlock.id))
+                .where(ProjectBlock.project_id == project_id)
+                .where(ProjectBlock.seq < oldest_seq)
+            ).scalar()
+        )
             
         return {
             "blocks": [row_to_dict(b) for b in blocks],
-            "latest_seq": new_latest
+            "latest_seq": new_latest,
+            "oldest_seq": oldest_seq,
+            "has_older": has_older,
         }
     finally:
         session.close()

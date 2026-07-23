@@ -79,6 +79,8 @@ class BlockOut(BaseModel):
 class BlockStreamOut(BaseModel):
     blocks: list[BlockOut]
     latest_seq: int
+    oldest_seq: int = 0
+    has_older: bool = False
 
 class BlockUpdate(BaseModel):
     status: Optional[str] = None

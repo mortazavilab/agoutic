@@ -4,6 +4,7 @@
 
 ### Bug Fixes
 
+- **Restored older-message loading for large projects with pending workflows:** Chat history pagination now renders independently of the live task dock, so pending workflow tasks no longer hide the control; older block pages are fetched on demand beyond the initial history window.
 - **Made long remote staging uploads resilient to transient SSH disconnects:** Direct and local-auth-broker `rsync` transfers now send SSH keepalives and automatically resume up to two recognized transport failures (including remote-host closures, resets, and broken pipes) from the existing `.rsync-partial` data while preserving the overall transfer deadline.
 - **Extended local SSH broker logins to 72 hours by default:** The local-auth session lifetime now defaults to 259200 seconds, preventing long remote staging operations from losing their authenticated broker session; deployments can still override `LOCAL_AUTH_SESSION_TTL_SECONDS`.
 - **Replaced deprecated `st.components.v1.html` with `st.html`:** Resolves Streamlit 1.51+ deprecation warning (`st.components.v1.html will be removed after 2026-06-01`). Now using Streamlit 1.58.0 going forward.

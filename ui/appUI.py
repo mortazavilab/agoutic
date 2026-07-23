@@ -370,8 +370,14 @@ def _active_project_slug() -> str:
     return _slugify_project_name(active_id)
 
 
-def get_sanitized_blocks(target_project_id: str):
-    return _get_sanitized_blocks(target_project_id, api_url=API_URL, request_fn=make_authenticated_request)
+def get_sanitized_blocks(target_project_id: str, *, before_seq: int = 0, limit: int = 500):
+    return _get_sanitized_blocks(
+        target_project_id,
+        api_url=API_URL,
+        request_fn=make_authenticated_request,
+        before_seq=before_seq,
+        limit=limit,
+    )
 
 
 def get_project_tasks(project_id: str):
@@ -818,6 +824,8 @@ if st.session_state.get("_last_rendered_project") != st.session_state.active_pro
     st.session_state.blocks = []
     st.session_state._last_rendered_project = st.session_state.active_project_id
     st.session_state.pop("_welcome_sent_for", None)
+    st.session_state.pop("_max_visible_blocks", None)
+    st.session_state.pop("_hidden_block_count", None)
     # Clear project-scoped caches (active-state index, dataframe index, rehydrated DFs)
     try:
         from appui_active_state import clear_active_state, clear_df_index, clear_rehydrated_df_cache
@@ -1223,11 +1231,12 @@ def _render_chat():
 
         if not _use_incremental_fetch:
             # Full fetch on initial load to establish baseline
-            fetched_blocks, _fetch_ok = get_sanitized_blocks(_active_id)
+            fetched_blocks, _fetch_ok, _pagination = get_sanitized_blocks(_active_id)
         else:
             # Incremental fetch for subsequent refreshes (only new blocks since last poll)
             from appui_tasks import get_sanitized_blocks_incremental
             fetched_blocks, _fetch_ok = get_sanitized_blocks_incremental(_active_id, API_URL, make_authenticated_request)
+            _pagination = {}
         
         fetched_blocks = [b for b in fetched_blocks if b.get("project_id") == _active_id]
 
@@ -1240,6 +1249,14 @@ def _render_chat():
                 max_visible=st.session_state.get("_max_visible_blocks", 30),
             )
             st.session_state.blocks = blocks
+            if blocks:
+                st.session_state[f"_oldest_block_seq_{_active_id}"] = min(
+                    int(block.get("seq") or 0) for block in blocks
+                )
+            if _pagination:
+                st.session_state[f"_has_older_blocks_{_active_id}"] = bool(
+                    _pagination.get("has_older", False)
+                )
         else:
             # Keep whatever was previously in session state so the chat stays visible.
             blocks = st.session_state.get("blocks", [])
@@ -1483,12 +1500,44 @@ def _render_task_dock():
         _render_task_dock_sections(_active_id, sections)
 
 
-    # Pagination button — rendered outside the fragment to avoid duplicate-key
-    # errors when the fragment's timer overlaps with a manual full-page rerun.
+def _render_history_pagination(project_id: str) -> None:
+    """Render chat history pagination independently of task-dock state."""
     _hbc = st.session_state.get("_hidden_block_count", 0)
-    if _hbc > 0:
-        if st.button(f"⬆️ Load {min(_hbc, 30)} older messages ({_hbc} hidden)"):
-            st.session_state["_max_visible_blocks"] = st.session_state.get("_max_visible_blocks", 30) + 30
+    _has_server_history = st.session_state.get(f"_has_older_blocks_{project_id}", False)
+    if _hbc > 0 or _has_server_history:
+        _load_label = (
+            f"⬆️ Load {min(_hbc, 30)} older messages ({_hbc} hidden)"
+            if _hbc > 0
+            else "⬆️ Load 30 older messages"
+        )
+        if st.button(_load_label):
+            if _hbc > 0:
+                st.session_state["_max_visible_blocks"] = st.session_state.get("_max_visible_blocks", 30) + 30
+            else:
+                _oldest_seq = int(st.session_state.get(f"_oldest_block_seq_{project_id}", 0) or 0)
+                _older_blocks, _older_fetch_ok, _older_pagination = get_sanitized_blocks(
+                    project_id,
+                    before_seq=_oldest_seq,
+                )
+                if _older_fetch_ok and _older_blocks:
+                    _combined_by_id = {
+                        block.get("id"): block
+                        for block in [*_older_blocks, *st.session_state.get("blocks", [])]
+                    }
+                    st.session_state.blocks = sorted(
+                        _combined_by_id.values(),
+                        key=lambda block: int(block.get("seq") or 0),
+                    )
+                    st.session_state[f"_oldest_block_seq_{project_id}"] = min(
+                        int(block.get("seq") or 0)
+                        for block in st.session_state.blocks
+                    )
+                    st.session_state[f"_has_older_blocks_{project_id}"] = bool(
+                        _older_pagination.get("has_older", False)
+                    )
+                    st.session_state["_max_visible_blocks"] = st.session_state.get("_max_visible_blocks", 30) + 30
+                elif not _older_fetch_ok:
+                    st.warning("Could not load older messages. Please try again.")
             st.rerun()
 
 # --- Capture chat input EARLY ---
@@ -1505,6 +1554,7 @@ if _captured_prompt and not st.session_state.get("_pending_prompt"):
     st.session_state["_pending_prompt"] = _captured_prompt
 
 _render_task_dock()
+_render_history_pagination(active_id)
 
 if _should_bootstrap_suppressed_monitoring(
     auto_refresh_suppressed=_auto_refresh_suppressed,

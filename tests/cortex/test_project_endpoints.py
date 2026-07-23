@@ -869,6 +869,31 @@ class TestBlockEndpoints:
         assert "blocks" in data
         assert len(data["blocks"]) >= 1
 
+    def test_get_blocks_can_page_backwards(self, client):
+        project_id = self._create_project(client)
+        for message in ("first", "second", "third"):
+            response = client.post("/block", json={
+                "project_id": project_id,
+                "type": "USER_MESSAGE",
+                "payload": {"markdown": message},
+                "status": "DONE",
+            })
+            assert response.status_code == 200
+
+        newest_page = client.get(f"/blocks?project_id={project_id}&limit=2")
+        assert newest_page.status_code == 200
+        newest_data = newest_page.json()
+        assert len(newest_data["blocks"]) == 2
+        assert newest_data["has_older"] is True
+
+        oldest_page = client.get(
+            f"/blocks?project_id={project_id}&before_seq={newest_data['oldest_seq']}&limit=2"
+        )
+        assert oldest_page.status_code == 200
+        oldest_data = oldest_page.json()
+        assert len(oldest_data["blocks"]) == 1
+        assert oldest_data["has_older"] is False
+
     def test_update_block(self, client):
         project_id = self._create_project(client)
         create_resp = client.post("/block", json={
