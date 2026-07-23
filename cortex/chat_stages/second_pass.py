@@ -103,6 +103,8 @@ class SecondPassStage:
         )
 
         _display_data = "\n".join(formatted_parts)
+        if _error_blocks:
+            _display_data = "\n\n".join([*_error_blocks, _display_data]).strip()
 
         if ctx.remote_stage_approval_context and has_real_data:
             ctx.needs_approval = True

@@ -85,6 +85,7 @@ class ChatContext:
     is_browsing_override: bool = False
     is_remote_browsing_override: bool = False
     is_sync_override: bool = False
+    is_multi_encode_file_override: bool = False
 
     # ── Remote stage ───────────────────────────────────────────────────
     remote_stage_approval_context: dict | None = None

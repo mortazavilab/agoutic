@@ -617,7 +617,7 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                     if acc_upper.startswith("ENCSR") and acc_upper not in accessions:
                         accessions.append(acc_upper)
 
-    if accessions and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+    if accessions and skill_key in ("ENCODE_Search", "ENCODE_LongRead", "download_files"):
         # Determine which tool based on what the user is asking
         file_keywords = ["bam", "fastq", "file", "files", "pod5", "tar", "bigwig",
                          "download", "available", "accessions", "alignments"]

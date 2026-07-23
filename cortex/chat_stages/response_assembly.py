@@ -421,6 +421,19 @@ class ResponseAssemblyStage:
             "legacy_analysis": len(ctx.legacy_analysis_matches),
         }
         _debug["embedded_df_count"] = len(ctx.embedded_dataframes)
+        _debug["tool_results"] = [
+            {
+                "source": source_key,
+                "tool": result.get("tool"),
+                "accession": result.get("params", {}).get("accession"),
+                "status": "error" if "error" in result else "ok",
+                "file_types": sorted(result.get("data", {}))
+                if isinstance(result.get("data"), dict) else [],
+                "error": result.get("error"),
+            }
+            for source_key, results in ctx.all_results.items()
+            for result in results
+        ]
         _debug["active_skill"] = ctx.active_skill
         _debug["pre_llm_skill"] = ctx.pre_llm_skill
         _debug["auto_skill_detected"] = ctx.auto_skill

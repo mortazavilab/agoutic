@@ -296,6 +296,16 @@ class TestEncodeAccessions:
         accessions = {c["params"]["accession"] for c in calls}
         assert accessions == {"ENCSR000AAA", "ENCSR000BBB"}
 
+    def test_multiple_fastq_accessions_generate_file_calls_in_download_skill(self):
+        calls = _auto_generate_data_calls(
+            "Download all released FASTQ files from ENCSR432YKA ENCSR476STT ENCSR448TJV",
+            "download_files",
+        )
+        assert [call["tool"] for call in calls] == ["get_files_by_type"] * 3
+        assert {call["params"]["accession"] for call in calls} == {
+            "ENCSR432YKA", "ENCSR476STT", "ENCSR448TJV",
+        }
+
     def test_non_encode_skill_skips_accession(self):
         """Accessions should only generate calls for ENCODE skills."""
         calls = _auto_generate_data_calls(

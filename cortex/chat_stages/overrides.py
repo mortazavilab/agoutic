@@ -27,6 +27,7 @@ _WORKFLOW_ANALYSIS_SKILLS = {
     "run_dogme_cdna",
     "analyze_job_results",
 }
+_ENCODE_FILE_REQUEST_KEYWORDS = ("fastq", "bam", "pod5", "files", "download")
 
 
 def _suppress_all_tags(ctx: ChatContext) -> None:
@@ -51,6 +52,22 @@ class OverrideDetectionStage:
 
     async def run(self, ctx: ChatContext) -> None:
         _msg_lower = ctx.user_msg_lower
+
+        if ctx.is_multi_encode_file_override:
+            _encode_file_calls = _auto_generate_data_calls(
+                ctx.message, ctx.active_skill, ctx.conversation_history,
+                history_blocks=ctx.history_blocks,
+                project_dir=ctx.project_dir,
+                project_id=ctx.project_id,
+            )
+            _suppress_all_tags(ctx)
+            ctx.auto_calls = _encode_file_calls
+            ctx.clean_markdown = ""
+            logger.warning(
+                "Early ENCODE file-request override: generating deterministic calls",
+                calls=len(ctx.auto_calls),
+            )
+            return
 
         # ── Referential-word flag (used later for hallucination guard) ─
         _ref_words = [
@@ -148,13 +165,23 @@ class OverrideDetectionStage:
 
         _generated_calls = []
         _can_auto_generate = not ctx.injected_previous_data or ctx.injected_was_capped
-        if _can_auto_generate:
+        _requires_encode_file_completeness_check = _is_multi_encode_file_request(ctx)
+        if _can_auto_generate or _requires_encode_file_completeness_check:
             _generated_calls = _auto_generate_data_calls(
                 ctx.message, ctx.active_skill, ctx.conversation_history,
                 history_blocks=ctx.history_blocks,
                 project_dir=ctx.project_dir,
                 project_id=ctx.project_id,
             )
+            if _should_override_incomplete_encode_file_calls(ctx, _generated_calls):
+                _suppress_all_tags(ctx)
+                ctx.auto_calls = _generated_calls
+                ctx.clean_markdown = ""
+                logger.warning(
+                    "ENCODE file-request override: replacing incomplete model calls",
+                    calls=len(ctx.auto_calls),
+                )
+                return
             if not _generated_calls:
                 _generated_calls = _promote_llm_workflow_summary_tags(ctx)
             if _should_override_generic_workflow_summary_tags(ctx, _generated_calls):
@@ -288,6 +315,50 @@ def _should_override_generic_workflow_summary_tags(ctx: ChatContext, auto_calls:
         return False
 
     return all(tool == "get_analysis_summary" for tool in llm_tools)
+
+
+def _should_override_incomplete_encode_file_calls(
+    ctx: ChatContext,
+    auto_calls: list[dict],
+) -> bool:
+    """Require a file lookup for every explicitly requested ENCODE experiment."""
+    requested = {
+        accession.upper()
+        for accession in re.findall(r"\b(ENCSR[A-Z0-9]{6})\b", ctx.message, re.IGNORECASE)
+    }
+    if len(requested) < 2:
+        return False
+
+    if not _is_multi_encode_file_request(ctx):
+        return False
+
+    generated = {
+        str(call.get("params", {}).get("accession", "")).upper()
+        for call in auto_calls
+        if call.get("source_key") == "encode"
+        and call.get("tool") == "get_files_by_type"
+    }
+    if not requested.issubset(generated):
+        return False
+
+    model_requested: set[str] = set()
+    for match in ctx.data_call_matches:
+        if match.group(1) != "consortium" or match.group(2) != "encode":
+            continue
+        if match.group(3) != "get_files_by_type":
+            continue
+        accession = str(_parse_tag_params(match.group(4)).get("accession", "")).upper()
+        if accession:
+            model_requested.add(accession)
+
+    return not requested.issubset(model_requested)
+
+
+def _is_multi_encode_file_request(ctx: ChatContext) -> bool:
+    requested = set(re.findall(r"\bENCSR[A-Z0-9]{6}\b", ctx.message, re.IGNORECASE))
+    return len(requested) >= 2 and any(
+        keyword in ctx.user_msg_lower for keyword in _ENCODE_FILE_REQUEST_KEYWORDS
+    )
 
 
 def _promote_llm_workflow_summary_tags(ctx: ChatContext) -> list[dict]:

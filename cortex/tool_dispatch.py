@@ -928,6 +928,18 @@ async def execute_tool_calls(
         # minutes for large result sets.  Use a generous timeout to avoid
         # killing transfers mid-stream.
         _mcp_timeout = REMOTE_STAGE_MCP_TIMEOUT if source_key == "launchpad" else 120.0
+
+        if source_key == "encode" and _is_encode_file_list_batch(calls):
+            all_results[source_key] = await _execute_encode_file_list_batch(
+                calls,
+                url=url,
+                timeout=_mcp_timeout,
+                request_id=request_id,
+                is_cancelled=is_cancelled,
+                source_label=source_label,
+            )
+            continue
+
         mcp_client = MCPHttpClient(name=source_key, base_url=url, timeout=_mcp_timeout)
         source_results: list[dict] = []
 
@@ -1067,6 +1079,67 @@ async def execute_tool_calls(
 
     result.all_results = all_results
     return result
+
+
+def _is_encode_file_list_batch(calls: list[dict]) -> bool:
+    """Return whether calls need isolated ENCODE MCP sessions."""
+    return len(calls) > 1 and all(call.get("tool") == "get_files_by_type" for call in calls)
+
+
+async def _execute_encode_file_list_batch(
+    calls: list[dict],
+    *,
+    url: str,
+    timeout: float,
+    request_id: str,
+    is_cancelled: Callable[[str], bool],
+    source_label: str,
+) -> list[dict]:
+    """Run each ENCODE file listing in a fresh MCP session.
+
+    ENCODELIB is stateful behind FastMCP's HTTP transport. Isolating requests
+    prevents one completed lookup from swallowing later experiment lookups.
+    """
+    source_results: list[dict] = []
+    for call in calls:
+        tool_name = call["tool"]
+        params = call["params"]
+        if is_cancelled(request_id):
+            raise ChatCancelled(
+                "tools",
+                f"Cancelled before running {tool_name} on {source_label}.",
+            )
+
+        mcp_client = MCPHttpClient(name="encode", base_url=url, timeout=timeout)
+        try:
+            await mcp_client.connect()
+            result_data = await _call_with_retry(
+                mcp_client, "encode", tool_name, params, source_results,
+            )
+            if result_data is not _SKIP_SENTINEL:
+                source_results.append({
+                    "tool": tool_name,
+                    "params": params,
+                    "data": result_data,
+                })
+        except ChatCancelled:
+            raise
+        except Exception as exc:
+            logger.error(
+                "ENCODE file-list batch call failed",
+                tool=tool_name,
+                params=params,
+                error=str(exc),
+            )
+            source_results.append({
+                "tool": tool_name,
+                "params": params,
+                "error": f"Connection failed: {exc}",
+            })
+        finally:
+            await mcp_client.disconnect()
+
+    return source_results
 
 
 # --- Sentinel to signal "skip this call" from _call_with_retry ---

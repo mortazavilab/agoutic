@@ -110,6 +110,7 @@ def extract_embedded_dataframes(
             elif tool in _SEARCH_TOOLS and "data" in r:
                 _extract_search_results(r, table_cols, embedded)
 
+    _extract_combined_requested_file_dataframes(all_results, user_message, embedded)
     return embedded
 
 
@@ -230,6 +231,77 @@ def _extract_files_by_type(
                     "visible": is_visible,
                 },
             }
+
+
+def _extract_combined_requested_file_dataframes(
+    all_results: dict[str, list[dict]],
+    user_message: str,
+    embedded: dict[str, dict],
+) -> None:
+    """Combine explicitly requested file types from multi-experiment calls."""
+    file_results = [
+        result
+        for results in all_results.values()
+        for result in results
+        if result.get("tool") == "get_files_by_type" and isinstance(result.get("data"), dict)
+    ]
+    accessions = {
+        str(result.get("params", {}).get("accession") or "").upper()
+        for result in file_results
+    }
+    accessions.discard("")
+    if len(accessions) < 2:
+        return
+
+    requested_types = {
+        file_type.lower()
+        for result in file_results
+        for file_type in result["data"]
+        if file_type.lower().split()[0] in user_message.lower()
+    }
+    for file_type in sorted(requested_types):
+        rows: list[dict] = []
+        for result in file_results:
+            experiment = str(result.get("params", {}).get("accession") or "")
+            files = result["data"].get(file_type) or []
+            for file_info in files:
+                if not isinstance(file_info, dict):
+                    continue
+                rows.append({
+                    "Experiment": experiment,
+                    "Accession": file_info.get("accession", ""),
+                    "Output Type": file_info.get("output_type", ""),
+                    "Replicate": (
+                        file_info.get("biological_replicates_formatted")
+                        or ", ".join(
+                            f"Rep {replicate}"
+                            for replicate in file_info.get("biological_replicates", [])
+                        )
+                    ),
+                    "Size": file_info.get("file_size", ""),
+                    "Status": file_info.get("status", ""),
+                })
+        if not rows:
+            continue
+
+        label = f"Requested {file_type.upper()} files ({len(rows)})"
+        embedded[label] = {
+            "columns": ["Experiment", "Accession", "Output Type", "Replicate", "Size", "Status"],
+            "data": rows,
+            "row_count": len(rows),
+            "metadata": {
+                "file_type": file_type,
+                "accessions": sorted(accessions),
+                "visible": True,
+            },
+        }
+        for payload in embedded.values():
+            metadata = payload.get("metadata") or {}
+            if (
+                metadata.get("file_type") == file_type
+                and metadata.get("accession", "").upper() in accessions
+            ):
+                metadata["visible"] = False
 
 
 def _extract_search_results(
