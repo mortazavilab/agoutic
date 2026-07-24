@@ -432,6 +432,60 @@ class TestAdminActivityHelpers:
             timeout=5,
         )
 
+    def test_cancellable_transfer_rows_include_only_active_result_downloads(self):
+        fn = _load_admin_page_function(
+            "_cancellable_transfer_rows",
+            {"CANCELLABLE_TRANSFER_STATES": {"pending_import", "downloading_outputs"}},
+        )
+
+        rows = [
+            {"source": "dogme_job", "state": "downloading_outputs", "run_uuid": "download-run"},
+            {"source": "dogme_job", "state": "pending_import", "run_uuid": "import-run"},
+            {"source": "dogme_job", "state": "inputs_uploaded", "run_uuid": "upload-run"},
+            {"source": "staging_task", "state": "running", "run_uuid": "stage-run"},
+            {"source": "dogme_job", "state": "downloading_outputs"},
+        ]
+
+        assert fn(rows) == rows[:2]
+
+    def test_fetch_active_encode_downloads_filters_other_sources(self):
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: [
+                {"download_id": "encode-1", "source": "encode"},
+                {"download_id": "url-1", "source": "url"},
+            ],
+        )
+        request = MagicMock(return_value=response)
+        fn = _load_admin_page_function(
+            "_fetch_active_encode_downloads",
+            {"make_authenticated_request": request},
+        )
+
+        downloads, error = fn("http://api.test")
+
+        assert downloads == [{"download_id": "encode-1", "source": "encode"}]
+        assert error is None
+        request.assert_called_once_with(
+            "GET",
+            "http://api.test/admin/downloads/active",
+            timeout=5,
+        )
+
+    def test_fetch_admin_projects_uses_admin_inventory_endpoint(self):
+        response = SimpleNamespace(status_code=200, json=lambda: [{"id": "project-1"}])
+        request = MagicMock(return_value=response)
+        fn = _load_admin_page_function(
+            "_fetch_admin_projects",
+            {"make_authenticated_request": request},
+        )
+
+        projects, error = fn("http://api.test")
+
+        assert projects == [{"id": "project-1"}]
+        assert error is None
+        request.assert_called_once_with("GET", "http://api.test/admin/projects", timeout=5)
+
 
 class TestMaintenanceBannerHelpers:
     def test_render_maintenance_banner_outputs_markup_when_flag_on(self):

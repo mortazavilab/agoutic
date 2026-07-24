@@ -1,6 +1,8 @@
-## [Unreleased]
+## [3.7.5] - 2026-07-24
 
 ### Features
+
+- **Expanded administrator operations:** Admins can cancel other users' active remote result-sync and ENCODE downloads, list all projects including archived projects, and archive or permanently delete projects through the Admin UI.
 
 - **Automatically discover complete reference folders:** At service startup, AGOUTIC now registers new `$AGOUTIC_DATA/references/<name>/` directories containing exactly one FASTA-family file and one GTF-family file. Discovered references appear in the UI catalog and use the normal remote staging flow; explicit catalog entries remain authoritative, while incomplete or ambiguous folders are skipped.
 
@@ -34,6 +36,9 @@
 
 - **Added remote transfer recovery regression coverage:** Focused Launchpad tests now reproduce a remote-host closure/broken-pipe failure and verify both direct and local-auth-broker `rsync` paths resume with their preserved partial directory and SSH keepalive options.
 - **Added focused UI regression coverage for the new refresh model:** `tests/ui/test_app_source_helpers.py` now covers the idle discovery interval, live-card classification for execution/staging/download blocks, and the helper wiring needed by the fragmentized execution-card path. Focused validation continues to use `tests/cortex/test_block_endpoints.py` alongside the UI suite to keep the incremental block-stream contract covered.
+
+- **Added focused admin-control coverage:** Tests cover admin-only project and active-download inventories, cross-user project visibility, and UI API helper filtering.
+
 
 ## [3.7.4] - 2026-06-24
 

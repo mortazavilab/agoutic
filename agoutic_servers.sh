@@ -21,7 +21,8 @@
 
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGOUTIC_VERSION="$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null | tr -d '\n' || echo '0.0.0')"
+AGOUTIC_VERSION_RAW="$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null | tr -d '\n' || echo '0.0.0')"
+AGOUTIC_VERSION="${AGOUTIC_VERSION_RAW#v}"
 export AGOUTIC_CODE="${AGOUTIC_CODE:-$SCRIPT_DIR}"
 export AGOUTIC_DATA="${AGOUTIC_DATA:-$AGOUTIC_CODE/data}"
 
@@ -409,7 +410,7 @@ stop_process() {
 cmd_start() {
     ensure_dirs
     rotate_logs
-    log "Starting AGOUTIC servers (${AGOUTIC_VERSION})..."
+    log "Starting AGOUTIC servers (v${AGOUTIC_VERSION})..."
     echo ""
 
     if ! run_db_migrations; then

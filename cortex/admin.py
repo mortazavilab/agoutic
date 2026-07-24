@@ -8,6 +8,7 @@ Provides user management functionality:
 - Set/change usernames (admin only)
 """
 
+import json
 import re
 from datetime import datetime
 from typing import List
@@ -26,6 +27,8 @@ from cortex.models import (
     ConversationMessage,
     DeletedProjectTokenUsage,
     DeletedProjectTokenDaily,
+    Project,
+    ProjectBlock,
 )
 from cortex.dependencies import require_admin
 from cortex.schemas import MaintenanceStateOut, MaintenanceStateUpdate
@@ -50,6 +53,75 @@ class UserListItem(BaseModel):
 class UserUpdateRequest(BaseModel):
     is_active: bool | None = None
     role: str | None = None
+
+
+@router.get("/projects")
+async def list_all_projects(admin: User = Depends(require_admin)):
+    """List every project, including archived projects, for administration."""
+    session = SessionLocal()
+    try:
+        rows = session.execute(
+            select(Project, User.email)
+            .outerjoin(User, User.id == Project.owner_id)
+            .order_by(Project.is_archived, Project.updated_at.desc())
+        ).all()
+        return [
+            {
+                "id": project.id,
+                "name": project.name,
+                "slug": project.slug,
+                "owner_id": project.owner_id,
+                "owner_email": str(owner_email or "—"),
+                "is_archived": bool(project.is_archived),
+                "created_at": project.created_at.isoformat() if project.created_at else None,
+                "updated_at": project.updated_at.isoformat() if project.updated_at else None,
+            }
+            for project, owner_email in rows
+        ]
+    finally:
+        session.close()
+
+
+@router.get("/downloads/active")
+async def list_active_downloads(admin: User = Depends(require_admin)):
+    """List cancellable file downloads running in this Cortex process."""
+    from cortex.routes.files import _active_downloads
+
+    active_downloads = list(_active_downloads.items())
+    if not active_downloads:
+        return []
+
+    session = SessionLocal()
+    try:
+        rows = []
+        for download_id, info in active_downloads:
+            if info.get("cancelled"):
+                continue
+            block = session.execute(
+                select(ProjectBlock).where(ProjectBlock.id == info.get("block_id"))
+            ).scalar_one_or_none()
+            if block is None or block.status != "RUNNING":
+                continue
+            payload = json.loads(block.payload_json or "{}")
+            if str(payload.get("status") or "").upper() != "RUNNING":
+                continue
+            owner = session.execute(select(User).where(User.id == block.owner_id)).scalar_one_or_none()
+            project = session.execute(select(Project).where(Project.id == block.project_id)).scalar_one_or_none()
+            rows.append(
+                {
+                    "download_id": download_id,
+                    "project_id": block.project_id,
+                    "source": str(payload.get("source") or "url"),
+                    "owner_email": str(getattr(owner, "email", "—") or "—"),
+                    "project_name": str(getattr(project, "name", "—") or "—"),
+                    "downloaded": int(payload.get("downloaded") or 0),
+                    "total_files": int(payload.get("total_files") or 0),
+                    "current_file": str(payload.get("current_file") or ""),
+                }
+            )
+        return rows
+    finally:
+        session.close()
 
 
 @router.get("/maintenance", response_model=MaintenanceStateOut)

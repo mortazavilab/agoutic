@@ -1,6 +1,6 @@
 # AGOUTIC UI
 
-**Release:** 3.7.4
+**Release:** 3.7.5
 **Status:** Active Development
 
 ## Overview
@@ -17,7 +17,7 @@ The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUT
 - 📄 **Direct file previews and downloads** — `/read-file` and natural-language file reads can open txt, markdown, and HTML workflow reports directly in chat, and assistant-shared project file paths now render download controls in the conversation UI
 - 📁 **Project management** with history, switching, and conversation recall
 - 🏷️ **Project-aware browser title** — the active project name appears in the browser tab alongside the AGOUTIC version
-- 🔑 **Admin panel** for user approval and role management
+- 🔑 **Admin panel** for user approval, role management, active-download cancellation, and cross-user project archive or deletion
 - 📈 **Interactive Plotly charts** — the agent can generate histogram, scatter, line, area, bar, box, violin, strip, heatmap, pie, venn, and upset charts from any DataFrame in the conversation; rendered inline as `AGENT_PLOT` blocks
 - 🧮 **Pending dataframe actions** — saved in-memory dataframe transforms can be reviewed and applied or dismissed directly from chat via `PENDING_ACTION` blocks
 - 📋 **Built-in dataframe + grouped DE help** — sidebar and deterministic help responses include dataframe inspection, transform, plotting, and reconcile-abundance differential-expression examples

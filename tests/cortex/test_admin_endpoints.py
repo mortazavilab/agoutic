@@ -27,7 +27,7 @@ from common.database import Base
 from cortex.models import (
     User, Session as SessionModel,
     Conversation, ConversationMessage,
-    DeletedProjectTokenUsage, DeletedProjectTokenDaily,
+    DeletedProjectTokenUsage, DeletedProjectTokenDaily, Project, ProjectBlock,
 )
 from cortex.app import app
 
@@ -252,6 +252,82 @@ class TestMaintenanceMode:
         resp = admin_client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["maintenance_mode"] is True
+
+
+class TestActiveDownloads:
+    def test_list_active_downloads_as_admin(self, admin_client, test_session_factory):
+        session = test_session_factory()
+        project = Project(id="download-project", name="Download Project", owner_id="admin-uid")
+        block = ProjectBlock(
+            id="download-block",
+            project_id=project.id,
+            owner_id="admin-uid",
+            seq=1,
+            type="DOWNLOAD_TASK",
+            status="RUNNING",
+            payload_json=json.dumps(
+                {
+                    "status": "RUNNING",
+                    "source": "encode",
+                    "downloaded": 1,
+                    "total_files": 2,
+                    "current_file": "ENCFF001.bam",
+                }
+            ),
+        )
+        session.add_all([project, block])
+        session.commit()
+        session.close()
+
+        with patch("cortex.routes.files._active_downloads", {"download-1": {"block_id": block.id, "cancelled": False}}):
+            response = admin_client.get("/admin/downloads/active")
+
+        assert response.status_code == 200
+        assert response.json() == [
+            {
+                "download_id": "download-1",
+                "project_id": "download-project",
+                "source": "encode",
+                "owner_email": "admin@example.com",
+                "project_name": "Download Project",
+                "downloaded": 1,
+                "total_files": 2,
+                "current_file": "ENCFF001.bam",
+            }
+        ]
+
+    def test_list_active_downloads_as_non_admin_is_forbidden(self, non_admin_client):
+        response = non_admin_client.get("/admin/downloads/active")
+
+        assert response.status_code == 403
+
+
+class TestAdminProjects:
+    def test_list_all_projects_includes_other_users_and_archived(self, admin_client, test_session_factory, seed_regular_user):
+        session = test_session_factory()
+        active_project = Project(id="other-active-project", name="Other Active", owner_id="user-uid")
+        archived_project = Project(
+            id="other-archived-project",
+            name="Other Archived",
+            owner_id="user-uid",
+            is_archived=True,
+        )
+        session.add_all([active_project, archived_project])
+        session.commit()
+        session.close()
+
+        response = admin_client.get("/admin/projects")
+
+        assert response.status_code == 200
+        projects = {project["id"]: project for project in response.json()}
+        assert projects["other-active-project"]["owner_email"] == "user@example.com"
+        assert projects["other-active-project"]["is_archived"] is False
+        assert projects["other-archived-project"]["is_archived"] is True
+
+    def test_list_all_projects_as_non_admin_is_forbidden(self, non_admin_client):
+        response = non_admin_client.get("/admin/projects")
+
+        assert response.status_code == 403
 
 
 # ---------------------------------------------------------------------------
