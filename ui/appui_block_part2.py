@@ -803,6 +803,7 @@ def render_block_part2(
     get_job_debug_info,
     _render_plot_block,
     live_job_status_map=None,
+    render_scope="main",
 ):
     handled = False
     if _render_md_with_dataframes is None:
@@ -1889,7 +1890,11 @@ def render_block_part2(
                 # Cancel download button
                 _dl_id = content.get("download_id")
                 if _dl_id:
-                    if st.button("🛑 Cancel Download", type="primary", key=f"cancel_dl_{block_id}"):
+                    if st.button(
+                        "🛑 Cancel Download",
+                        type="primary",
+                        key=f"cancel_dl_{block_id}_{render_scope}",
+                    ):
                         try:
                             _cancel_resp = make_authenticated_request(
                                 "DELETE",

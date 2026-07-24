@@ -13,7 +13,16 @@ async def test_executes_every_multi_experiment_encode_file_call():
     mock_clients = []
     for index, _ in enumerate(accessions, start=1):
         client = AsyncMock()
-        client.call_tool.return_value = {"fastq": [{"accession": f"ENCFF{index:06d}"}]}
+        file_accession = f"ENCFF{index:06d}"
+        client.call_tool.return_value = {
+            "fastq": [{
+                "accession": file_accession,
+                "file_format": "fastq",
+                "file_size": 1_000_000,
+                "status": "released",
+                "href": f"/files/{file_accession}/@@download/{file_accession}.fastq.gz",
+            }]
+        }
         mock_clients.append(client)
 
     calls_by_source = {
@@ -44,3 +53,7 @@ async def test_executes_every_multi_experiment_encode_file_call():
     assert [client.call_tool.await_count for client in mock_clients] == [1, 1, 1]
     assert [client.call_tool.await_args.kwargs["accession"] for client in mock_clients] == list(accessions)
     assert [entry["params"]["accession"] for entry in result.all_results["encode"]] == list(accessions)
+    assert [file["accession"] for file in result.pending_download_files] == [
+        "ENCFF000001", "ENCFF000002", "ENCFF000003",
+    ]
+    assert result.needs_approval is True

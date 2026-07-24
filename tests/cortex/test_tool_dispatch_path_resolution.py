@@ -143,3 +143,35 @@ class TestToolDispatchPathResolution:
         assert analyzer_calls[0]["tool"] == "find_file"
         assert analyzer_calls[0]["params"]["work_dir"] == "/media/backup_disk/agoutic_root/users/elnaz-a/c2c12-reconciled/workflow2"
         assert "run_uuid" not in analyzer_calls[0]["params"]
+
+    def test_multi_encode_auto_calls_survive_stale_tag_flag(self):
+        accessions = ("ENCSR432YKA", "ENCSR476STT", "ENCSR448TJV")
+        auto_calls = [
+            {
+                "source_type": "consortium",
+                "source_key": "encode",
+                "tool": "get_files_by_type",
+                "params": {"accession": accession},
+            }
+            for accession in accessions
+        ]
+
+        calls_by_source = build_calls_by_source(
+            data_call_matches=[],
+            legacy_encode_matches=[],
+            legacy_analysis_matches=[],
+            auto_calls=auto_calls,
+            has_any_tags=True,
+            user_id="u-1",
+            project_id="proj-1",
+            user_message="Download FASTQ files for ENCSR432YKA ENCSR476STT ENCSR448TJV",
+            conversation_history=[],
+            history_blocks=[],
+            project_dir="",
+            active_skill="ENCODE_Search",
+        )
+
+        assert [
+            call["params"]["accession"]
+            for call in calls_by_source["encode"]
+        ] == list(accessions)

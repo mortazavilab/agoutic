@@ -530,7 +530,18 @@ def build_calls_by_source(
     calls_by_source: dict[str, list[dict]] = {}
 
     # --- From auto-generated tags (safety net) ---
-    if not has_any_tags and auto_calls:
+    # A multi-experiment ENCODE file request is generated deterministically.
+    # Preserve that complete batch even when an earlier stage leaves a stale
+    # has_any_tags flag behind; deduplication below handles any overlapping tag.
+    is_encode_file_batch = (
+        len(auto_calls) > 1
+        and all(
+            call.get("source_key") == "encode"
+            and call.get("tool") == "get_files_by_type"
+            for call in auto_calls
+        )
+    )
+    if auto_calls and (not has_any_tags or is_encode_file_batch):
         for ac in auto_calls:
             ac_tool = ac["tool"]
             ac_params = _hydrate_request_placeholders(
@@ -930,7 +941,7 @@ async def execute_tool_calls(
         _mcp_timeout = REMOTE_STAGE_MCP_TIMEOUT if source_key == "launchpad" else 120.0
 
         if source_key == "encode" and _is_encode_file_list_batch(calls):
-            all_results[source_key] = await _execute_encode_file_list_batch(
+            source_results = await _execute_encode_file_list_batch(
                 calls,
                 url=url,
                 timeout=_mcp_timeout,
@@ -938,6 +949,19 @@ async def execute_tool_calls(
                 is_cancelled=is_cancelled,
                 source_label=source_label,
             )
+            for call, source_result in zip(calls, source_results):
+                if "data" not in source_result:
+                    continue
+                _handle_download_chain(
+                    call,
+                    source_result["tool"],
+                    source_result["params"],
+                    source_result["data"],
+                    user_message,
+                    result,
+                    source_key,
+                )
+            all_results[source_key] = source_results
             continue
 
         mcp_client = MCPHttpClient(name=source_key, base_url=url, timeout=_mcp_timeout)
@@ -1426,8 +1450,7 @@ def _handle_download_chain(
     result: ToolExecutionResult,
     source_key: str = "",
 ) -> None:
-    """After get_file_metadata / get_file_download_url, extract the download
-    URL and accumulate files for an approval-gated download."""
+    """Accumulate ENCODE/IGVF files for an approval-gated download."""
     def _filename_from_url(url: str | None) -> str | None:
         if not isinstance(url, str) or not url:
             return None
@@ -1435,10 +1458,6 @@ def _handle_download_chain(
         if not candidate or "." not in candidate:
             return None
         return candidate
-
-    _download_tools = {"get_file_metadata", "get_file_download_url"}
-    if tool_name not in _download_tools or not isinstance(result_data, dict):
-        return
 
     msg_lower = user_message.lower()
     user_wants_download = any(
@@ -1452,58 +1471,87 @@ def _handle_download_chain(
     if not is_download_chain:
         return
 
-    dl_url = None
-    file_acc = params.get("file_accession", "")
-    file_size = result_data.get("file_size")
-    file_fmt = result_data.get("file_format", "")
-    file_name = f"{file_acc}.{file_fmt}" if file_acc and file_fmt else file_acc
-    href = result_data.get("href")
-    cloud = result_data.get("cloud_metadata")
+    def _build_download_file(file_data: dict, fallback_accession: str = "") -> dict | None:
+        file_acc = file_data.get("accession") or fallback_accession
+        file_size = file_data.get("file_size")
+        file_fmt = file_data.get("file_format", "")
+        file_name = f"{file_acc}.{file_fmt}" if file_acc and file_fmt else file_acc
+        href = file_data.get("href")
+        cloud = file_data.get("cloud_metadata")
 
-    # IGVF: get_file_download_url returns a direct "download_url" field
-    if result_data.get("download_url"):
-        dl_url = result_data["download_url"]
-    # IGVF: get_file_metadata returns "href" (relative to api.data.igvf.org)
-    elif source_key == "igvf" and href:
-        if href.startswith("http"):
-            dl_url = href
-        else:
-            dl_url = f"https://api.data.igvf.org{href}"
-    # ENCODE: cloud_metadata or href
-    else:
-        if isinstance(cloud, dict) and cloud.get("url"):
+        if file_data.get("download_url"):
+            dl_url = file_data["download_url"]
+        elif source_key == "igvf" and href:
+            dl_url = href if href.startswith("http") else f"https://api.data.igvf.org{href}"
+        elif isinstance(cloud, dict) and cloud.get("url"):
             dl_url = cloud["url"]
         elif href:
             dl_url = f"https://www.encodeproject.org{href}"
+        else:
+            return None
 
-    if not dl_url:
-        return
-
-    filename_candidates = [
-        _filename_from_url(href),
-        _filename_from_url(result_data.get("download_url")),
-        _filename_from_url(cloud.get("url") if isinstance(cloud, dict) else None),
-        _filename_from_url(dl_url),
-    ]
-    for candidate in filename_candidates:
-        if candidate and file_acc and candidate.upper().startswith(file_acc.upper()):
-            file_name = candidate
-            break
-    else:
+        filename_candidates = [
+            _filename_from_url(href),
+            _filename_from_url(file_data.get("download_url")),
+            _filename_from_url(cloud.get("url") if isinstance(cloud, dict) else None),
+            _filename_from_url(dl_url),
+        ]
         for candidate in filename_candidates:
-            if candidate and candidate.count(".") > file_name.count("."):
+            if candidate and file_acc and candidate.upper().startswith(file_acc.upper()):
                 file_name = candidate
                 break
+        else:
+            for candidate in filename_candidates:
+                if candidate and candidate.count(".") > file_name.count("."):
+                    file_name = candidate
+                    break
 
-    dl_file_info = {
-        "url": dl_url,
-        "filename": file_name,
-        "size_bytes": file_size,
-        "accession": file_acc,
-    }
+        return {
+            "url": dl_url,
+            "filename": file_name,
+            "size_bytes": file_size,
+            "accession": file_acc,
+        }
+
+    if tool_name == "get_files_by_type" and isinstance(result_data, dict):
+        requested_types = {
+            file_type.lower()
+            for file_type in result_data
+            if file_type.lower().split()[0] in msg_lower
+        }
+        existing_accessions = {
+            str(file_info.get("accession") or "").upper()
+            for file_info in result.pending_download_files
+        }
+        for file_type in requested_types:
+            for file_data in result_data.get(file_type, []):
+                if not isinstance(file_data, dict):
+                    continue
+                if str(file_data.get("status") or "").lower() != "released":
+                    continue
+                download_file = _build_download_file(file_data)
+                if not download_file or download_file["accession"].upper() in existing_accessions:
+                    continue
+                result.pending_download_files.append(download_file)
+                existing_accessions.add(download_file["accession"].upper())
+        if result.pending_download_files:
+            result.active_skill = "download_files"
+            result.needs_approval = True
+            result.clean_markdown = _build_download_plan(result.pending_download_files)
+        return
+
+    _download_tools = {"get_file_metadata", "get_file_download_url"}
+    if tool_name not in _download_tools or not isinstance(result_data, dict):
+        return
+
+    dl_file_info = _build_download_file(result_data, params.get("file_accession", ""))
+    if not dl_file_info:
+        return
+
     result.pending_download_files.append(dl_file_info)
     logger.info("Download chain: resolved URL from file metadata",
-                file_accession=file_acc, url=dl_url, size_bytes=file_size,
+                file_accession=dl_file_info["accession"], url=dl_file_info["url"],
+                size_bytes=dl_file_info["size_bytes"],
                 source=source_key)
 
     result.active_skill = "download_files"

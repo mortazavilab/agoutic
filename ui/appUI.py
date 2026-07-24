@@ -921,7 +921,12 @@ def _render_workflow_plot_payload(payload: dict, block_id: str, step_suffix: str
     return _render_workflow_plot_payload_impl(payload, block_id, step_suffix, PLOTLY_TEMPLATE)
 
 
-def render_block(block, expected_project_id: str = "", live_job_status_map: dict | None = None):
+def render_block(
+    block,
+    expected_project_id: str = "",
+    live_job_status_map: dict | None = None,
+    render_scope: str = "main",
+):
     """Render a single block.
 
     If expected_project_id is provided, silently skip blocks that belong
@@ -1093,6 +1098,7 @@ def render_block(block, expected_project_id: str = "", live_job_status_map: dict
         _render_embedded_dataframes=_render_embedded_dataframes,
         _render_step_payload=_render_step_payload,
         _job_status_updated_at=_job_status_updated_at,
+        render_scope=render_scope,
         _run_status_label=_run_status_label,
         _format_timestamp=_format_timestamp,
         _workflow_label_from_path=_workflow_label_from_path,
@@ -1177,6 +1183,7 @@ def _render_live_block_fragment(block: dict, expected_project_id: str = ""):
             live_block,
             expected_project_id=expected_project_id,
             live_job_status_map=live_job_status_map,
+            render_scope="live",
         )
 
 
