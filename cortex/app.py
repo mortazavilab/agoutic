@@ -534,12 +534,30 @@ async def _proxy_remote_profile_request(
 @app.get("/remote-profiles")
 async def list_remote_profiles(request: Request):
     user = request.state.user
-    return await _proxy_remote_profile_request(
+    include_all = user.role == "admin"
+    response = await _proxy_remote_profile_request(
         "GET",
         "/ssh-profiles",
         user_id=user.id,
         timeout=10.0,
+        include_user_id_param=not include_all,
     )
+    if not include_all:
+        return response
+
+    profiles = json.loads(response.body)
+    owner_ids = {str(profile.get("user_id") or "") for profile in profiles}
+    session = SessionLocal()
+    try:
+        owner_emails = {
+            owner.id: owner.email
+            for owner in session.execute(select(User).where(User.id.in_(owner_ids))).scalars()
+        } if owner_ids else {}
+    finally:
+        session.close()
+    for profile in profiles:
+        profile["owner_email"] = str(owner_emails.get(profile.get("user_id")) or "—")
+    return JSONResponse(status_code=response.status_code, content=profiles)
 
 
 @app.post("/remote-profiles")

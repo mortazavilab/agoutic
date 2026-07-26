@@ -122,6 +122,33 @@ class TestRemoteProfileProxy:
             )
         ]
 
+    def test_admin_lists_profiles_for_all_users(self, client, session_factory, seed_data):
+        session = session_factory()
+        admin = User(id="admin-proxy", email="admin@example.com", role="admin", username="admin", is_active=True)
+        session.add(admin)
+        session.add(
+            SessionModel(
+                id="admin-proxy-session",
+                user_id=admin.id,
+                is_valid=True,
+                expires_at=datetime.datetime(2099, 1, 1),
+            )
+        )
+        session.commit()
+        session.close()
+        client.cookies.set("session", "admin-proxy-session")
+        calls = []
+        response = _FakeResponse(200, [{"id": "prof-1", "user_id": seed_data["user_id"], "ssh_host": "host"}])
+
+        with patch("cortex.app._launchpad_rest_base_url", return_value="http://launchpad.test"), \
+             patch("cortex.app._launchpad_internal_headers", return_value={"X-Internal-Secret": "secret"}), \
+             patch("cortex.app.httpx.AsyncClient", side_effect=lambda timeout: _FakeAsyncClient(calls, response)):
+            resp = client.get("/remote-profiles")
+
+        assert resp.status_code == 200
+        assert resp.json() == [{"id": "prof-1", "user_id": seed_data["user_id"], "ssh_host": "host", "owner_email": "proxy@example.com"}]
+        assert calls[0][2]["params"] is None
+
     def test_create_profile_injects_authenticated_user(self, client):
         calls = []
         response = _FakeResponse(201, {"id": "prof-2", "user_id": "u-proxy", "ssh_host": "gpu1"})

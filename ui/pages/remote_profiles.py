@@ -28,6 +28,7 @@ st.set_page_config(page_title="Remote Profiles", page_icon="🔌", layout="wide"
 
 # Require authentication
 user = require_auth(API_URL)
+is_admin = str((user or {}).get("role") or "").strip().lower() == "admin"
 
 section_header("Remote Connection Profiles", "Manage SSH profiles for remote HPC/SLURM execution", icon="🔌")
 st.caption("Remote base path may use placeholders like {ssh_username}, {project_slug}, {sample_name}, and {workflow_slug}.")
@@ -220,6 +221,9 @@ if not profiles:
     empty_state("No SSH profiles yet", "Create one above to get started.", icon="🔌")
     st.stop()
 
+if is_admin:
+    st.caption("Showing profiles for all users. Profiles owned by other users are read-only here.")
+
 # Display profiles as a table
 rows = []
 for p in profiles:
@@ -227,25 +231,34 @@ for p in profiles:
         "Nickname": p.get("nickname", "—"),
         "Host": p.get("ssh_host", p.get("host", "—")),
         "Username": p.get("ssh_username", p.get("username", "—")),
+        "Owner": p.get("owner_email", "You") if is_admin else None,
         "Port": p.get("ssh_port", p.get("port", 22)),
         "Auth Method": p.get("auth_method", "—"),
         "Enabled": "✅" if p.get("is_enabled", True) else "❌",
         "Created": _fmt_datetime(p.get("created_at", "")),
     })
 
-st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+profiles_df = pd.DataFrame(rows)
+if not is_admin:
+    profiles_df = profiles_df.drop(columns=["Owner"])
+st.dataframe(profiles_df, width="stretch", hide_index=True)
 
 # ── Per-profile actions ──────────────────────────────────────────────
 
 for idx, profile in enumerate(profiles):
     pid = profile.get("id", "")
     nick = profile.get("nickname", f"Profile {idx}")
+    is_foreign_profile = is_admin and profile.get("user_id") != user.get("id")
     test_result: dict | None = None
     test_error: str | None = None
     test_warning: str | None = None
 
     with st.container():
         st.markdown(f"---\n**{nick}** (`{profile.get('ssh_host', profile.get('host', ''))}`)")
+
+        if is_foreign_profile:
+            st.caption(f"Owned by {profile.get('owner_email', 'another user')}. Management controls are available only to the owner.")
+            continue
 
         act_col1, act_col2, act_col3 = st.columns(3)
 

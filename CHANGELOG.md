@@ -2,7 +2,7 @@
 
 ### Features
 
-- **Expanded administrator operations:** Admins can cancel other users' active remote result-sync and ENCODE downloads, list all projects including archived projects, and archive or permanently delete projects through the Admin UI.
+- **Expanded administrator operations:** Admins can cancel other users' active remote result-sync and ENCODE downloads, list all projects including archived projects, archive or permanently delete projects, and view all users' SSH connection profiles (read-only for profiles owned by others) through the Admin UI.
 
 - **Automatically discover complete reference folders:** At service startup, AGOUTIC now registers new `$AGOUTIC_DATA/references/<name>/` directories containing exactly one FASTA-family file and one GTF-family file. Discovered references appear in the UI catalog and use the normal remote staging flow; explicit catalog entries remain authoritative, while incomplete or ambiguous folders are skipped.
 

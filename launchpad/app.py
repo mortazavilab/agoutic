@@ -3574,12 +3574,13 @@ async def create_ssh_profile(req: SSHProfileCreate):
 
 
 @app.get("/ssh-profiles", response_model=list[SSHProfileOut])
-async def list_ssh_profiles(user_id: str = Query(..., min_length=1)):
-    """List SSH profiles for a user."""
+async def list_ssh_profiles(user_id: str | None = Query(None, min_length=1)):
+    """List SSH profiles, optionally filtered to one user."""
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(SSHProfile).where(SSHProfile.user_id == user_id).order_by(SSHProfile.created_at.desc())
-        )
+        query = select(SSHProfile).order_by(SSHProfile.created_at.desc())
+        if user_id:
+            query = query.where(SSHProfile.user_id == user_id)
+        result = await session.execute(query)
         profiles = result.scalars().all()
         return [_profile_to_out(p) for p in profiles]
 
