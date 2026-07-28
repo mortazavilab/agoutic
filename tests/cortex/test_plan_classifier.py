@@ -146,6 +146,13 @@ class TestDetectPlanType:
         assert _detect_plan_type("analyze my local sample") == "run_workflow"
 
     @patch("cortex.plan_classifier._detect_plan_type_from_manifests")
+    def test_dogme_batch_detected_from_multiple_explicit_sample_paths(self, mock_manifest):
+        mock_manifest.return_value = None
+        assert _detect_plan_type(
+            "Run DOGME DNA on tumor: /data/tumor and normal=/data/normal with parallelism 2"
+        ) == "run_dogme_batch"
+
+    @patch("cortex.plan_classifier._detect_plan_type_from_manifests")
     def test_enrichment_detected(self, mock_manifest):
         mock_manifest.return_value = None
         assert _detect_plan_type("run a GO enrichment analysis") == "run_enrichment"

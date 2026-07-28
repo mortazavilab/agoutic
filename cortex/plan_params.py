@@ -74,6 +74,10 @@ _GENOME_ALIAS_RE = re.compile(
     r"\b(" + "|".join(sorted((re.escape(alias) for alias in GENOME_ALIASES), key=len, reverse=True)) + r")\b",
     re.IGNORECASE,
 ) if GENOME_ALIASES else re.compile(r"$^")
+_DOGME_BATCH_SAMPLE_RE = re.compile(
+    r"\b(?P<sample_name>[A-Za-z0-9_-]+)\s*(?:=|:)\s*(?P<input_directory>(?:/|~|\.)[^\s,;]+)",
+    re.IGNORECASE,
+)
 _PORE_C_SAMPLE_SHEET_RE = re.compile(
     r"(?:sample[_ ]sheet|samplesheet)\s+(?:at|in|from|path)?\s*[=:]?\s*(?P<path>\S+\.(?:csv|tsv|txt))",
     re.IGNORECASE,
@@ -641,6 +645,47 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
                          project_dir: str = "") -> dict:
     """Extract relevant parameters from the user message and conversation state."""
     params: dict = {"goal": message}
+
+    if plan_type == "run_dogme_batch":
+        batch_samples = [
+            {
+                "sample_id": str(index + 1),
+                "sample_name": match.group("sample_name"),
+                "input_directory": match.group("input_directory").rstrip(".,;:!?"),
+            }
+            for index, match in enumerate(_DOGME_BATCH_SAMPLE_RE.finditer(message))
+        ]
+        shared_params: dict = {}
+        mode_match = re.search(r"\b(DNA|RNA|cDNA)\b", message, re.IGNORECASE)
+        if mode_match:
+            shared_params["mode"] = mode_match.group(1).upper()
+        fastq_inputs = [
+            sample["input_directory"].lower().endswith((".fastq", ".fastq.gz", ".fq", ".fq.gz"))
+            for sample in batch_samples
+        ]
+        if any(fastq_inputs):
+            shared_params["input_type"] = "fastq"
+            if shared_params.get("mode") == "CDNA":
+                shared_params["entry_point"] = "fastqCDNA"
+        genome_matches = [
+            GENOME_ALIASES.get(match.group(1).lower(), match.group(1))
+            for match in _GENOME_ALIAS_RE.finditer(message)
+        ]
+        if genome_matches:
+            shared_params["reference_genome"] = list(dict.fromkeys(genome_matches))
+        if re.search(r"\b(slurm|sbatch|cluster|remote)\b", message, re.IGNORECASE):
+            shared_params["execution_mode"] = "slurm"
+
+        parallelism_match = re.search(
+            r"\b(?:parallelism|max(?:imum)?\s+parallel|parallel)\s*(?:=|:|of)?\s*(\d+)\b",
+            message,
+            re.IGNORECASE,
+        )
+        if parallelism_match:
+            params["requested_max_parallel"] = int(parallelism_match.group(1))
+        params["batch_samples"] = batch_samples
+        params["shared_params"] = shared_params
+        return params
 
     if plan_type == "compare_samples":
         # Try to extract sample names from the message

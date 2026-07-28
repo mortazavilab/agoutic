@@ -59,6 +59,7 @@ from cortex.plan_templates import (  # noqa: F401 — re-exported
     _template_parse_plot_interpret,
     _template_reconcile_bams,
     _template_remote_stage_workflow,
+    _template_run_dogme_batch,
     _template_run_de_pipeline,
     _template_run_enrichment,
     _template_run_wf_pore_c,
@@ -188,6 +189,8 @@ def _deterministic_template_for_plan_type(plan_type: str, params: dict) -> dict 
         return _template_search_compare_to_local(params)
     if plan_type == "run_workflow":
         return _template_run_workflow(params)
+    if plan_type == "run_dogme_batch":
+        return _template_run_dogme_batch(params)
     if plan_type == "run_wf_pore_c":
         return _template_run_wf_pore_c(params)
     if plan_type == "run_de_pipeline":

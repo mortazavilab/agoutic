@@ -58,6 +58,41 @@ def _plan_payload(*, sample_name: str, status: str = "PENDING") -> dict:
 # ------------------------------------------------------------------
 
 class TestWorkflowTaskIsolation:
+    def test_dogme_batch_projects_parent_and_sample_children(self, session_factory):
+        session = session_factory()
+        project_id = "proj-batch-tasks"
+        _create_block_internal(
+            session,
+            project_id,
+            "APPROVAL_GATE",
+            {
+                "batch_id": "batch-tasks",
+                "batch_status": "COMPLETED_WITH_FAILURES",
+                "requested_max_parallel": 2,
+                "batch_samples": [
+                    {"sample_id": "1", "sample_name": "tumor", "input_directory": "/data/tumor", "status": "COMPLETED", "run_uuid": "run-a"},
+                    {"sample_id": "2", "sample_name": "normal", "input_directory": "/data/normal", "status": "FAILED", "error": "Launchpad failed"},
+                ],
+            },
+            status="APPROVED",
+            owner_id="u1",
+        )
+
+        tasks = sync_project_tasks(session, project_id)
+        tasks_by_source = {task.source_key: task for task in tasks}
+        parent = next(task for task in tasks if task.kind == "dogme_batch")
+        tumor = next(task for task in tasks if task.source_key.endswith(":1"))
+        normal = next(task for task in tasks if task.source_key.endswith(":2"))
+
+        assert parent.status == "FAILED"
+        assert tumor.parent_task_id == parent.id
+        assert tumor.status == "COMPLETED"
+        assert normal.parent_task_id == parent.id
+        assert normal.status == "FAILED"
+        assert json.loads(normal.metadata_json)["error"] == "Launchpad failed"
+        assert len(tasks_by_source) == 3
+        session.close()
+
     def test_only_active_workflow_tasks_shown(self, session_factory):
         """When two workflows exist (one COMPLETED, one PENDING), sync
         returns only the active (PENDING) workflow's tasks."""

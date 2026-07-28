@@ -1,3 +1,16 @@
+## [Unreleased]
+
+### Features
+
+- **Added parallel multi-sample DOGME batches:** Users can submit two or more explicit `sample_name: /path` or `sample_name=/path` entries in one Dogme request. A batch shares its assay mode, reference, execution target, and resource settings, presents one approval gate, and launches isolated per-sample runs with the requested submission parallelism while respecting the server-wide execution capacity.
+- **Added cDNA FASTQ batch support:** Explicit batches of `.fastq`, `.fastq.gz`, `.fq`, or `.fq.gz` inputs now configure each sample for Dogme's `fastqCDNA` entry point. Each batch entry remains one FASTQ input and receives its own run/output directory.
+- **Added batch lifecycle visibility and controls:** Task Center now projects a DOGME batch parent with per-sample child statuses, including partial completion. Users can cancel a batch through `POST /dogme-batches/{gate_block_id}/cancel`; completed outputs are preserved while pending and active siblings are cancelled.
+- **Added failed-sample batch retries:** `POST /dogme-batches/{gate_block_id}/retry` creates a linked batch containing only failed or cancelled samples. The default review-first mode creates an editable approval gate; `?review_before_submit=false` reuses the original shared settings and begins submission directly. Original runs and outputs are retained for auditability.
+
+### Tests
+
+- **Added focused DOGME batch coverage:** Tests cover request detection, sample/path validation, cDNA FASTQ parameter extraction, one approval payload, concurrent submission coordination, terminal status aggregation, task projection, cancellation, and retry cloning.
+
 ## [3.7.5] - 2026-07-24
 
 ### Features

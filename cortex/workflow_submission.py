@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shlex
+import uuid
 from pathlib import Path
 
 from sqlalchemy import select
@@ -11,6 +12,7 @@ from common.logging_config import get_logger
 from cortex.config import AGOUTIC_DATA, default_haplotype_vcf_for_reference, get_service_url
 from cortex.db import SessionLocal
 from cortex.db_helpers import _create_block_internal
+from cortex.job_parameters import normalize_dogme_batch_params
 from cortex.llm_validators import get_block_payload
 from cortex.models import Project, ProjectBlock, User
 from cortex.remote_orchestration import (
@@ -37,12 +39,300 @@ from cortex.remote_orchestration import (
 )
 import cortex.job_parameters as job_parameters
 import cortex.job_polling as job_polling
-from launchpad.config import resolve_dogme_accuracy
+from launchpad.config import MAX_CONCURRENT_JOBS, resolve_dogme_accuracy
 
 REMOTE_STAGE_MCP_TIMEOUT = float(os.getenv("LAUNCHPAD_STAGE_TIMEOUT", "3600"))
 SCRIPT_SUBMISSION_TIMEOUT_BUFFER_SECONDS = 30.0
 
 logger = get_logger(__name__)
+
+
+def _record_batch_sample_submission(
+    session,
+    *,
+    batch_parent_gate_id: str | None,
+    batch_sample_id: str | None,
+    run_uuid: str | None,
+    execution_block_id: str | None,
+    status: str,
+    error: str | None = None,
+) -> None:
+    if not batch_parent_gate_id or not batch_sample_id:
+        return
+
+    batch_gate = session.query(ProjectBlock).filter(ProjectBlock.id == batch_parent_gate_id).first()
+    if batch_gate is None:
+        return
+
+    payload = get_block_payload(batch_gate)
+    samples = payload.get("batch_samples")
+    if not isinstance(samples, list):
+        return
+
+    for sample in samples:
+        if not isinstance(sample, dict) or str(sample.get("sample_id")) != str(batch_sample_id):
+            continue
+        sample["status"] = status
+        if run_uuid:
+            sample["run_uuid"] = run_uuid
+        if execution_block_id:
+            sample["execution_block_id"] = execution_block_id
+        if error:
+            sample["error"] = error
+        break
+
+    payload["batch_samples"] = samples
+    payload["batch_status"] = "RUNNING"
+    batch_gate.payload_json = json.dumps(payload)
+    session.commit()
+
+
+async def submit_dogme_batch_after_approval(project_id: str, gate_block_id: str) -> None:
+    """Submit approved DOGME batch entries through the single-job pipeline."""
+    session = SessionLocal()
+    try:
+        batch_gate = session.query(ProjectBlock).filter(ProjectBlock.id == gate_block_id).first()
+        if batch_gate is None:
+            logger.error("Batch gate block not found", gate_block_id=gate_block_id)
+            return
+
+        gate_payload = get_block_payload(batch_gate)
+        raw_params = gate_payload.get("edited_params") or gate_payload.get("extracted_params")
+        normalized, errors = normalize_dogme_batch_params(raw_params)
+        if errors:
+            gate_payload["batch_validation_errors"] = errors
+            gate_payload["batch_status"] = "FOLLOW_UP"
+            batch_gate.payload_json = json.dumps(gate_payload)
+            session.commit()
+            logger.warning("Batch submission blocked by validation", gate_block_id=gate_block_id, errors=errors)
+            return
+
+        batch_id = normalized["batch_id"] or gate_block_id
+        shared_params = normalized["shared_params"]
+        batch_samples = normalized["batch_samples"]
+        requested_max_parallel = normalized["requested_max_parallel"] or MAX_CONCURRENT_JOBS
+        gate_payload.update({
+            "batch_id": batch_id,
+            "batch_samples": batch_samples,
+            "shared_params": shared_params,
+            "requested_max_parallel": requested_max_parallel,
+            "batch_status": "RUNNING",
+        })
+
+        child_gate_ids: list[str] = []
+        for sample in batch_samples:
+            if sample.get("run_uuid") or sample.get("status") not in {"PENDING", "VALIDATING", "FAILED"}:
+                continue
+            sample_params = {
+                **shared_params,
+                "sample_name": sample["sample_name"],
+                "input_directory": sample["input_directory"],
+                "batch_id": batch_id,
+                "batch_sample_id": sample["sample_id"],
+                "batch_parent_gate_id": batch_gate.id,
+            }
+            child_block = _create_block_internal(
+                session,
+                project_id,
+                "BATCH_JOB_SUBMISSION",
+                {
+                    "gate_action": "job",
+                    "extracted_params": sample_params,
+                    "batch_id": batch_id,
+                    "batch_sample_id": sample["sample_id"],
+                    "batch_parent_gate_id": batch_gate.id,
+                    "model": gate_payload.get("model", "default"),
+                },
+                status="APPROVED",
+                owner_id=batch_gate.owner_id,
+            )
+            sample["status"] = "SUBMITTING"
+            sample["submission_block_id"] = child_block.id
+            child_gate_ids.append(child_block.id)
+
+        gate_payload["batch_samples"] = batch_samples
+        batch_gate.payload_json = json.dumps(gate_payload)
+        session.commit()
+
+        semaphore = asyncio.Semaphore(requested_max_parallel)
+
+        async def submit_one(child_gate_id: str) -> None:
+            async with semaphore:
+                await submit_job_after_approval(project_id, child_gate_id)
+
+        await asyncio.gather(*(submit_one(child_gate_id) for child_gate_id in child_gate_ids))
+    finally:
+        session.close()
+
+
+async def cancel_dogme_batch(project_id: str, gate_block_id: str) -> dict:
+    """Cancel a DOGME batch while preserving completed sample outputs."""
+    session = SessionLocal()
+    try:
+        batch_gate = session.query(ProjectBlock).filter(ProjectBlock.id == gate_block_id).first()
+        if batch_gate is None or batch_gate.project_id != project_id:
+            raise ValueError("DOGME batch was not found.")
+
+        payload = get_block_payload(batch_gate)
+        batch_samples = payload.get("batch_samples")
+        if not isinstance(batch_samples, list):
+            raise ValueError("The approval gate does not contain a DOGME batch.")
+
+        active_samples: list[dict] = []
+        for sample in batch_samples:
+            if not isinstance(sample, dict):
+                continue
+            status = str(sample.get("status") or "PENDING").upper()
+            if status in {"COMPLETED", "FAILED", "CANCELLED", "SKIPPED"}:
+                continue
+            if sample.get("run_uuid"):
+                sample["status"] = "CANCELLING"
+                active_samples.append(sample)
+            else:
+                sample["status"] = "CANCELLED"
+
+        payload["cancellation_requested"] = True
+        payload["batch_samples"] = batch_samples
+        payload["batch_status"] = "RUNNING" if active_samples else "CANCELLED"
+        batch_gate.payload_json = json.dumps(payload)
+        session.commit()
+
+        async def cancel_one(sample: dict) -> tuple[dict, dict | Exception]:
+            try:
+                client = MCPHttpClient(name="launchpad", base_url=get_service_url("launchpad"))
+                await client.connect()
+                try:
+                    result = await client.call_tool("cancel_job", run_uuid=sample["run_uuid"])
+                finally:
+                    await client.disconnect()
+                return sample, result if isinstance(result, dict) else {}
+            except Exception as exc:
+                return sample, exc
+
+        results = await asyncio.gather(*(cancel_one(sample) for sample in active_samples))
+        for sample, result in results:
+            if isinstance(result, Exception):
+                sample["status"] = "FAILED"
+                sample["error"] = f"Cancellation failed: {result}"
+            else:
+                sample["status"] = "CANCELLED"
+                sample["error"] = None
+
+        statuses = [str(sample.get("status") or "PENDING").upper() for sample in batch_samples if isinstance(sample, dict)]
+        if statuses and all(status == "CANCELLED" for status in statuses):
+            payload["batch_status"] = "CANCELLED"
+        elif statuses and all(status in {"COMPLETED", "FAILED", "CANCELLED", "SKIPPED"} for status in statuses):
+            payload["batch_status"] = "COMPLETED_WITH_FAILURES"
+        else:
+            payload["batch_status"] = "RUNNING"
+        payload["batch_samples"] = batch_samples
+        batch_gate.payload_json = json.dumps(payload)
+        session.commit()
+
+        from cortex.task_service import sync_project_tasks
+
+        sync_project_tasks(session, project_id)
+        return {
+            "batch_id": payload.get("batch_id") or gate_block_id,
+            "batch_status": payload["batch_status"],
+            "cancelled_samples": sum(sample.get("status") == "CANCELLED" for sample in batch_samples if isinstance(sample, dict)),
+        }
+    finally:
+        session.close()
+
+
+async def retry_dogme_batch(
+    project_id: str,
+    gate_block_id: str,
+    *,
+    review_before_submit: bool = True,
+) -> dict:
+    """Clone terminal failed or cancelled samples into a linked retry batch."""
+    session = SessionLocal()
+    try:
+        source_gate = session.query(ProjectBlock).filter(ProjectBlock.id == gate_block_id).first()
+        if source_gate is None or source_gate.project_id != project_id:
+            raise ValueError("DOGME batch was not found.")
+
+        source_payload = get_block_payload(source_gate)
+        source_samples = source_payload.get("batch_samples")
+        if not isinstance(source_samples, list):
+            raise ValueError("The approval gate does not contain a DOGME batch.")
+
+        terminal_statuses = {"COMPLETED", "FAILED", "CANCELLED", "SKIPPED"}
+        statuses = [str(sample.get("status") or "PENDING").upper() for sample in source_samples if isinstance(sample, dict)]
+        if not statuses or not all(status in terminal_statuses for status in statuses):
+            raise ValueError("The DOGME batch must finish before failed samples can be retried.")
+
+        retry_samples = []
+        retry_attempt = int(source_payload.get("retry_attempt") or 0) + 1
+        for sample in source_samples:
+            if not isinstance(sample, dict):
+                continue
+            source_status = str(sample.get("status") or "PENDING").upper()
+            if source_status not in {"FAILED", "CANCELLED"}:
+                continue
+            source_sample_id = str(sample.get("sample_id") or len(retry_samples) + 1)
+            retry_samples.append({
+                "sample_id": f"{source_sample_id}-retry-{retry_attempt}",
+                "sample_name": sample.get("sample_name"),
+                "input_directory": sample.get("input_directory"),
+                "status": "PENDING",
+                "retry_of_sample_id": source_sample_id,
+            })
+
+        if not retry_samples:
+            raise ValueError("The DOGME batch has no failed or cancelled samples to retry.")
+
+        source_batch_id = source_payload.get("batch_id") or source_gate.id
+        retry_batch_id = uuid.uuid4().hex
+        shared_params = dict(source_payload.get("shared_params") or {})
+        retry_payload = {
+            "label": f"Retry DOGME for {len(retry_samples)} failed sample{'s' if len(retry_samples) != 1 else ''}?",
+            "extracted_params": {
+                "batch_id": retry_batch_id,
+                "batch_samples": retry_samples,
+                "shared_params": shared_params,
+                "requested_max_parallel": source_payload.get("requested_max_parallel"),
+                "retry_of_batch_id": source_batch_id,
+            },
+            "batch_id": retry_batch_id,
+            "batch_samples": retry_samples,
+            "shared_params": shared_params,
+            "requested_max_parallel": source_payload.get("requested_max_parallel"),
+            "retry_of_batch_id": source_batch_id,
+            "retry_attempt": retry_attempt,
+            "batch_status": "PENDING",
+            "gate_action": "job",
+            "attempt_number": 1,
+            "rejection_history": [],
+            "skill": source_payload.get("skill") or "analyze_local_sample",
+            "model": source_payload.get("model", "default"),
+        }
+        retry_gate = _create_block_internal(
+            session,
+            project_id,
+            "APPROVAL_GATE",
+            retry_payload,
+            status="PENDING" if review_before_submit else "APPROVED",
+            owner_id=source_gate.owner_id,
+        )
+
+        source_payload.setdefault("retry_batch_gate_ids", []).append(retry_gate.id)
+        source_gate.payload_json = json.dumps(source_payload)
+        session.commit()
+
+        if not review_before_submit:
+            asyncio.create_task(submit_dogme_batch_after_approval(project_id, retry_gate.id))
+
+        return {
+            "status": "approval_required" if review_before_submit else "submitting",
+            "batch_id": retry_batch_id,
+            "block_id": retry_gate.id,
+            "retry_count": len(retry_samples),
+        }
+    finally:
+        session.close()
 
 
 def _is_reconcile_script_submission(job_data: dict) -> bool:
@@ -483,6 +773,10 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 owner_id=owner_id
             )
             logger.error("Failed to extract parameters", project_id=project_id)
+            return
+
+        if isinstance(job_params, dict) and job_params.get("batch_samples"):
+            await submit_dogme_batch_after_approval(project_id, gate_block_id)
             return
 
         gate_action = gate_payload.get("gate_action") or job_params.get("gate_action") or "job"
@@ -1129,6 +1423,9 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                     "sample_name": job_data["sample_name"],
                     "mode": job_data["mode"],
                     "run_type": run_type,
+                    "batch_id": job_params.get("batch_id"),
+                    "batch_sample_id": job_params.get("batch_sample_id"),
+                    "batch_parent_gate_id": job_params.get("batch_parent_gate_id"),
                     "workflow_plan_block_id": workflow_block.id if workflow_block is not None else None,
                     "model": _gate_model,
                     "status": "SUBMITTED",
@@ -1145,6 +1442,15 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 },
                 status="RUNNING",
                 owner_id=owner_id
+            )
+
+            _record_batch_sample_submission(
+                session,
+                batch_parent_gate_id=job_params.get("batch_parent_gate_id"),
+                batch_sample_id=job_params.get("batch_sample_id"),
+                run_uuid=run_uuid,
+                execution_block_id=job_block.id,
+                status="QUEUED",
             )
 
             if workflow_block is not None:

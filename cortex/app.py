@@ -2202,7 +2202,12 @@ async def update_block(
             if gate_payload.get("gate_action") == "download":
                 asyncio.create_task(download_after_approval(block.project_id, block_id))
             else:
-                asyncio.create_task(workflow_submission.submit_job_after_approval(block.project_id, block_id))
+                submission = (
+                    workflow_submission.submit_dogme_batch_after_approval
+                    if isinstance(extracted_params, dict) and extracted_params.get("batch_samples")
+                    else workflow_submission.submit_job_after_approval
+                )
+                asyncio.create_task(submission(block.project_id, block_id))
             # If this gate belongs to a plan, resume plan execution after the job
             if block.parent_id:
                 _plan_block = _find_workflow_plan(session, block.project_id,
@@ -2254,6 +2259,53 @@ async def update_block(
             )
         
         return row_to_dict(block)
+    finally:
+        session.close()
+
+
+@app.post("/dogme-batches/{gate_block_id}/cancel")
+async def cancel_dogme_batch_endpoint(
+    request: Request,
+    gate_block_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    session = SessionLocal()
+    try:
+        gate_block = session.execute(
+            select(ProjectBlock).where(ProjectBlock.id == gate_block_id)
+        ).scalar_one_or_none()
+        if gate_block is None:
+            raise HTTPException(status_code=404, detail="DOGME batch not found")
+        require_project_access(gate_block.project_id, user, min_role="editor")
+        return await workflow_submission.cancel_dogme_batch(gate_block.project_id, gate_block_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
+@app.post("/dogme-batches/{gate_block_id}/retry")
+async def retry_dogme_batch_endpoint(
+    request: Request,
+    gate_block_id: str = FastAPIPath(..., min_length=1),
+    review_before_submit: bool = True,
+):
+    user = request.state.user
+    session = SessionLocal()
+    try:
+        gate_block = session.execute(
+            select(ProjectBlock).where(ProjectBlock.id == gate_block_id)
+        ).scalar_one_or_none()
+        if gate_block is None:
+            raise HTTPException(status_code=404, detail="DOGME batch not found")
+        require_project_access(gate_block.project_id, user, min_role="editor")
+        return await workflow_submission.retry_dogme_batch(
+            gate_block.project_id,
+            gate_block_id,
+            review_before_submit=review_before_submit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         session.close()
 

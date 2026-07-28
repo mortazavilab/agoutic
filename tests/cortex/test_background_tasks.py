@@ -71,6 +71,7 @@ from cortex.app import (
 )
 from cortex.job_parameters import extract_job_parameters_from_conversation
 from cortex.job_polling import (
+    _update_parent_batch_status,
     poll_staging_status,
     poll_job_status,
     _auto_trigger_analysis,
@@ -78,7 +79,14 @@ from cortex.job_polling import (
     _prefer_richer_job_status,
     _resolved_job_work_directory,
 )
-from cortex.workflow_submission import _build_haplotype_script_args, _build_script_submission_payload, submit_job_after_approval
+from cortex.workflow_submission import (
+    _build_haplotype_script_args,
+    _build_script_submission_payload,
+    cancel_dogme_batch,
+    retry_dogme_batch,
+    submit_dogme_batch_after_approval,
+    submit_job_after_approval,
+)
 from cortex.planner import _template_remote_stage_workflow
 from cortex.remote_orchestration import (
     _find_remote_staged_sample,
@@ -718,6 +726,118 @@ class TestSubmitJobAfterApproval:
         assert payload["work_directory"] == "/work/abc-123"
         assert payload["status"] == "SUBMITTED"
         assert job_blocks[0].status == "RUNNING"
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_batch_submission_creates_one_internal_submission_per_sample(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "extracted_params": {
+                "batch_id": "batch-1",
+                "batch_samples": [
+                    {"sample_name": "sample-a", "input_directory": "/data/a"},
+                    {"sample_name": "sample-b", "input_directory": "/data/b"},
+                ],
+                "shared_params": {"mode": "DNA", "reference_genome": ["mm39"]},
+                "requested_max_parallel": 2,
+            },
+        }, status="APPROVED")
+
+        with _patch_session(session_factory), patch(
+            "cortex.workflow_submission.submit_job_after_approval",
+            new=AsyncMock(),
+        ) as submit_mock:
+            await submit_dogme_batch_after_approval("proj-bg", gate.id)
+
+        assert submit_mock.await_count == 2
+        sess = session_factory()
+        child_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "BATCH_JOB_SUBMISSION").all()
+        assert len(child_blocks) == 2
+        assert {get_block_payload(block)["extracted_params"]["sample_name"] for block in child_blocks} == {
+            "sample-a", "sample-b",
+        }
+        parent_payload = get_block_payload(sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one())
+        assert parent_payload["batch_status"] == "RUNNING"
+        assert [sample["status"] for sample in parent_payload["batch_samples"]] == ["SUBMITTING", "SUBMITTING"]
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_batch_cancellation_marks_unsubmitted_samples_cancelled(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "batch_id": "batch-cancel",
+            "batch_samples": [
+                {"sample_id": "1", "sample_name": "sample-a", "status": "PENDING"},
+                {"sample_id": "2", "sample_name": "sample-b", "status": "COMPLETED"},
+            ],
+        }, status="APPROVED")
+
+        with _patch_session(session_factory):
+            result = await cancel_dogme_batch("proj-bg", gate.id)
+
+        assert result == {
+            "batch_id": "batch-cancel",
+            "batch_status": "COMPLETED_WITH_FAILURES",
+            "cancelled_samples": 1,
+        }
+        sess = session_factory()
+        payload = get_block_payload(sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one())
+        assert [sample["status"] for sample in payload["batch_samples"]] == ["CANCELLED", "COMPLETED"]
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_batch_retry_creates_review_gate_for_failed_subset(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "batch_id": "batch-original",
+            "batch_status": "COMPLETED_WITH_FAILURES",
+            "shared_params": {"mode": "CDNA", "reference_genome": ["GRCh38"]},
+            "requested_max_parallel": 2,
+            "batch_samples": [
+                {"sample_id": "1", "sample_name": "sample-a", "input_directory": "/data/a", "status": "COMPLETED", "run_uuid": "run-a"},
+                {"sample_id": "2", "sample_name": "sample-b", "input_directory": "/data/b", "status": "FAILED", "run_uuid": "run-b"},
+                {"sample_id": "3", "sample_name": "sample-c", "input_directory": "/data/c", "status": "CANCELLED", "run_uuid": "run-c"},
+            ],
+        }, status="APPROVED")
+
+        with _patch_session(session_factory):
+            result = await retry_dogme_batch("proj-bg", gate.id)
+
+        assert result["status"] == "approval_required"
+        assert result["retry_count"] == 2
+        sess = session_factory()
+        retry_gate = sess.query(ProjectBlock).filter(ProjectBlock.id == result["block_id"]).one()
+        retry_payload = get_block_payload(retry_gate)
+        assert retry_gate.status == "PENDING"
+        assert retry_payload["retry_of_batch_id"] == "batch-original"
+        assert retry_payload["shared_params"] == {"mode": "CDNA", "reference_genome": ["GRCh38"]}
+        assert retry_payload["batch_samples"] == [
+            {"sample_id": "2-retry-1", "sample_name": "sample-b", "input_directory": "/data/b", "status": "PENDING", "retry_of_sample_id": "2"},
+            {"sample_id": "3-retry-1", "sample_name": "sample-c", "input_directory": "/data/c", "status": "PENDING", "retry_of_sample_id": "3"},
+        ]
+        original_payload = get_block_payload(sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one())
+        assert original_payload["batch_samples"][1]["run_uuid"] == "run-b"
+        assert original_payload["retry_batch_gate_ids"] == [result["block_id"]]
+        sess.close()
+
+    def test_terminal_sample_status_aggregates_partial_batch_completion(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "batch_samples": [
+                {"sample_id": "1", "sample_name": "sample-a", "status": "RUNNING"},
+                {"sample_id": "2", "sample_name": "sample-b", "status": "RUNNING"},
+            ],
+        }, status="APPROVED")
+        sess = session_factory()
+        execution_payload = {"batch_parent_gate_id": gate.id, "batch_sample_id": "1"}
+        _update_parent_batch_status(sess, execution_payload, {"status": "COMPLETED"})
+        _update_parent_batch_status(
+            sess,
+            {"batch_parent_gate_id": gate.id, "batch_sample_id": "2"},
+            {"status": "FAILED", "message": "Launchpad failed"},
+        )
+
+        parent_payload = get_block_payload(sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one())
+        assert parent_payload["batch_status"] == "COMPLETED_WITH_FAILURES"
+        assert parent_payload["batch_samples"][0]["status"] == "COMPLETED"
+        assert parent_payload["batch_samples"][1]["status"] == "FAILED"
+        assert parent_payload["batch_samples"][1]["error"] == "Launchpad failed"
         sess.close()
 
     @pytest.mark.asyncio
@@ -2843,6 +2963,55 @@ async def test_ensure_workflow_plan_approval_gate_builds_reconcile_specific_payl
     assert gate_payload["extracted_params"]["annotation_gtf"] == "/refs/mm39.gtf"
     assert gate_payload["extracted_params"]["bam_count"] == 2
     assert gate_payload["extracted_params"]["output_directory"] == "/proj/reconcile"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_preserves_dogme_batch_payload(session_factory, seed_data):
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "run_dogme_batch",
+            "batch_id": "batch-approval",
+            "batch_samples": [
+                {"sample_id": "1", "sample_name": "tumor", "input_directory": "/data/tumor"},
+                {"sample_id": "2", "sample_name": "normal", "input_directory": "/data/normal"},
+            ],
+            "shared_params": {"mode": "DNA", "reference_genome": ["GRCh38"]},
+            "requested_max_parallel": 2,
+            "current_step_id": "approve_dogme_batch",
+            "steps": [{
+                "id": "approve_dogme_batch",
+                "kind": "REQUEST_APPROVAL",
+                "status": "WAITING_APPROVAL",
+            }],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["label"] == "Do you authorize DOGME for 2 samples?"
+    assert gate_payload["extracted_params"] == {
+        "batch_id": "batch-approval",
+        "batch_samples": [
+            {"sample_id": "1", "sample_name": "tumor", "input_directory": "/data/tumor"},
+            {"sample_id": "2", "sample_name": "normal", "input_directory": "/data/normal"},
+        ],
+        "shared_params": {"mode": "DNA", "reference_genome": ["GRCh38"]},
+        "requested_max_parallel": 2,
+        "retry_of_batch_id": None,
+    }
     sess.close()
 
 

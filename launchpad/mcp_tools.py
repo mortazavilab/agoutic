@@ -598,6 +598,24 @@ class LaunchpadMCPTools:
         except Exception as e:
             raise RuntimeError(f"Failed to check status: {str(e)}")
 
+    async def cancel_job(self, run_uuid: str) -> dict:
+        """Cancel an active local or SLURM job by its run UUID."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.server_url}/jobs/{run_uuid}/cancel",
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                )
+                if response.status_code == 404:
+                    raise RuntimeError(f"Job {run_uuid} not found")
+                if response.status_code == 400:
+                    raise RuntimeError(response.json().get("detail", "Cannot cancel job"))
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to cancel job: {str(e)}")
+
     async def sync_job_results(
         self,
         run_uuid: str = "",
@@ -1103,6 +1121,17 @@ TOOL_REGISTRY = {
             },
             "required": ["run_uuid"],
         }
+    },
+    "cancel_job": {
+        "description": "Cancel an active local or SLURM job",
+        "tool_function": "cancel_job",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_uuid": {"type": "string", "description": "Job UUID"},
+            },
+            "required": ["run_uuid"],
+        },
     },
     "sync_job_results": {
         "description": "Manually retry remote-to-local result synchronization for a completed SLURM run.",

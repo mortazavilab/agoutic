@@ -302,6 +302,18 @@ async def _ensure_workflow_plan_approval_gate(
         gate_skill = plan_specific_context["skill"]
         gate_label = plan_specific_context["label"]
         cache_preflight = plan_specific_context.get("cache_preflight")
+    elif payload.get("plan_type") == "run_dogme_batch":
+        extracted_params = {
+            "batch_id": payload.get("batch_id") or workflow_block.id,
+            "batch_samples": payload.get("batch_samples") or [],
+            "shared_params": payload.get("shared_params") or {},
+            "requested_max_parallel": payload.get("requested_max_parallel"),
+            "retry_of_batch_id": payload.get("retry_of_batch_id"),
+        }
+        gate_action = "job"
+        gate_skill = payload.get("skill") or "analyze_local_sample"
+        gate_label = f"Do you authorize DOGME for {len(extracted_params['batch_samples'])} samples?"
+        cache_preflight = None
     else:
         extracted_params = await job_parameters.extract_job_parameters_from_conversation(session, workflow_block.project_id)
         gate_action = "job"

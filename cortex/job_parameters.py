@@ -43,6 +43,96 @@ _REMOTE_INPUT_PATTERNS = [
 _RELATIVE_INPUT_PATH_PATTERN = r'(?<!/)\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq(?:\.gz)?|fq(?:\.gz)?|fast5))\b'
 _ABSOLUTE_INPUT_PATH_PATTERN = r'(?:(?<=^)|(?<=[\s"\'(]))(/[^\s,]+(?:/[^\s,]+)*)'
 
+_DOGME_BATCH_SAMPLE_STATES = frozenset({
+    "PENDING",
+    "VALIDATING",
+    "SUBMITTING",
+    "QUEUED",
+    "RUNNING",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "SKIPPED",
+})
+
+
+def normalize_dogme_batch_params(params: dict | None) -> tuple[dict, list[str]]:
+    """Normalize an explicit DOGME batch request without accessing project files."""
+    raw_params = params if isinstance(params, dict) else {}
+    raw_samples = raw_params.get("batch_samples")
+    errors: list[str] = []
+    if not isinstance(raw_samples, list) or not raw_samples:
+        return {"batch_samples": [], "shared_params": {}, "requested_max_parallel": None}, [
+            "At least one batch sample is required."
+        ]
+
+    shared_params = raw_params.get("shared_params")
+    if shared_params is None:
+        shared_params = {
+            key: value
+            for key, value in raw_params.items()
+            if key not in {"batch_id", "batch_samples", "requested_max_parallel", "retry_of_batch_id"}
+        }
+    if not isinstance(shared_params, dict):
+        errors.append("Shared DOGME settings must be an object.")
+        shared_params = {}
+
+    requested_max_parallel = raw_params.get("requested_max_parallel")
+    if requested_max_parallel in (None, ""):
+        normalized_parallelism = None
+    else:
+        try:
+            normalized_parallelism = int(requested_max_parallel)
+        except (TypeError, ValueError):
+            errors.append("Requested batch parallelism must be a positive integer.")
+            normalized_parallelism = None
+        else:
+            if normalized_parallelism < 1:
+                errors.append("Requested batch parallelism must be a positive integer.")
+
+    normalized_samples: list[dict] = []
+    seen_sample_ids: set[str] = set()
+    for index, raw_sample in enumerate(raw_samples):
+        if not isinstance(raw_sample, dict):
+            errors.append(f"Batch sample {index + 1} must be an object.")
+            continue
+
+        sample_id = str(raw_sample.get("sample_id") or index + 1).strip()
+        sample_name = str(raw_sample.get("sample_name") or "").strip()
+        input_directory = str(raw_sample.get("input_directory") or "").strip()
+        status = str(raw_sample.get("status") or "PENDING").upper()
+
+        if not sample_id:
+            errors.append(f"Batch sample {index + 1} needs a sample ID.")
+        elif sample_id in seen_sample_ids:
+            errors.append(f"Batch sample ID '{sample_id}' is duplicated.")
+        else:
+            seen_sample_ids.add(sample_id)
+        if not sample_name:
+            errors.append(f"Batch sample {index + 1} needs a sample name.")
+        if not input_directory:
+            errors.append(f"Batch sample {index + 1} needs an input directory.")
+        if status not in _DOGME_BATCH_SAMPLE_STATES:
+            errors.append(f"Batch sample {index + 1} has unsupported status '{status}'.")
+
+        normalized_samples.append({
+            "sample_id": sample_id,
+            "sample_name": sample_name,
+            "input_directory": input_directory,
+            "status": status,
+            "run_uuid": raw_sample.get("run_uuid"),
+            "execution_block_id": raw_sample.get("execution_block_id"),
+            "error": raw_sample.get("error"),
+        })
+
+    return {
+        "batch_id": raw_params.get("batch_id"),
+        "batch_samples": normalized_samples,
+        "shared_params": dict(shared_params),
+        "requested_max_parallel": normalized_parallelism,
+        "retry_of_batch_id": raw_params.get("retry_of_batch_id"),
+    }, errors
+
 
 def _input_type_signals(*, user_text_original: str, user_text: str) -> dict[str, bool]:
     original_lower = str(user_text_original or "").lower()

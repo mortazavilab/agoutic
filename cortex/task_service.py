@@ -579,6 +579,99 @@ def sync_project_tasks(session, project_id: str) -> list[ProjectTask]:
             # Skip gates belonging to superseded workflows
             if active_wf_ids and block.parent_id and block.parent_id not in active_wf_ids:
                 continue
+            batch_samples = payload.get("batch_samples")
+            if isinstance(batch_samples, list):
+                batch_status = str(payload.get("batch_status") or "PENDING").upper()
+                task_status = {
+                    "PENDING": "PENDING",
+                    "RUNNING": "RUNNING",
+                    "COMPLETED": "COMPLETED",
+                    "COMPLETED_WITH_FAILURES": "FAILED",
+                    "CANCELLED": "CANCELLED",
+                    "FOLLOW_UP": "FOLLOW_UP",
+                }.get(batch_status, "PENDING")
+                batch_source_key = f"dogme-batch:{block.id}"
+                seen_sources.add(batch_source_key)
+                batch_task, task_changed = _upsert_task(
+                    session,
+                    existing_by_source,
+                    _decorate_task_spec(
+                        {
+                            "project_id": project_id,
+                            "source_key": batch_source_key,
+                            "kind": "dogme_batch",
+                            "title": f"Run DOGME for {len(batch_samples)} samples",
+                            "status": task_status,
+                            "priority": "high" if task_status in {"FAILED", "FOLLOW_UP"} else "normal",
+                            "source_type": "block",
+                            "source_id": block.id,
+                            "parent_task_id": workflow_parent_ids.get(block.parent_id) if block.parent_id else None,
+                            "action_label": _action_for_status(task_status, pending_label="Review", completed_label="View batch"),
+                            "action_target": _build_target("block", block_id=block.id),
+                            "metadata": {
+                                "batch_id": payload.get("batch_id") or block.id,
+                                "batch_status": batch_status,
+                                "requested_max_parallel": payload.get("requested_max_parallel"),
+                            },
+                        },
+                        activity_at=_block_activity_at(block, payload),
+                    ),
+                    owner_id=owner_id,
+                )
+                changed = changed or task_changed
+                for order_index, sample in enumerate(batch_samples):
+                    if not isinstance(sample, dict):
+                        continue
+                    sample_status = str(sample.get("status") or "PENDING").upper()
+                    child_status = {
+                        "PENDING": "PENDING",
+                        "VALIDATING": "RUNNING",
+                        "SUBMITTING": "RUNNING",
+                        "QUEUED": "RUNNING",
+                        "RUNNING": "RUNNING",
+                        "COMPLETED": "COMPLETED",
+                        "FAILED": "FAILED",
+                        "CANCELLED": "CANCELLED",
+                        "SKIPPED": "CANCELLED",
+                    }.get(sample_status, "PENDING")
+                    sample_source_key = f"dogme-batch-sample:{block.id}:{sample.get('sample_id', order_index + 1)}"
+                    seen_sources.add(sample_source_key)
+                    _, task_changed = _upsert_task(
+                        session,
+                        existing_by_source,
+                        _decorate_task_spec(
+                            {
+                                "project_id": project_id,
+                                "source_key": sample_source_key,
+                                "kind": "dogme_batch_sample",
+                                "title": sample.get("sample_name") or f"Sample {order_index + 1}",
+                                "status": child_status,
+                                "priority": "high" if child_status == "FAILED" else "normal",
+                                "source_type": "block",
+                                "source_id": sample.get("execution_block_id") or block.id,
+                                "parent_task_id": batch_task.id,
+                                "action_label": _action_for_status(child_status, pending_label="Waiting", completed_label="View run"),
+                                "action_target": _build_target(
+                                    "block",
+                                    block_id=sample.get("execution_block_id") or block.id,
+                                    run_uuid=sample.get("run_uuid"),
+                                ),
+                                "metadata": {
+                                    "batch_id": payload.get("batch_id") or block.id,
+                                    "sample_id": sample.get("sample_id"),
+                                    "sample_name": sample.get("sample_name"),
+                                    "input_directory": sample.get("input_directory"),
+                                    "run_uuid": sample.get("run_uuid"),
+                                    "error": sample.get("error"),
+                                    "order_index": order_index,
+                                },
+                            },
+                            activity_at=_block_activity_at(block, payload),
+                        ),
+                        owner_id=owner_id,
+                    )
+                    changed = changed or task_changed
+                continue
             task_status = {
                 "PENDING": "PENDING",
                 "APPROVED": "COMPLETED",

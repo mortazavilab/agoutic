@@ -26,6 +26,16 @@ If the staged sample folder already exists, the system pauses and asks whether t
   - **For modkit/annotateRNA entry points:** This MUST be the genome the BAM was actually mapped to. The symlink is named `{sample_name}.{genome_ref}.bam` and Dogme expects this exact naming. Do NOT guess — always ask the user.
 * `max_gpu_tasks`: (Integer, Optional) Maximum number of simultaneous GPU tasks (dorado/openChromatin) per pipeline run. Default is 1. The user may say "run 2 GPU tasks at a time" or "limit dorado to 1".
 
+## Running Multiple Samples
+
+Users may submit multiple DOGME samples in one request by providing at least two explicit sample/path pairs. Use `sample_name: /path` or `sample_name=/path` for each entry.
+
+```
+Run DOGME DNA on tumor: /data/tumor and normal=/data/normal for GRCh38 with parallelism 2
+```
+
+All entries in one batch share the sample type, reference genome, DOGME profile/resources, and execution target. Use separate batches when those settings differ. The batch has one approval gate, while each sample receives its own isolated DOGME run and status. A requested `parallelism` value controls concurrent batch submission; the server-wide execution limit can still queue work. Repeated input paths are allowed for intentional reruns. A failed sample does not stop successful siblings. For cDNA FASTQ batches, provide one `.fastq`, `.fastq.gz`, `.fq`, or `.fq.gz` file per sample entry; the system uses Dogme's `fastqCDNA` entry point for every entry.
+
 ## Running Dogme from Downloaded BAM Files
 
 When users have **downloaded BAM files** (e.g., from ENCODE), those files live in the
@@ -54,7 +64,7 @@ Dogme FASTQ input is supported only for the documented cDNA `fastqCDNA` path.
 2. **Project data**: uploaded FASTQs may already exist in `projectdir/data/` as symlinks to the user's central data folder
 3. **Entry point**: the pipeline runs with `-entry fastqCDNA`
 4. **Detection**: if the user mentions FASTQ together with cDNA, or the project contains FASTQ data and the user is asking for Dogme cDNA, the system should route to approval with `input_type=fastq`, `entry_point=fastqCDNA`, and `mode=CDNA`
-5. **Constraint**: v1 supports exactly one FASTQ per submission; if multiple FASTQs are present, approval will block until the user resolves that input set manually
+5. **Constraint**: each Dogme cDNA run supports one FASTQ input. Submit several FASTQs as an explicit batch with one named file path per sample.
 
 **Clarification behavior:**
 - **FASTQ + cDNA**: go straight to approval. Do not ask a follow-up question.

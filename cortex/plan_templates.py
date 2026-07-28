@@ -246,6 +246,75 @@ def _template_run_workflow(params: dict) -> dict:
     }
 
 
+def _template_run_dogme_batch(params: dict) -> dict:
+    """Build a single-approval DOGME workflow for multiple explicit samples."""
+    raw_samples = params.get("batch_samples") or []
+    batch_samples = []
+    for index, raw_sample in enumerate(raw_samples):
+        if not isinstance(raw_sample, dict):
+            continue
+        sample = dict(raw_sample)
+        sample["sample_id"] = str(sample.get("sample_id") or index + 1)
+        sample["sample_name"] = str(sample.get("sample_name") or f"sample_{index + 1}")
+        sample["input_directory"] = str(sample.get("input_directory") or "")
+        sample["status"] = str(sample.get("status") or "PENDING")
+        sample["run_uuid"] = sample.get("run_uuid")
+        sample["execution_block_id"] = sample.get("execution_block_id")
+        sample["error"] = sample.get("error")
+        batch_samples.append(sample)
+
+    steps = []
+    s_validate = _make_step("VALIDATE_INPUTS", "Validate batch input files", 0)
+    s_validate["id"] = "validate_batch_inputs"
+    steps.append(s_validate)
+
+    s_approve = _make_step(
+        "REQUEST_APPROVAL",
+        "Approve DOGME batch submission",
+        1,
+        requires_approval=True,
+        depends_on=[s_validate["id"]],
+    )
+    s_approve["id"] = "approve_dogme_batch"
+    steps.append(s_approve)
+
+    s_submit = _make_step(
+        "SUBMIT_WORKFLOW",
+        "Submit DOGME batch",
+        2,
+        requires_approval=True,
+        depends_on=[s_approve["id"]],
+    )
+    s_submit["id"] = "submit_dogme_batch"
+    steps.append(s_submit)
+
+    s_monitor = _make_step(
+        "MONITOR_WORKFLOW",
+        "Monitor DOGME batch",
+        3,
+        depends_on=[s_submit["id"]],
+    )
+    s_monitor["id"] = "monitor_dogme_batch"
+    steps.append(s_monitor)
+
+    return {
+        "plan_type": "run_dogme_batch",
+        "title": f"Run DOGME for {len(batch_samples)} samples",
+        "goal": params.get("goal", "Analyze multiple samples with DOGME"),
+        "workflow_type": "dogme_batch",
+        "batch_id": str(params.get("batch_id") or _plan_instance_id()),
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": s_validate["id"],
+        "batch_samples": batch_samples,
+        "shared_params": dict(params.get("shared_params") or {}),
+        "requested_max_parallel": params.get("requested_max_parallel"),
+        "retry_of_batch_id": params.get("retry_of_batch_id"),
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
 def _template_run_wf_pore_c(params: dict) -> dict:
     """Deterministic Phase 1 plan for a wf-pore-c dry-run preview."""
     sample_name = params.get("sample_name", "pore_c_sample")

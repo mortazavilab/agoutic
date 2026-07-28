@@ -23,6 +23,10 @@ _PROJECT_WORKFLOW_REF_RE = re.compile(
     re.IGNORECASE,
 )
 _BED_PATH_RE = re.compile(r"(?:/|~|\.)[^\s,;]+\.bed\b", re.IGNORECASE)
+_DOGME_BATCH_SAMPLE_RE = re.compile(
+    r"\b[A-Za-z0-9_-]+\s*(?:=|:)\s*(?:/|~|\.)[^\s,;]+",
+    re.IGNORECASE,
+)
 
 
 def _is_region_overlap_request(message: str) -> bool:
@@ -187,6 +191,13 @@ _RUN_WORKFLOW_PATTERNS = [
     re.compile(r"analyze\s+(?:my\s+)?(?:local\s+)?(?:sample|data)", re.I),
 ]
 
+
+def _is_dogme_batch_request(message: str) -> bool:
+    """Return whether a message supplies at least two explicit DOGME sample paths."""
+    lowered = (message or "").lower()
+    has_dogme_intent = "dogme" in lowered or "pipeline" in lowered
+    return has_dogme_intent and len(_DOGME_BATCH_SAMPLE_RE.findall(message or "")) >= 2
+
 _RECONCILE_BAMS_PATTERNS = [
     re.compile(r"(?:reconcile|merge|combine)\s+(?:the\s+)?(?:annotated\s+)?bams?", re.I),
     re.compile(r"cross[-\s]?workflow\s+bam\s+reconcil", re.I),
@@ -245,6 +256,9 @@ def _detect_plan_type(message: str) -> str | None:
 
     if _is_region_overlap_request(message):
         return "compare_region_overlaps"
+
+    if _is_dogme_batch_request(message):
+        return "run_dogme_batch"
 
     # 2. Enrichment analysis
     for pat in _ENRICHMENT_PATTERNS:

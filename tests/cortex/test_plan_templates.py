@@ -10,6 +10,7 @@ from cortex.plan_templates import (
     _normalize_fragment_alias,
     _manifest_tool_call,
     _template_remote_stage_workflow,
+    _template_run_dogme_batch,
     _template_run_workflow,
     _template_run_wf_pore_c,
     _template_compare_samples,
@@ -181,6 +182,58 @@ class TestTemplateRunWorkflow:
                 submit_step = s
         assert approve_step is not None
         assert submit_step is not None
+
+
+# ---------------------------------------------------------------------------
+# _template_run_dogme_batch
+# ---------------------------------------------------------------------------
+
+class TestTemplateRunDogmeBatch:
+    def test_batch_preserves_explicit_samples_and_shared_settings(self):
+        plan = _template_run_dogme_batch({
+            "batch_id": "batch-123",
+            "batch_samples": [
+                {"sample_name": "tumor", "input_directory": "/data/tumor"},
+                {"sample_id": "normal-1", "sample_name": "normal", "input_directory": "/data/normal"},
+            ],
+            "shared_params": {"mode": "DNA", "reference_genome": "GRCh38"},
+            "requested_max_parallel": 2,
+        })
+
+        assert plan["plan_type"] == "run_dogme_batch"
+        assert plan["workflow_type"] == "dogme_batch"
+        assert plan["batch_id"] == "batch-123"
+        assert plan["shared_params"] == {"mode": "DNA", "reference_genome": "GRCh38"}
+        assert plan["requested_max_parallel"] == 2
+        assert plan["batch_samples"] == [
+            {
+                "sample_id": "1",
+                "sample_name": "tumor",
+                "input_directory": "/data/tumor",
+                "status": "PENDING",
+                "run_uuid": None,
+                "execution_block_id": None,
+                "error": None,
+            },
+            {
+                "sample_id": "normal-1",
+                "sample_name": "normal",
+                "input_directory": "/data/normal",
+                "status": "PENDING",
+                "run_uuid": None,
+                "execution_block_id": None,
+                "error": None,
+            },
+        ]
+
+    def test_batch_has_one_approval_before_submit_and_monitor(self):
+        plan = _template_run_dogme_batch({"batch_samples": [{"sample_name": "s1", "input_directory": "/data/s1"}]})
+        steps = {step["id"]: step for step in plan["steps"]}
+
+        assert list(steps) == ["validate_batch_inputs", "approve_dogme_batch", "submit_dogme_batch", "monitor_dogme_batch"]
+        assert steps["approve_dogme_batch"]["requires_approval"] is True
+        assert steps["submit_dogme_batch"]["depends_on"] == ["approve_dogme_batch"]
+        assert steps["monitor_dogme_batch"]["depends_on"] == ["submit_dogme_batch"]
 
 
 # ---------------------------------------------------------------------------

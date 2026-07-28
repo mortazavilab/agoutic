@@ -30,6 +30,59 @@ _TERMINAL_RESULT_SYNC_STATES = {"outputs_downloaded", "transfer_failed", "sync_c
 _latest_job_status_by_run_uuid: dict[str, dict] = {}
 
 
+def _update_parent_batch_status(session, execution_payload: dict, status_data: dict) -> None:
+    """Fold a terminal execution result into its owning DOGME batch, if any."""
+    batch_parent_gate_id = execution_payload.get("batch_parent_gate_id")
+    batch_sample_id = execution_payload.get("batch_sample_id")
+    if not batch_parent_gate_id or not batch_sample_id:
+        return
+
+    batch_gate = session.query(ProjectBlock).filter(ProjectBlock.id == batch_parent_gate_id).first()
+    if batch_gate is None:
+        return
+
+    batch_payload = get_block_payload(batch_gate)
+    batch_samples = batch_payload.get("batch_samples")
+    if not isinstance(batch_samples, list):
+        return
+
+    job_status = str(status_data.get("status") or "UNKNOWN").upper()
+    sample_status = {
+        "COMPLETED": "COMPLETED",
+        "FAILED": "FAILED",
+        "STALE": "FAILED",
+        "CANCELLED": "CANCELLED",
+    }.get(job_status)
+    if sample_status is None:
+        return
+
+    for sample in batch_samples:
+        if not isinstance(sample, dict) or str(sample.get("sample_id")) != str(batch_sample_id):
+            continue
+        sample["status"] = sample_status
+        if status_data.get("message"):
+            sample["error"] = status_data["message"] if sample_status != "COMPLETED" else None
+        break
+
+    terminal_statuses = {"COMPLETED", "FAILED", "CANCELLED", "SKIPPED"}
+    statuses = [str(sample.get("status") or "PENDING").upper() for sample in batch_samples if isinstance(sample, dict)]
+    if statuses and all(status in terminal_statuses for status in statuses):
+        if all(status == "COMPLETED" for status in statuses):
+            batch_payload["batch_status"] = "COMPLETED"
+        elif "COMPLETED" in statuses:
+            batch_payload["batch_status"] = "COMPLETED_WITH_FAILURES"
+        elif "CANCELLED" in statuses:
+            batch_payload["batch_status"] = "CANCELLED"
+        else:
+            batch_payload["batch_status"] = "COMPLETED_WITH_FAILURES"
+    else:
+        batch_payload["batch_status"] = "RUNNING"
+
+    batch_payload["batch_samples"] = batch_samples
+    batch_gate.payload_json = json.dumps(batch_payload)
+    session.commit()
+
+
 def _save_analysis_report(work_directory: str, workflow_ref: str, final_md: str) -> None:
     """Save the LLM-generated analysis report to the workflow folder.
 
@@ -301,6 +354,7 @@ async def poll_job_status(
                     block.payload_json = json.dumps(payload)
                     session.commit()
                     session.refresh(block)
+                    _update_parent_batch_status(session, payload, status_data)
                     sync_project_tasks(session, project_id)
 
                     logger.info("Job status updated", run_uuid=run_uuid, job_status=job_status, progress=status_data.get("progress_percent", 0))
