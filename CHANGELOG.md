@@ -7,6 +7,11 @@
 - **Added batch lifecycle visibility and controls:** Task Center now projects a DOGME batch parent with per-sample child statuses, including partial completion. Users can cancel a batch through `POST /dogme-batches/{gate_block_id}/cancel`; completed outputs are preserved while pending and active siblings are cancelled.
 - **Added failed-sample batch retries:** `POST /dogme-batches/{gate_block_id}/retry` creates a linked batch containing only failed or cancelled samples. The default review-first mode creates an editable approval gate; `?review_before_submit=false` reuses the original shared settings and begins submission directly. Original runs and outputs are retained for auditability.
 
+### Bug Fixes
+
+- **Fixed multi-sample DOGME approval handling:** Explicit batch sample names and all input FASTQs are now preserved when a legacy approval path is used. Batch approval forms display shared genome, hpc3/SLURM, resource, and parallelism settings, apply approved shared settings to every sample, and retain the full batch payload instead of collapsing it into one synthetic single-sample run.
+- **Fixed Task Center duplicate action keys during active batches:** Removed nested Streamlit task-dock fragments that could render the same task action button twice and raise `StreamlitDuplicateElementKey`.
+
 ### Tests
 
 - **Added focused DOGME batch coverage:** Tests cover request detection, sample/path validation, cDNA FASTQ parameter extraction, one approval payload, concurrent submission coordination, terminal status aggregation, task projection, cancellation, and retry cloning.

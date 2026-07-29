@@ -1670,6 +1670,27 @@ def render_block_part1(
 
                 elif extracted_params:
                     st.write("**📋 Extracted Parameters** (edit if needed):")
+                    _batch_params = extracted_params if isinstance(extracted_params.get("batch_samples"), list) else None
+                    _is_dogme_batch = bool(_batch_params)
+                    if _is_dogme_batch:
+                        _batch_shared_params = _batch_params.get("shared_params") or {}
+                        extracted_params = {**_batch_params, **_batch_shared_params}
+                        st.caption(
+                            f"Batch submission: {len(_batch_params['batch_samples'])} samples. "
+                            "Settings below apply to every sample."
+                        )
+                        st.dataframe(
+                            [
+                                {
+                                    "Sample": sample.get("sample_name", ""),
+                                    "Input": sample.get("input_directory", ""),
+                                }
+                                for sample in _batch_params["batch_samples"]
+                                if isinstance(sample, dict)
+                            ],
+                            hide_index=True,
+                            width="stretch",
+                        )
                     _field_visibility = _approval_gate_field_visibility(extracted_params, gate_action=_gate_action)
                     _workflow_key = str(_field_visibility["workflow_key"])
                     _active_project_id = st.session_state.get("active_project_id")
@@ -1683,6 +1704,16 @@ def render_block_part1(
                     with st.form(key=f"params_form_{block_id}"):
                         grouped_section("Core Run Settings")
                         _submit_block_reason = None
+
+                        requested_max_parallel = None
+                        if _is_dogme_batch:
+                            requested_max_parallel = st.number_input(
+                                "Batch Submission Parallelism",
+                                min_value=1,
+                                max_value=256,
+                                value=int(extracted_params.get("requested_max_parallel") or 1),
+                                help="Maximum number of batch submissions to coordinate at once. Server-wide capacity limits still apply.",
+                            )
 
                         _sample_name_default = extracted_params.get("sample_name", "")
                         if _workflow_key == "dogme" and _dogme_fastq_state.get("default_sample_name"):
@@ -2284,6 +2315,28 @@ def render_block_part1(
                             # Preserve resume_from_dir for resubmit-resume flow
                             if extracted_params.get("resume_from_dir"):
                                 edited_params["resume_from_dir"] = extracted_params["resume_from_dir"]
+
+                            if _is_dogme_batch:
+                                edited_params_from_form = edited_params
+                                batch_metadata_keys = {
+                                    "batch_id",
+                                    "batch_samples",
+                                    "shared_params",
+                                    "requested_max_parallel",
+                                    "retry_of_batch_id",
+                                    "goal",
+                                }
+                                edited_params = {
+                                    key: value
+                                    for key, value in _batch_params.items()
+                                    if key in batch_metadata_keys
+                                }
+                                edited_params["shared_params"] = {
+                                    key: value
+                                    for key, value in edited_params_from_form.items()
+                                    if key not in batch_metadata_keys
+                                }
+                                edited_params["requested_max_parallel"] = int(requested_max_parallel)
                             
                             # Update block with edited params and approved status
                             payload_update = dict(content)

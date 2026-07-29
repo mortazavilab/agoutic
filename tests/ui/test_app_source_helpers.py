@@ -699,6 +699,16 @@ class TestPauseAutoRefresh:
         assert fake_st.session_state["_suppress_auto_refresh_until"] == 110.0
 
 class TestProjectSwitchHelpers:
+    def test_live_task_dock_is_not_a_nested_streamlit_fragment(self):
+        tree = ast.parse(UI_APP_PATH.read_text(), filename=str(UI_APP_PATH))
+        live_dock = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_render_live_task_dock"
+        )
+
+        assert live_dock.decorator_list == []
+
     def test_project_scope_mount_key_changes_with_project_id(self):
         fn = _load_function("_project_scope_mount_key")
 

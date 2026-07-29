@@ -36,3 +36,20 @@ def test_extract_cdna_fastq_batch_sets_fastq_entry_point():
         "input_type": "fastq",
         "entry_point": "fastqCDNA",
     }
+
+
+def test_extract_cdna_fastq_batch_preserves_hpc3_as_shared_slurm_target():
+    params = _extract_plan_params(
+        "Run DOGME cDNA on hpc3 for GRCh38 with sample-a: /data/a.fastq.gz and sample-b: /data/b.fastq.gz",
+        SimpleNamespace(sample_name=None, work_dir=None),
+        "run_dogme_batch",
+    )
+
+    assert params["shared_params"] == {
+        "mode": "CDNA",
+        "input_type": "fastq",
+        "entry_point": "fastqCDNA",
+        "reference_genome": ["GRCh38"],
+        "execution_mode": "slurm",
+        "ssh_profile_nickname": "hpc3",
+    }

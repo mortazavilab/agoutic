@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from common.logging_config import get_logger
 from cortex.config import GENOME_ALIASES, default_haplotype_vcf_for_reference
+from cortex.remote_orchestration import _extract_remote_profile_nickname
 from cortex import user_jail
 
 if TYPE_CHECKING:
@@ -673,8 +674,22 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         ]
         if genome_matches:
             shared_params["reference_genome"] = list(dict.fromkeys(genome_matches))
-        if re.search(r"\b(slurm|sbatch|cluster|remote)\b", message, re.IGNORECASE):
+        has_remote_intent = bool(re.search(r"\b(slurm|sbatch|cluster|remote)\b", message, re.IGNORECASE))
+        explicit_profile_match = re.search(
+            r"\b(?:using|via)\s+(?:the\s+)?[a-zA-Z0-9_-]+\s+profile\b",
+            message,
+            re.IGNORECASE,
+        )
+        hpc_profile_match = re.search(r"\bon\s+(hpc\d+)\b", message, re.IGNORECASE)
+        ssh_profile_nickname = (
+            _extract_remote_profile_nickname(message)
+            if explicit_profile_match or hpc_profile_match
+            else None
+        )
+        if has_remote_intent or ssh_profile_nickname:
             shared_params["execution_mode"] = "slurm"
+        if ssh_profile_nickname:
+            shared_params["ssh_profile_nickname"] = ssh_profile_nickname
 
         parallelism_match = re.search(
             r"\b(?:parallelism|max(?:imum)?\s+parallel|parallel)\s*(?:=|:|of)?\s*(\d+)\b",

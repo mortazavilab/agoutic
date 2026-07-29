@@ -604,7 +604,19 @@ async def _build_approval_gate(ctx: ChatContext):
             "target_dir": _dl_target,
         }
     else:
-        if (ctx.remote_stage_approval_context
+        from cortex.plan_classifier import _is_dogme_batch_request
+        from cortex.plan_params import _extract_plan_params
+
+        if _is_dogme_batch_request(ctx.message):
+            # A legacy LLM approval tag must not collapse an explicit batch into
+            # the first input selected by the single-job conversation extractor.
+            extracted_params = _extract_plan_params(
+                ctx.message,
+                ctx.conv_state,
+                "run_dogme_batch",
+                project_dir=ctx.project_dir,
+            )
+        elif (ctx.remote_stage_approval_context
                 and isinstance(ctx.remote_stage_approval_context.get("params"), dict)):
             extracted_params = dict(ctx.remote_stage_approval_context.get("params") or {})
         else:

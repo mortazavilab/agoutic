@@ -1463,8 +1463,8 @@ with st.container(key=_project_scope_mount_key("project_panel", active_id)):
     _render_chat()
 
 
-@st.fragment(run_every=_refresh_interval)
 def _render_live_task_dock(project_id: str):
+    """Refresh and render active task-dock content within its owning fragment."""
     if st.session_state.get("_project_switch_loading_for") == project_id:
         st.session_state["_show_task_dock"] = False
         return

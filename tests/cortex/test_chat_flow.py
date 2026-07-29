@@ -177,6 +177,32 @@ def spurious_approval_client(session_factory, seed_user, tmp_path):
 # Approval gate creation
 # ---------------------------------------------------------------------------
 class TestApprovalGateCreation:
+    def test_approval_needed_preserves_explicit_dogme_batch_samples(self, approval_client):
+        resp = approval_client.post("/chat", json={
+            "project_id": "proj-flow",
+            "message": (
+                "Run DOGME cDNA for GRCh38 with parallelism 4: "
+                "sample_01: /data/ENCFF022LHT.fastq.gz, "
+                "sample_02: /data/ENCFF143KMY.fastq.gz"
+            ),
+            "skill": "analyze_local_sample",
+        })
+
+        assert resp.status_code == 200
+        payload = resp.json()["gate_block"]["payload"]
+        params = payload["extracted_params"]
+        assert params["requested_max_parallel"] == 4
+        assert params["shared_params"] == {
+            "mode": "CDNA",
+            "input_type": "fastq",
+            "entry_point": "fastqCDNA",
+            "reference_genome": ["GRCh38"],
+        }
+        assert params["batch_samples"] == [
+            {"sample_id": "1", "sample_name": "sample_01", "input_directory": "/data/ENCFF022LHT.fastq.gz"},
+            {"sample_id": "2", "sample_name": "sample_02", "input_directory": "/data/ENCFF143KMY.fastq.gz"},
+        ]
+
     def test_approval_needed_creates_gate(self, approval_client):
         resp = approval_client.post("/chat", json={
             "project_id": "proj-flow",
