@@ -366,6 +366,29 @@ def _submission_client_timeout_seconds(run_type: str, submission_payload: dict) 
     return max(900.0, timeout_seconds + SCRIPT_SUBMISSION_TIMEOUT_BUFFER_SECONDS)
 
 
+def _is_ambiguous_submit_timeout(error: Exception) -> bool:
+    message = str(error).lower()
+    return "timed out" in message and "submit" in message and "launchpad" in message
+
+
+async def _find_accepted_submission(
+    project_id: str,
+    parent_block_id: str,
+) -> dict | None:
+    launchpad_url = get_service_url("launchpad")
+    client = MCPHttpClient(name="launchpad", base_url=launchpad_url, timeout=30.0)
+    await client.connect()
+    try:
+        result = await client.call_tool(
+            "find_job_by_parent_block",
+            project_id=project_id,
+            parent_block_id=parent_block_id,
+        )
+    finally:
+        await client.disconnect()
+    return result if isinstance(result, dict) and result.get("run_uuid") else None
+
+
 def _should_submit_script_as_job(job_data: dict) -> bool:
     return _is_reconcile_script_submission(job_data) or _is_haplotype_script_submission(job_data)
 
@@ -1123,6 +1146,9 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             submission_payload = dict(job_data)
             submission_payload.pop("staged_input_directory", None)
 
+        if workflow_block is not None:
+            submission_payload["parent_block_id"] = workflow_block.id
+
         workflow_payload = get_block_payload(workflow_block) if workflow_block is not None else None
         check_remote_stage_step_id = None
         stage_input_step_id = None
@@ -1362,7 +1388,27 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
                 await client.disconnect()
         except Exception as e:
             _err = str(e).strip() or f"{type(e).__name__}: {e!r}"
-            raise Exception(f"MCP call to Launchpad failed: {_err}")
+            if workflow_block is None or not _is_ambiguous_submit_timeout(e):
+                raise Exception(f"MCP call to Launchpad failed: {_err}")
+            try:
+                result = await _find_accepted_submission(project_id, workflow_block.id)
+            except Exception as recovery_error:
+                recovery_detail = str(recovery_error).strip() or type(recovery_error).__name__
+                raise Exception(
+                    f"MCP call to Launchpad failed: {_err}. "
+                    f"Timed-out submission could not be reconciled: {recovery_detail}"
+                ) from recovery_error
+            if result is None:
+                raise Exception(
+                    f"MCP call to Launchpad failed: {_err}. "
+                    "Launchpad did not register a job for this workflow."
+                )
+            logger.warning(
+                "Recovered Launchpad submission after response timeout",
+                project_id=project_id,
+                parent_block_id=workflow_block.id,
+                run_uuid=result["run_uuid"],
+            )
 
         run_uuid = result.get("run_uuid") if isinstance(result, dict) else None
         _work_directory = result.get("work_directory", "") if isinstance(result, dict) else ""

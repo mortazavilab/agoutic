@@ -1850,11 +1850,9 @@ async def stage_remote_sample(
     from launchpad.backends.staging_worker import (
         StagingTaskState,
         get_staging_tasks,
-        active_task_count,
         new_task_id,
         persist_staging_task,
-        start_staging_task,
-        MAX_CONCURRENT_STAGING_TASKS,
+        resume_queued_staging_tasks,
     )
 
     params_dict = {
@@ -1891,19 +1889,17 @@ async def stage_remote_sample(
             raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
 
     # --- Async background mode (default) ---
-    if active_task_count() >= MAX_CONCURRENT_STAGING_TASKS:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Too many concurrent staging tasks ({MAX_CONCURRENT_STAGING_TASKS}). "
-            "Wait for a running transfer to finish before starting another.",
-        )
-
     task = StagingTaskState(task_id=new_task_id(), params=params_dict)
     await persist_staging_task(task, force=True, raise_on_error=True)
     staging_tasks = get_staging_tasks()
     staging_tasks[task.task_id] = task
-    start_staging_task(task)
-    logger.info("Background staging task created", task_id=task.task_id, sample_name=req.sample_name)
+    await resume_queued_staging_tasks(profile_id=req.ssh_profile_id)
+    logger.info(
+        "Background staging task created",
+        task_id=task.task_id,
+        sample_name=req.sample_name,
+        status=task.status,
+    )
 
     return StageTaskAcceptedResponse(task_id=task.task_id, status=task.status)
 
@@ -2366,6 +2362,31 @@ async def submit_job(req: SubmitJobRequest):
         await session.close()
 
 # --- JOB STATUS ---
+@app.get("/jobs/by-parent", response_model=JobDetailsResponse)
+async def get_job_by_parent_block(
+    project_id: str = Query(..., min_length=1),
+    parent_block_id: str = Query(..., min_length=1),
+):
+    """Return the job created for an exact Cortex workflow-plan block."""
+    session = SessionLocal()
+    try:
+        result = await session.execute(
+            select(DogmeJob)
+            .where(
+                DogmeJob.project_id == project_id,
+                DogmeJob.parent_block_id == parent_block_id,
+            )
+            .order_by(DogmeJob.submitted_at.desc())
+            .limit(1)
+        )
+        job = result.scalar_one_or_none()
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return JobDetailsResponse(**job_to_dict(job))
+    finally:
+        await session.close()
+
+
 @app.get("/jobs/{run_uuid}", response_model=JobDetailsResponse)
 async def get_job_details(run_uuid: str = FastAPIPath(..., min_length=1)):
     """Get detailed status of a specific job."""

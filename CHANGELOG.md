@@ -10,6 +10,8 @@
 ### Bug Fixes
 
 - **Fixed multi-sample DOGME approval handling:** Explicit batch sample names and all input FASTQs are now preserved when a legacy approval path is used. Batch approval forms display shared genome, hpc3/SLURM, resource, and parallelism settings, apply approved shared settings to every sample, and retain the full batch payload instead of collapsing it into one synthetic single-sample run.
+- **Recovered accepted remote submissions after a response timeout:** SLURM jobs now carry their workflow-plan ID through Launchpad. When the submit response times out after Launchpad has accepted the job, Cortex recovers its run UUID and continues normal status polling instead of showing a false failed workflow.
+- **Queued remote staging beyond transfer capacity:** Large SLURM batches now accept staging requests after the configured concurrent-transfer limit is reached. Excess samples remain trackable as queued staging tasks and start automatically as earlier transfers finish, rather than failing with HTTP 429.
 - **Fixed Task Center duplicate action keys during active batches:** Removed nested Streamlit task-dock fragments that could render the same task action button twice and raise `StreamlitDuplicateElementKey`.
 
 ### Tests

@@ -199,6 +199,7 @@ class LaunchpadMCPTools:
         user_id: Optional[str] = None,
         username: Optional[str] = None,
         project_slug: Optional[str] = None,
+        parent_block_id: Optional[str] = None,
         resume_from_dir: Optional[str] = None,
         execution_mode: str = "local",
         local_max_task_cpus: Optional[int] = None,
@@ -294,6 +295,8 @@ class LaunchpadMCPTools:
             payload["username"] = username
         if project_slug is not None:
             payload["project_slug"] = project_slug
+        if parent_block_id is not None:
+            payload["parent_block_id"] = parent_block_id
         if resume_from_dir is not None:
             payload["resume_from_dir"] = resume_from_dir
         if ssh_profile_id is not None:
@@ -597,6 +600,23 @@ class LaunchpadMCPTools:
                 return response.json()
         except Exception as e:
             raise RuntimeError(f"Failed to check status: {str(e)}")
+
+    async def find_job_by_parent_block(self, project_id: str, parent_block_id: str) -> dict:
+        """Find the job created for a Cortex workflow-plan block."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.server_url}/jobs/by-parent",
+                    params={"project_id": project_id, "parent_block_id": parent_block_id},
+                    headers=self._headers(),
+                    timeout=self.status_timeout,
+                )
+                if response.status_code == 404:
+                    return {}
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to find job by parent block: {_describe_exception(e)}")
 
     async def cancel_job(self, run_uuid: str) -> dict:
         """Cancel an active local or SLURM job by its run UUID."""

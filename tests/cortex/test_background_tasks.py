@@ -1873,6 +1873,50 @@ class TestSubmitJobAfterApproval:
         assert submitted["slurm_memory_gb"] == 16
         assert submitted["slurm_walltime"] == "48:00:00"
         assert submitted["staged_remote_input_path"] == "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/778fbb3a707d09a5"
+        assert submitted["parent_block_id"]
+
+    @pytest.mark.asyncio
+    async def test_remote_submit_timeout_recovers_accepted_job(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "edited_params": {
+                "sample_name": "remote-timeout",
+                "mode": "CDNA",
+                "input_type": "fastq",
+                "entry_point": "fastqCDNA",
+                "input_directory": "/data/remote-timeout.fastq.gz",
+                "reference_genome": ["GRCh38"],
+                "execution_mode": "slurm",
+                "ssh_profile_id": "profile-123",
+                "staged_remote_input_path": "/remote/data/timeout",
+            },
+        })
+
+        async def _passthrough_prepare(session, project_id, owner_id, params):
+            return dict(params)
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            RuntimeError("Failed to submit job: request timed out while waiting for Launchpad /jobs/submit"),
+            {"run_uuid": "recovered-uuid", "work_directory": "/work/recovered"},
+        ])
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission._prepare_remote_execution_params", new=_passthrough_prepare), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock(side_effect=_close_scheduled_coroutine)
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        sess = session_factory()
+        job_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").one()
+        assert job_block.status == "RUNNING"
+        assert get_block_payload(job_block)["run_uuid"] == "recovered-uuid"
+        assert [call.args[0] for call in mock_client.call_tool.call_args_list] == [
+            "submit_dogme_job", "find_job_by_parent_block",
+        ]
+        sess.close()
 
     @pytest.mark.asyncio
     async def test_remote_unmapped_bam_remap_skips_staging(self, session_factory, seed_data):

@@ -960,6 +960,49 @@ class TestRemoteExecutionDetection:
         assert result["input_directory_explicit"] is False
 
     @pytest.mark.asyncio
+    async def test_stale_profile_id_refreshes_remote_base_for_resolved_user_profile(self):
+        sess = self.sf()
+        try:
+            with patch(
+                "cortex.remote_orchestration._resolve_ssh_profile_reference",
+                new=AsyncMock(return_value=("profile-elnaz", "hpc3")),
+            ), patch(
+                "cortex.remote_orchestration._list_user_ssh_profiles",
+                new=AsyncMock(return_value=[{
+                    "id": "profile-elnaz",
+                    "nickname": "hpc3",
+                    "ssh_username": "elnaza",
+                    "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/elnaz",
+                }]),
+            ):
+                result = await _prepare_remote_execution_params(
+                    sess,
+                    "proj-1",
+                    "u1",
+                    {
+                        "execution_mode": "slurm",
+                        "ssh_profile_id": "profile-other-user",
+                        "ssh_profile_nickname": "hpc3",
+                        "sample_name": "sample_02",
+                        "mode": "CDNA",
+                        "input_type": "fastq",
+                        "input_directory": "/data/sample_02.fastq.gz",
+                        "reference_genome": ["GRCh38"],
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "staged_remote_input_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/stale",
+                        "cache_preflight": {"status": "ready"},
+                    },
+                )
+        finally:
+            sess.close()
+
+        assert result["ssh_profile_id"] == "profile-elnaz"
+        assert result["remote_base_path"] == "/share/crsp/lab/seyedam/share/agoutic/elnaz"
+        assert result["remote_reference_cache_root"] == "/share/crsp/lab/seyedam/share/agoutic/elnaz/ref"
+        assert result["remote_data_cache_root"] == "/share/crsp/lab/seyedam/share/agoutic/elnaz/data"
+        assert "staged_remote_input_path" not in result
+
+    @pytest.mark.asyncio
     async def test_ignores_account_partition_phrase_when_extracting_path_and_partition(self):
         _add_block(
             self.sf,

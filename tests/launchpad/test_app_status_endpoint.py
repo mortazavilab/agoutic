@@ -870,6 +870,46 @@ async def test_resume_staging_task_endpoint_returns_replacement_task(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_stage_remote_sample_queues_when_all_staging_slots_are_occupied(monkeypatch):
+    class _Session:
+        async def close(self):
+            return None
+
+    task = SimpleNamespace(task_id="stg-queued", status="queued", params={})
+    tasks = {}
+
+    monkeypatch.setattr(launchpad_app, "SessionLocal", lambda: _Session())
+    monkeypatch.setattr(launchpad_app, "get_maintenance_state_async", AsyncMock(return_value={"mode": False}))
+    monkeypatch.setattr("launchpad.backends.staging_worker.new_task_id", lambda: "stg-queued")
+    monkeypatch.setattr("launchpad.backends.staging_worker.StagingTaskState", lambda **kwargs: task)
+    monkeypatch.setattr("launchpad.backends.staging_worker.get_staging_tasks", lambda: tasks)
+    monkeypatch.setattr("launchpad.backends.staging_worker.persist_staging_task", AsyncMock())
+
+    async def _resume(profile_id=None):
+        assert profile_id == "profile-1"
+        assert tasks["stg-queued"] is task
+        return 0
+
+    monkeypatch.setattr("launchpad.backends.staging_worker.resume_queued_staging_tasks", _resume)
+
+    response = await launchpad_app.stage_remote_sample(
+        launchpad_app.StageRemoteSampleRequest(
+            project_id="proj-1",
+            user_id="user-1",
+            sample_name="sample-queued",
+            mode="CDNA",
+            input_directory="/data/sample.fastq.gz",
+            reference_genome=["GRCh38"],
+            ssh_profile_id="profile-1",
+        ),
+        sync=False,
+    )
+
+    assert response.task_id == "stg-queued"
+    assert response.status == "queued"
+
+
+@pytest.mark.asyncio
 async def test_resume_staging_task_endpoint_maps_capacity_limit(monkeypatch):
     monkeypatch.setattr(
         "launchpad.backends.staging_worker.resume_staging_task",

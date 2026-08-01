@@ -74,6 +74,7 @@ async def submit_dogme_job(
     user_id: str | None = None,
     username: str | None = None,
     project_slug: str | None = None,
+    parent_block_id: str | None = None,
     modifications: str | None = None,
     input_type: str | None = None,
     entry_point: str | None = None,
@@ -117,6 +118,7 @@ async def submit_dogme_job(
         user_id=user_id,
         username=username,
         project_slug=project_slug,
+        parent_block_id=parent_block_id,
         sample_name=sample_name,
         mode=mode,
         reference_genome=reference_genome,
@@ -241,6 +243,16 @@ async def get_staging_task_status(task_id: str) -> str:
 async def check_nextflow_status(run_uuid: str) -> str:
     """Check the status of a Nextflow job."""
     result = await tools.check_nextflow_status(run_uuid=run_uuid)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def find_job_by_parent_block(project_id: str, parent_block_id: str) -> str:
+    """Find the Launchpad job associated with a Cortex workflow-plan block."""
+    result = await tools.find_job_by_parent_block(
+        project_id=project_id,
+        parent_block_id=parent_block_id,
+    )
     return json.dumps(result, indent=2)
 
 

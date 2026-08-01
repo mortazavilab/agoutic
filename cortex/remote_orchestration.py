@@ -728,6 +728,7 @@ async def _build_slurm_cache_preflight(
 
     ssh_profile_id = normalized.get("ssh_profile_id")
     ssh_profile_nickname = normalized.get("ssh_profile_nickname")
+    requested_ssh_profile_id = ssh_profile_id
     ssh_username = "agoutic"
     profile_defaults: dict = {}
 
@@ -748,7 +749,18 @@ async def _build_slurm_cache_preflight(
         except Exception:
             logger.info("SLURM cache preflight: profile enrichment unavailable", project_id=project_id)
 
-    normalized["remote_base_path"] = normalized.get("remote_base_path") or profile_defaults.get("remote_base_path")
+    profile_reference_repaired = bool(
+        requested_ssh_profile_id
+        and ssh_profile_id
+        and requested_ssh_profile_id != ssh_profile_id
+    )
+    if profile_reference_repaired:
+        # Profile-owned paths and cache metadata cannot be reused after an
+        # old profile ID resolves to a different current-user profile.
+        normalized["remote_base_path"] = profile_defaults.get("remote_base_path")
+        normalized.pop("cache_preflight", None)
+    else:
+        normalized["remote_base_path"] = normalized.get("remote_base_path") or profile_defaults.get("remote_base_path")
     if normalized.get("remote_base_path"):
         remote_base_path = str(normalized["remote_base_path"]).rstrip("/")
         normalized["remote_reference_cache_root"] = f"{remote_base_path}/ref"
@@ -940,6 +952,7 @@ async def _prepare_remote_execution_params(
 
     ssh_profile_id = normalized.get("ssh_profile_id")
     ssh_profile_nickname = normalized.get("ssh_profile_nickname")
+    requested_ssh_profile_id = ssh_profile_id
     ssh_username = None
     profile_defaults: dict = {}
 
@@ -984,7 +997,20 @@ async def _prepare_remote_execution_params(
         "local_workflow_directory": normalized["local_workflow_directory"],
     }
     remote_base_default = _render_profile_default(profile_defaults.get("remote_base_path"), template_context)
-    normalized["remote_base_path"] = normalized.get("remote_base_path") or remote_base_default
+    profile_reference_repaired = bool(
+        requested_ssh_profile_id
+        and ssh_profile_id
+        and requested_ssh_profile_id != ssh_profile_id
+    )
+    if profile_reference_repaired:
+        # A stale profile ID may carry another user's base path and cache
+        # snapshot. The resolved current-user profile is authoritative.
+        normalized["remote_base_path"] = remote_base_default
+        normalized.pop("cache_preflight", None)
+        normalized.pop("staged_remote_input_path", None)
+        normalized.pop("remote_staged_sample", None)
+    else:
+        normalized["remote_base_path"] = normalized.get("remote_base_path") or remote_base_default
     if normalized.get("remote_base_path"):
         remote_base_path = str(normalized["remote_base_path"]).rstrip("/")
         normalized["remote_reference_cache_root"] = f"{remote_base_path}/ref"
