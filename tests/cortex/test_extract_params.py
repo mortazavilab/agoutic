@@ -708,6 +708,38 @@ class TestRemoteExecutionDetection:
         assert result["gate_action"] == "remote_stage"
 
     @pytest.mark.asyncio
+    async def test_detects_hpc3_before_human_cdna_fastq_qualifiers(self):
+        _add_block(
+            self.sf,
+            "USER_MESSAGE",
+            {
+                "text": (
+                    "stage on hpc3 human CDNA fastq sample ENCFF801EBI using "
+                    "/media/backup_disk/agoutic_root/users/ali-mortazavi/"
+                    "kidneyv2/data/ENCFF801EBI.fastq.gz"
+                )
+            },
+        )
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp), \
+             patch("cortex.remote_orchestration._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=[{
+                 "id": "profile-123",
+                 "nickname": "hpc3",
+                 "remote_base_path": "/remote/agoutic",
+             }])):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["execution_mode"] == "slurm"
+        assert result["ssh_profile_nickname"] == "hpc3"
+        assert result["remote_action"] == "stage_only"
+        assert result["input_directory"] == (
+            "/media/backup_disk/agoutic_root/users/ali-mortazavi/"
+            "kidneyv2/data/ENCFF801EBI.fastq.gz"
+        )
+
+    @pytest.mark.asyncio
     async def test_detects_remote_input_path_for_slurm_submission(self):
         _add_block(
             self.sf,

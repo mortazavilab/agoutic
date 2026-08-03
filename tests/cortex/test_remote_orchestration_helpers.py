@@ -53,3 +53,13 @@ class TestExtractRemoteExecutionRequest:
             "ssh_profile_nickname": "hpc3",
             "stage_only": False,
         }
+
+    def test_detects_profile_before_biological_qualifiers(self):
+        request = _extract_remote_execution_request(
+            "stage on hpc3 human CDNA fastq sample ENCFF801EBI using /data/ENCFF801EBI.fastq.gz"
+        )
+
+        assert request == {
+            "ssh_profile_nickname": "hpc3",
+            "stage_only": True,
+        }

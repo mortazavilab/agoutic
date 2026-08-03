@@ -50,6 +50,18 @@ _REMOTE_PROFILE_CONTINUATIONS = {
     "at",
     "of",
     "please",
+    "human",
+    "homo",
+    "mouse",
+    "mus",
+    "dna",
+    "rna",
+    "cdna",
+    "fastq",
+    "pod5",
+    "bam",
+    "sample",
+    "file",
 }
 
 

@@ -1848,7 +1848,7 @@ async def execute_step(
     # Resolve tool calls: use step-specific calls, or fall back to defaults
     explicit_tool_calls = bool(step.get("tool_calls"))
     tool_calls = step.get("tool_calls") or []
-    if not tool_calls:
+    if not tool_calls and not step.get("skip_default_tool_calls"):
         defaults = STEP_TOOL_DEFAULTS.get(kind)
         if defaults:
             tool_calls = defaults
@@ -2445,7 +2445,7 @@ async def _execute_parallel_safe_step(step: dict, *, plan_payload: dict | None =
     if not isinstance(tool_calls, list):
         return StepResult(success=False, error="Invalid tool_calls for step")
 
-    if not tool_calls:
+    if not tool_calls and not step.get("skip_default_tool_calls"):
         defaults = STEP_TOOL_DEFAULTS.get(kind)
         if defaults:
             tool_calls = defaults

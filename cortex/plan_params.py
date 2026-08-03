@@ -1241,7 +1241,7 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         if sample_match:
             params["sample_name"] = sample_match.group(1)
 
-        input_match = re.search(r"(?:at|from)\s+(\S+)", message, re.I)
+        input_match = re.search(r"(?:at|from|using)\s+(?:the\s+)?(\S+)", message, re.I)
         if input_match:
             params["input_directory"] = input_match.group(1).rstrip(".,;:!?")
 

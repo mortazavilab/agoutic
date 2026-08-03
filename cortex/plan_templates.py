@@ -102,12 +102,21 @@ def _template_remote_stage_workflow(params: dict) -> dict:
     steps = []
     idx = 0
 
+    locate_tool_calls = []
+    if not (input_dir and Path(input_dir).is_absolute()):
+        locate_tool_calls = [{
+            "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": {"work_dir": input_dir or work_dir},
+        }]
     s_locate = _make_step(
         "LOCATE_DATA",
         f"Locate data for {sample_name}",
         idx,
-        tool_calls=[{"source_key": "analyzer", "tool": "list_job_files", "params": {"work_dir": input_dir or work_dir}}],
+        tool_calls=locate_tool_calls,
     )
+    if input_dir and Path(input_dir).is_absolute():
+        s_locate["skip_default_tool_calls"] = True
     s_locate["id"] = "locate_data"
     steps.append(s_locate)
     idx += 1

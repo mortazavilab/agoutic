@@ -120,6 +120,16 @@ class TestManifestToolCall:
 # ---------------------------------------------------------------------------
 
 class TestTemplateRemoteStageWorkflow:
+    def test_local_source_path_skips_workflow_file_lookup(self):
+        plan = _template_remote_stage_workflow({
+            "sample_name": "ENCFF801EBI",
+            "input_directory": "/media/backup/ENCFF801EBI.fastq.gz",
+        })
+
+        locate_step = next(step for step in plan["steps"] if step["id"] == "locate_data")
+        assert locate_step["tool_calls"] == []
+        assert locate_step["skip_default_tool_calls"] is True
+
     def test_basic_template(self):
         params = {"sample_name": "test_sample", "work_dir": "/proj/workflow1"}
         plan = _template_remote_stage_workflow(params)

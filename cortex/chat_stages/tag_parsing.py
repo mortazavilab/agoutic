@@ -55,6 +55,14 @@ def _apply_requested_plot_style(plot_specs: list[dict], user_message: str) -> No
             spec["color"] = requested_palette
 
 
+def _injected_data_contains_files(injected_dfs: dict) -> bool:
+    return any(
+        bool(dataframe.get("metadata", {}).get("file_type"))
+        for dataframe in injected_dfs.values()
+        if isinstance(dataframe, dict)
+    )
+
+
 class TagParsingStage:
     name = "tag_parsing"
     priority = PRIORITY
@@ -106,18 +114,33 @@ class TagParsingStage:
             ctx.data_call_matches or ctx.legacy_encode_matches or ctx.legacy_analysis_matches
         )
 
-        # ── Suppress redundant DATA_CALLs when injected data present ──
+        # Suppress file lookups only when the injected data already includes files.
         if ctx.injected_dfs and not ctx.injected_was_capped:
             _suppressed = []
+            _suppressed_tools = {"get_experiment"}
+            if _injected_data_contains_files(ctx.injected_dfs):
+                _suppressed_tools.add("get_files_by_type")
             if ctx.data_call_matches:
-                _suppressed.extend(m.group(3) for m in ctx.data_call_matches)
-                ctx.data_call_matches = []
+                kept_data_calls = []
+                for match in ctx.data_call_matches:
+                    tool = match.group(3)
+                    if tool in _suppressed_tools:
+                        _suppressed.append(tool)
+                    else:
+                        kept_data_calls.append(match)
+                ctx.data_call_matches = kept_data_calls
             if ctx.legacy_encode_matches:
-                _suppressed.extend(f"legacy:{m.group(1)}" for m in ctx.legacy_encode_matches)
-                ctx.legacy_encode_matches = []
+                kept_legacy_calls = []
+                for match in ctx.legacy_encode_matches:
+                    tool = match.group(1)
+                    if tool in _suppressed_tools:
+                        _suppressed.append(f"legacy:{tool}")
+                    else:
+                        kept_legacy_calls.append(match)
+                ctx.legacy_encode_matches = kept_legacy_calls
             if _suppressed:
                 logger.info(
-                    "Suppressed ALL DATA_CALL tags (injected data already present)",
+                    "Suppressed redundant DATA_CALL tags (injected data already present)",
                     suppressed_tools=_suppressed,
                 )
                 ctx.has_any_tags = bool(
