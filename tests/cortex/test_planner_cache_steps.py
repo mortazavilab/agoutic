@@ -1086,6 +1086,40 @@ def test_extract_plan_params_reconcile_cross_project_workflow_refs_resolve_from_
     ]
 
 
+def test_extract_plan_params_reconcile_uses_owner_resolved_shared_project_paths():
+    params = _extract_plan_params(
+        "reconcile bams from owned-project:workflow2 and shared-project:workflow7",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+        project_workflow_paths={
+            ("owned-project", "workflow2"): "/agoutic/users/alim/owned-project/workflow2",
+            ("shared-project", "workflow7"): "/agoutic/users/project-owner/shared-project/workflow7",
+        },
+    )
+
+    assert params["workflow_dirs"] == [
+        "/agoutic/users/alim/owned-project/workflow2",
+        "/agoutic/users/project-owner/shared-project/workflow7",
+    ]
+
+
+def test_extract_plan_params_reconcile_uses_owner_qualified_project_path():
+    params = _extract_plan_params(
+        "reconcile requester:analysis:workflow2 and shared-owner:analysis:workflow7",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+        project_workflow_paths={
+            ("requester", "analysis", "workflow2"): "/agoutic/users/requester/analysis/workflow2",
+            ("shared-owner", "analysis", "workflow7"): "/agoutic/users/shared-owner/analysis/workflow7",
+        },
+    )
+
+    assert params["workflow_dirs"] == [
+        "/agoutic/users/requester/analysis/workflow2",
+        "/agoutic/users/shared-owner/analysis/workflow7",
+    ]
+
+
 def test_extract_plan_params_reconcile_cross_project_workflow_refs_keep_relative_without_base():
     params = _extract_plan_params(
         "reconcile bams from A in projectX:workflow2 and B in projectY:workflow7",

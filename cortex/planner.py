@@ -605,6 +605,7 @@ def generate_plan(
     engine: "AgentEngine",
     conversation_history: list | None = None,
     project_dir: str = "",
+    project_workflow_paths: dict[tuple[str, ...], str] | None = None,
 ) -> dict | None:
     """
     Generate a structured plan payload for a MULTI_STEP request.
@@ -619,7 +620,8 @@ def generate_plan(
         plan_type = "summarize_results"
 
     params = _extract_plan_params(message, conv_state, plan_type or "",
-                                    project_dir=project_dir)
+                                    project_dir=project_dir,
+                                    project_workflow_paths=project_workflow_paths)
 
     # Temporary bridge: hybrid-first for selected non-core flows.
     if plan_type in _HYBRID_FIRST_FLOWS:

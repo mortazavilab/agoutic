@@ -12,8 +12,13 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from fastapi import HTTPException
+from sqlalchemy import func, select
+
 from common.logging_config import get_logger
 from cortex.config import GENOME_ALIASES, default_haplotype_vcf_for_reference
+from cortex.db_helpers import _resolve_project_dir
+from cortex.models import Project, ProjectAccess, User
 from cortex.remote_orchestration import _extract_remote_profile_nickname
 from cortex import user_jail
 
@@ -23,7 +28,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _PROJECT_WORKFLOW_REF_RE = re.compile(
-    r"\b(?P<project>[a-z0-9][a-z0-9_-]*)\s*:\s*(?P<workflow>workflow\d+)\b",
+    r"\b(?:(?P<owner>[a-z0-9][a-z0-9_-]*)\s*:\s*)?"
+    r"(?P<project>[a-z0-9][a-z0-9_-]*)\s*:\s*(?P<workflow>workflow\d+)\b",
     re.IGNORECASE,
 )
 _BED_PATH_RE = re.compile(r"(?P<path>(?:/|~|\.)[^\s,;]+\.bed)\b", re.IGNORECASE)
@@ -643,7 +649,8 @@ def build_de_group_clarification(
 # ---------------------------------------------------------------------------
 
 def _extract_plan_params(message: str, conv_state: "ConversationState", plan_type: str,
-                         project_dir: str = "") -> dict:
+                         project_dir: str = "",
+                         project_workflow_paths: dict[tuple[str, str], str] | None = None) -> dict:
     """Extract relevant parameters from the user message and conversation state."""
     params: dict = {"goal": message}
 
@@ -1062,28 +1069,28 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             match.strip().lower()
             for match in re.findall(r"\b(workflow[\w.-]+)\b", message, re.I)
         }
-        project_workflow_refs: list[tuple[str, str]] = []
+        project_workflow_refs: list[tuple[str | None, str, str]] = []
 
         # Cross-project explicit mentions:
-        # "sampleA in projectX:workflow2"
-        # "projectX:workflow2"
+        # "sampleA in owner:projectX:workflow2"
+        # "owner:projectX:workflow2"
         project_workflow_mentions = re.findall(
-            r"([a-zA-Z0-9_.-]+)\s+in\s+([a-zA-Z0-9_.-]+)\s*:\s*(workflow[\w.-]+)",
+            r"([a-zA-Z0-9_.-]+)\s+in\s+(?:([a-zA-Z0-9_.-]+)\s*:\s*)?([a-zA-Z0-9_.-]+)\s*:\s*(workflow[\w.-]+)",
             message,
             re.I,
         )
         if project_workflow_mentions:
-            selected_names = [sample for sample, _project, _wf in project_workflow_mentions]
-            for _sample, project_name, workflow_name in project_workflow_mentions:
+            selected_names = [sample for sample, _owner, _project, _wf in project_workflow_mentions]
+            for _sample, owner_name, project_name, workflow_name in project_workflow_mentions:
                 selected_workflow_tokens.add(workflow_name.lower())
-                project_workflow_refs.append((project_name.strip(), workflow_name.strip()))
+                project_workflow_refs.append((owner_name.strip() or None, project_name.strip(), workflow_name.strip()))
 
-        for project_name, workflow_name in re.findall(
-            r"\b([a-zA-Z0-9_.-]+)\s*:\s*(workflow[\w.-]+)\b",
-            message,
-            re.I,
-        ):
-            ref = (project_name.strip(), workflow_name.strip())
+        for match in _PROJECT_WORKFLOW_REF_RE.finditer(message):
+            ref = (
+                (match.group("owner") or "").strip() or None,
+                match.group("project").strip(),
+                match.group("workflow").strip(),
+            )
             if ref not in project_workflow_refs:
                 project_workflow_refs.append(ref)
 
@@ -1172,11 +1179,18 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
 
         if project_workflow_refs:
             selected_workflow_tokens.clear()
-            for project_name, workflow_name in project_workflow_refs:
+            for owner_name, project_name, workflow_name in project_workflow_refs:
                 selected_workflow_tokens.add(workflow_name.lower())
-                if candidate_base_dirs:
+                mapping_key = (
+                    (owner_name.lower(), project_name.lower(), workflow_name.lower())
+                    if owner_name else (project_name.lower(), workflow_name.lower())
+                )
+                resolved = (project_workflow_paths or {}).get(
+                    mapping_key
+                )
+                if not resolved and candidate_base_dirs:
                     resolved = f"{candidate_base_dirs[0].rstrip('/')}/{project_name}/{workflow_name}"
-                else:
+                elif not resolved:
                     resolved = f"{project_name}/{workflow_name}"
                 if resolved not in workflow_dirs:
                     workflow_dirs.append(resolved)
@@ -1252,3 +1266,56 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         params["work_dir"] = conv_state.work_dir
 
     return params
+
+
+def resolve_reconcile_project_workflow_paths(message: str, session, user) -> dict[tuple[str, ...], str]:
+    """Resolve authorized cross-project reconcile sources to their owner directories."""
+    references = [
+        (match.group("owner"), match.group("project"), match.group("workflow"))
+        for match in _PROJECT_WORKFLOW_REF_RE.finditer(message)
+    ]
+    resolved_paths: dict[tuple[str, ...], str] = {}
+
+    for owner_ref, project_ref, workflow_ref in references:
+        key = (
+            (owner_ref.lower(), project_ref.lower(), workflow_ref.lower())
+            if owner_ref else (project_ref.lower(), workflow_ref.lower())
+        )
+        if key in resolved_paths:
+            continue
+
+        project_query = select(Project).where(func.lower(Project.slug) == project_ref.lower())
+        if owner_ref:
+            project_query = project_query.join(User, Project.owner_id == User.id).where(
+                func.lower(User.username) == owner_ref.lower()
+            )
+        projects = list(session.execute(project_query).scalars())
+        if not projects:
+            project_label = f"{owner_ref}:{project_ref}" if owner_ref else project_ref
+            raise HTTPException(status_code=404, detail=f"Project '{project_label}' was not found.")
+
+        accessible_projects = []
+        for project in projects:
+            if getattr(user, "role", "") == "admin" or project.owner_id == user.id or project.is_public:
+                accessible_projects.append(project)
+                continue
+            access = session.execute(
+                select(ProjectAccess).where(
+                    ProjectAccess.project_id == project.id,
+                    ProjectAccess.user_id == user.id,
+                )
+            ).scalar_one_or_none()
+            if access is not None:
+                accessible_projects.append(project)
+
+        if not accessible_projects:
+            raise HTTPException(status_code=403, detail=f"You do not have access to project '{project_ref}'.")
+        if len(accessible_projects) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Project reference '{project_ref}' is ambiguous among accessible projects.",
+            )
+
+        resolved_paths[key] = str(_resolve_project_dir(session, user, accessible_projects[0].id) / workflow_ref)
+
+    return resolved_paths
