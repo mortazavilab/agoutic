@@ -9,6 +9,7 @@
 
 ### Bug Fixes
 
+- **Preserved Dogme input modes when resuming failed runs:** Job records now retain the submitted input type and entry point, so new BAM remap jobs resume as `bam`/`remap` and cDNA FASTQ jobs resume as `fastq`/`fastqCDNA` for both local and SLURM execution. Legacy runs with a recorded FASTQ file path are also recovered as cDNA FASTQ runs instead of falling back to POD5.
 - **Fixed remote staging for explicitly named local FASTQs:** Stage-only requests now preserve paths introduced with `using`, recognize profile names followed by biological qualifiers such as `on hpc3 human CDNA`, and mark local-source validation steps so the executor does not fall back to Analyzer's workflow-only file lookup. This keeps staging requests on the selected SLURM profile instead of failing before approval or falling back to local multi-FASTQ submission.
 - **Fixed ENCODE FASTQ follow-ups dropping file lookups:** Follow-up requests that started from an experiment-results dataframe now preserve `get_files_by_type` calls, allowing the agent to retrieve FASTQ accessions. Redundant file lookups remain suppressed when the injected dataframe already contains file rows.
 - **Fixed multi-sample DOGME approval handling:** Explicit batch sample names and all input FASTQs are now preserved when a legacy approval path is used. Batch approval forms display shared genome, hpc3/SLURM, resource, and parallelism settings, apply approved shared settings to every sample, and retain the full batch payload instead of collapsing it into one synthetic single-sample run.

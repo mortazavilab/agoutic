@@ -25,6 +25,8 @@ class DogmeJob(Base):
     mode: Mapped[str | None] = mapped_column(String, nullable=True)  # Dogme-only mode: DNA, RNA, CDNA
     
     # Input data
+    input_type: Mapped[str | None] = mapped_column(String, nullable=True, default="pod5")
+    entry_point: Mapped[str | None] = mapped_column(String, nullable=True)
     input_directory: Mapped[str] = mapped_column(String, nullable=False)
     reference_genome: Mapped[str] = mapped_column(String, nullable=True)
     modifications: Mapped[str] = mapped_column(String, nullable=True)

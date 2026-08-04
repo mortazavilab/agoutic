@@ -50,6 +50,8 @@ def job_to_dict(job: DogmeJob) -> dict:
         "workflow_display_name": job.workflow_display_name,
         "sample_name": job.sample_name,
         "mode": job.mode,
+        "input_type": job.input_type,
+        "entry_point": job.entry_point,
         "input_directory": job.input_directory,
         "reference_genome": job.reference_genome,
         "modifications": job.modifications,
@@ -97,6 +99,8 @@ async def create_job(
     workflow_alias: str | None = None,
     workflow_folder_name: str | None = None,
     workflow_display_name: str | None = None,
+    input_type: str = "pod5",
+    entry_point: str | None = None,
 ) -> DogmeJob:
     """Create a new job record."""
     import json
@@ -118,6 +122,8 @@ async def create_job(
         workflow_display_name=workflow_display_name,
         sample_name=sample_name,
         mode=mode,
+        input_type=input_type,
+        entry_point=entry_point,
         input_directory=input_directory,
         reference_genome=reference_genome_str,
         modifications=modifications,

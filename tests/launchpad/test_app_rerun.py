@@ -459,7 +459,9 @@ async def test_rerun_job_local_reuses_workflow_identity_and_archives_previous_na
         workflow_display_name="tumor-retry",
         sample_name="tumor-original",
         mode="DNA",
-        input_directory="/input/pod5",
+        input_type="fastq",
+        entry_point="fastqCDNA",
+        input_directory="/input/reads.fastq.gz",
         reference_genome='["GRCh38", "mm39"]',
         modifications="5mCG_5hmCG,6mA",
         parent_block_id="block-1",
@@ -533,11 +535,15 @@ async def test_rerun_job_local_reuses_workflow_identity_and_archives_previous_na
     assert create_job_kwargs["workflow_folder_name"] == "workflow7"
     assert create_job_kwargs["workflow_display_name"] == "tumor-retry"
     assert create_job_kwargs["sample_name"] == "tumor-retry"
+    assert create_job_kwargs["input_type"] == "fastq"
+    assert create_job_kwargs["entry_point"] == "fastqCDNA"
     assert create_job_kwargs["reference_genome"] == ["GRCh38", "mm39"]
     assert executor_kwargs["rerun_in_place"] is True
     assert executor_kwargs["archive_sample_names"] == ["tumor-original", "tumor-retry"]
     assert executor_kwargs["resume_from_dir"] == str(work_dir)
     assert executor_kwargs["workflow_index"] == 7
+    assert executor_kwargs["input_type"] == "fastq"
+    assert executor_kwargs["entry_point"] == "fastqCDNA"
     assert executor_kwargs["local_max_task_cpus"] == 8
     assert executor_kwargs["local_max_task_memory_gb"] == 48
     assert rerun_job.status == launchpad_app.JobStatus.RUNNING
@@ -573,8 +579,8 @@ async def test_rerun_job_slurm_uses_backend_rerun_existing(monkeypatch):
         workflow_folder_name="workflow3",
         workflow_display_name=None,
         sample_name="sample-3",
-        mode="RNA",
-        input_directory="/input/pod5",
+        mode="CDNA",
+        input_directory="/input/reads.fastq.gz",
         reference_genome="GRCh38",
         modifications=None,
         parent_block_id=None,
@@ -638,6 +644,8 @@ async def test_rerun_job_slurm_uses_backend_rerun_existing(monkeypatch):
     assert backend_calls["params"].rerun_in_place is True
     assert backend_calls["params"].workflow_number == 3
     assert backend_calls["params"].reference_genome == ["GRCh38"]
+    assert backend_calls["params"].input_type == "fastq"
+    assert backend_calls["params"].entry_point == "fastqCDNA"
     assert backend_calls["remote_work"] == "/remote/project/workflow3"
     assert backend_calls["remote_output"] == "/remote/project/workflow3/output"
     assert backend_calls["local_work_dir"] == "/local/project/workflow3"

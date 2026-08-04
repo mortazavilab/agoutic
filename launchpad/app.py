@@ -603,6 +603,21 @@ def _normalize_reference_genome(raw_value: str | list[str] | None) -> list[str]:
     return []
 
 
+def _resolve_rerun_input_mode(source_job) -> tuple[str, str | None]:
+    """Recover the original input mode for legacy job records when possible."""
+    entry_point = getattr(source_job, "entry_point", None)
+    input_type = getattr(source_job, "input_type", None)
+    if input_type:
+        return input_type, entry_point
+
+    input_path = str(getattr(source_job, "input_directory", "") or "").lower()
+    if input_path.endswith((".fastq", ".fastq.gz", ".fq", ".fq.gz")):
+        return "fastq", entry_point or "fastqCDNA"
+    if entry_point == "fastqCDNA":
+        return "fastq", entry_point
+    return "pod5", entry_point
+
+
 def _normalize_workflow_name(raw_value: str) -> str:
     value = str(raw_value or "").strip()
     if not value:
@@ -2096,6 +2111,8 @@ async def submit_job(req: SubmitJobRequest):
             workflow_key=workflow_key,
             sample_name=req.sample_name,
             mode=req.mode,
+            input_type=req.input_type,
+            entry_point=req.entry_point,
             input_directory=req.input_directory,
             reference_genome=req.reference_genome,
             modifications=req.modifications,
@@ -3061,6 +3078,7 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         archive_sample_names = [source_job.sample_name]
         if sample_name != source_job.sample_name:
             archive_sample_names.append(sample_name)
+        input_type, entry_point = _resolve_rerun_input_mode(source_job)
         workflow_key = getattr(source_job, "workflow_key", None) or "dogme"
         workflow_executor = _get_workflow_executor_or_400(workflow_key)
         if not workflow_executor.supports_submission:
@@ -3084,6 +3102,8 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             workflow_key=workflow_key,
             sample_name=sample_name,
             mode=source_job.mode,
+            input_type=input_type,
+            entry_point=entry_point,
             input_directory=source_job.input_directory,
             reference_genome=reference_genome,
             modifications=source_job.modifications,
@@ -3129,10 +3149,11 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                 workflow_key=workflow_key,
                 sample_name=sample_name,
                 mode=source_job.mode,
-                input_type="pod5",
+                input_type=input_type,
                 input_directory=source_job.input_directory,
                 reference_genome=reference_genome,
                 modifications=source_job.modifications,
+                entry_point=entry_point,
                 max_gpu_tasks=None,
                 resume_from_dir=source_job.nextflow_work_dir,
                 rerun_in_place=True,
@@ -3187,10 +3208,11 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             run_uuid=rerun_uuid,
             sample_name=sample_name,
             mode=source_job.mode,
-            input_type="pod5",
+            input_type=input_type,
             input_dir=source_job.input_directory,
             reference_genome=reference_genome,
             modifications=source_job.modifications,
+            entry_point=entry_point,
             max_gpu_tasks=None,
             local_max_task_cpus=source_job.local_max_task_cpus,
             local_max_task_memory_gb=source_job.local_max_task_memory_gb,
