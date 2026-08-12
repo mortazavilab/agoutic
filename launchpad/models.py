@@ -131,6 +131,7 @@ class SSHProfile(Base):
     user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     nickname: Mapped[str | None] = mapped_column(String, nullable=True)
     ssh_host: Mapped[str] = mapped_column(String, nullable=False)
+    transfer_host: Mapped[str | None] = mapped_column(String, nullable=True)
     ssh_port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
     ssh_username: Mapped[str] = mapped_column(String, nullable=False)
     auth_method: Mapped[str] = mapped_column(String, nullable=False, default="key_file")  # "key_file", "ssh_agent"

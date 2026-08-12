@@ -440,6 +440,7 @@ class SSHProfileCreate(BaseModel):
     user_id: str = Field(..., min_length=1)
     nickname: Optional[str] = None
     ssh_host: str = Field(..., min_length=1)
+    transfer_host: Optional[str] = None
     ssh_port: int = 22
     ssh_username: str = Field(..., min_length=1)
     auth_method: Literal["key_file", "ssh_agent"] = "key_file"
@@ -462,6 +463,7 @@ class SSHProfileUpdate(BaseModel):
     """Request to update an SSH profile."""
     nickname: Optional[str] = None
     ssh_host: Optional[str] = None
+    transfer_host: Optional[str] = None
     ssh_port: Optional[int] = None
     ssh_username: Optional[str] = None
     auth_method: Optional[Literal["key_file", "ssh_agent"]] = None
@@ -481,6 +483,7 @@ class SSHProfileOut(BaseModel):
     user_id: str
     nickname: Optional[str] = None
     ssh_host: str
+    transfer_host: Optional[str] = None
     ssh_port: int
     ssh_username: str
     auth_method: str

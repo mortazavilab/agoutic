@@ -161,6 +161,7 @@ class TestRemoteProfileProxy:
                 json={
                     "nickname": "cluster",
                     "ssh_host": "gpu1",
+                    "transfer_host": "transfer1",
                     "ssh_port": 22,
                     "ssh_username": "alice",
                     "auth_method": "ssh_agent",
@@ -176,6 +177,34 @@ class TestRemoteProfileProxy:
         assert kwargs["params"] is None
         assert kwargs["json"]["user_id"] == "u-proxy"
         assert kwargs["json"]["ssh_host"] == "gpu1"
+        assert kwargs["json"]["transfer_host"] == "transfer1"
+
+    def test_update_profile_forwards_transfer_host(self, client):
+        calls = []
+        response = _FakeResponse(
+            200,
+            {
+                "id": "prof-1",
+                "user_id": "u-proxy",
+                "ssh_host": "gpu1",
+                "transfer_host": "transfer1",
+            },
+        )
+
+        with patch("cortex.app._launchpad_rest_base_url", return_value="http://launchpad.test"), \
+             patch("cortex.app._launchpad_internal_headers", return_value={"X-Internal-Secret": "secret"}), \
+             patch("cortex.app.httpx.AsyncClient", side_effect=lambda timeout: _FakeAsyncClient(calls, response)):
+            resp = client.put(
+                "/remote-profiles/prof-1",
+                json={"transfer_host": "transfer1"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["transfer_host"] == "transfer1"
+        assert calls[0][0] == "PUT"
+        assert calls[0][1] == "http://launchpad.test/ssh-profiles/prof-1"
+        assert calls[0][2]["params"] == {"user_id": "u-proxy"}
+        assert calls[0][2]["json"] == {"transfer_host": "transfer1"}
 
     def test_auth_session_create_forwards_local_password(self, client):
         calls = []

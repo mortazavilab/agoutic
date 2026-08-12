@@ -341,6 +341,35 @@ class TestRunAllowlistedScript:
         assert result["success"] is True
         assert result["dataframe"]["row_count"] == 1
         assert result["dataframe"]["metadata"]["label"] == "BED chromosome counts"
+        assert result["script_output"]["row_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_run_allowlisted_script_preserves_large_json_payload(self, monkeypatch, tmp_path):
+        script_path = tmp_path / "reconcile_bams.py"
+        script_path.write_text("print('ok')\n")
+        json_stdout = json.dumps({"inputs": {"bams": [{"path": f"/data/{index}.bam"} for index in range(2000)]}})
+
+        class _FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return (json_stdout.encode("utf-8"), b"")
+
+        monkeypatch.setattr(
+            "launchpad.mcp_tools.resolve_allowlisted_script",
+            lambda **_kwargs: SimpleNamespace(script_id="reconcile_bams/reconcile_bams", script_path=script_path.resolve()),
+        )
+        monkeypatch.setattr("launchpad.mcp_tools.normalize_script_args", lambda args: args or [])
+        monkeypatch.setattr("launchpad.mcp_tools.validate_script_working_directory", lambda _path: script_path.parent.resolve())
+        monkeypatch.setattr("launchpad.mcp_tools.asyncio.create_subprocess_exec", AsyncMock(return_value=_FakeProcess()))
+
+        result = await LaunchpadMCPTools("http://launchpad.local").run_allowlisted_script(
+            script_id="reconcile_bams/reconcile_bams",
+            script_args=["--json"],
+        )
+
+        assert result["stdout"].endswith("... [truncated]")
+        assert len(result["script_output"]["inputs"]["bams"]) == 2000
 
     @pytest.mark.asyncio
     async def test_run_allowlisted_script_surfaces_json_error_payload(self, monkeypatch, tmp_path):

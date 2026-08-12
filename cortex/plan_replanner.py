@@ -523,6 +523,10 @@ def _extract_reconcile_preflight_payload(results: list | dict) -> dict | None:
         if result_data.get("script_id") != "reconcile_bams/reconcile_bams":
             continue
 
+        structured_output = result_data.get("script_output")
+        if isinstance(structured_output, dict):
+            return structured_output
+
         stdout_text = result_data.get("stdout")
         if not isinstance(stdout_text, str) or not stdout_text.strip():
             continue

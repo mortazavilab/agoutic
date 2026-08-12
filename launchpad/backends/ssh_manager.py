@@ -47,6 +47,7 @@ class SSHProfileData:
     key_file_path: str | None
     local_username: str | None  # Local Unix user used for per-session SSH access via broker
     is_enabled: bool
+    transfer_host: str | None = None
     remote_base_path: str | None = None
     default_slurm_account: str | None = None
     default_slurm_partition: str | None = None

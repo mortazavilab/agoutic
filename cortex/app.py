@@ -449,6 +449,7 @@ async def get_available_skills():
 class RemoteProfileCreateBody(BaseModel):
     nickname: Optional[str] = None
     ssh_host: str
+    transfer_host: Optional[str] = None
     ssh_port: int = 22
     ssh_username: str
     auth_method: Literal["key_file", "ssh_agent"] = "key_file"
@@ -464,6 +465,7 @@ class RemoteProfileCreateBody(BaseModel):
 class RemoteProfileUpdateBody(BaseModel):
     nickname: Optional[str] = None
     ssh_host: Optional[str] = None
+    transfer_host: Optional[str] = None
     ssh_port: Optional[int] = None
     ssh_username: Optional[str] = None
     auth_method: Optional[Literal["key_file", "ssh_agent"]] = None

@@ -50,6 +50,10 @@ _RSYNC_SKIP_COMPRESS = "/".join(_RSYNC_SKIP_COMPRESS_SUFFIXES)
 _RSYNC_PARTIAL_DIR = ".rsync-partial"
 
 
+def _transfer_host(profile: SSHProfileData) -> str:
+    return profile.transfer_host or profile.ssh_host
+
+
 def build_rsync_command(
     *,
     ssh_command: str,
@@ -429,6 +433,7 @@ class FileTransferManager:
             "op": "rsync_transfer",
             "profile": {
                 "ssh_host": profile.ssh_host,
+                "transfer_host": profile.transfer_host,
                 "ssh_port": profile.ssh_port,
                 "ssh_username": profile.ssh_username,
                 "auth_method": profile.auth_method,
@@ -527,7 +532,7 @@ class FileTransferManager:
         return await self._rsync_transfer(
             profile=profile,
             source=source,
-            dest=f"{profile.ssh_username}@{profile.ssh_host}:{remote_path}",
+            dest=f"{profile.ssh_username}@{_transfer_host(profile)}:{remote_path}",
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             direction="upload",
@@ -562,7 +567,7 @@ class FileTransferManager:
 
         return await self._rsync_transfer(
             profile=profile,
-            source=f"{profile.ssh_username}@{profile.ssh_host}:{_remote}",
+            source=f"{profile.ssh_username}@{_transfer_host(profile)}:{_remote}",
             dest=local_path,
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,

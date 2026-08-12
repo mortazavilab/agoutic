@@ -23,6 +23,25 @@ def test_extract_reconcile_preflight_payload_detects_manual_gtf_request():
     assert extracted == payload
 
 
+def test_extract_reconcile_preflight_payload_uses_structured_output_when_stdout_is_truncated():
+    payload = {
+        "status": "preflight_ready",
+        "inputs": {"count": 26, "bams": [{"path": "/proj/workflow2/annot/sample.GRCh38.annotated.bam"}]},
+    }
+    results = [
+        {
+            "tool": "run_allowlisted_script",
+            "result": {
+                "script_id": "reconcile_bams/reconcile_bams",
+                "stdout": '{"status": "preflight_ready", "inputs": ... [truncated]',
+                "script_output": payload,
+            },
+        }
+    ]
+
+    assert _extract_reconcile_preflight_payload(results) == payload
+
+
 def test_extract_reconcile_preflight_payload_ignores_other_scripts():
     results = [
         {

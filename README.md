@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Release:** 3.7.5
+**Release:** 3.7.6
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -66,6 +66,7 @@ AGOUTIC supports **dual execution modes**:
 
 Remote execution features:
 - **Saved SSH profiles** — per-user connection profiles with secure key references (no raw secrets stored). Supports local OS user key access through a per-session broker launched under that Unix account with `su` (password used transiently, never stored)
+- **Separate rsync transfer host** — optionally stage inputs and download outputs through a dedicated host while SLURM submission, polling, and remote commands continue through the configured SSH host; blank transfer-host settings fall back automatically
 - **SLURM resource management** — configurable account, partition, CPUs, memory, walltime, GPUs with validation
 - **Shared OpenChromatin GPU runtime defaults** — DNA SLURM runs now default to the shared Dogme OpenChromatin GPU container and task-scoped runtime wiring instead of the older custom host-mounted modkit path
 - **Remote base path model** — a single `remote_base_path` anchors `ref/`, `data/`, and per-workflow remote directories
@@ -1039,7 +1040,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.7.2 — workflow cleanup now supports local and remote `clean` commands, `clean workflows`, and per-file `bedMethyl/*.bed` gzip preservation, while deterministic `/list files` prefers tracked local workflow directories after remote runs and the shipped help surfaces document the new cleanup flow
+- **Release**: 3.7.6 — adds optional separate rsync transfer hosts for remote SLURM profiles, with automatic fallback to the SLURM host when no transfer host is configured
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

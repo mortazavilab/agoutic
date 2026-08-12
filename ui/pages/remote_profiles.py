@@ -130,6 +130,10 @@ with st.expander("➕ Create Profile", expanded=False):
         cp_col1, cp_col2 = st.columns(2)
         with cp_col1:
             ssh_host = st.text_input("SSH Host *", help="Hostname or IP address")
+            transfer_host = st.text_input(
+                "Transfer Host (optional)",
+                help="Host used for rsync transfers. Leave blank to use the SSH Host.",
+            )
             ssh_username = st.text_input("SSH Username *")
         with cp_col2:
             ssh_port = st.number_input("SSH Port", min_value=1, max_value=65535, value=22)
@@ -181,6 +185,8 @@ with st.expander("➕ Create Profile", expanded=False):
                     "ssh_username": ssh_username.strip(),
                     "auth_method": auth_method,
                 }
+                if transfer_host.strip():
+                    payload["transfer_host"] = transfer_host.strip()
                 if auth_method == "key_file" and key_file_path.strip():
                     payload["key_file_path"] = key_file_path.strip()
                 if local_username.strip():
@@ -410,6 +416,12 @@ for idx, profile in enumerate(profiles):
                             value=profile.get("ssh_host", profile.get("host", "")),
                             key=f"eh_{idx}",
                         )
+                        new_transfer_host = st.text_input(
+                            "Transfer Host (optional)",
+                            value=profile.get("transfer_host", "") or "",
+                            key=f"eth_{idx}",
+                            help="Host used for rsync transfers. Leave blank to use the SSH Host.",
+                        )
                         new_username = st.text_input(
                             "SSH Username",
                             value=profile.get("ssh_username", profile.get("username", "")),
@@ -485,6 +497,7 @@ for idx, profile in enumerate(profiles):
                         update_payload = {
                             "nickname": new_nickname.strip(),
                             "ssh_host": new_host.strip(),
+                            "transfer_host": new_transfer_host.strip() or None,
                             "ssh_port": new_port,
                             "ssh_username": new_username.strip(),
                             "auth_method": new_auth,

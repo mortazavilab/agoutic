@@ -469,6 +469,7 @@ async def get_ssh_profile(profile_id: str, user_id: str | None = None) -> SSHPro
             key_file_path=row.key_file_path,
             local_username=row.local_username,
             remote_base_path=row.remote_base_path,
+            transfer_host=row.transfer_host,
             is_enabled=row.is_enabled,
             default_slurm_account=row.default_slurm_account,
             default_slurm_partition=row.default_slurm_partition,

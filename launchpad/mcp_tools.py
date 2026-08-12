@@ -73,6 +73,15 @@ def _extract_script_error_payload(stdout_text: str) -> dict | None:
         return None
     return parsed
 
+
+def _extract_script_json_payload(stdout_text: str) -> dict | None:
+    """Parse a JSON object before its display output is truncated."""
+    try:
+        parsed = json.loads(stdout_text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
 class LaunchpadMCPTools:
     """MCP tools for Launchpad job management."""
     
@@ -146,7 +155,8 @@ class LaunchpadMCPTools:
                 "stderr": _truncate_script_output(stderr.decode("utf-8", errors="replace")),
             }
 
-        stdout_text = _truncate_script_output(stdout.decode("utf-8", errors="replace"))
+        raw_stdout_text = stdout.decode("utf-8", errors="replace")
+        stdout_text = _truncate_script_output(raw_stdout_text)
         stderr_text = _truncate_script_output(stderr.decode("utf-8", errors="replace"))
         success = process.returncode == 0
         result = {
@@ -162,6 +172,9 @@ class LaunchpadMCPTools:
         dataframe = _extract_script_dataframe(stdout_text)
         if dataframe is not None:
             result["dataframe"] = dataframe
+        structured_output = _extract_script_json_payload(raw_stdout_text)
+        if success and structured_output is not None:
+            result["script_output"] = structured_output
         if not success:
             error_payload = _extract_script_error_payload(stdout_text)
             if error_payload is not None:

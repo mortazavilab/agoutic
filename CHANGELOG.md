@@ -1,7 +1,8 @@
-## [Unreleased]
+## [3.7.6] - 2026-08-11
 
 ### Features
 
+- **Added an optional separate rsync transfer host for remote SLURM profiles:** Remote SSH profiles can now use a dedicated transfer host for input staging and output downloads while continuing to submit and monitor SLURM jobs through the existing SSH host. When omitted, rsync falls back to the SLURM host and reuses the profile's credentials, port, and remote paths.
 - **Added parallel multi-sample DOGME batches:** Users can submit two or more explicit `sample_name: /path` or `sample_name=/path` entries in one Dogme request. A batch shares its assay mode, reference, execution target, and resource settings, presents one approval gate, and launches isolated per-sample runs with the requested submission parallelism while respecting the server-wide execution capacity.
 - **Added cDNA FASTQ batch support:** Explicit batches of `.fastq`, `.fastq.gz`, `.fq`, or `.fq.gz` inputs now configure each sample for Dogme's `fastqCDNA` entry point. Each batch entry remains one FASTQ input and receives its own run/output directory.
 - **Added batch lifecycle visibility and controls:** Task Center now projects a DOGME batch parent with per-sample child statuses, including partial completion. Users can cancel a batch through `POST /dogme-batches/{gate_block_id}/cancel`; completed outputs are preserved while pending and active siblings are cancelled.
@@ -9,6 +10,7 @@
 
 ### Bug Fixes
 
+- **Preserved remote profile transfer hosts through the Cortex proxy:** Remote profile create and update payloads now forward `transfer_host` to Launchpad instead of silently filtering it from the request.
 - **Resolved shared-project sources for cross-project BAM reconciliation:** Reconcile requests now verify access to each named project and resolve every source workflow under its owner's project directory, allowing an owned workflow and a workflow shared with the requester to be reconciled together. Owner-qualified references such as `owner:project:workflow7` disambiguate projects with the same slug.
 - **Preserved Dogme input modes when resuming failed runs:** Job records now retain the submitted input type and entry point, so new BAM remap jobs resume as `bam`/`remap` and cDNA FASTQ jobs resume as `fastq`/`fastqCDNA` for both local and SLURM execution. Legacy runs with a recorded FASTQ file path are also recovered as cDNA FASTQ runs instead of falling back to POD5.
 - **Fixed remote staging for explicitly named local FASTQs:** Stage-only requests now preserve paths introduced with `using`, recognize profile names followed by biological qualifiers such as `on hpc3 human CDNA`, and mark local-source validation steps so the executor does not fall back to Analyzer's workflow-only file lookup. This keeps staging requests on the selected SLURM profile instead of failing before approval or falling back to local multi-FASTQ submission.

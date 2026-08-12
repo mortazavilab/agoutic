@@ -53,6 +53,7 @@ ssh -i ~/.ssh/agoutic_localcluster youruser@login.cluster.example.edu "hostname"
 3. Fill in:
    - **Nickname:** `localCluster`
    - **Host:** `login.cluster.example.edu`
+  - **Transfer Host** (optional): `data-transfer.cluster.example.edu`
    - **Port:** `22`
    - **Username:** your cluster username
    - **Auth Method:** `key_file` or `ssh_agent`
@@ -73,6 +74,7 @@ curl -X POST "<launchpad-url>/ssh-profiles" \
     "user_id": "user-123",
     "nickname": "localCluster",
     "ssh_host": "login.cluster.example.edu",
+    "transfer_host": "data-transfer.cluster.example.edu",
     "ssh_port": 22,
     "ssh_username": "youruser",
     "auth_method": "key_file",
@@ -83,6 +85,12 @@ curl -X POST "<launchpad-url>/ssh-profiles" \
     "remote_base_path": "/scratch/youruser/agoutic"
   }'
 ```
+
+`transfer_host` is optional. When omitted, AGOUTIC uses `ssh_host` for rsync
+uploads and downloads. When set, it reuses the profile's username, port,
+authentication, and remote paths, so the transfer host must expose the same
+remote workflow filesystem as the Slurm host. Slurm job submission, status
+checks, and remote commands continue to use `ssh_host`.
 
 ## Step 4: Unlock Brokered Profiles When Needed
 

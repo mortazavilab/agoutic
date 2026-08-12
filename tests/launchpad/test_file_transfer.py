@@ -1,6 +1,7 @@
 """Tests for launchpad/backends/file_transfer.py."""
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -105,6 +106,53 @@ async def test_upload_single_file_prefers_active_broker_session_without_trailing
     _, payload = invoke_calls[0]
     assert payload["source"] == str(local_file)
     assert payload["copy_links"] is True
+
+
+@pytest.mark.asyncio
+async def test_upload_uses_transfer_host_for_broker_rsync(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_file = tmp_path / "reads.fastq"
+    local_file.write_text("ACGT")
+    profile = replace(key_file_profile, transfer_host="transfer.example.edu")
+    fake_session = SimpleNamespace(session_id="sess-1")
+    invoke_calls = []
+
+    class FakeSessionManager:
+        async def get_active_session(self, current_profile):
+            return fake_session
+
+        async def invoke(self, session, payload):
+            invoke_calls.append(payload)
+            return {"ok": True, "bytes_transferred": 12}
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+
+    result = await manager.upload_inputs(
+        profile=profile,
+        local_path=str(local_file),
+        remote_path="/scratch/seyedam/agoutic/data/sample",
+    )
+
+    assert result["ok"] is True
+    assert invoke_calls[0]["dest"] == "seyedam@transfer.example.edu:/scratch/seyedam/agoutic/data/sample"
+    assert invoke_calls[0]["profile"]["transfer_host"] == "transfer.example.edu"
+
+
+@pytest.mark.asyncio
+async def test_download_uses_transfer_host_for_direct_rsync(key_file_profile, tmp_path):
+    manager = FileTransferManager()
+    profile = replace(key_file_profile, transfer_host="transfer.example.edu")
+    manager._rsync_transfer = AsyncMock(return_value={"ok": True, "bytes_transferred": 8})
+
+    result = await manager.download_outputs(
+        profile=profile,
+        remote_path="/scratch/seyedam/agoutic/results",
+        local_path=str(tmp_path / "results"),
+    )
+
+    assert result["ok"] is True
+    kwargs = manager._rsync_transfer.await_args.kwargs
+    assert kwargs["source"] == "seyedam@transfer.example.edu:/scratch/seyedam/agoutic/results/"
 
 
 @pytest.mark.asyncio
