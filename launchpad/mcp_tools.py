@@ -202,6 +202,7 @@ class LaunchpadMCPTools:
         modifications: Optional[str] = None,
         input_type: Optional[str] = None,
         entry_point: Optional[str] = None,
+        dogme_revision: Optional[str] = None,
         modkit_filter_threshold: Optional[float] = None,
         min_cov: Optional[int] = None,
         per_mod: Optional[int] = None,
@@ -288,6 +289,8 @@ class LaunchpadMCPTools:
             payload["input_type"] = input_type
         if entry_point is not None:
             payload["entry_point"] = entry_point
+        if dogme_revision is not None:
+            payload["dogme_revision"] = dogme_revision
         if modkit_filter_threshold is not None:
             payload["modkit_filter_threshold"] = modkit_filter_threshold
         if min_cov is not None:

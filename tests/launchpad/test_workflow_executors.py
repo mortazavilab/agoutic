@@ -1,8 +1,10 @@
 """Contract tests for Launchpad workflow executor registry."""
 
 import pytest
+from types import SimpleNamespace
 
 from launchpad import config as launchpad_config
+from launchpad.backends.base import SubmitParams
 from launchpad.workflow_executors import get_workflow_executor, workflow_executor_keys
 from launchpad.workflow_executors.base import UnknownWorkflowKeyError
 
@@ -139,6 +141,30 @@ def test_dogme_backend_submit_params_include_workflow_executor():
     )
 
     assert params["workflow_executor"] is executor
+
+
+def test_dogme_remote_command_pins_selected_revision():
+    executor = get_workflow_executor("dogme")
+    params = SubmitParams(
+        sample_name="sample-1",
+        mode="DNA",
+        input_type="pod5",
+        reference_genome=["mm39"],
+        dogme_revision="devel",
+    )
+
+    command = executor.remote_build_command(
+        request=SimpleNamespace(),
+        params=params,
+        remote_work="/remote/workflow4",
+        remote_output="/remote/workflow4/output",
+        staged_inputs={"workflow_remote_input": "/remote/workflow4/pod5"},
+        reference_assets={},
+        rendered_files={"nextflow.config": "/remote/workflow4/nextflow.config"},
+    )
+
+    assert "run mortazavilab/dogme" in command
+    assert command.index("run mortazavilab/dogme") < command.index("-r devel")
 
 
 def test_wf_pore_c_remote_submission_is_allowed_when_flag_enabled(monkeypatch, tmp_path):

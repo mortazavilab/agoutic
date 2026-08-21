@@ -931,6 +931,7 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "local_max_task_memory_gb": job_params.get("local_max_task_memory_gb"),
             "custom_dogme_profile": job_params.get("custom_dogme_profile"),
             "custom_dogme_bind_paths": job_params.get("custom_dogme_bind_paths") or [],
+            "dogme_revision": job_params.get("dogme_revision") or None,
             "execution_mode": execution_mode,
             "ssh_profile_id": ssh_profile_id,
             "slurm_account": selected_slurm_account,

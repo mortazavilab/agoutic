@@ -45,6 +45,7 @@ class LocalBackend:
             local_max_task_cpus=params.local_max_task_cpus,
             local_max_task_memory_gb=params.local_max_task_memory_gb,
             custom_dogme_profile=params.custom_dogme_profile,
+            dogme_revision=params.dogme_revision,
             rerun_in_place=params.rerun_in_place,
             user_id=params.user_id,
             project_id=params.project_id,

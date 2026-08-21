@@ -1145,6 +1145,7 @@ class NextflowExecutor:
         cutter: Optional[str] = None,
         workflow_repo: Optional[str] = None,
         workflow_version: Optional[str] = None,
+        dogme_revision: Optional[str] = None,
         output_flags: Optional[dict[str, bool]] = None,
     ) -> tuple[str, Path]:
         """
@@ -1387,6 +1388,9 @@ class NextflowExecutor:
             "run",
             str(DOGME_REPO / "dogme.nf"),
         ]
+
+        if dogme_revision and dogme_revision.strip():
+            cmd[3:3] = ["-r", dogme_revision.strip()]
         
         # Add entry point if specified
         if entry_point:

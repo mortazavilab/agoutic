@@ -25,6 +25,7 @@ class SubmitJobRequest(BaseModel):
     cutter: Optional[str] = None
     workflow_repo: Optional[str] = None
     workflow_version: Optional[str] = None
+    dogme_revision: Optional[str] = None
     output_flags: dict[str, bool] = Field(default_factory=dict)
     reference_genome: Union[str, List[str]] = "mm39"  # Single or multiple genomes
     modifications: Optional[str] = None

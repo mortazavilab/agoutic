@@ -31,6 +31,7 @@ class SubmitParams:
     cutter: str | None = None
     workflow_repo: str | None = None
     workflow_version: str | None = None
+    dogme_revision: str | None = None
     report_filename: str | None = None
     output_flags: dict[str, bool] = field(default_factory=dict)
     reference_genome: list[str] = field(default_factory=lambda: ["GRCh38"])

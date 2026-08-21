@@ -441,6 +441,8 @@ class DogmeWorkflowExecutor(WorkflowExecutor):
             f"--reference_genome {shlex.quote(genome_list)}",
             f"-c {shlex.quote(config_path)}",
         ]
+        if str(getattr(params, "dogme_revision", None) or "").strip():
+            cmd_parts.insert(1, f"-r {shlex.quote(str(params.dogme_revision).strip())}")
         if params.modifications:
             cmd_parts.append(f"--modifications {shlex.quote(params.modifications)}")
         if params.entry_point:
@@ -494,6 +496,7 @@ class DogmeWorkflowExecutor(WorkflowExecutor):
             "local_max_task_cpus": request.local_max_task_cpus,
             "local_max_task_memory_gb": request.local_max_task_memory_gb,
             "custom_dogme_profile": request.custom_dogme_profile,
+            "dogme_revision": getattr(request, "dogme_revision", None),
             "workflow_index": workflow_index,
             "user_id": request.user_id,
             "project_id": request.project_id,
@@ -533,6 +536,7 @@ class DogmeWorkflowExecutor(WorkflowExecutor):
             "local_max_task_memory_gb": request.local_max_task_memory_gb,
             "custom_dogme_profile": request.custom_dogme_profile,
             "custom_dogme_bind_paths": request.custom_dogme_bind_paths,
+            "dogme_revision": getattr(request, "dogme_revision", None),
             "resume_from_dir": request.resume_from_dir,
             "parent_block_id": request.parent_block_id,
             "ssh_profile_id": request.ssh_profile_id,

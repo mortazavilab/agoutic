@@ -1808,6 +1808,18 @@ def render_block_part1(
                                 )
                             )
 
+                        dogme_revision = None
+                        if _workflow_key == "dogme":
+                            dogme_revision_options = ["default", "devel"]
+                            current_dogme_revision = extracted_params.get("dogme_revision") or "default"
+                            dogme_revision = st.selectbox(
+                                "Dogme Revision",
+                                dogme_revision_options,
+                                index=dogme_revision_options.index(current_dogme_revision) if current_dogme_revision in dogme_revision_options else 0,
+                                format_func=lambda value: "Default release" if value == "default" else "devel branch",
+                                help="Use the devel branch when the Dogme repository requires an explicit revision.",
+                            )
+
                         if _workflow_key == "dogme" and input_type == "fastq":
                             _nonblocking_clarification = _dogme_fastq_state.get("clarification")
                             if isinstance(_nonblocking_clarification, dict) and not _nonblocking_clarification.get("blocking"):
@@ -2267,6 +2279,7 @@ def render_block_part1(
                                 edited_params.update({
                                     "mode": mode,
                                     "entry_point": entry_point if entry_point != "(auto)" else None,
+                                    "dogme_revision": dogme_revision if dogme_revision != "default" else None,
                                     "modifications": modifications if modifications else None,
                                     "modkit_filter_threshold": modkit_threshold,
                                     "min_cov": min_cov,
